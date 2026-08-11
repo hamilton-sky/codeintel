@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Local codeintel semantic index cache (regenerable)
+.codeintel/
+
+# Pathly board exports (DB is authoritative)
+pathly/**/BOARD.json
+pathly/**/EVENTS.jsonl
