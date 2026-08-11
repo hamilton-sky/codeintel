@@ -97,6 +97,35 @@ def code_status_handler(args: dict) -> dict:
         }
 
 
+def code_map_handler(args: dict) -> dict:
+    try:
+        from codeintel.mapper import MapGenerator
+        from codeintel.injector import Injector
+
+        project_root = str(args.get("project_root", "") or "")
+        budget = int(args.get("budget", 32768) or 32768)
+        inject = bool(args.get("inject", False))
+
+        try:
+            provider = GraphProvider()
+        except Exception:
+            provider = None
+
+        gen = MapGenerator(provider)
+        content = gen.generate(project_root, budget_bytes=budget)
+        path = gen.write(project_root, content)
+        size = len(content.encode("utf-8"))
+
+        inject_result = None
+        if inject:
+            inj_path, inj_action = Injector().inject(project_root)
+            inject_result = {"path": inj_path, "action": inj_action}
+
+        return {"ok": True, "path": path, "size_bytes": size, "inject": inject_result}
+    except Exception:
+        return {"ok": True, "path": None, "size_bytes": 0, "note": "map-error"}
+
+
 def run() -> None:
     mcp = MCPServer(name="codeintel")
 
@@ -114,7 +143,11 @@ def run() -> None:
     async def _code_status() -> dict:
         return code_status_handler({})
 
+    async def _code_map(project_root: str = "", budget: int = 32768, inject: bool = False) -> dict:
+        return code_map_handler({"project_root": project_root, "budget": budget, "inject": inject})
+
     mcp.add_tool(_code_query, name="code.query", description="Query the code intelligence engine")
     mcp.add_tool(_code_status, name="code.status", description="Return engine status")
+    mcp.add_tool(_code_map, name="code.map", description="Generate or refresh CODE_INTEL.md orientation file")
 
     anyio.run(mcp.run_stdio_async)

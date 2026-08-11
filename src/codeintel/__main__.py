@@ -54,6 +54,12 @@ def main() -> None:
         help="Agent to register with (default: all)",
     )
 
+    # map subcommand
+    map_parser = subparsers.add_parser("map", help="Generate CODE_INTEL.md orientation file")
+    map_parser.add_argument("project_root", nargs="?", default=None)
+    map_parser.add_argument("--inject", action="store_true", help="Inject reference block into CLAUDE.md/AGENTS.md")
+    map_parser.add_argument("--budget", type=int, default=32768, help="Byte budget for CODE_INTEL.md (default: 32768)")
+
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -90,6 +96,39 @@ def main() -> None:
                 Reindexer()._graph_reindex(project_root)
             except Exception:
                 pass
+
+        # best-effort map refresh after index
+        try:
+            from codeintel.providers.graph import GraphProvider
+            from codeintel.mapper import MapGenerator
+            _provider = GraphProvider()
+            _gen = MapGenerator(_provider)
+            _content = _gen.generate(project_root)
+            _gen.write(project_root, _content)
+        except Exception:
+            pass
+
+    elif args.command == "map":
+        from codeintel.providers.graph import GraphProvider
+        from codeintel.mapper import MapGenerator
+        from codeintel.injector import Injector
+
+        project_root = args.project_root or os.getcwd()
+        try:
+            provider = GraphProvider()
+        except Exception:
+            provider = None
+        gen = MapGenerator(provider)
+        content = gen.generate(project_root, budget_bytes=args.budget)
+        path = gen.write(project_root, content)
+        print(f"Wrote {path} ({len(content.encode())} bytes)")
+        if args.inject:
+            inj_path, inj_action = Injector().inject(project_root)
+            if inj_path:
+                print(f"Inject: {inj_action} block in {inj_path}")
+            else:
+                print(f"Inject: {inj_action}")
+        sys.exit(0)
 
     elif args.command == "query":
         try:
