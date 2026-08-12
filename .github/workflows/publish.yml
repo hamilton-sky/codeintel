@@ -1,9 +1,9 @@
 name: Publish to PyPI
 
-# Publishes codeintel-mcp to PyPI when a version tag (v*) is pushed.
+# Publishes codecortex to PyPI when a version tag (v*) is pushed.
 #
 # Uses PyPI Trusted Publishing (OIDC) — NO API token is stored in the repo. Before the first
-# release, configure a trusted publisher on PyPI for the `codeintel-mcp` project:
+# release, configure a trusted publisher on PyPI for the `codecortex` project:
 #   PyPI → your project → Publishing → Add a trusted publisher (GitHub Actions)
 #     owner:       hamilton-sky
 #     repository:  codeintel

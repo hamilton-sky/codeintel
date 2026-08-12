@@ -8,7 +8,7 @@ This is a **greenfield project spec**, purpose-built — not an extraction of an
 codebase. It is written to be seeded into a Pathly **project board** and decomposed into
 features (each `## Feature Fn` below → one `pathly/features/<slug>/`).
 
-Working name: `codeintel` · MCP server: `codeintel-mcp` · CLI: `codeintel`
+Working name: `codeintel` · PyPI dist: `codecortex` · CLI: `codeintel`
 (names are placeholders — rename freely; alt ideas: *Cortex, Codescope, Lens, Beacon*).
 
 ---

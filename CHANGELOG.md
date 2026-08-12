@@ -6,7 +6,7 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [0.2.0] — 2026-08-12
 
-First public release. Distributed on PyPI as **`codeintel-mcp`** (the import package and CLI
+First public release. Distributed on PyPI as **`codecortex`** (the import package and CLI
 remain `codeintel`). Verified end-to-end on real Python **and** TypeScript repositories.
 
 ### Added
@@ -46,8 +46,8 @@ remain `codeintel`). Verified end-to-end on real Python **and** TypeScript repos
 
 ### Notes
 - The graph engine requires the external `codebase-memory-mcp` binary; the LSP engine fetches
-  serena via `uvx` on first use. `pip install codeintel-mcp` gives you the semantic engine
+  serena via `uvx` on first use. `pip install codecortex` gives you the semantic engine
   out of the box — run `codeintel doctor` to see what else is available. The unrelated `codeintel`
-  package on PyPI is a different project; install `codeintel-mcp`, and avoid installing both.
+  package on PyPI is a different project; install `codecortex`, and avoid installing both.
 
 [0.2.0]: https://github.com/hamilton-sky/codeintel/releases/tag/v0.2.0

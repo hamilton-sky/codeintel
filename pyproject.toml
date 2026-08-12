@@ -3,9 +3,10 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Distribution name is `codeintel-mcp` because `codeintel` is already taken on PyPI; the import
-# package and the CLI are still `codeintel` (i.e. `pip install codeintel-mcp` gives you `codeintel`).
-name = "codeintel-mcp"
+# Distribution name is `codecortex` because `codeintel` is taken on PyPI and `codeintel-*` names
+# are rejected as "too similar" to it. The import package and the CLI are still `codeintel`
+# (i.e. `pip install codecortex` installs the `codeintel` command).
+name = "codecortex"
 dynamic = ["version"]
 description = "Local-first, MCP-native code-intelligence server — graph, LSP, and semantic search behind one safe code.query tool for coding agents."
 readme = "README.md"

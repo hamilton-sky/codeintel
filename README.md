@@ -7,13 +7,13 @@ A unified code-intelligence gateway — graph + LSP + semantic — that gives an
 ## Quickstart
 
 ```bash
-pip install codeintel-mcp
+pip install codecortex
 ```
 
 This installs the `codeintel` CLI; the **semantic** engine works out of the box. The **graph**
 and **LSP** engines use external backends (`codebase-memory-mcp`, and serena via `uvx`) —
 run `codeintel doctor` to see what's available and how to enable the rest. (On PyPI the
-distribution is `codeintel-mcp` because `codeintel` was taken; the CLI and import stay `codeintel`.)
+distribution is `codecortex` because `codeintel` was taken; the CLI and import stay `codeintel`.)
 
 Or from source:
 
