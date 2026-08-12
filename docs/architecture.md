@@ -127,6 +127,19 @@ query — it never blocks the response. Disabled with `CODEINTEL_REINDEX=off`. S
 - **Local-first & private** — no network egress in the default path; the semantic engine runs on a local model.
 - **Single responsibility** — gateway / providers / index-store / transports / config are separate concerns, each a small file.
 
+## Privacy & dependencies
+
+codeintel is a **single local process** — no cloud service, no API keys, no telemetry, no per-query network. A source scan finds zero outbound HTTP clients or API-key usage in its own code; the HTTP transport binds to `127.0.0.1` only.
+
+| Kind | What | Notes |
+|---|---|---|
+| Python libs (bundled) | `mcp`, `sqlite-vec`, `fastembed` | installed with the package; run locally |
+| External backend — graph | `codebase-memory-mcp` (subprocess) | optional; auto-detected via `shutil.which` |
+| External backend — lsp | `uvx` / `serena` (subprocess) | optional; auto-detected |
+| External backend — semantic | *(none)* | fully in-house |
+
+**Network:** the only egress is first-run downloads — `fastembed` fetches the `BAAI/bge-small-en-v1.5` model once (cached under `~/.cache`, offline thereafter), and the optional backends install on first use if you opt in. After setup, no code or data leaves the machine — which is what makes `both`/`all` fan-out safe to run on private repos.
+
 ## See also
 
 - [query-flow.md](query-flow.md) — the request lifecycle, engine selection, fan-out, caching.

@@ -97,6 +97,22 @@ max_chunks   = 500                      # max chunks to embed per project
 model        = "BAAI/bge-small-en-v1.5" # fastembed embedding model
 ```
 
+## Privacy & dependencies
+
+**codeintel is local-first** — one local process, no cloud service, no API keys, no telemetry, and no per-query network. Its own code makes zero outbound HTTP calls, and the HTTP transport binds to `127.0.0.1` only.
+
+**Bundled (installed with the package, run locally):** `mcp` (the tool interface) · `sqlite-vec` (the semantic index, a local DB file) · `fastembed` (the local embedding model).
+
+**Optional external backends** — auto-detected on `PATH`; if one is absent, that engine returns a safe-null and the agent simply degrades to grep:
+
+| Engine | Needs on `PATH` | Third-party? |
+|---|---|---|
+| `graph` | `codebase-memory-mcp` | yes — external CLI |
+| `lsp` | `uvx` or `serena` (runs `uvx serena`) | yes |
+| `semantic` | *nothing external* | no — fully in-house |
+
+**The only network touch is first-run setup:** `fastembed` downloads the `BAAI/bge-small-en-v1.5` weights once (cached under `~/.cache`, fully offline thereafter); the optional backends also install on first use *if you opt in*. After that, **no code or data leaves your machine** — which is what makes `--engine all` safe to run on a private repo.
+
 ## For agents
 
 Start the HTTP server, then POST queries to `/code/query`:
