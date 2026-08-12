@@ -60,6 +60,12 @@ def main() -> None:
     map_parser.add_argument("--inject", action="store_true", help="Inject reference block into CLAUDE.md/AGENTS.md")
     map_parser.add_argument("--budget", type=int, default=32768, help="Byte budget for CODE_INTEL.md (default: 32768)")
 
+    # doctor subcommand
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose engine health + index status for a repo")
+    doctor_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    doctor_parser.add_argument("--deep", action="store_true", help="Also boot-check serena (slower; first boot pulls it via uvx)")
+    doctor_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report instead of the table")
+
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -177,7 +183,10 @@ def main() -> None:
                 print(value)
             else:
                 reason = result.get("reason", "unknown")
+                hint = result.get("hint")
                 print(f"No result (reason: {reason})")
+                if hint:
+                    print(f"  hint: {hint}", file=sys.stderr)
         except Exception as exc:
             print(f"No result (reason: {exc})")
         sys.exit(0)
@@ -209,6 +218,23 @@ def main() -> None:
         except Exception as exc:
             print(f"Status unavailable: {exc}")
         sys.exit(0)
+
+    elif args.command == "doctor":
+        try:
+            from codeintel import doctor as _doctor
+
+            project_root = args.project_root or os.getcwd()
+            report = _doctor.run_doctor(project_root, deep=args.deep)
+            if args.json:
+                import json as _json
+                print(_json.dumps(report, indent=2))
+            else:
+                print(_doctor.render_doctor_text(report))
+            # Exit non-zero when a repo-critical engine is unhealthy, so scripts/CI can gate on it.
+            sys.exit(0 if report.get("summary", {}).get("healthy") else 1)
+        except Exception as exc:
+            print(f"doctor unavailable: {exc}")
+            sys.exit(0)
 
     elif args.command == "serve-http":
         try:

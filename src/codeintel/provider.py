@@ -12,6 +12,7 @@ class Result(TypedDict):
     engine: str
     cached: bool
     reason: NotRequired[str]
+    hint: NotRequired[str]
 
 
 @runtime_checkable
@@ -33,6 +34,7 @@ def safe_null_result(
     target: Any,
     engine: str = "none",
     reason: str = "no-engine",
+    hint: Optional[str] = None,
 ) -> Result:
     r: Result = {
         "ok": True,
@@ -43,4 +45,8 @@ def safe_null_result(
         "cached": False,
         "reason": reason,
     }
+    # Optional actionable breadcrumb (e.g. "not indexed → run codeintel index"); emit the key
+    # only when set, exactly like `reason`, so envelope-shape tests stay unaffected.
+    if hint is not None:
+        r["hint"] = hint
     return r

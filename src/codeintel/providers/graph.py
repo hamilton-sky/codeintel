@@ -59,41 +59,72 @@ class GraphProvider:
         except Exception:
             return None
 
+    @staticmethod
+    def _match_project(raw: Any, project_root: str) -> Optional[str]:
+        """Resolve a list_projects response to the project name for ``project_root``.
+
+        The real codebase-memory-mcp returns ``{"projects": [...]}``; a bare list is the
+        older/mocked shape — accept both. Prefer an exact ``root_path`` match; otherwise the
+        LONGEST prefix match (so ``.../project/codeintel`` resolves to codeintel, not its
+        parent ``.../project``). Pure + static so ``_resolve_project`` and ``probe`` share it."""
+        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
+        if not isinstance(entries, list):
+            return None
+        exact: Optional[str] = None
+        best_prefix_len = -1
+        best_prefix_name: Optional[str] = None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            rp = entry.get("root_path", "")
+            if not rp:
+                continue
+            if rp == project_root:
+                exact = entry.get("name")
+                break
+            if project_root.startswith(rp.rstrip("/") + "/") and len(rp) > best_prefix_len:
+                best_prefix_len = len(rp)
+                best_prefix_name = entry.get("name")
+        return exact if exact is not None else best_prefix_name
+
     def _resolve_project(self, project_root: str) -> Optional[str]:
         if project_root in self._project_cache:
             return self._project_cache[project_root]
-
         raw = self._run("list_projects", {}, 3000)
-        # The real codebase-memory-mcp returns {"projects": [...]}; a bare list is the
-        # older/mocked shape. Accept both so a backend contract change can't silently
-        # make every graph query report "project-not-indexed".
-        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
-        name: Optional[str] = None
-        if isinstance(entries, list):
-            exact: Optional[str] = None
-            best_prefix_len = -1
-            best_prefix_name: Optional[str] = None
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                rp = entry.get("root_path", "")
-                if not rp:
-                    continue
-                if rp == project_root:
-                    # Exact match wins outright. (Multiple indexed projects can share a
-                    # root_path; take the first exact hit.)
-                    exact = entry.get("name")
-                    break
-                # A prefix match means we're inside a larger indexed project. Prefer the
-                # LONGEST (most specific) prefix so e.g. ".../project/codeintel" resolves to
-                # the codeintel project, not its parent ".../project" — the old first-match
-                # break silently bound every query to whichever project listed first.
-                if project_root.startswith(rp.rstrip("/") + "/") and len(rp) > best_prefix_len:
-                    best_prefix_len = len(rp)
-                    best_prefix_name = entry.get("name")
-            name = exact if exact is not None else best_prefix_name
+        name = self._match_project(raw, project_root)
         self._project_cache[project_root] = name
         return name
+
+    def probe(self, project_root: str, timeout_ms: int = 3000) -> dict:
+        """Cheap, never-raise, single-subprocess health check for the doctor.
+
+        Returns ``{installed, runnable, repo_indexed, project, detail, remediation}`` — one
+        ``list_projects`` call, bounded by ``timeout_ms`` (``_run`` returns None on timeout)."""
+        if not self.available:
+            return {
+                "installed": False, "runnable": False, "repo_indexed": False, "project": None,
+                "detail": "codebase-memory-mcp not found on PATH",
+                "remediation": "install codebase-memory-mcp (the graph backend)",
+            }
+        raw = self._run("list_projects", {}, timeout_ms)
+        if raw is None:
+            return {
+                "installed": True, "runnable": False, "repo_indexed": False, "project": None,
+                "detail": "codebase-memory-mcp is installed but list_projects failed/timed out",
+                "remediation": "check `codebase-memory-mcp cli list_projects '{}'` works",
+            }
+        project = self._match_project(raw, project_root)
+        if project is None:
+            return {
+                "installed": True, "runnable": True, "repo_indexed": False, "project": None,
+                "detail": "backend OK but this repo is not indexed in the graph",
+                "remediation": f"codeintel index {project_root}",
+            }
+        return {
+            "installed": True, "runnable": True, "repo_indexed": True, "project": project,
+            "detail": f"resolved project '{project}' in codebase-memory-mcp",
+            "remediation": None,
+        }
 
     # ------------------------------------------------------------------ helpers
 
@@ -308,7 +339,10 @@ class GraphProvider:
 
             project = self._resolve_project(root_str)
             if project is None:
-                return safe_null_result(op_str, target_str, engine="graph", reason="project-not-indexed")
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="project-not-indexed",
+                    hint=f"run: codeintel index {root_str}  (or: codeintel doctor)",
+                )
 
             result_text = self._dispatch(op_str, target_str, project, timeout_ms)
             if result_text is None:

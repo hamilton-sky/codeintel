@@ -135,6 +135,56 @@ class LspProvider:
             self._sessions[root] = session
             return session
 
+    def probe(self, project_root: str, deep: bool = False, timeout_s: float = 20.0) -> dict:
+        """Never-raise health check for the doctor. Shallow (default) is FREE — PATH presence
+        plus any existing session's live state. Deep boots serena and polls until READY/FAILED,
+        bounded by ``timeout_s`` (first boot pulls serena via uvx and is slow). ``repo_indexed``
+        is always None: serena keeps no persistent index, it warms per-root on demand."""
+        if not self.available:
+            return {
+                "installed": False, "runnable": False, "repo_indexed": None,
+                "detail": "neither `serena` nor `uvx` found on PATH",
+                "remediation": "install uv (provides uvx) — serena is fetched on first use",
+            }
+        cmd = self._cmd
+        if not deep:
+            existing = self._sessions.get(project_root)
+            if existing is None:
+                return {
+                    "installed": True, "runnable": None, "repo_indexed": None,
+                    "detail": f"serena via `{cmd}`; boot not verified (warms on 1st query; --deep to check now)",
+                    "remediation": None,
+                }
+            with existing._lock:
+                st = existing.state
+            if st == _State.READY:
+                return {"installed": True, "runnable": True, "repo_indexed": None,
+                        "detail": "serena session is READY for this repo", "remediation": None}
+            if st == _State.FAILED:
+                return {"installed": True, "runnable": False, "repo_indexed": None,
+                        "detail": "serena session failed to boot for this repo",
+                        "remediation": "re-run `codeintel doctor --deep` to see the boot error"}
+            return {"installed": True, "runnable": None, "repo_indexed": None,
+                    "detail": "serena session is warming for this repo", "remediation": None}
+
+        # deep: boot (or reuse) a session and poll to a hard deadline — never hangs.
+        session = self._get_or_create_session(project_root)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with session._lock:
+                st = session.state
+            if st == _State.READY:
+                return {"installed": True, "runnable": True, "repo_indexed": None,
+                        "detail": f"serena booted via `{cmd}` and reached READY", "remediation": None}
+            if st == _State.FAILED:
+                return {"installed": True, "runnable": False, "repo_indexed": None,
+                        "detail": "serena failed to boot",
+                        "remediation": "check uvx + network: `uvx --from git+https://github.com/oraios/serena serena start-mcp-server`"}
+            time.sleep(0.5)
+        return {"installed": True, "runnable": None, "repo_indexed": None,
+                "detail": f"serena did not reach READY within {int(timeout_s)}s (still warming)",
+                "remediation": "retry — first boot pulls serena via uvx and can be slow"}
+
     def build_result(
         self,
         op: Any,

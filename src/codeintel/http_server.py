@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from codeintel.server import code_query_handler, code_status_handler
+from codeintel.server import code_doctor_handler, code_query_handler, code_status_handler
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -19,7 +19,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
-        if self.path != "/code/query":
+        if self.path not in ("/code/query", "/code/doctor"):
             self._send_json(404, {"error": "not-found"})
             return
         try:
@@ -36,7 +36,10 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(parsed, dict):
             self._send_json(400, {"error": "bad-request"})
             return
-        result = code_query_handler(parsed)
+        if self.path == "/code/doctor":
+            result = code_doctor_handler(parsed)
+        else:
+            result = code_query_handler(parsed)
         self._send_json(200, result)
 
     def do_GET(self) -> None:

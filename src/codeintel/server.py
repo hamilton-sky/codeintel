@@ -136,6 +136,26 @@ def code_status_handler(args: dict) -> dict:
         }
 
 
+def code_doctor_handler(args: dict) -> dict:
+    try:
+        from codeintel import doctor as _doctor
+
+        project_root = str(args.get("project_root", "") or "")
+        deep = bool(args.get("deep", False))
+        # Reuse the singleton gateway's providers so the report reflects the LIVE warmed LSP
+        # session state an agent's real queries hit (and the graph project cache).
+        gw = _get_gateway()
+        return _doctor.run_doctor(
+            project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic
+        )
+    except Exception:
+        return {
+            "ok": True, "project_root": "", "deep": False,
+            "summary": {"ready": 0, "total": 3, "healthy": False},
+            "engines": {}, "note": "doctor-error",
+        }
+
+
 def code_map_handler(args: dict) -> dict:
     try:
         from codeintel.mapper import MapGenerator
@@ -182,11 +202,15 @@ def run() -> None:
     async def _code_status() -> dict:
         return code_status_handler({})
 
+    async def _code_doctor(project_root: str = "", deep: bool = False) -> dict:
+        return code_doctor_handler({"project_root": project_root, "deep": deep})
+
     async def _code_map(project_root: str = "", budget: int = 32768, inject: bool = False) -> dict:
         return code_map_handler({"project_root": project_root, "budget": budget, "inject": inject})
 
     mcp.add_tool(_code_query, name="code.query", description="Query the code intelligence engine")
     mcp.add_tool(_code_status, name="code.status", description="Return engine status")
+    mcp.add_tool(_code_doctor, name="code.doctor", description="Diagnose engine health + repo index status with remediation")
     mcp.add_tool(_code_map, name="code.map", description="Generate or refresh CODE_INTEL.md orientation file")
 
     anyio.run(mcp.run_stdio_async)
