@@ -4,6 +4,31 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-08-12
+
+Production-hardening pass — bounded memory, concurrent request handling, and a maintained CI.
+
+### Added
+- **Concurrent HTTP transport** — the server now handles requests on threads, so one slow query
+  (an LSP session warming, a first-time index) no longer blocks every other agent. Shared gateway
+  state is lock-guarded and the semantic engine is thread-confined with WAL, so this is safe.
+
+### Changed
+- **Bounded query cache** — `ContentHashCache` is now an LRU capped at 1024 entries so the
+  long-lived server holds steady memory instead of growing an unbounded dict; freshness/hash
+  invalidation is unchanged.
+- **Thread-safe graph project resolution** — the graph provider's project-name cache is now
+  lock-guarded, and `list_projects` runs outside the lock so a slow backend can't serialize
+  concurrent requests.
+
+### CI
+- Bumped `actions/checkout`, `actions/setup-python`, and `actions/upload-artifact` off the
+  deprecated Node 20 runtime.
+
+### Documentation
+- README: added a **"What makes it good"** section (local-first & private, never-throws, one tool
+  not three, graceful degradation, fast+bounded caching, concurrency-safe, self-diagnosing).
+
 ## [0.2.1] — 2026-08-12
 
 ### Fixed

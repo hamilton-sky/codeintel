@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any, Optional
 
@@ -35,6 +36,7 @@ class GraphProvider:
 
     def __init__(self) -> None:
         self._project_cache: dict[str, Optional[str]] = {}
+        self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
         self._detect_backend()
 
     def _detect_backend(self) -> None:
@@ -125,11 +127,16 @@ class GraphProvider:
         return exact if exact is not None else best_prefix_name
 
     def _resolve_project(self, project_root: str) -> Optional[str]:
-        if project_root in self._project_cache:
-            return self._project_cache[project_root]
+        with self._project_cache_lock:
+            if project_root in self._project_cache:
+                return self._project_cache[project_root]
+        # list_projects shells out — resolve it OUTSIDE the lock so a slow backend can't serialize
+        # every concurrent request. A rare duplicate lookup on first contact is harmless (the
+        # result is idempotent); we simply never hold the lock across a subprocess.
         raw = self._run("list_projects", {}, 3000)
         name = self._match_project(raw, project_root)
-        self._project_cache[project_root] = name
+        with self._project_cache_lock:
+            self._project_cache[project_root] = name
         return name
 
     def probe(self, project_root: str, timeout_ms: int = 3000) -> dict:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from codeintel.server import code_doctor_handler, code_query_handler, code_status_handler
 
@@ -57,8 +57,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
 
-class CodeIntelHTTPServer(HTTPServer):
-    pass
+class CodeIntelHTTPServer(ThreadingHTTPServer):
+    # Threaded so one slow request (e.g. an LSP session warming, or a first-time index) can't
+    # block every other agent's query. The gateway is a shared singleton, but its mutable state
+    # is lock-guarded (query cache, reindexer, LSP sessions, graph project cache) and the
+    # semantic engine is thread-confined with WAL, so concurrent requests are safe.
+    daemon_threads = True
 
 
 _LOOPBACK_NAMES = {"localhost"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+from collections import OrderedDict
 from typing import Optional
 
 from codeintel.provider import Result
@@ -22,10 +23,15 @@ def _compute_hash(target: str, project_root: str) -> str:
 
 
 class ContentHashCache:
-    def __init__(self) -> None:
+    # Bounded: the server builds ONE gateway and reuses it across every request, so an unbounded
+    # store would grow for the life of the process. Capped as an LRU — past _max_entries the
+    # least-recently-used entry is evicted. Sized generously; an agent session touches at most a
+    # few hundred distinct (op, target, engine, root) keys, each holding a small Result.
+    def __init__(self, max_entries: int = 1024) -> None:
         self._lock = threading.Lock()
-        # key → (content_hash, Result)
-        self._store: dict[tuple[str, str, str, str], tuple[str, Result]] = {}
+        self._max_entries = max(1, int(max_entries))
+        # key → (content_hash, Result); OrderedDict preserves insertion/access order for LRU.
+        self._store: "OrderedDict[tuple[str, str, str, str], tuple[str, Result]]" = OrderedDict()
 
     def get(
         self,
@@ -41,10 +47,14 @@ class ContentHashCache:
         if entry is None:
             return None
         stored_hash, result = entry
+        # _compute_hash may read the target file — keep it OUTSIDE the lock (original intent).
         current_hash = f"{_compute_hash(target, project_root)}:{freshness}"
-        if current_hash == stored_hash:
-            return result
-        return None
+        if current_hash != stored_hash:
+            return None
+        with self._lock:
+            if key in self._store:  # may have been evicted between the two locked sections
+                self._store.move_to_end(key)  # mark most-recently-used
+        return result
 
     def put(
         self,
@@ -64,3 +74,6 @@ class ContentHashCache:
         content_hash = f"{_compute_hash(target, project_root)}:{freshness}"
         with self._lock:
             self._store[key] = (content_hash, result)
+            self._store.move_to_end(key)  # most-recently-used
+            while len(self._store) > self._max_entries:
+                self._store.popitem(last=False)  # evict least-recently-used
