@@ -29,7 +29,8 @@ class SemanticProvider:
         budget: int,
         project_root: str,
     ) -> Result:
-        if op != "search":
+        # `context` (fan-out op) → semantic's contribution is a similarity search on the target.
+        if op not in ("search", "context"):
             return safe_null_result(op, target, engine="semantic", reason="op-not-supported")
         if not self.available:
             return safe_null_result(op, target, engine="semantic", reason="engine-unavailable")

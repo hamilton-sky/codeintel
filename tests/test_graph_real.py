@@ -165,6 +165,18 @@ def test_impact_combines_callers_and_callees(monkeypatch):
     assert "gateway" in r["result"] and "builtins.str" in r["result"]
 
 
+def test_context_aliases_to_impact(monkeypatch):
+    # `context` is a fan-out op; the graph engine answers it with its impact (callers+callees) view.
+    seq = iter([CAP_CALLERS, CAP_CALLEES])
+    p = _provider(
+        monkeypatch,
+        {"list_projects": CAP_LIST_PROJECTS, "query_graph": lambda payload: next(seq)},
+    )
+    r = p.build_result("context", "safe_null_result", [], 0, "/Users/x/Documents/project/codeintel")
+    assert r["result"] is not None
+    assert "### Callers" in r["result"] and "### Callees" in r["result"]
+
+
 def test_empty_rows_yield_safe_null(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "query_graph": CAP_EMPTY})
     r = p.build_result("callers", "does_not_exist", [], 0, "/Users/x/Documents/project/codeintel")

@@ -328,7 +328,8 @@ class GraphProvider:
     def _dispatch(
         self, op: str, target: str, project: str, timeout_ms: int
     ) -> Optional[str]:
-        if op == "impact":
+        if op == "impact" or op == "context":
+            # `context` (fan-out op) → the graph's richest single-symbol view: callers + callees.
             return self._op_impact(target, project, timeout_ms)
         if op == "callers":
             return self._op_callers(target, project, timeout_ms)

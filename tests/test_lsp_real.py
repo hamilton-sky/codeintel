@@ -139,6 +139,26 @@ def test_symbol_two_step_uses_located_relative_path(monkeypatch):
     assert "src/codeintel/server.py:72" in body
 
 
+def test_context_aliases_to_symbol(monkeypatch):
+    # `context` is a fan-out op; the LSP engine answers it with its symbol (def+refs) view.
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/repo"] = _ready_session()
+
+    def _fake_call_tool(sess, tool, args, timeout_s):
+        if tool == "find_symbol":
+            return _FakeToolResult(FIND_SYMBOL_JSON)
+        if tool == "find_referencing_symbols":
+            return _FakeToolResult(FIND_REFS_JSON)
+        return None
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result("context", "safe_null_result", [], 0, "/repo")
+    assert r["result"] is not None
+    assert "**Function**" in r["result"]
+    assert "## References (3)" in r["result"]
+
+
 def test_symbol_definition_only_when_no_references(monkeypatch):
     monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()

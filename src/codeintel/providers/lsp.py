@@ -192,7 +192,8 @@ class LspProvider:
         root: str,
         timeout_s: float,
     ) -> Optional[str]:
-        if op == "symbol":
+        if op == "symbol" or op == "context":
+            # `context` (fan-out op) → the LSP's richest single-symbol view: definition + refs.
             return self._op_symbol(session, target, root, timeout_s)
         if op == "overview":
             return self._op_overview(session, target, root, timeout_s)

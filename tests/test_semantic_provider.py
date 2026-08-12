@@ -133,6 +133,14 @@ def test_unsupported_op_safe_null(monkeypatch):
     assert result.get("reason") == "op-not-supported"
 
 
+def test_context_op_is_accepted(monkeypatch):
+    # `context` (fan-out op) must be a valid semantic op — reaching the project-root check,
+    # NOT rejected as op-not-supported (which would drop semantic from every context fan-out).
+    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    result = SemanticProvider().build_result("context", "foo", [], 0, "")
+    assert result.get("reason") == "no-project-root"
+
+
 # ---------------------------------------------------------------------------
 # Never-raise invariant
 # ---------------------------------------------------------------------------
