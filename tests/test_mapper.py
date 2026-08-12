@@ -83,6 +83,37 @@ def test_generate_deterministic():
     assert result1 == result2
 
 
+def test_generate_reads_columns_rows_shape():
+    """The real backend returns {columns, rows}; the old mapper only accepted a list and so
+    always rendered an empty table. This locks the real shape + the builtin/project noise filter."""
+    ranked = {
+        "columns": ["fn.name", "fn.qualified_name", "fn.file_path", "in_degree"],
+        "rows": [
+            ["query", "codeintel.gateway.Gateway.query", "src/codeintel/gateway.py", "29"],
+            ["str", "builtins.str", "<python-builtins>", "27"],       # noise → dropped
+            ["codeintel", "codeintel.pyproject", "pyproject.toml", "30"],  # noise → dropped
+            ["Result", "codeintel.provider.Result", "src/codeintel/provider.py", "22"],
+        ],
+    }
+    entry = {"columns": ["fn.name", "fn.file_path"], "rows": [["main", "src/codeintel/__main__.py"]]}
+    provider = MagicMock()
+    provider.available = True
+    provider._resolve_project.return_value = "proj"
+    provider.build_result.return_value = {
+        "ok": True, "op": "overview", "target": "", "result": "## Arch",
+        "engine": "graph", "cached": False,
+    }
+    provider._run.side_effect = [ranked, entry]
+
+    out = MapGenerator(provider).generate("/repo")
+    assert "## Ranked Symbols (by caller count)" in out
+    assert "`query`" in out and "29" in out
+    assert "`Result`" in out
+    assert "<python-builtins>" not in out and "`str`" not in out  # noise filtered
+    assert "pyproject.toml" not in out
+    assert "## Entry Points" in out and "`main`" in out
+
+
 def test_write_creates_file():
     gen = MapGenerator(None)
     with tempfile.TemporaryDirectory() as d:

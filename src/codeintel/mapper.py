@@ -6,18 +6,44 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from codeintel.providers.graph import GraphProvider
 
+# Real codebase-memory-mcp contract (verified live): query_graph returns {columns, rows}
+# value-arrays, module-level calls are USAGE (not only CALLS), and nodes carry `is_entry_point`
+# (there is no `fn.type` property — that filter matched nothing, so the old queries were dead).
 _FAN_IN_CYPHER = (
-    "MATCH (fn) WHERE fn.type IN ['function', 'method', 'class'] "
-    "OPTIONAL MATCH (caller)-[:CALLS]->(fn) "
-    "WITH fn, count(caller) as in_degree "
-    "ORDER BY in_degree DESC LIMIT 30 "
-    "RETURN fn.name, fn.file_path, in_degree"
+    "MATCH (caller)-[:CALLS|USAGE]->(fn) WHERE fn.name IS NOT NULL "
+    "RETURN fn.name, fn.qualified_name, fn.file_path, count(caller) AS in_degree "
+    "ORDER BY in_degree DESC LIMIT 40"
 )
 
 _ENTRY_CYPHER = (
-    "MATCH (fn) WHERE NOT ()-[:CALLS]->(fn) AND (fn)-[:CALLS]->() "
+    "MATCH (fn) WHERE fn.is_entry_point = true "
     "RETURN fn.name, fn.file_path LIMIT 10"
 )
+
+# Builtins and the synthetic project/config node are high-fan-in but useless as "symbols".
+_RANK_SKIP_PATHS = frozenset({"<python-builtins>", "pyproject.toml", ""})
+
+
+def _rows_from(raw: object) -> list[dict]:
+    """Normalize a query_graph response to a list of column->value dicts.
+
+    Accepts the real ``{"columns": [...], "rows": [[...]]}`` shape AND the legacy list-of-dicts
+    shape (used by older mocks); anything else yields ``[]``. Mirrors GraphProvider._query_rows
+    so the map generator reads the same reality every other graph op now does."""
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    if not isinstance(raw, dict):
+        return []
+    cols, rows = raw.get("columns"), raw.get("rows")
+    if not isinstance(cols, list) or not isinstance(rows, list):
+        return []
+    out: list[dict] = []
+    for row in rows:
+        if isinstance(row, list):
+            out.append({str(cols[i]): row[i] for i in range(min(len(cols), len(row)))})
+        elif isinstance(row, dict):
+            out.append(row)
+    return out
 
 
 class MapGenerator:
@@ -69,25 +95,25 @@ class MapGenerator:
 
 def _query_ranked_symbols(provider: GraphProvider, project: str) -> list[dict]:
     raw = provider._run("query_graph", {"project": project, "query": _FAN_IN_CYPHER}, 8000)
-    if not isinstance(raw, list):
-        return []
     rows = []
-    for row in raw:
-        name = row.get("fn.name") or row.get("name", "?")
-        path = row.get("fn.file_path") or row.get("file_path", "")
+    for row in _rows_from(raw):
+        name = row.get("fn.name") or row.get("name") or "?"
+        path = str(row.get("fn.file_path") or row.get("file_path") or "")
         deg = row.get("in_degree", 0)
+        if path in _RANK_SKIP_PATHS:  # drop builtins / project node noise
+            continue
         rows.append({"name": name, "file_path": path, "in_degree": deg})
+        if len(rows) >= 30:
+            break
     return rows
 
 
 def _query_entry_points(provider: GraphProvider, project: str) -> list[dict]:
     raw = provider._run("query_graph", {"project": project, "query": _ENTRY_CYPHER}, 5000)
-    if not isinstance(raw, list):
-        return []
     rows = []
-    for row in raw:
-        name = row.get("fn.name") or row.get("name", "?")
-        path = row.get("fn.file_path") or row.get("file_path", "")
+    for row in _rows_from(raw):
+        name = row.get("fn.name") or row.get("name") or "?"
+        path = str(row.get("fn.file_path") or row.get("file_path") or "")
         rows.append({"name": name, "file_path": path})
     return rows
 
