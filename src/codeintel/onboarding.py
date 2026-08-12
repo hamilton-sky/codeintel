@@ -72,6 +72,7 @@ def _bounded_index(project_root: str, *, timeout_s: float, out) -> dict:
                     db, model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
                     window=int(cfg.get("window", 20)), stride=int(cfg.get("stride", 10)),
                     max_chunks=int(cfg.get("max_chunks", 500)),
+                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
                 ).index(project_root)
             finally:
                 db.close()

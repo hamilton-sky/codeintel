@@ -37,12 +37,14 @@ class Indexer:
         window: int = 20,
         stride: int = 10,
         max_chunks: int = 500,
+        max_total_chunks: int = 100000,
     ) -> None:
         self.db = db
         self.model_name = model_name
         self.window = window
         self.stride = stride
-        self.max_chunks = max_chunks
+        self.max_chunks = max_chunks               # per file
+        self.max_total_chunks = max_total_chunks   # safety ceiling per index pass (memory backstop)
         self._embedder = None
 
     def _get_embedder(self):
@@ -131,6 +133,13 @@ class Indexer:
         new_chunks: list[tuple[str, str, str, int, str]] = []
 
         for filepath in self._walk_files(root):
+            if len(new_chunks) >= self.max_total_chunks:
+                logger.warning(
+                    "index: reached max_total_chunks=%d this pass — stopping "
+                    "(raise it in .codeintel.toml to embed more of a very large repo)",
+                    self.max_total_chunks,
+                )
+                break
             try:
                 with open(filepath, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
@@ -145,6 +154,8 @@ class Indexer:
             chunk_count = 0
 
             for chunk_start in range(0, len(lines), self.stride):
+                if len(new_chunks) >= self.max_total_chunks:
+                    break  # global ceiling reached mid-file; the file-loop guard logs and stops
                 if chunk_count >= self.max_chunks:
                     logger.debug(
                         "chunk cap hit for %s, truncating at %d",

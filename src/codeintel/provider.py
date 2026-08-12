@@ -1,7 +1,26 @@
 from __future__ import annotations
 
+import logging
+import os
+import traceback
 from typing import Any, Optional, Protocol, runtime_checkable
 from typing_extensions import NotRequired, TypedDict
+
+_logger = logging.getLogger("codeintel")
+_DEBUG = os.environ.get("CODEINTEL_DEBUG", "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def log_swallowed(where: str, exc: BaseException) -> None:
+    """Record an exception the never-raise contract is about to swallow. Quiet by default so the
+    contract stays silent in normal use; set ``CODEINTEL_DEBUG=1`` to surface a full traceback when
+    diagnosing why a query came back as a safe-null. Never raises — logging failures are ignored."""
+    try:
+        if _DEBUG:
+            _logger.warning("codeintel swallowed error in %s: %s\n%s", where, exc, traceback.format_exc())
+        else:
+            _logger.debug("codeintel swallowed error in %s: %s", where, exc)
+    except Exception:
+        pass
 
 
 class Result(TypedDict):

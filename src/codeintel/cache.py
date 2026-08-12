@@ -13,7 +13,7 @@ def _compute_hash(target: str, project_root: str) -> str:
     try:
         root = os.path.realpath(project_root) if project_root else ""
         path = os.path.realpath(target)
-        if root and path.startswith(root + os.sep) or path == root:
+        if (root and path.startswith(root + os.sep)) or path == root:
             if os.path.isfile(path):
                 with open(path, "rb") as fh:
                     return hashlib.sha256(fh.read()).hexdigest()

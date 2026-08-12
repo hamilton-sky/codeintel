@@ -150,7 +150,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel setup [project_root] [--index] [--warm] [--install-uv]` | Check backends + optionally index this repo; ends with a health report |
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |
-| `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote]` | Start the HTTP transport (loopback-only unless `--allow-remote`) |
+| `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote] [--token TOKEN]` | Start the HTTP transport (loopback-only unless `--allow-remote`; `--token` requires a bearer token on every request) |
 | `codeintel query --op OP --target TARGET [--engine auto]` | Run a single query and print the result |
 | `codeintel status [project_root]` | Show engine availability and index age |
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
@@ -164,17 +164,28 @@ Human-facing commands (`doctor`, `status`, `query`, `setup`, `reset`) honor `--n
 Create `.codeintel.toml` at your project root to override defaults:
 
 ```toml
-backend      = "auto"                   # auto | graph | lsp | semantic
-semantic     = "on"                     # on | off
-reindex      = "on-demand"              # on-demand | never
-cosine_floor = 0.25                     # minimum similarity score for semantic hits
-max_chunks   = 500                      # max chunks to embed per file
-model        = "BAAI/bge-small-en-v1.5" # fastembed embedding model
+backend          = "auto"                   # auto | graph | lsp | semantic
+semantic         = "on"                     # on | off
+reindex          = "on-demand"              # on-demand | never
+cosine_floor     = 0.25                     # minimum similarity score for semantic hits (0–1)
+max_chunks       = 500                      # max chunks to embed per file
+max_total_chunks = 100000                   # safety ceiling on chunks embedded in one index pass
+model            = "BAAI/bge-small-en-v1.5" # fastembed embedding model
 ```
+
+Config is **validated on load** — an out-of-range number, a misspelled enum, or a wrong type falls back to that key's default (with a logged warning) instead of breaking every query.
+
+**Environment variables:**
+
+| Variable | Effect |
+|---|---|
+| `CODEINTEL_HTTP_TOKEN` | Bearer token required by `serve-http` (equivalent to `--token`) |
+| `CODEINTEL_DEBUG=1` | Log the full traceback of any error the never-throw contract swallows (silent by default) — the switch for diagnosing an unexpected `null` |
+| `CODEINTEL_REINDEX=off` | Disable the background reindexer; queries then index inline to stay fresh |
 
 ## Privacy & dependencies
 
-**codeintel is local-first** — one local process, no cloud service, no API keys, no telemetry, and no per-query network. Its own code makes zero outbound HTTP calls, and the HTTP transport binds to `127.0.0.1` only.
+**codeintel is local-first** — one local process, no cloud service, no API keys, no telemetry, and no per-query network. Its own code makes zero outbound HTTP calls, and the HTTP transport binds to `127.0.0.1` only by default — binding a non-loopback host requires `--allow-remote`, and `--token` (or `CODEINTEL_HTTP_TOKEN`) then gates every request behind a bearer token. The server bounds concurrent connections, but for exposure to a hostile network you should still front it with a reverse proxy (TLS, rate-limiting) — the built-in `http.server` is not hardened for the open internet.
 
 **Bundled (installed with the package, run locally):** `mcp` (the tool interface) · `sqlite-vec` (the semantic index, a local DB file) · `fastembed` (the local embedding model).
 
@@ -206,6 +217,8 @@ Over MCP the agent calls `code.query` directly. Over HTTP, start the server and 
 ```bash
 codeintel serve-http &   # listens on 127.0.0.1:8766 by default
 ```
+
+For a shared or remote deployment, start it with `--allow-remote --token "$CODEINTEL_HTTP_TOKEN"` and send `Authorization: Bearer <token>` on each request — a missing or wrong token gets a clean `401`. Requests are handled concurrently, so one slow query never blocks another.
 
 ```python
 import urllib.request, json

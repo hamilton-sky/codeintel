@@ -103,15 +103,21 @@ def code_status_handler(args: dict) -> dict:
         if not engines:
             engines.append("none")
 
-        # Report real freshness/model instead of hardcoded nulls (SPEC §7).
+        # Report real freshness/model instead of hardcoded nulls (SPEC §7). When a project_root is
+        # supplied, `indexed` is scoped to THAT repo (does it have indexed chunks?) rather than the
+        # misleading "any semantic db file exists on this machine".
+        project_root = str(args.get("project_root", "") or "")
         indexed = False
         model = None
         try:
-            import os
             from codeintel.semantic_db import DEFAULT_MODEL, default_db_path
             if semantic_available:
                 model = DEFAULT_MODEL
-                indexed = os.path.exists(default_db_path())
+                if project_root:
+                    indexed = bool(SemanticProvider().probe(project_root).get("repo_indexed"))
+                else:
+                    import os
+                    indexed = os.path.exists(default_db_path())
         except Exception:
             pass
 
@@ -199,8 +205,8 @@ def run() -> None:
             {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
         )
 
-    async def _code_status() -> dict:
-        return code_status_handler({})
+    async def _code_status(project_root: str = "") -> dict:
+        return code_status_handler({"project_root": project_root})
 
     async def _code_doctor(project_root: str = "", deep: bool = False) -> dict:
         return code_doctor_handler({"project_root": project_root, "deep": deep})

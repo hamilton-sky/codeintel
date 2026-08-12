@@ -12,7 +12,7 @@ from typing import Any, Optional
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
-from codeintel.provider import Result, safe_null_result
+from codeintel.provider import Result, log_swallowed, safe_null_result
 
 _COOLDOWN_SECONDS = 60
 _DEFAULT_TIMEOUT_S = 5.0
@@ -231,7 +231,8 @@ class LspProvider:
                 "engine": "lsp",
                 "cached": False,
             }
-        except Exception:
+        except Exception as exc:
+            log_swallowed("LspProvider.build_result", exc)
             return safe_null_result(op, target, engine="lsp", reason="error")
 
     def _dispatch(

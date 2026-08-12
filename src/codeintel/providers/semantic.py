@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 import pathlib
 
-from codeintel.provider import Result, safe_null_result
+from codeintel.provider import Result, log_swallowed, safe_null_result
 
 try:
     import fastembed  # noqa: F401
@@ -101,15 +102,26 @@ class SemanticProvider:
             db = SemanticDb(str(_DB_PATH))
             db.init()
 
-            Indexer(
-                db,
-                model_name=model,
-                window=int(cfg.get("window", 20)),
-                stride=int(cfg.get("stride", 10)),
-                max_chunks=int(cfg.get("max_chunks", 500)),
-            ).index(project_root)
-
             searcher = Searcher(db, model_name=model)
+
+            # A full index pass walks and hashes every file — too expensive to run on every query.
+            # The background Reindexer (gated by the CODEINTEL_REINDEX env) already keeps a warm repo
+            # fresh, so we only pay the inline pass on a COLD repo (nothing indexed yet). The one
+            # exception: when that background reindexer is turned off, the inline pass is the only
+            # thing keeping the index current, so we run it every query to preserve freshness.
+            background_reindex_off = (
+                os.environ.get("CODEINTEL_REINDEX", "on").strip().lower() == "off"
+            )
+            if background_reindex_off or not searcher.has_index(project_root):
+                Indexer(
+                    db,
+                    model_name=model,
+                    window=int(cfg.get("window", 20)),
+                    stride=int(cfg.get("stride", 10)),
+                    max_chunks=int(cfg.get("max_chunks", 500)),
+                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+                ).index(project_root)
+
             if not searcher.has_index(project_root):
                 return safe_null_result(
                     op, target, engine="semantic", reason="no-index",
@@ -135,5 +147,6 @@ class SemanticProvider:
                 "cached": False,
             }
             return result
-        except Exception:
+        except Exception as exc:
+            log_swallowed("SemanticProvider.build_result", exc)
             return safe_null_result(op, target, engine="semantic", reason="provider-error")

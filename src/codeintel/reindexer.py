@@ -71,7 +71,20 @@ class Reindexer:
                 return
             self._last_fired[project_root] = now
 
+        # Passed the debounce gate — honor a per-project `reindex = "never"` opt-out before doing
+        # expensive work, so that config key actually disables background reindexing (not only the
+        # inline path). Checked post-debounce, so config is read at most once per window.
+        if self._reindex_disabled(project_root):
+            return
+
         self._executor.submit(self._do_reindex, project_root)
+
+    def _reindex_disabled(self, project_root: str) -> bool:
+        try:
+            from codeintel.config import load_config
+            return str(load_config(project_root).get("reindex") or "").strip().lower() == "never"
+        except Exception:
+            return False
 
     def _do_reindex(self, project_root: str) -> None:
         try:
@@ -85,17 +98,27 @@ class Reindexer:
     def _semantic_reindex(self, project_root: str) -> None:
         import pathlib
 
+        from codeintel.config import load_config
         from codeintel.semantic_db import SemanticDb, default_db_path
         from codeintel.indexer import Indexer
 
-        # Same per-machine cache the SemanticProvider reads — index and search must
-        # never diverge onto different files.
+        # Same per-machine cache the SemanticProvider reads — index and search must never diverge
+        # onto different files. Honor the project's config so the background pass indexes exactly
+        # like the inline and CLI paths (same model, window/stride, and chunk ceilings).
+        cfg = load_config(project_root)
         db_path = default_db_path()
         pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         db = SemanticDb(db_path)
         try:
             db.init()
-            Indexer(db).index(project_root)
+            Indexer(
+                db,
+                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                window=int(cfg.get("window", 20)),
+                stride=int(cfg.get("stride", 10)),
+                max_chunks=int(cfg.get("max_chunks", 500)),
+                max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+            ).index(project_root)
         finally:
             db.close()
 

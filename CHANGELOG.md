@@ -4,6 +4,50 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-12
+
+Reliability pass for unattended/production use: safe config, cheaper warm queries, optional auth
+on the network transport, and diagnosable failures.
+
+### Added
+- **Optional bearer-token auth for `serve-http`** — `--token TOKEN` (or `CODEINTEL_HTTP_TOKEN`)
+  requires `Authorization: Bearer <token>` on every request (constant-time, bytes-safe compare),
+  making `--allow-remote` actually deployable. No token → auth disabled (the loopback default).
+- **Config validation** — a malformed `.codeintel.toml` (wrong type, out-of-range `cosine_floor`,
+  unknown enum) now falls back to that key's default with a warning instead of breaking every
+  query that loads it.
+- **`CODEINTEL_DEBUG=1`** — logs the full traceback of any error the never-throw contract
+  swallows, so an unexpected `null` is diagnosable without weakening the contract.
+- **`max_total_chunks`** config — safety ceiling on chunks embedded in one index pass, so a huge
+  monorepo can't drive unbounded memory on its first index.
+- Per-request socket timeout on the HTTP transport (slow-client / slowloris guard).
+
+### Changed
+- **Semantic search skips the inline full-index on a warm repo** — it only walks+hashes the whole
+  tree on a COLD repo (or when the background reindexer is disabled via `CODEINTEL_REINDEX=off`),
+  relying on the debounced background reindexer otherwise. Large latency win on repeat queries.
+- **`code.status` / `codeintel status <repo>` is project-scoped** — `indexed` reflects whether
+  THAT repo has indexed chunks, not merely "a semantic db exists somewhere on this machine".
+- **`overview` auto-routing also falls back to LSP** when the repo isn't in the graph (previously
+  only when the graph backend was entirely unavailable).
+
+### Hardened (from an adversarial review pass)
+- Config coercion no longer crashes on TOML `inf`/`nan` (`int(float('inf'))` → `OverflowError`);
+  the CLI `index` path could previously abort with an uncaught traceback.
+- `reindex = "never"` now actually disables the **background** reindexer (not just the inline
+  path), and `max_total_chunks` is honored by **all** index entry points (`index`, `setup`, the
+  background pass), not only inline search.
+- The HTTP transport bounds concurrent worker threads (fast `503` past the cap) so a slow-client
+  burst can't exhaust threads/FDs, and routes stalled-client socket errors through the same quiet
+  `log_swallowed` path instead of a stderr traceback.
+- The graph provider caches a *failed* project lookup only briefly (short TTL), so a repo indexed
+  into the graph after a first miss is picked up without restarting a long-lived server.
+
+### Tests
+- New suites for config validation (incl. inf/nan), HTTP auth (incl. a non-ASCII-token crash
+  regression + the concurrency cap), the cold/warm indexing decision, the chunk ceiling, the
+  overview fallback, `reindex="never"`, and the graph negative-lookup TTL (+29 tests → 200 total).
+
 ## [0.2.2] — 2026-08-12
 
 Production-hardening pass — bounded memory, concurrent request handling, and a maintained CI.

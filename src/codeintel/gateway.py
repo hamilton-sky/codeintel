@@ -5,7 +5,7 @@ from typing import Any
 
 from codeintel.cache import ContentHashCache
 from codeintel.policy import TieringPolicy
-from codeintel.provider import Result, safe_null_result
+from codeintel.provider import Result, log_swallowed, safe_null_result
 from codeintel.providers.none import NoneProvider
 from codeintel.reindexer import Reindexer
 
@@ -128,7 +128,8 @@ class Gateway:
             if r is not None:
                 return r
             return safe_null_result(op_str, target_str, engine=engine_str, reason="no-result")
-        except Exception:
+        except Exception as exc:
+            log_swallowed(f"Gateway._dispatch_single[{engine_str}.{op_str}]", exc)
             return safe_null_result(op_str, target_str, engine=engine_str, reason="provider-error")
 
     def query(
@@ -206,14 +207,15 @@ class Gateway:
             provider = self._provider_for(engine_str)
             result = self._dispatch_single(provider, op_str, target_str, budget, project_root, engine_str)
 
-            # overview auto-fallback (F4 Story 2): when auto-routed to graph but graph is
-            # unavailable, try lsp — a file/symbol overview is something lsp can also serve.
+            # overview auto-fallback (F4 Story 2): when auto-routed to graph but graph can't serve
+            # it — the backend is unavailable, OR this repo simply isn't in the graph — try lsp,
+            # which can produce a file/symbol overview without the graph index.
             if (
                 was_auto
                 and op_str == "overview"
                 and engine_str == "graph"
                 and result.get("result") is None
-                and result.get("reason") == "engine-unavailable"
+                and result.get("reason") in ("engine-unavailable", "project-not-indexed")
             ):
                 lsp_result = self._dispatch_single(
                     self.lsp, op_str, target_str, budget, project_root, "lsp"
@@ -224,5 +226,6 @@ class Gateway:
             self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
             return result
 
-        except Exception:
+        except Exception as exc:
+            log_swallowed("Gateway.query", exc)
             return safe_null_result(op or "", target or "", reason="gateway-error")

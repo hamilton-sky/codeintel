@@ -50,7 +50,8 @@ def main() -> None:
     http_parser = subparsers.add_parser("serve-http", help="Start the HTTP transport server")
     http_parser.add_argument("--port", type=int, default=8766, help="Port to listen on (default: 8766)")
     http_parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-    http_parser.add_argument("--allow-remote", action="store_true", help="Permit binding a non-loopback host (exposes an UNAUTHENTICATED endpoint)")
+    http_parser.add_argument("--allow-remote", action="store_true", help="Permit binding a non-loopback host (use with --token, or the endpoint is UNAUTHENTICATED)")
+    http_parser.add_argument("--token", default=None, help="Require this bearer token on every request (or set CODEINTEL_HTTP_TOKEN). Strongly recommended with --allow-remote.")
 
     # install subcommand
     install_parser = subparsers.add_parser("install", help="Register codeintel with AI agents")
@@ -120,6 +121,7 @@ def main() -> None:
                 window=int(cfg.get("window", 20)),
                 stride=int(cfg.get("stride", 10)),
                 max_chunks=int(cfg.get("max_chunks", 500)),
+                max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
             ).index(project_root)
             if count > 0:
                 print(f"Indexed {count} chunks")
@@ -225,7 +227,7 @@ def main() -> None:
             from codeintel import server
 
             project_root = args.project_root or os.getcwd()
-            status = server.code_status_handler({})
+            status = server.code_status_handler({"project_root": project_root})
 
             print("Engine status:")
             for engine in ["graph", "lsp", "semantic"]:
@@ -318,7 +320,8 @@ def main() -> None:
     elif args.command == "serve-http":
         try:
             from codeintel.http_server import run
-            run(host=args.host, port=args.port, allow_remote=args.allow_remote)
+            token = args.token or os.environ.get("CODEINTEL_HTTP_TOKEN")
+            run(host=args.host, port=args.port, allow_remote=args.allow_remote, token=token)
         except KeyboardInterrupt:
             pass
         except Exception as exc:

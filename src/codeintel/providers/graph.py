@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any, Optional
 
-from codeintel.provider import Result, safe_null_result
+from codeintel.provider import Result, log_swallowed, safe_null_result
 
 
 def _cypher_literal(s: Any) -> str:
@@ -35,7 +35,8 @@ class GraphProvider:
     """
 
     def __init__(self) -> None:
-        self._project_cache: dict[str, Optional[str]] = {}
+        self._project_cache: dict[str, Optional[str]] = {}          # resolved names (stable, kept)
+        self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
         self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
         self._detect_backend()
 
@@ -129,14 +130,22 @@ class GraphProvider:
     def _resolve_project(self, project_root: str) -> Optional[str]:
         with self._project_cache_lock:
             if project_root in self._project_cache:
-                return self._project_cache[project_root]
+                return self._project_cache[project_root]  # positive: a repo's name is stable
+            neg_until = self._negative_until.get(project_root)
+            if neg_until is not None and time.monotonic() < neg_until:
+                return None  # a recently-failed lookup, still within its short TTL
         # list_projects shells out — resolve it OUTSIDE the lock so a slow backend can't serialize
-        # every concurrent request. A rare duplicate lookup on first contact is harmless (the
-        # result is idempotent); we simply never hold the lock across a subprocess.
+        # every concurrent request. A rare duplicate lookup on first contact is harmless.
         raw = self._run("list_projects", {}, 3000)
         name = self._match_project(raw, project_root)
         with self._project_cache_lock:
-            self._project_cache[project_root] = name
+            if name is not None:
+                self._project_cache[project_root] = name
+                self._negative_until.pop(project_root, None)
+            else:
+                # Cache the MISS only briefly, so a repo indexed into the graph AFTER this failed
+                # lookup is picked up within the TTL rather than staying stuck until a restart.
+                self._negative_until[project_root] = time.monotonic() + 30.0
         return name
 
     def probe(self, project_root: str, timeout_ms: int = 3000) -> dict:
@@ -400,7 +409,8 @@ class GraphProvider:
                 "engine": "graph",
                 "cached": False,
             }
-        except Exception:
+        except Exception as exc:
+            log_swallowed("GraphProvider.build_result", exc)
             return safe_null_result(op, target, engine="graph", reason="error")
 
     def _dispatch(
