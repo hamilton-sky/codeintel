@@ -50,6 +50,18 @@ def test_render_shows_marks_and_remediation():
     assert "n/a" in text  # lsp repo-indexed
     assert "codeintel index /repo" in text  # remediation surfaced (two-line fix:)
     assert "1 / 3 engines ready" in text
+    assert "codeintel setup" in text  # actionable tip footer surfaces when not healthy
+
+
+def test_setup_tip_footer_only_when_unhealthy():
+    base = {"project_root": "/repo", "deep": False,
+            "engines": {"semantic": {"engine": "semantic", "status": "ok", "installed": True,
+                                     "runnable": True, "repo_indexed": True, "detail": "ok",
+                                     "remediation": None}}}
+    healthy = doctor.render_doctor_text({**base, "summary": {"ready": 1, "total": 1, "healthy": True}})
+    unhealthy = doctor.render_doctor_text({**base, "summary": {"ready": 0, "total": 1, "healthy": False}})
+    assert "codeintel setup" not in healthy   # no noise when everything is ready
+    assert "codeintel setup" in unhealthy      # actionable guidance only when something is missing
 
 
 # --------------------------------------------------------------------------- #

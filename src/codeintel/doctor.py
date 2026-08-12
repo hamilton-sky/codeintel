@@ -158,4 +158,9 @@ def render_doctor_text(report: dict) -> str:
     tail = "" if report.get("deep") else c.dim("  (run with --deep to boot-check serena)")
     out.append("")
     out.append(f"  {count} engines ready for this repo.{tail}")
+    if healthy is False:
+        out.append("  " + c.dim(
+            "tip: `codeintel setup --install-uv --install-deps --index` bootstraps the "
+            "pip-installable backends; each fix: line above has the per-engine command."
+        ))
     return "\n".join(out)

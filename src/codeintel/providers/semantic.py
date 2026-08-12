@@ -130,7 +130,10 @@ class SemanticProvider:
                 )
 
             matches = searcher.search(
-                target, project_root, cosine_floor=float(cfg.get("cosine_floor", 0.25))
+                target, project_root,
+                cosine_floor=float(cfg.get("cosine_floor", 0.25)),
+                rerank=str(cfg.get("rerank", "on")),
+                rerank_candidates=int(cfg.get("rerank_candidates", 30)),
             )
             if not matches:
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")

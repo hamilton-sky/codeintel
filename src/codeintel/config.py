@@ -25,6 +25,8 @@ _DEFAULTS: dict = {
     "cosine_floor": 0.25,
     "model": "BAAI/bge-small-en-v1.5",
     "chunk_strategy": "syntax",  # syntax-aware (def/class boundaries) vs fixed line windows
+    "rerank": "on",              # hybrid lexical+semantic rerank of search results
+    "rerank_candidates": 30,     # cosine candidates fused/re-ranked before returning top-k
 }
 
 # Values restricted to a fixed set — anything else falls back to the default.
@@ -33,8 +35,9 @@ _ENUMS: dict = {
     "semantic": {"on", "off"},
     "reindex": {"on-demand", "never"},
     "chunk_strategy": {"syntax", "lines"},
+    "rerank": {"on", "off"},
 }
-_POSITIVE_INTS = ("window", "stride", "max_chunks", "max_total_chunks")
+_POSITIVE_INTS = ("window", "stride", "max_chunks", "max_total_chunks", "rerank_candidates")
 
 
 def _read_toml(path: pathlib.Path) -> dict:

@@ -4,6 +4,60 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-12
+
+Hybrid reranking for the semantic engine — search results are re-ordered by fusing cosine
+similarity with a lexical/symbol score, so an exact symbol match is no longer buried under a
+merely-semantically-near chunk. Phase 2 of `docs/roadmap-semantic.md`.
+
+### Added
+- **Hybrid rerank** (`rerank = "on"`, the new default). `Searcher.search` retrieves a cosine
+  candidate set (`rerank_candidates`, default 30), re-reads each candidate's chunk text (bounded —
+  ≤ 40 lines, capped at the next stored chunk so it never bleeds into an unrelated def), scores a
+  lexical token overlap (camelCase/snake_case-aware) plus a `def`/`class` **symbol boost**, fuses
+  the semantic and lexical ranks with Reciprocal Rank Fusion (`1/(60+rank_sem) + 1/(60+rank_lex)`)
+  plus the boost, and returns the top-k. A query with no lexical overlap returns the cosine order
+  unchanged.
+- **`rerank` + `rerank_candidates` config keys**, validated in `config.py`. `rerank = "off"`
+  restores the exact pre-0.7 pure-cosine path.
+
+### Changed
+- The `cosine_floor` gate stays on the **semantic** candidate set, so reranking only re-orders
+  chunks pure cosine already judged good enough — quality can't regress below the pre-0.7 path.
+  Result `score` stays the cosine similarity (interpretable); only the ordering reflects the fusion.
+
+### Hardened (from two adversarial review passes)
+- Lexical/boost text is bounded at the **next stored chunk start** (via the Phase-1
+  `(project_root, file_path)` index), so a small chunk can't be credited with a neighbouring def's
+  symbol, and an overlapping window chunk isn't truncated below its own span.
+- `Searcher.search` coerces `k` / `rerank_candidates` (bad type / zero / negative → default) and
+  caps the candidate set (`_RERANK_CANDIDATES_CAP`) so a misconfigured `rerank_candidates` can't
+  turn one query into thousands of reads — while always honoring `k`. `_read_chunk` uses
+  `itertools.islice` so a huge file isn't fully read for a 40-line window. Falsy `rerank` spellings
+  (incl. `False`) disable; the symbol boost is Unicode-aware and case-insensitive, matching the
+  lexical score.
+- Never-raise throughout: a missing/edited file scores that candidate 0 (not a crash), and any
+  rerank fault falls back to the cosine order.
+
+### Fixed
+- **Embeddings now update when a chunk's content changes.** `Indexer._embed_and_write` used
+  `INSERT OR REPLACE` on the `code_embeddings` **vec0** virtual table, which `sqlite-vec` does not
+  honor — it raised `UNIQUE constraint failed` on an existing `chunk_id` instead of replacing, so a
+  chunk whose content changed but whose start line (`chunk_id`) stayed put silently kept its
+  **stale** vector. Syntax chunking (0.6.0) exposed this on every function-body edit (a def's
+  `chunk_id` is its def line, which doesn't move). Now uses DELETE-then-INSERT, the supported vec0
+  upsert. Found by dogfooding: re-indexing a real repo threw 185 of these errors → now 0.
+- **`doctor` now says *how* to fix a missing backend.** The `fix:` lines carried vague "install X"
+  text; they now carry runnable commands (`codeintel setup --install-uv`, `brew install uv`, …),
+  and a footer points at `codeintel setup` for the pip-installable backends.
+
+### Tests
+- New `tests/test_rerank.py` (14 cases): exact-symbol-over-semantic ordering, `rerank="off"`
+  cosine parity, no-lexical-signal order preservation, the no-bleed fix, bounded + capped reads,
+  large-`k`-not-shrunk, bad-param and falsy-`rerank` degradation, and lexical / symbol-boost units.
+  Plus a regression test that a changed chunk re-embeds at a stable `chunk_id` (the vec0 upsert).
+  Config validation and the config-threading integration test extended. Full suite: 259 passed.
+
 ## [0.6.0] — 2026-08-12
 
 Syntax-aware chunking for the semantic engine — Python files are now embedded on real definition

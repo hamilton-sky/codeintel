@@ -146,7 +146,9 @@ def test_empty_project_reports_no_index(tmp_path, monkeypatch):
 
 def test_config_cosine_floor_reaches_searcher(tmp_path, monkeypatch):
     import codeintel.providers.semantic as sem
-    (tmp_path / ".codeintel.toml").write_text("cosine_floor = 0.99\n")
+    (tmp_path / ".codeintel.toml").write_text(
+        'cosine_floor = 0.99\nrerank = "off"\nrerank_candidates = 7\n'
+    )
     (tmp_path / "code.py").write_text("def f():\n    return 1\n")
     monkeypatch.setattr(sem, "_DB_PATH", tmp_path / "s.db")
     monkeypatch.setattr(sem, "_DEPS_OK", True)
@@ -154,14 +156,18 @@ def test_config_cosine_floor_reaches_searcher(tmp_path, monkeypatch):
     captured = {}
     real_search = Searcher.search
 
-    def spy(self, query, project_root, k=10, cosine_floor=0.25):
-        captured["floor"] = cosine_floor
-        return real_search(self, query, project_root, k=k, cosine_floor=cosine_floor)
+    def spy(self, query, project_root, k=10, cosine_floor=0.25, rerank="on", rerank_candidates=30):
+        captured.update(floor=cosine_floor, rerank=rerank, rerank_candidates=rerank_candidates)
+        return real_search(self, query, project_root, k=k, cosine_floor=cosine_floor,
+                           rerank=rerank, rerank_candidates=rerank_candidates)
 
     monkeypatch.setattr(Searcher, "search", spy)
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         SemanticProvider().build_result("search", "f", [], 0, str(tmp_path))
-    assert captured.get("floor") == 0.99   # the config value reached the searcher
+    # every semantic knob from .codeintel.toml must reach the searcher, not just cosine_floor
+    assert captured.get("floor") == 0.99
+    assert captured.get("rerank") == "off"
+    assert captured.get("rerank_candidates") == 7
 
 
 # --- Bug #8: HTTP transport 400s a malformed Content-Length (never crashes) --

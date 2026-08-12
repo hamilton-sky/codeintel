@@ -157,7 +157,9 @@ class GraphProvider:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False, "project": None,
                 "detail": "codebase-memory-mcp not found on PATH",
-                "remediation": "install codebase-memory-mcp (the graph backend)",
+                "remediation": "put the codebase-memory-mcp binary on PATH — it's an external "
+                               "native backend (see docs/graph.md); once present it self-updates "
+                               "via `codebase-memory-mcp update`",
             }
         raw = self._run("list_projects", {}, timeout_ms)
         if raw is None:

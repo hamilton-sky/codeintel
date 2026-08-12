@@ -1,6 +1,7 @@
 """Tests for SemanticProvider — covers all 4 USER_STORIES (7 test cases)."""
 from __future__ import annotations
 
+import hashlib
 import struct
 from unittest.mock import MagicMock, patch
 
@@ -31,6 +32,53 @@ def _mem_db() -> SemanticDb:
     db = SemanticDb(":memory:")
     db.init()
     return db
+
+
+class _ContentEmbedding:
+    """Content-addressed stub: the vector depends on the text, so a chunk whose content changed
+    yields a different embedding — lets a test detect whether a re-embed actually persisted
+    (the constant-vector _FakeTextEmbedding above cannot)."""
+    def __init__(self, model_name=None):
+        pass
+
+    def embed(self, texts):
+        out = []
+        for t in list(texts):
+            h = int(hashlib.sha256(t.encode()).hexdigest()[:8], 16)
+            v = np.zeros(384, dtype=np.float32)
+            v[0] = (h % 100000) / 100000.0
+            v[1] = 1.0
+            out.append(v)
+        return out
+
+
+def test_changed_chunk_reembeds_at_stable_chunk_id(tmp_path):
+    # Regression: sqlite-vec's vec0 ignores INSERT OR REPLACE and raises UNIQUE, so re-embedding a
+    # chunk whose content changed but whose chunk_id (def start line) is stable must go
+    # DELETE-then-INSERT — else the stale vector is kept forever. Syntax chunking exposes this on
+    # every function-body edit (the def line, hence the chunk_id, doesn't move).
+    mod = tmp_path / "mod.py"
+    mod.write_text("def f():\n    return 1\n")
+
+    def _vec(db):
+        row = db.conn().execute(
+            "SELECT embedding FROM code_embeddings WHERE chunk_id LIKE ?", ("%:mod.py:0",)
+        ).fetchone()
+        return row[0] if row else None
+
+    with patch("fastembed.TextEmbedding", _ContentEmbedding):
+        db = _mem_db()
+        idx = Indexer(db)
+        assert idx.index(str(tmp_path)) > 0
+        before = _vec(db)
+        assert before is not None
+
+        mod.write_text("def f():\n    return 999999\n")  # body changed, def line (chunk_id) stable
+        assert idx.index(str(tmp_path)) > 0, "the changed chunk must re-embed, not silently fail"
+        after = _vec(db)
+
+    assert after is not None
+    assert before != after, "the stored embedding must UPDATE for changed content on a vec0 table"
 
 
 # ---------------------------------------------------------------------------

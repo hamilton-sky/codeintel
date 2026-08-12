@@ -36,6 +36,17 @@ def test_chunk_strategy_enum_validation():
     assert _coerce({"chunk_strategy": "ast"})["chunk_strategy"] == "syntax"   # unknown → default
 
 
+def test_rerank_config_validation():
+    assert _coerce({})["rerank"] == "on"                                      # default
+    assert _coerce({})["rerank_candidates"] == 30                            # default
+    assert _coerce({"rerank": "off"})["rerank"] == "off"                     # escape hatch kept
+    assert _coerce({"rerank": "ON"})["rerank"] == "on"                       # case-normalized
+    assert _coerce({"rerank": "maybe"})["rerank"] == "on"                    # unknown → default
+    assert _coerce({"rerank_candidates": 50})["rerank_candidates"] == 50     # positive kept
+    assert _coerce({"rerank_candidates": 0})["rerank_candidates"] == 30      # non-positive → default
+    assert _coerce({"rerank_candidates": "x"})["rerank_candidates"] == 30    # non-int → default
+
+
 def test_valid_values_are_preserved():
     c = _coerce({"backend": "graph", "cosine_floor": 0.5, "window": 40, "reindex": "never"})
     assert c["backend"] == "graph"

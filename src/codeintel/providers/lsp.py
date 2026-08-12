@@ -144,7 +144,9 @@ class LspProvider:
             return {
                 "installed": False, "runnable": False, "repo_indexed": None,
                 "detail": "neither `serena` nor `uvx` found on PATH",
-                "remediation": "install uv (provides uvx) — serena is fetched on first use",
+                "remediation": "install uv (provides uvx): `codeintel setup --install-uv` "
+                               "(or `brew install uv` / `pip install uv`) — serena is then "
+                               "fetched on first use",
             }
         cmd = self._cmd
         if not deep:

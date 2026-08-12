@@ -380,9 +380,17 @@ class Indexer:
                 try:
                     vec = embeddings[j]
                     vec_bytes = struct.pack(f"{len(vec)}f", *vec)
+                    # sqlite-vec's vec0 virtual table does NOT honor INSERT OR REPLACE — it raises
+                    # UNIQUE on an existing chunk_id instead of replacing. So re-embedding a chunk
+                    # whose content changed but whose chunk_id (start line) is stable — the common
+                    # case under syntax chunking, where a def's chunk_id is its def line — would
+                    # silently fail and keep the STALE vector. DELETE-then-INSERT is the supported
+                    # upsert for vec0. (chunk_hashes below is a normal table, where REPLACE works.)
                     conn.execute(
-                        "INSERT OR REPLACE INTO code_embeddings(chunk_id, embedding)"
-                        " VALUES (?, ?)",
+                        "DELETE FROM code_embeddings WHERE chunk_id = ?", (chunk_id,)
+                    )
+                    conn.execute(
+                        "INSERT INTO code_embeddings(chunk_id, embedding) VALUES (?, ?)",
                         (chunk_id, vec_bytes),
                     )
                     conn.execute(

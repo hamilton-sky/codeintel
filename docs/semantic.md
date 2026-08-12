@@ -94,14 +94,40 @@ indexing and query embedding. Embeddings are stored as raw float32 bytes in `sql
 ## Search behaviour
 
 ```python
-Searcher(db).search(query, project_root, k=10, cosine_floor=0.25)
+Searcher(db).search(query, project_root, k=10, cosine_floor=0.25,
+                    rerank="on", rerank_candidates=30)
 ```
 
-- Top-`k` nearest neighbours by cosine distance (via `vec_distance_cosine`).
-- Results with `score = 1.0 - cosine_distance < 0.25` are dropped (below the floor).
-- Each result includes: `path` (relative), `line` (chunk start), `snippet` (5 lines), `score`.
+- Retrieve a cosine candidate set (`rerank_candidates`, default 30 — but never fewer than `k`, and
+  hard-capped so a misconfigured value can't blow up a query) by cosine distance (via
+  `vec_distance_cosine`), then return the top `k` after reranking.
+- Results with `score = 1.0 - cosine_distance < 0.25` are dropped (below the floor). The floor
+  gates the **cosine** candidate set, so reranking only re-orders what pure cosine already judged
+  good enough — quality can't regress below the pure-cosine path.
+- Each result includes: `path` (relative), `line` (chunk start), `snippet` (5 lines), `score`
+  (the **cosine** similarity — the list order reflects the rerank, the score stays interpretable).
 - An empty index (zero rows in `chunk_hashes`) returns an empty list immediately, which is
   then surfaced as `reason: 'below-floor'`.
+
+### Hybrid rerank
+
+Cosine alone under-ranks exact lexical/symbol matches (searching `parse_config` when a
+differently-worded but semantically-near chunk out-scores the literal match). With `rerank = "on"`
+(the default), each candidate's chunk text is re-read (bounded — up to 40 lines from its start,
+capped at the next candidate in the same file) and scored two more ways:
+
+- a **lexical** score — the fraction of query (sub)tokens present in the chunk (identifiers are
+  split on camelCase/snake_case, so `parse` matches `parse_config`);
+- a **symbol boost** — an additive bonus when the query is a single identifier that appears as a
+  `def`/`class` name (full) or a standalone word (half).
+
+The semantic rank and lexical rank are fused with Reciprocal Rank Fusion
+(`1/(60+rank_sem) + 1/(60+rank_lex)`) plus the symbol boost, and the candidates are re-sorted.
+When no candidate has any lexical overlap the lexical rank mirrors the semantic rank, so the
+cosine order is returned unchanged. Everything is bounded (≤ `rerank_candidates` file reads) and
+never raises — a missing/edited file scores that candidate 0 rather than failing the query, and
+any rerank fault falls back to the cosine order. `rerank = "off"` restores the exact pure-cosine
+path.
 
 ## Safe-null reasons
 
