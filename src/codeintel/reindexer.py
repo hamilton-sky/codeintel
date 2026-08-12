@@ -4,9 +4,39 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+
+class _DaemonPool:
+    """Runs background work on DAEMON threads so it can never block interpreter shutdown.
+
+    A one-shot ``codeintel query`` must return immediately — with a non-daemon pool, Python's
+    shutdown joins the workers, so a first query on a large repo hung for minutes while the
+    repo-wide reindex finished (and, with buffered/piped stdout, the result never even flushed
+    until the join completed). Daemon threads exit with the process; on the persistent server
+    they run to completion normally. Rate is bounded by the Reindexer's debounce, so a
+    thread-per-task is fine. ``shutdown(wait=)`` is kept for deterministic test draining."""
+
+    def __init__(self, max_workers: int = 2) -> None:
+        self._max_workers = max_workers  # advisory; the Reindexer debounce is the real rate limit
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+
+    def submit(self, fn, *args) -> None:
+        t = threading.Thread(target=fn, args=args, daemon=True)
+        with self._lock:
+            self._threads = [x for x in self._threads if x.is_alive()]  # drop finished
+            self._threads.append(t)
+        t.start()
+
+    def shutdown(self, wait: bool = True) -> None:
+        if not wait:
+            return
+        with self._lock:
+            threads = list(self._threads)
+        for t in threads:
+            t.join()
 
 
 class Reindexer:
@@ -22,7 +52,7 @@ class Reindexer:
         # folds it into the cache key so a structural answer is invalidated once the
         # index actually moves (a symbol/free-text target has no file content to hash).
         self._generation: dict[str, int] = {}
-        self._executor = ThreadPoolExecutor(max_workers=2)
+        self._executor = _DaemonPool(max_workers=2)
 
     def generation(self, project_root: str) -> int:
         with self._lock:

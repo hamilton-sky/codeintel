@@ -96,3 +96,33 @@ def test_never_raises_on_indexer_exception():
         r.maybe_reindex("/tmp/test")
         _drain(r)
         # reaching here without exception confirms the never-raise contract
+
+
+# ---------------------------------------------------------------------------
+# Test 6: background reindex threads are DAEMON — a one-shot CLI must not hang on
+# exit waiting for a repo-wide reindex to finish.
+# ---------------------------------------------------------------------------
+
+def test_reindex_runs_on_daemon_threads():
+    import threading as _threading
+
+    slow_started = _threading.Event()
+    release = _threading.Event()
+
+    def _slow_index(_root):
+        slow_started.set()
+        release.wait(5)  # simulate a long reindex still in flight
+
+    with patch("codeintel.indexer.Indexer") as MockIndexer, \
+         patch("codeintel.semantic_db.SemanticDb"), \
+         patch("shutil.which", return_value=None):
+        MockIndexer.return_value.index.side_effect = _slow_index
+        r = Reindexer(debounce_seconds=0)
+        r.maybe_reindex("/tmp/test")
+        assert slow_started.wait(2), "reindex thread did not start"
+        with r._executor._lock:
+            live = [t for t in r._executor._threads if t.is_alive()]
+        assert live, "expected a running reindex thread"
+        assert all(t.daemon for t in live), "reindex threads must be daemon (must not block CLI exit)"
+        release.set()
+        _drain(r)
