@@ -23,8 +23,10 @@ telemetry. What that means for security:
 - **Default transport is loopback-only.** `serve-http` refuses to bind a non-loopback host without
   `--allow-remote`, and warns loudly if you do so without a token.
 - **Authentication** for the HTTP transport is an optional bearer token (`--token` /
-  `CODEINTEL_HTTP_TOKEN`), compared in constant time. `/healthz` and `/readyz` are intentionally
-  unauthenticated and reveal only up/ready.
+  `CODEINTEL_HTTP_TOKEN`), compared in constant time, or **RBAC** via a token→role config
+  (`auth.toml`) where the role is derived server-side from the token — a client cannot escalate by
+  claiming a role in the request body, and a disallowed op returns 403. `/healthz` and `/readyz`
+  are intentionally unauthenticated and reveal only up/ready.
 - **Not hardened for hostile networks.** The built-in server bounds body size (1 MiB), concurrency,
   and idle connections, but stdlib `http.server` is not a public-internet edge. Front it with a
   reverse proxy (TLS, rate-limiting) — see [docs/deploy.md](docs/deploy.md).

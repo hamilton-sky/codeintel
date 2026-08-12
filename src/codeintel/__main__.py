@@ -90,6 +90,8 @@ def main() -> None:
     reset_parser.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
     reset_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
+    subparsers.add_parser("gen-token", help="Print a secure random bearer token (for serve-http / RBAC auth.toml)")
+
     args = parser.parse_args()
 
     from codeintel import term
@@ -354,6 +356,11 @@ def main() -> None:
                 print(f"x {agent}: failed — {r['reason']}")
 
         sys.exit(0 if any_ok else 1)
+
+    elif args.command == "gen-token":
+        import secrets
+        print(secrets.token_urlsafe(32))
+        sys.exit(0)
 
     else:
         parser.print_help()

@@ -19,6 +19,7 @@ Per-repo settings live in `.codeintel.toml` (see the README). Operational settin
 |---|---|---|
 | `CODEINTEL_HTTP_TOKEN` | — | Require `Authorization: Bearer <token>` on every request. **Set this for any non-loopback bind.** |
 | `CODEINTEL_ALLOW_NO_AUTH` | — | `1` to explicitly serve **unauthenticated** on a non-loopback host (a trusted network). Without a token *or* this, a non-loopback bind refuses to start. |
+| `CODEINTEL_AUTH_CONFIG` | `~/.codeintel/auth.toml` | Path to the RBAC token→role config (see §3). Enables per-token roles + op scopes. |
 | `CODEINTEL_LOG_LEVEL` | `WARNING` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
 | `CODEINTEL_LOG_FORMAT` | plain | `json` for structured logs (ELK / Splunk / Datadog) |
 | `CODEINTEL_HTTP_ACCESS_LOG` | off | `1` to log one line per request (method, path, status, latency) |
@@ -54,6 +55,39 @@ codeintel serve-http --host 0.0.0.0 --allow-remote      # reads the token from t
 Binding a non-loopback host **requires** `--allow-remote` **and** authentication: codeintel **refuses to start** on a non-loopback bind that has no token, unless you set `CODEINTEL_ALLOW_NO_AUTH=1` to explicitly opt into an unauthenticated endpoint on a trusted network (it fails closed by default). Clients send `Authorization: Bearer <token>`; the compare is constant-time.
 
 > The built-in server bounds concurrent connections and drops idle clients, but stdlib `http.server` is **not** hardened for the open internet. For public exposure, put it behind a reverse proxy (TLS, rate-limiting, request-size limits) — see §6.
+
+### Role-based access control (RBAC)
+
+For multiple callers with different privileges, define a token→role map in `~/.codeintel/auth.toml`
+(or `$CODEINTEL_AUTH_CONFIG`). Each role lists the ops it may run; `["*"]` means all.
+
+```toml
+[roles]
+admin    = ["*"]
+reader   = ["search", "symbol", "overview", "callers", "callees", "impact", "chain", "context"]
+searcher = ["search", "context"]
+
+[tokens]                                  # generate values with `codeintel gen-token`
+"REPLACE-admin-token"  = "admin"
+"REPLACE-reader-token" = "reader"
+"sha256:<hex-of-token>" = "searcher"      # store a hash instead of the plaintext token
+```
+
+- The role is derived **server-side from the token** — a client can never escalate by sending
+  `"role": "admin"` in the request body.
+- A disallowed op returns **HTTP 403** (`reason: op-not-allowed-for-role`).
+- `chmod 600 ~/.codeintel/auth.toml`. With RBAC configured, a non-loopback bind counts as
+  authenticated (no separate `--token` needed). Restart to pick up config changes.
+- `/code/status` and `/metrics` require a valid token of any role; `/code/doctor` is privileged
+  (it can boot the LSP), so it needs the `doctor` op — grant it explicitly or use `["*"]`;
+  `/healthz` and `/readyz` stay open.
+- A role's ops **must be a list**; a bare string (a missing-brackets typo) fails closed (deny-all)
+  and is logged, never silently granted full access.
+
+**SSO**: codeintel is local-first and doesn't speak OIDC/SAML itself. Put an auth proxy (e.g.
+[oauth2-proxy](https://github.com/oauth2-proxy/oauth2-proxy)) in front to authenticate users against
+your IdP, and have it forward a per-role bearer token to codeintel — the proxy owns SSO, codeintel
+owns authorization.
 
 ---
 

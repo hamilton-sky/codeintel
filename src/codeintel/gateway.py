@@ -132,6 +132,14 @@ class Gateway:
             log_swallowed(f"Gateway._dispatch_single[{engine_str}.{op_str}]", exc)
             return safe_null_result(op_str, target_str, engine=engine_str, reason="provider-error")
 
+    def allows(self, role: str, op: str) -> bool:
+        """Whether *role* may run *op* under the current policy (True when no policy is configured).
+        Lets non-query handlers (e.g. doctor) share the same RBAC gate as query()."""
+        try:
+            return self._policy is None or self._policy.is_allowed(role, op)
+        except Exception:
+            return True
+
     def query(
         self,
         op=None,
@@ -142,15 +150,24 @@ class Gateway:
         project_root=None,
     ) -> Result:
         try:
-            try:
-                self._reindexer.maybe_reindex(str(project_root or ""))
-            except Exception:
-                pass
-
             op_str = str(op or "")
             target_str = str(target or "")
             engine_str = str(engine or "").strip() or "auto"
             was_auto = engine_str == "auto"
+
+            # Policy check FIRST — a role denied for this op does NO work (no reindex, no dispatch,
+            # no cache lookup). Applies to the modern provider path; the legacy list path has none.
+            if (
+                self._legacy_providers is None
+                and self._policy is not None
+                and not self._policy.is_allowed(role, op_str)
+            ):
+                return safe_null_result(op_str, target_str, reason="op-not-allowed-for-role")
+
+            try:
+                self._reindexer.maybe_reindex(str(project_root or ""))
+            except Exception:
+                pass
 
             # Legacy list-based path (backward compat with pre-Phase-2 tests)
             if self._legacy_providers is not None:
@@ -163,10 +180,6 @@ class Gateway:
                         continue
                 reason = "engine-unavailable" if engine is not None else "no-result"
                 return safe_null_result(op_str, target_str, reason=reason)
-
-            # Policy check — before cache lookup
-            if self._policy is not None and not self._policy.is_allowed(role, op_str):
-                return safe_null_result(op_str, target_str, reason="op-not-allowed-for-role")
 
             # Unknown engine — reject immediately
             if engine_str not in _KNOWN_ENGINES:

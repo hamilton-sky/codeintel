@@ -32,7 +32,15 @@ def _build_gateway() -> Gateway:
     except Exception:
         pass
     semantic = SemanticProvider()
-    policy = TieringPolicy(enabled=False)
+    # RBAC: when an auth config defines restricted roles, enforce role→op; otherwise the policy is
+    # disabled (full access). The per-request role is authenticated server-side by the HTTP layer;
+    # the local MCP agent passes role="" (unrestricted), so RBAC never affects the stdio transport.
+    try:
+        from codeintel.auth import load_auth
+        auth = load_auth()
+        policy = auth.build_policy() if auth.enabled else TieringPolicy(enabled=False)
+    except Exception:
+        policy = TieringPolicy(enabled=False)
     return Gateway(graph=graph, lsp=lsp, semantic=semantic, policy=policy, reindexer=_REINDEXER)
 
 
@@ -148,9 +156,18 @@ def code_doctor_handler(args: dict) -> dict:
 
         project_root = str(args.get("project_root", "") or "")
         deep = bool(args.get("deep", False))
+        role = str(args.get("role", "") or "")
         # Reuse the singleton gateway's providers so the report reflects the LIVE warmed LSP
         # session state an agent's real queries hit (and the graph project cache).
         gw = _get_gateway()
+        # RBAC: doctor is a privileged op (engine state + a deep LSP boot on an arbitrary path), so
+        # it's gated behind the "doctor" scope — a restricted role must list it (or use "*").
+        if not gw.allows(role, "doctor"):
+            return {
+                "ok": True, "project_root": project_root, "deep": deep,
+                "summary": {"ready": 0, "total": 3, "healthy": False},
+                "engines": {}, "reason": "op-not-allowed-for-role",
+            }
         return _doctor.run_doctor(
             project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic
         )

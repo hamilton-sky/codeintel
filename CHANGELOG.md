@@ -4,6 +4,42 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-08-12
+
+Role-based access control — the HTTP transport can now serve multiple callers with different
+privileges, activating the previously-dormant `TieringPolicy`.
+
+### Added
+- **RBAC** — an optional `auth.toml` (`~/.codeintel/auth.toml` or `$CODEINTEL_AUTH_CONFIG`) maps
+  bearer tokens to roles and roles to the ops they may run (`["*"]` = all). The role is derived
+  **server-side from the token**, so a client cannot escalate by sending `"role": "admin"` in the
+  request body; a disallowed op returns **HTTP 403** (`op-not-allowed-for-role`). Tokens are
+  compared as sha256 (a `sha256:<hex>` entry keeps plaintext out of the config file).
+- **`codeintel gen-token`** — print a secure random bearer token.
+- Docs: an RBAC + SSO-via-auth-proxy section in `docs/deploy.md` (codeintel owns authorization; an
+  OIDC proxy such as oauth2-proxy owns SSO).
+
+### Changed
+- With RBAC configured, a non-loopback bind counts as authenticated (no separate `--token` needed);
+  the fail-closed guard accepts either a shared token or an RBAC config.
+- The MCP (stdio) transport is unaffected — the local agent runs unrestricted.
+
+### Hardened (from a security review pass)
+- `/code/doctor` is now RBAC-gated behind a `doctor` scope — previously any authenticated token,
+  regardless of role, got full diagnostics (including a deep LSP boot on an arbitrary path).
+- A role whose `ops` is not a list (the `reader = "search"` missing-brackets typo) now **fails
+  closed** (deny-all) with a warning, instead of silently granting full access.
+- A malformed or token-less `auth.toml` is now logged loudly (was silent), and the `sha256:` token
+  prefix is matched case-insensitively.
+- The RBAC policy check runs **before** the background reindex, so a denied role can't trigger
+  reindex work on an attacker-chosen path.
+
+### Tests
+- New `tests/test_rbac.py`: config loading (`sha256:` entries, malformed files, non-list-ops
+  fail-closed), policy construction, and HTTP enforcement — allow / deny-403 (query **and**
+  doctor), missing + invalid token → 401, the no-escalation guard (a reader claiming `role=admin`
+  is still a reader), and denied-op-does-no-reindex. (+16 tests → 227 total.)
+
 ## [0.4.0] — 2026-08-12
 
 Enterprise operability — the HTTP transport ships the endpoints, signals, and packaging a platform

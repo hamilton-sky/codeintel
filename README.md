@@ -156,6 +156,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
 | `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
 | `codeintel reset [project_root] [--all] [--yes]` | Clear the semantic index (this repo, or `--all`) to recover from a corrupt/stale DB |
+| `codeintel gen-token` | Print a secure random bearer token (for `serve-http` / RBAC `auth.toml`) |
 
 Human-facing commands (`doctor`, `status`, `query`, `setup`, `reset`) honor `--no-color` / `NO_COLOR` and `--ascii`, and auto-degrade to plain text when piped.
 
@@ -180,6 +181,7 @@ Config is **validated on load** — an out-of-range number, a misspelled enum, o
 | Variable | Effect |
 |---|---|
 | `CODEINTEL_HTTP_TOKEN` | Bearer token required by `serve-http` (equivalent to `--token`) |
+| `CODEINTEL_AUTH_CONFIG` | Path to an RBAC token→role config (default `~/.codeintel/auth.toml`) — per-token roles + op scopes |
 | `CODEINTEL_LOG_LEVEL` | `DEBUG`\|`INFO`\|`WARNING`(default)\|`ERROR` for the server logger |
 | `CODEINTEL_LOG_FORMAT=json` | Structured (JSON-per-line) logs for ELK / Splunk / Datadog |
 | `CODEINTEL_HTTP_ACCESS_LOG=1` | One log line per HTTP request (method, path, status, latency) |
@@ -253,9 +255,9 @@ Running codeintel as a shared service? It ships with what ops teams expect:
 | `GET /readyz` | none | Readiness — `200` once the gateway is up (`readinessProbe`) |
 | `GET /metrics` | token | Prometheus exposition — request counts, latency, in-flight, build info |
 
-Plus **bearer-token auth**, **structured JSON logs** (`CODEINTEL_LOG_FORMAT=json`) with optional per-request access logs, **graceful `SIGTERM`** shutdown, a bounded connection pool, and a non-root **Dockerfile** with a healthcheck.
+Plus **bearer-token auth** — or **RBAC** (per-token roles + op scopes via `auth.toml`; a disallowed op returns `403`, and the role is server-authoritative so a client can't escalate) — **structured JSON logs** (`CODEINTEL_LOG_FORMAT=json`) with optional per-request access logs, **graceful `SIGTERM`** shutdown, a bounded connection pool, and a non-root **Dockerfile** with a healthcheck.
 
-**Full guide → [docs/deploy.md](docs/deploy.md)**: systemd, Docker / Compose, Kubernetes (liveness + readiness probes, token from a Secret), reverse-proxy TLS, a Prometheus scrape config, and a security checklist.
+**Full guide → [docs/deploy.md](docs/deploy.md)**: systemd, Docker / Compose, Kubernetes (liveness + readiness probes, token from a Secret), reverse-proxy TLS, **RBAC + SSO-via-auth-proxy**, a Prometheus scrape config, and a security checklist.
 
 ```bash
 docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \

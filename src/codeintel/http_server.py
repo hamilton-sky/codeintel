@@ -81,24 +81,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self._observe(status)
 
-    def _authorized(self) -> bool:
-        """When the server was started with a token, require ``Authorization: Bearer <token>``
-        (constant-time compare). No token configured → auth is disabled (the loopback default)."""
-        token = getattr(self.server, "auth_token", None)
-        if not token:
-            return True
+    def _bearer(self) -> str:
         header = self.headers.get("Authorization", "")
         prefix = "Bearer "
-        if not header.startswith(prefix):
-            return False
-        presented = header[len(prefix):].strip()
-        # Compare as UTF-8 bytes: hmac.compare_digest raises TypeError on a non-ASCII str, so a
-        # malformed header (e.g. `Bearer résumé`) would otherwise crash the handler thread. Encoding
-        # is always safe and keeps the comparison constant-time.
-        return hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8"))
+        return header[len(prefix):].strip() if header.startswith(prefix) else ""
+
+    def _resolve_role(self) -> tuple[bool, str]:
+        """Authenticate the request and return ``(authorized, role)``. The role is
+        **server-authoritative** — derived from the token, never from the request body. RBAC (a
+        token→role auth config) takes precedence; else a single shared token; else no auth (the
+        loopback default). Bytes-compare so a non-ASCII header can't crash ``hmac.compare_digest``."""
+        auth = getattr(self.server, "token_auth", None)
+        if auth is not None and auth.enabled:
+            role = auth.role_for(self._bearer())
+            return (role is not None, role or "")
+        token = getattr(self.server, "auth_token", None)
+        if not token:
+            return (True, "")  # auth disabled → full access, no role
+        presented = self._bearer()
+        ok = bool(presented) and hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8"))
+        return (ok, "")
 
     def do_POST(self) -> None:
-        if not self._authorized():
+        ok, role = self._resolve_role()
+        if not ok:
             self._send_json(401, {"error": "unauthorized"})
             return
         if self.path not in ("/code/query", "/code/doctor"):
@@ -122,11 +128,14 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(parsed, dict):
             self._send_json(400, {"error": "bad-request"})
             return
+        parsed["role"] = role  # server-authoritative — overrides any client-supplied role (no escalation)
         if self.path == "/code/doctor":
             result = code_doctor_handler(parsed)
         else:
             result = code_query_handler(parsed)
-        self._send_json(200, result)
+        # An RBAC denial (query OR doctor) comes back as a safe-null with this reason — 403 it.
+        status = 403 if result.get("reason") == "op-not-allowed-for-role" else 200
+        self._send_json(status, result)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -147,9 +156,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"status": "not-ready"})
             return
 
-        # Everything else is auth-gated when a token is configured (metrics can reveal usage
-        # patterns; status reveals engine/index state).
-        if not self._authorized():
+        # Everything else is auth-gated when auth is configured (metrics can reveal usage patterns;
+        # status reveals engine/index state). Any valid token/role may read these operational views.
+        ok, _ = self._resolve_role()
+        if not ok:
             self._send_json(401, {"error": "unauthorized"})
             return
 
@@ -175,7 +185,8 @@ class CodeIntelHTTPServer(ThreadingHTTPServer):
     # lock-guarded (query cache, reindexer, LSP sessions, graph project cache) and the semantic
     # engine is thread-confined with WAL, so concurrent requests are safe.
     daemon_threads = True
-    auth_token: str | None = None  # set by run() when a token is provided
+    auth_token: str | None = None  # set by run() when a single shared token is provided
+    token_auth = None              # set by run(): a TokenAuth for RBAC (token->role), if configured
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -246,27 +257,36 @@ def run(
     token: str | None = None,
 ) -> None:
     configure_logging()
+    from codeintel.auth import load_auth
+    token_auth = load_auth()                          # RBAC (token→role), if an auth config exists
     server_token = (token or "").strip() or None
+    authenticated = bool(server_token) or token_auth.enabled
     if not _is_loopback(host):
         if not allow_remote:
             print(f"refusing to bind non-loopback host {host!r} without --allow-remote — this would "
                   f"expose a code-intel endpoint (your indexed repo) to the network", file=sys.stderr)
             raise SystemExit(2)
-        if not server_token and not _no_auth_override():
+        if not authenticated and not _no_auth_override():
             # Fail closed: never serve an UNAUTHENTICATED endpoint on the network by accident (a
-            # containerized `serve-http --host 0.0.0.0` with no token stops here unless overridden).
-            print(f"refusing to serve on {host}:{port} with NO authentication — set --token or "
-                  f"CODEINTEL_HTTP_TOKEN (recommended), or set CODEINTEL_ALLOW_NO_AUTH=1 to override "
-                  f"for a trusted network", file=sys.stderr)
+            # containerized `serve-http --host 0.0.0.0` with no auth stops here unless overridden).
+            print(f"refusing to serve on {host}:{port} with NO authentication — set --token / "
+                  f"CODEINTEL_HTTP_TOKEN, configure an RBAC auth.toml, or set CODEINTEL_ALLOW_NO_AUTH=1 "
+                  f"to override for a trusted network", file=sys.stderr)
             raise SystemExit(2)
 
     server = CodeIntelHTTPServer((host, port), _Handler)
     server.auth_token = server_token
-    if not _is_loopback(host) and not server_token:
+    server.token_auth = token_auth
+    if not _is_loopback(host) and not authenticated:
         print(f"WARNING: serving codeintel on {host}:{port} with NO authentication "
               f"(CODEINTEL_ALLOW_NO_AUTH set) — anyone who can reach this port can read your "
               f"indexed repo", file=sys.stderr)
-    auth_note = "  (bearer-token auth required)" if server_token else ""
+    if token_auth.enabled:
+        auth_note = "  (RBAC: token→role auth)"
+    elif server_token:
+        auth_note = "  (bearer-token auth required)"
+    else:
+        auth_note = ""
     print(f"Listening on http://{host}:{port}{auth_note}")
 
     def _graceful(signum, frame) -> None:
