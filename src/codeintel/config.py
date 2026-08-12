@@ -24,6 +24,7 @@ _DEFAULTS: dict = {
     "max_total_chunks": 100000,  # safety ceiling on chunks embedded in one index pass
     "cosine_floor": 0.25,
     "model": "BAAI/bge-small-en-v1.5",
+    "chunk_strategy": "syntax",  # syntax-aware (def/class boundaries) vs fixed line windows
 }
 
 # Values restricted to a fixed set — anything else falls back to the default.
@@ -31,6 +32,7 @@ _ENUMS: dict = {
     "backend": {"auto", "graph", "lsp", "semantic"},
     "semantic": {"on", "off"},
     "reindex": {"on-demand", "never"},
+    "chunk_strategy": {"syntax", "lines"},
 }
 _POSITIVE_INTS = ("window", "stride", "max_chunks", "max_total_chunks")
 

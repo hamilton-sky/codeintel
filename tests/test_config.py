@@ -29,6 +29,13 @@ def test_unknown_enum_values_fall_back():
     assert _coerce({"reindex": "sometimes"})["reindex"] == "on-demand"
 
 
+def test_chunk_strategy_enum_validation():
+    assert _coerce({})["chunk_strategy"] == "syntax"                          # default
+    assert _coerce({"chunk_strategy": "lines"})["chunk_strategy"] == "lines"  # escape hatch kept
+    assert _coerce({"chunk_strategy": "SYNTAX"})["chunk_strategy"] == "syntax"  # case-normalized
+    assert _coerce({"chunk_strategy": "ast"})["chunk_strategy"] == "syntax"   # unknown → default
+
+
 def test_valid_values_are_preserved():
     c = _coerce({"backend": "graph", "cosine_floor": 0.5, "window": 40, "reindex": "never"})
     assert c["backend"] == "graph"

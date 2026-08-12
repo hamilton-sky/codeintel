@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import pathlib
 import sqlite3
 
 import sqlite_vec
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
@@ -79,10 +82,52 @@ class SemanticDb:
                 content_hash TEXT NOT NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_chunk_project
-                ON chunk_hashes(project_root);
+            -- Composite (project_root, file_path): serves the project-scoped scans
+            -- (_cleanup_deleted, row-count, search KNN) via the leftmost prefix AND the
+            -- per-file orphan reconcile / cleanup lookups, which would otherwise scan every
+            -- row of the project once per file (O(files^2) on a large repo). Supersedes the
+            -- old single-column idx_chunk_project, dropped here so migrated caches stay tidy.
+            CREATE INDEX IF NOT EXISTS idx_chunk_project_file
+                ON chunk_hashes(project_root, file_path);
+
+            DROP INDEX IF EXISTS idx_chunk_project;
         """)
         c.commit()
+
+    def delete_file_orphans(
+        self, project_root: str, file_path: str, keep_ids: set[str]
+    ) -> int:
+        """Drop rows for one file whose ``chunk_id`` the file no longer produces.
+
+        Syntax-aware chunking (and any edit that moves/removes a def) shifts chunk
+        boundaries, so a re-index leaves stale rows behind — ``_cleanup_deleted`` only
+        prunes whole *deleted files*, never a def that vanished from a file that still
+        exists. Reconcile per file: everything indexed under (project_root, file_path)
+        that isn't in ``keep_ids`` is an orphan and is removed from BOTH tables.
+
+        Scoped by project_root AND file_path so it can only ever touch this one file's
+        rows in this one project. Never raises — a reconcile failure logs and returns 0
+        (the stale rows simply persist until the next successful pass; the cache is
+        regenerable). Computes the delete set in Python rather than a ``NOT IN (...)``
+        clause so a large ``keep_ids`` can't trip SQLite's bound-parameter limit.
+        """
+        conn = self.conn()
+        try:
+            rows = conn.execute(
+                "SELECT chunk_id FROM chunk_hashes"
+                " WHERE project_root = ? AND file_path = ?",
+                (project_root, file_path),
+            ).fetchall()
+            orphans = [r[0] for r in rows if r[0] not in keep_ids]
+            for cid in orphans:
+                conn.execute("DELETE FROM code_embeddings WHERE chunk_id = ?", (cid,))
+                conn.execute("DELETE FROM chunk_hashes WHERE chunk_id = ?", (cid,))
+            if orphans:
+                conn.commit()
+            return len(orphans)
+        except Exception as exc:
+            logger.warning("orphan reconcile failed for %s: %s", file_path, exc)
+            return 0
 
     def close(self) -> None:
         if self._conn is not None:

@@ -124,6 +124,7 @@ def main() -> None:
                 stride=int(cfg.get("stride", 10)),
                 max_chunks=int(cfg.get("max_chunks", 500)),
                 max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+                chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
             ).index(project_root)
             if count > 0:
                 print(f"Indexed {count} chunks")

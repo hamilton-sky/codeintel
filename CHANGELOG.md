@@ -4,6 +4,55 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-12
+
+Syntax-aware chunking for the semantic engine — Python files are now embedded on real definition
+boundaries instead of fixed line windows, so a search hit maps to a whole function/method/class
+rather than an arbitrary span. Phase 1 of `docs/roadmap-semantic.md`.
+
+### Added
+- **Syntax-aware chunking** (`chunk_strategy = "syntax"`, the new default). `.py` files are parsed
+  with the stdlib `ast` and chunked on definition boundaries: each top-level `def` / `async def` is
+  one chunk (decorators included); each `class` becomes a header chunk (bases + class docstring)
+  plus one chunk per method / nested def; module-level and inter-method runs are line-windowed so
+  coverage stays complete. A def longer than `2 × window` is window-split so no chunk overflows the
+  embedder. `chunk_start` stays 0-based and `chunk_id` is unchanged, so the DB schema and
+  `Searcher._read_snippet` are untouched.
+- **`chunk_strategy` config key** (`"syntax" | "lines"`, default `"syntax"`), validated in
+  `config.py`. `"lines"` forces the pre-0.6 fixed-window behaviour — a runtime escape hatch.
+- **Per-file orphan reconciliation.** After re-chunking a file, rows for `chunk_id`s it no longer
+  produces (a moved/deleted function, or a strategy switch) are dropped from both `chunk_hashes` and
+  `code_embeddings`, scoped by `(project_root, file_path)`. This also fixes a latent pre-0.6 bug:
+  deleting a function never dropped its chunk.
+
+### Changed
+- Non-`.py` files, and any `.py` that fails to parse (`SyntaxError`, a NUL byte, …), fall back to
+  line windowing **per file** — the never-raise contract holds per file, so one malformed file
+  never aborts the index pass.
+- Replaced the single-column `idx_chunk_project` index with a composite
+  `idx_chunk_project_file(project_root, file_path)`, so the new per-file reconcile (and the existing
+  deleted-file cleanup) is an index seek rather than an O(files²) project-wide scan. Backward
+  compatible: the regenerable cache builds the new index on next open.
+
+### Hardened (from an adversarial review pass)
+- `Indexer` now coerces its numeric knobs (`window` / `stride` / `max_chunks` / `max_total_chunks`)
+  and case-normalizes `chunk_strategy` in its constructor, so a direct caller that bypasses config
+  can't set a `stride=0` that raises inside `range()`, a `window=0` that silently drops every
+  region, or a `chunk_strategy="LINES"` that silently swaps to the default.
+- Corrected the "non-overlapping" claim in the chunker docs/docstring: def-aligned chunks are whole
+  distinct units, but window-filled runs and oversized-def splits reuse the overlapping
+  `window`/`stride` exactly as the legacy windower does (always strictly less overlap than `lines`
+  mode). Coverage is complete and chunk starts are collision-free.
+
+### Tests
+- New `tests/test_chunking.py`: def-aligned / gapless / collision-free spans, decorator inclusion,
+  oversized-def splitting (both the default overlapping-window path and the `window == stride`
+  non-overlapping case), syntax-error and NUL-byte fallback, non-Python windowing,
+  `chunk_strategy="lines"` parity with the legacy windower (verified byte-identical against the
+  0.5.0 source and pinned to the legacy formula), constructor guards, and orphan reconciliation
+  (function removed, cross-file scoping, strategy switch). Existing
+  semantic / e2e / hardening / integration suites stay green.
+
 ## [0.5.0] — 2026-08-12
 
 Role-based access control — the HTTP transport can now serve multiple callers with different
