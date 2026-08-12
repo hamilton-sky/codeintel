@@ -20,7 +20,15 @@ class Reindexer:
         )
         self._lock = threading.Lock()
         self._last_fired: dict[str, float] = {}
+        # Per-project index generation — bumped when a reindex completes. The gateway
+        # folds it into the cache key so a structural answer is invalidated once the
+        # index actually moves (a symbol/free-text target has no file content to hash).
+        self._generation: dict[str, int] = {}
         self._executor = ThreadPoolExecutor(max_workers=2)
+
+    def generation(self, project_root: str) -> int:
+        with self._lock:
+            return self._generation.get(project_root, 0)
 
     def maybe_reindex(self, project_root: str) -> None:
         if not self._enabled:
@@ -41,14 +49,21 @@ class Reindexer:
         try:
             self._semantic_reindex(project_root)
             self._graph_reindex(project_root)
+            with self._lock:
+                self._generation[project_root] = self._generation.get(project_root, 0) + 1
         except Exception as exc:
             logger.warning("Reindexer._do_reindex failed for %s: %s", project_root, exc)
 
     def _semantic_reindex(self, project_root: str) -> None:
-        from codeintel.semantic_db import SemanticDb
+        import pathlib
+
+        from codeintel.semantic_db import SemanticDb, default_db_path
         from codeintel.indexer import Indexer
 
-        db_path = os.path.join(project_root, ".codeintel", "semantic.db")
+        # Same per-machine cache the SemanticProvider reads — index and search must
+        # never diverge onto different files.
+        db_path = default_db_path()
+        pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         db = SemanticDb(db_path)
         try:
             db.init()
@@ -60,9 +75,10 @@ class Reindexer:
         if not shutil.which("codebase-memory-mcp"):
             return
         try:
+            import json
             subprocess.run(
                 ["codebase-memory-mcp", "cli", "detect_changes",
-                 f'{{"project_root": "{project_root}"}}'],
+                 json.dumps({"project_root": project_root})],
                 capture_output=True,
                 timeout=120,
             )

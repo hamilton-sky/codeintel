@@ -94,7 +94,7 @@ def test_engine_both_merges_graph_and_lsp():
     gw = Gateway(graph=graph, lsp=lsp)
     r = gw.query(op="symbol", target="x", engine="both")
     assert r["ok"] is True
-    assert r["engine"] == "merged"
+    assert r["engine"] == "both"
     assert "graph-data" in r["result"]
     assert "lsp-data" in r["result"]
 
@@ -124,7 +124,7 @@ def test_engine_all_merges_all_three():
     gw = Gateway(graph=graph, lsp=lsp, semantic=semantic)
     r = gw.query(op="search", target="x", engine="all")
     assert r["ok"] is True
-    assert r["engine"] == "merged"
+    assert r["engine"] == "all"
     assert "graph-data" in r["result"]
     assert "lsp-data" in r["result"]
     assert "semantic-data" in r["result"]

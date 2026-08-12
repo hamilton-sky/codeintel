@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,14 +42,22 @@ class Searcher:
             logger.warning("query embedding failed: %s", exc)
             return None
 
-    def _row_count(self) -> int:
+    def _row_count(self, project_root_real: str) -> int:
         try:
             conn = self.db.conn()
-            row = conn.execute("SELECT COUNT(*) FROM chunk_hashes").fetchone()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM chunk_hashes WHERE project_root = ?",
+                (project_root_real,),
+            ).fetchone()
             return row[0] if row else 0
         except Exception as exc:
             logger.warning("rowcount check failed: %s", exc)
             return 0
+
+    def has_index(self, project_root: str) -> bool:
+        """True when this project has at least one indexed chunk — lets the provider
+        distinguish 'nothing indexed yet' (no-index) from 'matches below floor'."""
+        return self._row_count(os.path.realpath(project_root)) > 0
 
     def _read_snippet(self, file_path: Path, chunk_start: int) -> str:
         try:
@@ -73,8 +82,11 @@ class Searcher:
             return []
 
         k = max(1, k)
+        project_root_real = os.path.realpath(project_root)
 
-        if self._row_count() == 0:
+        # Scope the KNN to THIS project — a search in repo B must never surface repo A's
+        # chunks (wrong-file, wrong-content hits) from the shared cache.
+        if self._row_count(project_root_real) == 0:
             return []
 
         query_vec = self._embed_query(query)
@@ -92,10 +104,11 @@ class Searcher:
                     vec_distance_cosine(ce.embedding, ?) AS dist
                 FROM code_embeddings ce
                 JOIN chunk_hashes ch ON ce.chunk_id = ch.chunk_id
+                WHERE ch.project_root = ?
                 ORDER BY dist
                 LIMIT ?
                 """,
-                (query_vec, k),
+                (query_vec, project_root_real, k),
             ).fetchall()
         except Exception as exc:
             logger.warning("KNN query failed: %s", exc)

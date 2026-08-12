@@ -91,21 +91,22 @@ class Gateway:
         results: dict[str, Result],
         op_str: str,
         target_str: str,
+        engine_str: str = "merged",
     ) -> Result:
         parts: list[str] = []
-        for engine_str, r in results.items():
+        for eng, r in results.items():
             if r.get("result") is not None:
-                parts.append(f"## [{engine_str}]\n{r['result']}")
+                parts.append(f"## [{eng}]\n{r['result']}")
 
         if not parts:
-            return safe_null_result(op_str, target_str, engine="merged", reason="no-result")
+            return safe_null_result(op_str, target_str, engine=engine_str, reason="no-result")
 
         return {
             "ok": True,
             "op": op_str,
             "target": target_str,
             "result": "\n\n".join(parts),
-            "engine": "merged",
+            "engine": engine_str,
             "cached": False,
         }
 
@@ -148,6 +149,7 @@ class Gateway:
             op_str = str(op or "")
             target_str = str(target or "")
             engine_str = str(engine or "").strip() or "auto"
+            was_auto = engine_str == "auto"
 
             # Legacy list-based path (backward compat with pre-Phase-2 tests)
             if self._legacy_providers is not None:
@@ -175,9 +177,17 @@ class Gateway:
 
             root_str = project_root or ""
 
+            # Freshness token — bumps when a background reindex completes, so a cached
+            # structural answer (a symbol/free-text target, whose content hash never
+            # changes) is invalidated once the index actually moves. 0 when unavailable.
+            try:
+                freshness = self._reindexer.generation(root_str)
+            except Exception:
+                freshness = 0
+
             # Fan-out: dispatch to multiple engines concurrently and merge
             if engine_str in _FANOUT_ENGINES:
-                cached_result = self._cache.get(op_str, target_str, engine_str, root_str)
+                cached_result = self._cache.get(op_str, target_str, engine_str, root_str, freshness)
                 if cached_result is not None:
                     return {**cached_result, "cached": True}
                 if engine_str == "both":
@@ -185,17 +195,33 @@ class Gateway:
                 else:  # "all"
                     engines = ["graph", "lsp", "semantic"]
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
-                result = self._merge(fan_results, op_str, target_str)
-                self._cache.put(op_str, target_str, engine_str, root_str, result)
+                result = self._merge(fan_results, op_str, target_str, engine_str)
+                self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
                 return result
 
             # Single-engine dispatch
-            cached_result = self._cache.get(op_str, target_str, engine_str, root_str)
+            cached_result = self._cache.get(op_str, target_str, engine_str, root_str, freshness)
             if cached_result is not None:
                 return {**cached_result, "cached": True}
             provider = self._provider_for(engine_str)
             result = self._dispatch_single(provider, op_str, target_str, budget, project_root, engine_str)
-            self._cache.put(op_str, target_str, engine_str, root_str, result)
+
+            # overview auto-fallback (F4 Story 2): when auto-routed to graph but graph is
+            # unavailable, try lsp — a file/symbol overview is something lsp can also serve.
+            if (
+                was_auto
+                and op_str == "overview"
+                and engine_str == "graph"
+                and result.get("result") is None
+                and result.get("reason") == "engine-unavailable"
+            ):
+                lsp_result = self._dispatch_single(
+                    self.lsp, op_str, target_str, budget, project_root, "lsp"
+                )
+                if lsp_result.get("result") is not None:
+                    result = lsp_result
+
+            self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
             return result
 
         except Exception:

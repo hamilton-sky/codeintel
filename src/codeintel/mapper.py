@@ -31,25 +31,30 @@ class MapGenerator:
         if not provider or not getattr(provider, "available", False):
             return _minimal_map(project_root, note="graph engine not available — install codebase-memory-mcp and run `codeintel index`")
 
-        project = provider._resolve_project(project_root)
-        if project is None:
-            return _minimal_map(project_root, note="project not yet indexed — run `codeintel index` first")
+        # Top-level guard: the map is best-effort orientation — a malformed backend
+        # response must degrade to a minimal map, never crash the caller (never-raise).
+        try:
+            project = provider._resolve_project(project_root)
+            if project is None:
+                return _minimal_map(project_root, note="project not yet indexed — run `codeintel index` first")
 
-        # Query 1: architecture overview
-        arch_result = provider.build_result("overview", "", [], 5000, project_root)
-        arch_text: Optional[str] = None
-        if arch_result and arch_result.get("ok") and arch_result.get("result"):
-            arch_text = str(arch_result["result"])
+            # Query 1: architecture overview
+            arch_result = provider.build_result("overview", "", [], 5000, project_root)
+            arch_text: Optional[str] = None
+            if arch_result and arch_result.get("ok") and arch_result.get("result"):
+                arch_text = str(arch_result["result"])
 
-        # Query 2: ranked symbols by fan-in
-        ranked_rows = _query_ranked_symbols(provider, project)
+            # Query 2: ranked symbols by fan-in
+            ranked_rows = _query_ranked_symbols(provider, project)
 
-        # Query 3: entry points
-        entry_rows = _query_entry_points(provider, project)
+            # Query 3: entry points
+            entry_rows = _query_entry_points(provider, project)
 
-        content = _render(project_root, arch_text, ranked_rows, entry_rows)
-        content = _enforce_budget(content, budget_bytes, project_root, arch_text, ranked_rows, entry_rows)
-        return content
+            content = _render(project_root, arch_text, ranked_rows, entry_rows)
+            content = _enforce_budget(content, budget_bytes, project_root, arch_text, ranked_rows, entry_rows)
+            return content
+        except Exception as exc:
+            return _minimal_map(project_root, note=f"map generation failed: {exc}")
 
     def write(self, project_root: str, content: str) -> str:
         path = os.path.join(project_root, "CODE_INTEL.md")

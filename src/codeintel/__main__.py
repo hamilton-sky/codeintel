@@ -69,18 +69,23 @@ def main() -> None:
     elif args.command == "index":
         from codeintel.config import load_config
         from codeintel.indexer import Indexer
-        from codeintel.semantic_db import SemanticDb
+        from codeintel.semantic_db import SemanticDb, default_db_path
 
         project_root = args.project_root or os.getcwd()
-        load_config(project_root)  # validate/load config; result unused here but exercises the path
+        cfg = load_config(project_root)
 
-        db_dir = os.path.join(project_root, ".codeintel")
-        os.makedirs(db_dir, exist_ok=True)
-        db_path = os.path.join(db_dir, "semantic.db")
+        db_path = default_db_path()
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         db = SemanticDb(db_path)
         try:
             db.init()
-            count = Indexer(db).index(project_root)
+            count = Indexer(
+                db,
+                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                window=int(cfg.get("window", 20)),
+                stride=int(cfg.get("stride", 10)),
+                max_chunks=int(cfg.get("max_chunks", 500)),
+            ).index(project_root)
             if count > 0:
                 print(f"Indexed {count} chunks")
             else:
@@ -119,15 +124,19 @@ def main() -> None:
         except Exception:
             provider = None
         gen = MapGenerator(provider)
-        content = gen.generate(project_root, budget_bytes=args.budget)
-        path = gen.write(project_root, content)
-        print(f"Wrote {path} ({len(content.encode())} bytes)")
-        if args.inject:
-            inj_path, inj_action = Injector().inject(project_root)
-            if inj_path:
-                print(f"Inject: {inj_action} block in {inj_path}")
-            else:
-                print(f"Inject: {inj_action}")
+        try:
+            content = gen.generate(project_root, budget_bytes=args.budget)
+            path = gen.write(project_root, content)
+            print(f"Wrote {path} ({len(content.encode())} bytes)")
+            if args.inject:
+                inj_path, inj_action = Injector().inject(project_root)
+                if inj_path:
+                    print(f"Inject: {inj_action} block in {inj_path}")
+                else:
+                    print(f"Inject: {inj_action}")
+        except Exception as exc:
+            # Never-raise parity with the MCP code.map handler — degrade, don't crash.
+            print(f"map failed: {exc}")
         sys.exit(0)
 
     elif args.command == "query":
@@ -166,7 +175,8 @@ def main() -> None:
                 state = "available" if available else "unavailable"
                 print(f"  {engine:<10} {state}")
 
-            db_path = os.path.join(project_root, ".codeintel", "semantic.db")
+            from codeintel.semantic_db import default_db_path
+            db_path = default_db_path()
             if os.path.exists(db_path):
                 import datetime
                 mtime = os.path.getmtime(db_path)

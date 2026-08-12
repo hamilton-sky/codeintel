@@ -18,7 +18,7 @@ _DEFAULTS: dict = {
     "window": 20,
     "stride": 10,
     "max_chunks": 500,
-    "cosine_floor": 0.3,
+    "cosine_floor": 0.25,
     "model": "BAAI/bge-small-en-v1.5",
 }
 

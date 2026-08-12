@@ -37,16 +37,33 @@ class SemanticProvider:
             return safe_null_result(op, target, engine="semantic", reason="no-project-root")
 
         try:
+            from codeintel.config import load_config
             from codeintel.semantic_db import SemanticDb
             from codeintel.indexer import Indexer
             from codeintel.searcher import Searcher
+
+            cfg = load_config(project_root)
+            model = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
 
             _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
             db = SemanticDb(str(_DB_PATH))
             db.init()
 
-            Indexer(db).index(project_root)
-            matches = Searcher(db).search(target, project_root)
+            Indexer(
+                db,
+                model_name=model,
+                window=int(cfg.get("window", 20)),
+                stride=int(cfg.get("stride", 10)),
+                max_chunks=int(cfg.get("max_chunks", 500)),
+            ).index(project_root)
+
+            searcher = Searcher(db, model_name=model)
+            if not searcher.has_index(project_root):
+                return safe_null_result(op, target, engine="semantic", reason="no-index")
+
+            matches = searcher.search(
+                target, project_root, cosine_floor=float(cfg.get("cosine_floor", 0.25))
+            )
             if not matches:
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")
 

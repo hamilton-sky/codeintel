@@ -77,3 +77,27 @@ Ranked by real-world impact. All are in the actually-running system, not hypothe
 **The meta-lesson (relevant to pathly itself):** faithful plan-execution and a green suite are necessary but not sufficient. The gaps here are precisely the ones that live *between* well-planned units — the integrated lifecycle, cross-entity state, and real external contracts — which is exactly what per-feature planning and per-feature unit tests structurally under-cover. A "wire it together and run it for real" integration phase (two repos, the live backend, the actual transport) would have caught nearly every item in §3.
 
 **Recommended next moves (in impact order):** (1) make the semantic index project-scoped + unify the DB path [fixes bugs #1, #2]; (2) persist the gateway/providers as a module singleton like the reindexer [#3, and the LSP/cache consequences]; (3) fix the cache content-hash for non-file targets [#4]; (4) wire the config [#5]; (5) verify the graph backend method names + parameterize the Cypher [#6, #12]; (6) close the two never-raise/HTTP holes [#7, #8].
+
+---
+
+## Fixes applied (branch `review/planning-and-implementation`)
+
+Suite after fixes: **93 passing** (86 + 7 new integration tests that exercise the real lifecycle — two projects, gateway persistence, cache invalidation, fallback, config, HTTP — i.e. the coverage whose absence let these bugs through). Fixes live in `tests/test_integration.py` and across the source.
+
+**Fixed**
+- **#1 cross-project data loss** — `chunk_hashes` now carries a `project_root` column; `chunk_id` is project-key-prefixed; cleanup and the KNN are both scoped `WHERE project_root = ?`. One repo can no longer purge or leak into another. (`test_two_projects_do_not_leak_or_purge`)
+- **#2 divergent DB paths** — a single `semantic_db.default_db_path()` is now used by the provider, the reindexer, and the CLI. `index` and `search` hit the same file.
+- **#3 gateway rebuilt per request** — `server._get_gateway()` is a lazy module singleton, so the cache and the LSP session persist across calls. (`test_gateway_is_reused_across_handler_calls`)
+- **#4 cache never busts on edit** — the reindexer exposes a per-project `generation()` that bumps when a reindex completes; the gateway folds it into the cache key, so structural (non-file-target) answers are invalidated once the index moves. (`test_cache_busts_when_index_generation_bumps`)
+- **#5 config disconnected** — `load_config()` is now threaded into the semantic path (model/window/stride/max_chunks/cosine_floor), and the `cosine_floor` default drift (0.3 vs 0.25) is reconciled to 0.25. (`test_config_cosine_floor_reaches_searcher`)
+- **#7 CLI `map` never-raise** — wrapped in the CLI, plus a top-level guard in `MapGenerator.generate` (degrades to a minimal map).
+- **#8 HTTP `Content-Length` crash** — parsed inside the guard; a malformed header now 400s. (`test_http_bad_content_length_returns_400`)
+- **#9 F4 ACs** — `overview` auto-falls-back graph→lsp (`test_overview_auto_falls_back_to_lsp`); fan-out envelopes now report the requested `both`/`all` (was `merged`; the two tests that encoded the drift were corrected).
+- **#10 status / .gitignore** — `code.status` reports the real model + index presence (no longer hardcoded); the indexer now honors `.gitignore` (simple name/dir patterns) plus a default vendor/build ignore set.
+- **#12 Cypher injection** — `target` is escaped for the Cypher string literal.
+- **Bonus** — empty/whitespace chunks are no longer embedded (EC3.4); an empty project now reports `no-index` instead of `below-floor` (F5 drift).
+
+**Deliberately not changed (with reason)**
+- **#6 graph `pattern` method** — I probed the installed `codebase-memory-mcp` CLI: **`search_code` is a valid method** (so the review's "wrong method name" claim was incorrect) — changing it would have introduced a regression. The probe *did* surface a real future concern: the CLI has **deprecated raw-JSON args in favor of flags**, so `GraphProvider._run` will need to migrate before the backend removes JSON support. Left as a tracked follow-up (still works, with a warning).
+- **#11 mapper protocol bypass** — hardened against crashes but still calls `GraphProvider` internals; making the map generator consume the `CodeProvider` protocol is an architectural refactor, deferred.
+- **§K synchronous semantic freshness** — the provider still indexes inline on `search`, but the index is incremental (content-hash skip), so repeat searches are cheap; moving it fully behind the debounced seam risks the "empty on first search" regression F5 already fought, so it's deferred intentionally.

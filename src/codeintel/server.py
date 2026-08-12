@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import anyio
 from mcp.server.mcpserver.server import MCPServer
 
@@ -34,6 +36,30 @@ def _build_gateway() -> Gateway:
     return Gateway(graph=graph, lsp=lsp, semantic=semantic, policy=policy, reindexer=_REINDEXER)
 
 
+_GATEWAY: Gateway | None = None
+_GATEWAY_LOCK = threading.Lock()
+
+
+def _get_gateway() -> Gateway:
+    """Build the gateway ONCE and reuse it across requests, so the content-hash cache and
+    the async-warming LSP session persist between an agent's calls. Rebuilding it per
+    request (the old behavior) left the cache permanently cold and the LSP engine stuck
+    re-warming a fresh ``uvx serena`` subprocess on every single call."""
+    global _GATEWAY
+    if _GATEWAY is None:
+        with _GATEWAY_LOCK:
+            if _GATEWAY is None:
+                _GATEWAY = _build_gateway()
+    return _GATEWAY
+
+
+def _reset_gateway() -> None:
+    """Test hook: drop the cached gateway so the next call rebuilds it."""
+    global _GATEWAY
+    with _GATEWAY_LOCK:
+        _GATEWAY = None
+
+
 def code_query_handler(args: dict) -> dict:
     try:
         op = args.get("op", "")
@@ -41,7 +67,7 @@ def code_query_handler(args: dict) -> dict:
         project_root = args.get("project_root", "")
         engine = args.get("engine", None)
         role = args.get("role", "")
-        gw = _build_gateway()
+        gw = _get_gateway()
         return gw.query(op=op, target=target, engine=engine, role=role, project_root=project_root)
     except Exception:
         return safe_null_result("", "", reason="handler-error")
@@ -76,14 +102,27 @@ def code_status_handler(args: dict) -> dict:
             engines.append("semantic")
         if not engines:
             engines.append("none")
+
+        # Report real freshness/model instead of hardcoded nulls (SPEC §7).
+        indexed = False
+        model = None
+        try:
+            import os
+            from codeintel.semantic_db import DEFAULT_MODEL, default_db_path
+            if semantic_available:
+                model = DEFAULT_MODEL
+                indexed = os.path.exists(default_db_path())
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "engines": engines,
             "graph": graph_available,
             "lsp": lsp_available,
             "semantic": semantic_available,
-            "indexed": False,
-            "model": None,
+            "indexed": indexed,
+            "model": model,
         }
     except Exception:
         return {

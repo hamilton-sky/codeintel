@@ -22,7 +22,11 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/code/query":
             self._send_json(404, {"error": "not-found"})
             return
-        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "bad-request"})
+            return
         raw = self.rfile.read(content_length) if content_length > 0 else b""
         try:
             parsed = json.loads(raw)

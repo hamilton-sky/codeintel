@@ -33,6 +33,7 @@ class ContentHashCache:
         target: str,
         engine: str,
         project_root: str,
+        freshness: int = 0,
     ) -> Optional[Result]:
         key = (op, target, engine, project_root)
         with self._lock:
@@ -40,7 +41,7 @@ class ContentHashCache:
         if entry is None:
             return None
         stored_hash, result = entry
-        current_hash = _compute_hash(target, project_root)
+        current_hash = f"{_compute_hash(target, project_root)}:{freshness}"
         if current_hash == stored_hash:
             return result
         return None
@@ -52,10 +53,14 @@ class ContentHashCache:
         engine: str,
         project_root: str,
         result: Optional[Result],
+        freshness: int = 0,
     ) -> None:
         if result is None or result.get("result") is None:
             return
         key = (op, target, engine, project_root)
-        content_hash = _compute_hash(target, project_root)
+        # Fold the project's index generation into the stored hash so a completed reindex
+        # (which bumps `freshness`) forces a refresh even when the target isn't a file whose
+        # content hash would change — i.e. every symbol/free-text query.
+        content_hash = f"{_compute_hash(target, project_root)}:{freshness}"
         with self._lock:
             self._store[key] = (content_hash, result)

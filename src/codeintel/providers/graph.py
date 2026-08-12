@@ -8,6 +8,12 @@ from typing import Any, Optional
 from codeintel.provider import Result, safe_null_result
 
 
+def _cypher_literal(s: Any) -> str:
+    """Escape a value for a double-quoted Cypher string literal — defense against a
+    ``target`` containing quotes/backslashes (e.g. content an agent echoed from a repo)."""
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
 class GraphProvider:
     """Wraps the codebase-memory-mcp CLI. Never raises."""
 
@@ -93,7 +99,7 @@ class GraphProvider:
 
     def _op_callers(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
         cypher = (
-            f'MATCH (caller)-[:CALLS]->(fn) WHERE fn.name="{target}" '
+            f'MATCH (caller)-[:CALLS]->(fn) WHERE fn.name="{_cypher_literal(target)}" '
             "RETURN caller.name, caller.file_path LIMIT 20"
         )
         raw = self._run("query_graph", {"project": project, "query": cypher}, timeout_ms)
@@ -104,7 +110,7 @@ class GraphProvider:
 
     def _op_callees(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
         cypher = (
-            f'MATCH (fn)-[:CALLS]->(callee) WHERE fn.name="{target}" '
+            f'MATCH (fn)-[:CALLS]->(callee) WHERE fn.name="{_cypher_literal(target)}" '
             "RETURN callee.name, callee.file_path LIMIT 20"
         )
         raw = self._run("query_graph", {"project": project, "query": cypher}, timeout_ms)

@@ -16,6 +16,17 @@ _INDEXED_EXTS = frozenset({
     ".py", ".ts", ".js", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".md"
 })
 _SKIP_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
+# Vendored / regenerable dirs skipped even without a .gitignore entry.
+_DEFAULT_IGNORES = frozenset({
+    ".venv", "venv", "env", "dist", "build", "target",
+    ".mypy_cache", ".pytest_cache", ".tox", ".idea", ".vscode", ".cache",
+})
+
+
+def _project_key(project_root_real: str) -> str:
+    """A short, stable id for a project root — prefixes every chunk_id so two repos
+    with an identically-named file never collide in the shared cache."""
+    return hashlib.sha256(project_root_real.encode()).hexdigest()[:12]
 
 
 class Indexer:
@@ -48,11 +59,33 @@ class Indexer:
             logger.error("Indexer.index() unrecoverable failure: %s", exc)
             return -1
 
-    def _cleanup_deleted(self, root: Path) -> None:
+    def _load_gitignore(self, root: Path) -> set[str]:
+        """Best-effort ``.gitignore``: collect simple name/dir patterns to skip. This is
+        NOT full gitignore semantics (no globs, negations, or nesting) — just enough to
+        avoid indexing vendored/build output the user already told git to ignore."""
+        patterns: set[str] = set()
+        gi = root / ".gitignore"
+        try:
+            if gi.is_file():
+                for line in gi.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("!"):
+                        continue
+                    name = line.rstrip("/").lstrip("/")
+                    if name and "*" not in name and "/" not in name:
+                        patterns.add(name)
+        except Exception:
+            pass
+        return patterns
+
+    def _cleanup_deleted(self, root: Path, project_root_real: str) -> None:
+        """Drop rows for THIS project whose file no longer exists — scoped by
+        project_root so touching one repo can never purge another's index."""
         conn = self.db.conn()
         try:
             rows = conn.execute(
-                "SELECT DISTINCT file_path FROM chunk_hashes"
+                "SELECT DISTINCT file_path FROM chunk_hashes WHERE project_root = ?",
+                (project_root_real,),
             ).fetchall()
             deleted_paths = [
                 row[0] for row in rows if not (root / row[0]).exists()
@@ -61,7 +94,9 @@ class Indexer:
                 chunk_ids = [
                     r[0]
                     for r in conn.execute(
-                        "SELECT chunk_id FROM chunk_hashes WHERE file_path = ?", (fp,)
+                        "SELECT chunk_id FROM chunk_hashes"
+                        " WHERE project_root = ? AND file_path = ?",
+                        (project_root_real, fp),
                     ).fetchall()
                 ]
                 for cid in chunk_ids:
@@ -76,17 +111,20 @@ class Indexer:
             logger.warning("Cleanup pass failed: %s", exc)
 
     def _walk_files(self, root: Path):
+        ignores = set(_SKIP_DIRS) | set(_DEFAULT_IGNORES) | self._load_gitignore(root)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [
                 d for d in dirnames
-                if d not in _SKIP_DIRS and not d.endswith(".egg-info")
+                if d not in ignores and not d.endswith(".egg-info")
             ]
             for fname in filenames:
+                if fname in ignores:
+                    continue
                 if Path(fname).suffix.lower() in _INDEXED_EXTS:
                     yield Path(dirpath) / fname
 
     def _collect_new_chunks(
-        self, root: Path
+        self, root: Path, project_key: str, project_root_real: str
     ) -> list[tuple[str, str, str, int, str]]:
         """Walk files; return (chunk_id, text, rel_path, start, hash) for new/changed chunks."""
         conn = self.db.conn()
@@ -120,7 +158,12 @@ class Indexer:
                     break
 
                 chunk_text = "".join(chunk_lines)
-                chunk_id = f"{rel_path}:{chunk_start}"
+                if not chunk_text.strip():
+                    # EC3.4: never embed empty/whitespace-only chunks (zero vectors pollute results).
+                    chunk_count += 1
+                    continue
+
+                chunk_id = f"{project_key}:{rel_path}:{chunk_start}"
                 content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
 
                 try:
@@ -142,7 +185,7 @@ class Indexer:
         return new_chunks
 
     def _embed_and_write(
-        self, new_chunks: list[tuple[str, str, str, int, str]]
+        self, new_chunks: list[tuple[str, str, str, int, str]], project_root_real: str
     ) -> int:
         embedder = self._get_embedder()  # may raise → propagates to index() → returns -1
         conn = self.db.conn()
@@ -172,9 +215,9 @@ class Indexer:
                     )
                     conn.execute(
                         "INSERT OR REPLACE INTO chunk_hashes"
-                        "(chunk_id, file_path, chunk_start, content_hash)"
-                        " VALUES (?, ?, ?, ?)",
-                        (chunk_id, rel_path, chunk_start, content_hash),
+                        "(chunk_id, project_root, file_path, chunk_start, content_hash)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (chunk_id, project_root_real, rel_path, chunk_start, content_hash),
                     )
                     embedded_count += 1
                 except Exception as exc:
@@ -195,10 +238,13 @@ class Indexer:
         if not root.exists():
             return 0
 
-        self._cleanup_deleted(root)
+        project_root_real = os.path.realpath(project_root)
+        project_key = _project_key(project_root_real)
 
-        new_chunks = self._collect_new_chunks(root)
+        self._cleanup_deleted(root, project_root_real)
+
+        new_chunks = self._collect_new_chunks(root, project_key, project_root_real)
         if not new_chunks:
             return 0
 
-        return self._embed_and_write(new_chunks)
+        return self._embed_and_write(new_chunks, project_root_real)
