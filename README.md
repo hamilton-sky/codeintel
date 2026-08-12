@@ -29,6 +29,21 @@ codeintel query --op search --target "authentication middleware"
 
 A `Gateway` receives every query and dispatches it to one of three providers — graph (structural relationships), LSP (precise symbol resolution), or semantic (embedding-based search) — based on the operation type. Each provider is fully isolated: if it is unavailable or raises an exception, the gateway catches it and returns a safe-null envelope. The caller always gets a well-formed response with no exception to catch.
 
+```mermaid
+flowchart LR
+    A["AI agent · MCP"] --> GW
+    H["Harness · HTTP"] --> GW
+    C["Developer · CLI"] --> GW
+    GW["Gateway<br/>route · cache · safe-null"] -->|"auto: search"| SP[SemanticProvider]
+    GW -->|"auto: impact / callers / …"| GP[GraphProvider]
+    GW -->|"auto: symbol"| LP[LspProvider]
+    GP --> GB[("codebase-memory-mcp")]
+    LP --> LB[("language server")]
+    SP --> SB[("fastembed + sqlite-vec")]
+```
+
+> Full walkthrough: **[docs/architecture.md](docs/architecture.md)** · **[docs/query-flow.md](docs/query-flow.md)**.
+
 ## Safe-null contract
 
 Every `Gateway.query()` call returns a dict with exactly these keys:
@@ -48,6 +63,15 @@ Every `Gateway.query()` call returns a dict with exactly these keys:
 | `semantic` | `search` | `fastembed` + `sqlite-vec` (installed with the package) — see [docs/semantic.md](docs/semantic.md) |
 
 Pass `--engine auto` (the default) and codeintel chooses the best engine per operation. Pass `--engine both` or `--engine all` to fan out to multiple engines and merge results.
+
+## Documentation
+
+Full system docs live in [`docs/`](docs/) — start with the index:
+
+- **[Architecture](docs/architecture.md)** — layers, the `CodeProvider` protocol, the safe-null contract, caching, freshness (ASCII + Mermaid).
+- **[Query flow](docs/query-flow.md)** — request lifecycle, engine selection, fan-out & merge, and why it never throws.
+- **[Map file](docs/map-file.md)** — the static `CODE_INTEL.md` orientation layer for hosts with no MCP support.
+- Engine references: **[graph](docs/graph.md)** · **[lsp](docs/lsp.md)** · **[semantic](docs/semantic.md)**.
 
 ## CLI reference
 
