@@ -8,8 +8,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -22,5 +23,38 @@ jobs:
       - name: Install dependencies
         run: pip install -e .[dev]
 
+      # The live graph/LSP tests skip when their backends (codebase-memory-mcp, uvx/serena) are
+      # absent, so CI stays green without them; everything else runs against real seams/fixtures.
       - name: Run tests
         run: pytest tests/ -q
+
+  build:
+    name: Build + verify the package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Install the wheel in a clean env and smoke-test the CLI
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/python -m pip install dist/*.whl
+          /tmp/verify/bin/codeintel --version
+          /tmp/verify/bin/codeintel status
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*

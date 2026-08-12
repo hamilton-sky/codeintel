@@ -2,12 +2,23 @@
 
 A unified code-intelligence gateway — graph + LSP + semantic — that gives any coding agent a single safe API to search, trace, and understand any codebase.
 
-[![CI](https://github.com/shammaihamilton/codeintel/actions/workflows/ci.yml/badge.svg)](https://github.com/shammaihamilton/codeintel/actions/workflows/ci.yml)
+[![CI](https://github.com/hamilton-sky/codeintel/actions/workflows/ci.yml/badge.svg)](https://github.com/hamilton-sky/codeintel/actions/workflows/ci.yml)
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/shammaihamilton/codeintel.git
+pip install codeintel-mcp
+```
+
+This installs the `codeintel` CLI; the **semantic** engine works out of the box. The **graph**
+and **LSP** engines use external backends (`codebase-memory-mcp`, and serena via `uvx`) —
+run `codeintel doctor` to see what's available and how to enable the rest. (On PyPI the
+distribution is `codeintel-mcp` because `codeintel` was taken; the CLI and import stay `codeintel`.)
+
+Or from source:
+
+```bash
+git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .
 ```
@@ -155,7 +166,7 @@ The response is always JSON-safe. Check `result["result"] is not None` before us
 ## Development
 
 ```bash
-git clone https://github.com/shammaihamilton/codeintel.git
+git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
 pytest tests/ -q            # full suite, ~1s
