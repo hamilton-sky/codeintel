@@ -46,9 +46,9 @@ def test_render_shows_marks_and_remediation():
     }
     text = doctor.render_doctor_text(report)
     assert "codeintel doctor" in text
-    assert "✓" in text and "✗" in text and "⚠" in text
+    assert "✓" in text and "✗" in text and "▲" in text  # ▲ is the width-safe warn glyph (not ⚠)
     assert "n/a" in text  # lsp repo-indexed
-    assert "codeintel index /repo" in text  # remediation surfaced
+    assert "codeintel index /repo" in text  # remediation surfaced (two-line fix:)
     assert "1 / 3 engines ready" in text
 
 

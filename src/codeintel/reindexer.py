@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -72,15 +70,13 @@ class Reindexer:
             db.close()
 
     def _graph_reindex(self, project_root: str) -> None:
-        if not shutil.which("codebase-memory-mcp"):
-            return
+        # Route through the graph provider's single subprocess/JSON seam (piped stdin, with a
+        # deprecated raw-JSON fallback) rather than duplicating the deprecated raw-JSON call here.
         try:
-            import json
-            subprocess.run(
-                ["codebase-memory-mcp", "cli", "detect_changes",
-                 json.dumps({"project_root": project_root})],
-                capture_output=True,
-                timeout=120,
-            )
+            from codeintel.providers.graph import GraphProvider
+            gp = GraphProvider()
+            if not gp.available:
+                return
+            gp._run("detect_changes", {"project_root": project_root}, 120_000)
         except Exception as exc:
             logger.warning("graph detect_changes failed: %s", exc)

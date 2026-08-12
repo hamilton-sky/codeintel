@@ -9,6 +9,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="codeintel")
     parser.add_argument("--version", action="version", version=f"codeintel {__version__}")
     subparsers = parser.add_subparsers(dest="command")
+
+    # Shared flags for the human-facing (styled) commands.
+    color_parent = argparse.ArgumentParser(add_help=False)
+    color_parent.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    color_parent.add_argument("--ascii", action="store_true", help="Use ASCII-only glyphs")
+
     subparsers.add_parser("serve", help="Start the MCP server")
 
     # index subcommand
@@ -44,6 +50,7 @@ def main() -> None:
     http_parser = subparsers.add_parser("serve-http", help="Start the HTTP transport server")
     http_parser.add_argument("--port", type=int, default=8766, help="Port to listen on (default: 8766)")
     http_parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    http_parser.add_argument("--allow-remote", action="store_true", help="Permit binding a non-loopback host (exposes an UNAUTHENTICATED endpoint)")
 
     # install subcommand
     install_parser = subparsers.add_parser("install", help="Register codeintel with AI agents")
@@ -61,12 +68,34 @@ def main() -> None:
     map_parser.add_argument("--budget", type=int, default=32768, help="Byte budget for CODE_INTEL.md (default: 32768)")
 
     # doctor subcommand
-    doctor_parser = subparsers.add_parser("doctor", help="Diagnose engine health + index status for a repo")
+    doctor_parser = subparsers.add_parser("doctor", parents=[color_parent], help="Diagnose engine health + index status for a repo")
     doctor_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     doctor_parser.add_argument("--deep", action="store_true", help="Also boot-check serena (slower; first boot pulls it via uvx)")
     doctor_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report instead of the table")
 
+    # setup subcommand
+    setup_parser = subparsers.add_parser("setup", parents=[color_parent], help="Prepare backends and optionally index this repo")
+    setup_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    setup_parser.add_argument("--install-uv", action="store_true", help="Run `pip install uv` (provides uvx for the LSP engine)")
+    setup_parser.add_argument("--install-deps", action="store_true", help="Run `pip install -e .` (semantic engine deps)")
+    setup_parser.add_argument("--index", action="store_true", help="Index this repo now (first run downloads the ~50MB model)")
+    setup_parser.add_argument("--warm", action="store_true", help="Boot serena now (first run pulls it via uvx; slow)")
+    setup_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
+
+    # reset subcommand
+    reset_parser = subparsers.add_parser("reset", parents=[color_parent], help="Clear the semantic index (recover from a corrupt/stale DB)")
+    reset_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    reset_parser.add_argument("--all", action="store_true", help="Clear the ENTIRE index (all projects), not just this repo")
+    reset_parser.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
+    reset_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
+
     args = parser.parse_args()
+
+    from codeintel import term
+    term.configure(
+        no_color=getattr(args, "no_color", False),
+        ascii_mode=(True if getattr(args, "ascii", False) else None),
+    )
 
     if args.command == "serve":
         from codeintel.server import run
@@ -236,12 +265,67 @@ def main() -> None:
             print(f"doctor unavailable: {exc}")
             sys.exit(0)
 
+    elif args.command == "setup":
+        try:
+            from codeintel import onboarding
+
+            project_root = args.project_root or os.getcwd()
+            report = onboarding.run_setup(
+                project_root,
+                install_uv=args.install_uv,
+                install_deps=args.install_deps,
+                do_index=args.index,
+                warm_lsp=args.warm,
+            )
+            if args.json:
+                import json as _json
+                print(_json.dumps(report, indent=2))
+            else:
+                print(onboarding.render_setup_text(report))
+            healthy = report.get("doctor", {}).get("summary", {}).get("healthy")
+            sys.exit(0 if healthy else 1)
+        except Exception as exc:
+            print(f"setup unavailable: {exc}")
+            sys.exit(0)
+
+    elif args.command == "reset":
+        try:
+            from codeintel import reset as _reset
+
+            project_root = args.project_root or os.getcwd()
+            preview = _reset.run_reset(project_root, all_projects=args.all, apply=False)
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    print("refusing to reset without --yes in a non-interactive shell")
+                    sys.exit(1)
+                target = "ALL projects" if args.all else project_root
+                count = preview.get("count", 0)
+                ans = input(f"Reset semantic index for {target} ({count} entries)? [y/N] ").strip().lower()
+                if ans not in ("y", "yes"):
+                    print("aborted")
+                    sys.exit(0)
+            report = _reset.run_reset(project_root, all_projects=args.all, apply=True)
+            if args.json:
+                import json as _json
+                print(_json.dumps(report, indent=2))
+            else:
+                print(report.get("detail", "reset complete"))
+            sys.exit(0)
+        except Exception as exc:
+            print(f"reset unavailable: {exc}")
+            sys.exit(0)
+
     elif args.command == "serve-http":
         try:
             from codeintel.http_server import run
-            run(host=args.host, port=args.port)
+            run(host=args.host, port=args.port, allow_remote=args.allow_remote)
         except KeyboardInterrupt:
             pass
+        except Exception as exc:
+            # A startup failure (e.g. port in use) should print a friendly line, not a traceback.
+            # SystemExit from the non-loopback guard is BaseException — it passes through here.
+            print(f"serve-http failed: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "install":
         from codeintel.installer import Installer

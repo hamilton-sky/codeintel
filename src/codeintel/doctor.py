@@ -114,34 +114,48 @@ def run_doctor(
 
 
 def render_doctor_text(report: dict) -> str:
-    """Human-readable CLI rendering: a per-engine ✓/✗/⚠ table + remediation lines."""
+    """Human-readable CLI rendering: a per-engine ✓/✗/▲ table + two-line `fix:` remediation.
+    Styled via codeintel.term (color only on a TTY; width-safe glyphs so columns stay aligned)."""
+    from codeintel.term import c  # imported at call time to honor the CLI's term.configure()
+
+    _NAME, _INST, _RUN, _REPO = 10, 11, 10, 14
     root = report.get("project_root", "")
     engines = report.get("engines", {})
-    out = [f"codeintel doctor  —  {root}", ""]
-    out.append("  {:<10} {:^11} {:^9} {:^13}".format("engine", "installed", "runnable", "repo-indexed"))
-    out.append("  " + "─" * 10 + " " + "─" * 11 + " " + "─" * 9 + " " + "─" * 13)
+    out = [c.header("doctor", root), ""]
+    out.append("  " + c.bold(
+        "engine".ljust(_NAME) + " " + "installed".center(_INST) + " "
+        + "runnable".center(_RUN) + " " + "repo-indexed".center(_REPO)
+    ))
+    out.append("  " + c.rule(_NAME) + " " + c.rule(_INST) + " " + c.rule(_RUN) + " " + c.rule(_REPO))
 
-    notes: list[str] = []
+    def _state(value, na_ok=False):
+        if value is True:
+            return "ok"
+        if value is False:
+            return "fail"
+        return "na" if na_ok else "warn"
+
+    notes: list[tuple] = []
     for name in _ENGINES:
         e = engines.get(name, {})
-        inst = "✓" if e.get("installed") else "✗"
-        run = {True: "✓", False: "✗", None: "⚠"}.get(e.get("runnable"), "?")
-        ri = e.get("repo_indexed")
-        ri_s = "n/a" if ri is None else ("✓" if ri else "✗")
-        out.append("  {:<10} {:^11} {:^9} {:^13}".format(name, inst, run, ri_s))
+        inst = c.status_cell(_state(e.get("installed")), _INST)
+        run = c.status_cell(_state(e.get("runnable")), _RUN)
+        repo = c.status_cell(_state(e.get("repo_indexed"), na_ok=True), _REPO)
+        out.append("  " + name.ljust(_NAME) + " " + inst + " " + run + " " + repo)
         if e.get("status") != "ok":
-            note = f"    └─ {name}: {e.get('detail', '')}"
-            rem = e.get("remediation")
-            if rem:
-                note += f"  →  {rem}"
-            notes.append(note)
+            notes.append((name, e.get("detail", ""), e.get("remediation")))
 
-    if notes:
+    for name, detail, rem in notes:
         out.append("")
-        out.extend(notes)
+        out.append("  " + c.dim("└─") + " " + c.cyan(name) + ": " + detail)
+        if rem:
+            out.append("     " + c.bold(c.cyan("fix:")) + " " + rem)
 
     summ = report.get("summary", {})
+    ready, total, healthy = summ.get("ready", "?"), summ.get("total", "?"), summ.get("healthy")
+    count = c.bold(f"{ready} / {total}")
+    count = c.red(count) if healthy is False else (c.green(count) if healthy else count)
+    tail = "" if report.get("deep") else c.dim("  (run with --deep to boot-check serena)")
     out.append("")
-    tail = "" if report.get("deep") else "  (run with --deep to boot-check serena)"
-    out.append(f"  {summ.get('ready', '?')} / {summ.get('total', '?')} engines ready for this repo.{tail}")
+    out.append(f"  {count} engines ready for this repo.{tail}")
     return "\n".join(out)

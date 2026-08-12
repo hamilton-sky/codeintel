@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from typing import Any, Optional
 
 from codeintel.provider import Result, safe_null_result
@@ -45,19 +46,55 @@ class GraphProvider:
             self.available = False
             self._cmd = None
 
+    # Sentinel: distinguishes "the subprocess call failed" from "it succeeded and returned JSON
+    # null". Overloading None for both would make a legit null result wrongly trigger the fallback.
+    _FAIL = object()
+
     def _run(self, method: str, payload: dict, timeout_ms: int) -> Optional[Any]:
-        # NOTE: raw-JSON args are deprecated-but-working in the CLI (the deprecation warning
-        # goes to stderr; stdout stays clean JSON, which is all we parse). Tracked follow-up:
-        # migrate to per-method flags before the backend removes JSON support.
+        # Prefer PIPED STDIN — the stable, non-deprecated form the backend documents
+        # (`echo '<json>' | codebase-memory-mcp cli <method>`; no deprecation warning). Fall back
+        # to the deprecated raw-JSON positional arg for one release so an older backend still
+        # works. The two attempts SHARE one deadline (the caller's timeout_ms) so total wall time
+        # can't double. Never raises. `_run` stays the single seam existing tests patch.
+        body = json.dumps(payload)
+        deadline = time.monotonic() + max(0.0, timeout_ms / 1000)
+        out = self._run_stdin(method, body, timeout_ms)
+        if out is not self._FAIL:
+            return out  # success (including a legit null) → no fallback
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return None
+        out = self._run_rawjson(method, body, remaining_ms)
+        return None if out is self._FAIL else out
+
+    def _run_stdin(self, method: str, body: str, timeout_ms: int) -> Any:
         try:
             result = subprocess.run(
-                [self._cmd, "cli", method, json.dumps(payload)],
+                [self._cmd, "cli", method],
+                input=body.encode(),
                 capture_output=True,
                 timeout=timeout_ms / 1000,
             )
+            if result.returncode != 0:
+                return self._FAIL  # unsupported / error → let the raw-JSON fallback try
             return json.loads(result.stdout)
         except Exception:
-            return None
+            return self._FAIL
+
+    def _run_rawjson(self, method: str, body: str, timeout_ms: int) -> Any:
+        # Deprecated-but-working bridge for older backends; remove once the live stdin test
+        # (tests/test_graph_stdin.py::test_live_stdin_list_projects) is green in CI.
+        try:
+            result = subprocess.run(
+                [self._cmd, "cli", method, body],
+                capture_output=True,
+                timeout=timeout_ms / 1000,
+            )
+            if result.returncode != 0:
+                return self._FAIL
+            return json.loads(result.stdout)
+        except Exception:
+            return self._FAIL
 
     @staticmethod
     def _match_project(raw: Any, project_root: str) -> Optional[str]:
@@ -192,11 +229,11 @@ class GraphProvider:
         callees = self._op_callees(target, project, timeout_ms)
         if callers is None and callees is None:
             return None
+        # callers/callees already carry their own "## Callers of X (N)" header — don't wrap them
+        # in a second "### Callers" header (that produced a redundant double heading).
         parts = [f"## Impact of {target}"]
-        parts.append("### Callers")
-        parts.append(callers or "(none found)")
-        parts.append("### Callees")
-        parts.append(callees or "(none found)")
+        parts.append(callers or f"## Callers of {target} (0)\n(none found)")
+        parts.append(callees or f"## Callees of {target} (0)\n(none found)")
         return "\n".join(parts)
 
     def _op_chain(self, target: str, project: str, timeout_ms: int) -> Optional[str]:

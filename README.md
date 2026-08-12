@@ -81,13 +81,17 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | Command | Purpose |
 |---|---|
 | `codeintel install [--agent claude\|codex\|gemini\|zed\|all]` | Register codeintel with AI agent(s) |
+| `codeintel setup [project_root] [--index] [--warm] [--install-uv]` | Check backends + optionally index this repo; ends with a health report |
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |
-| `codeintel serve-http [--host HOST] [--port 8766]` | Start the HTTP transport server |
+| `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote]` | Start the HTTP transport (loopback-only unless `--allow-remote`) |
 | `codeintel query --op OP --target TARGET [--engine auto]` | Run a single query and print the result |
 | `codeintel status [project_root]` | Show engine availability and index age |
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
 | `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
+| `codeintel reset [project_root] [--all] [--yes]` | Clear the semantic index (this repo, or `--all`) to recover from a corrupt/stale DB |
+
+Human-facing commands (`doctor`, `status`, `query`, `setup`, `reset`) honor `--no-color` / `NO_COLOR` and `--ascii`, and auto-degrade to plain text when piped.
 
 ## Config
 

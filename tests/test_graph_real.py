@@ -161,7 +161,7 @@ def test_impact_combines_callers_and_callees(monkeypatch):
     )
     r = p.build_result("impact", "safe_null_result", [], 0, "/Users/x/Documents/project/codeintel")
     assert r["result"] is not None
-    assert "### Callers" in r["result"] and "### Callees" in r["result"]
+    assert "## Callers of" in r["result"] and "## Callees of" in r["result"]
     assert "gateway" in r["result"] and "builtins.str" in r["result"]
 
 
@@ -174,7 +174,7 @@ def test_context_aliases_to_impact(monkeypatch):
     )
     r = p.build_result("context", "safe_null_result", [], 0, "/Users/x/Documents/project/codeintel")
     assert r["result"] is not None
-    assert "### Callers" in r["result"] and "### Callees" in r["result"]
+    assert "## Callers of" in r["result"] and "## Callees of" in r["result"]
 
 
 def test_empty_rows_yield_safe_null(monkeypatch):
@@ -276,4 +276,4 @@ def test_live_callers_of_safe_null_result():
 
     impact = p.build_result("impact", "safe_null_result", [], 0, REPO_ROOT)
     assert impact["result"] is not None
-    assert "### Callers" in impact["result"]
+    assert "## Callers of" in impact["result"]
