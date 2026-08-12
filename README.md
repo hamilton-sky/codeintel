@@ -18,10 +18,11 @@ Register with your AI agent(s):
 codeintel install            # registers with Claude, Codex, Gemini, Zed
 ```
 
-Index a project and run your first query:
+Index a project, check what's ready, and run your first query:
 
 ```bash
 codeintel index /path/to/your/project
+codeintel doctor /path/to/your/project    # which engines are ready + how to fix the rest
 codeintel query --op search --target "authentication middleware"
 ```
 
@@ -58,9 +59,11 @@ Every `Gateway.query()` call returns a dict with exactly these keys:
 
 | Engine | Key ops | Install prereq |
 |---|---|---|
-| `graph` | `impact`, `callers`, `callees`, `chain`, `pattern`, `overview` | `codebase-memory-mcp` CLI on PATH — see [docs/graph.md](docs/graph.md) |
-| `lsp` | `symbol`, `context` | Language server on PATH (e.g. `pyright`) — see [docs/lsp.md](docs/lsp.md) |
-| `semantic` | `search` | `fastembed` + `sqlite-vec` (installed with the package) — see [docs/semantic.md](docs/semantic.md) |
+| `graph` | `impact`, `callers`, `callees`, `chain`, `pattern`, `overview`, `context` | `codebase-memory-mcp` CLI on PATH — see [docs/graph.md](docs/graph.md) |
+| `lsp` | `symbol`, `overview`, `context` | `uvx` on PATH — serena is fetched from GitHub on first use; see [docs/lsp.md](docs/lsp.md) |
+| `semantic` | `search`, `context` | `fastembed` + `sqlite-vec` (installed with the package) — see [docs/semantic.md](docs/semantic.md) |
+
+Run `codeintel doctor` at any time to see which engines are actually ready for a repo and how to fix the ones that aren't.
 
 Pass `--engine auto` (the default) and codeintel chooses the best engine per operation. Pass `--engine both` or `--engine all` to fan out to multiple engines and merge results.
 
@@ -83,6 +86,8 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel serve-http [--host HOST] [--port 8766]` | Start the HTTP transport server |
 | `codeintel query --op OP --target TARGET [--engine auto]` | Run a single query and print the result |
 | `codeintel status [project_root]` | Show engine availability and index age |
+| `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
+| `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
 
 ## Config
 
@@ -92,7 +97,7 @@ Create `.codeintel.toml` at your project root to override defaults:
 backend      = "auto"                   # auto | graph | lsp | semantic
 semantic     = "on"                     # on | off
 reindex      = "on-demand"              # on-demand | never
-cosine_floor = 0.3                      # minimum similarity score for semantic hits
+cosine_floor = 0.25                     # minimum similarity score for semantic hits
 max_chunks   = 500                      # max chunks to embed per project
 model        = "BAAI/bge-small-en-v1.5" # fastembed embedding model
 ```
@@ -108,8 +113,10 @@ model        = "BAAI/bge-small-en-v1.5" # fastembed embedding model
 | Engine | Needs on `PATH` | Third-party? |
 |---|---|---|
 | `graph` | `codebase-memory-mcp` | yes — external CLI |
-| `lsp` | `uvx` or `serena` (runs `uvx serena`) | yes |
+| `lsp` | `uvx` (fetches & runs serena from GitHub on first use) | yes — [oraios/serena](https://github.com/oraios/serena) |
 | `semantic` | *nothing external* | no — fully in-house |
+
+Not sure what's installed? `codeintel doctor` reports exactly which backends are present, whether this repo is indexed, and the command to fix each gap.
 
 **The only network touch is first-run setup:** `fastembed` downloads the `BAAI/bge-small-en-v1.5` weights once (cached under `~/.cache`, fully offline thereafter); the optional backends also install on first use *if you opt in*. After that, **no code or data leaves your machine** — which is what makes `--engine all` safe to run on a private repo.
 

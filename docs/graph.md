@@ -5,9 +5,13 @@ Wraps the `codebase-memory-mcp` CLI binary. Never raises — always returns an e
 ## Install prerequisite
 
 `codebase-memory-mcp` must be on `PATH` (detected via `shutil.which`). If absent, every
-call returns `ok: false` with `reason: 'engine-unavailable'`.
+call returns a **safe null** with `reason: 'engine-unavailable'` — `ok` is still `true`; the
+contract never returns `ok: false`.
 
-Install via pip or as a standalone binary; see the `codebase-memory-mcp` project for details.
+`codebase-memory-mcp` is a standalone, platform-specific binary distributed by its own project —
+install the build for your OS/arch and ensure it is on `PATH` (it self-manages via
+`codebase-memory-mcp install|update`). Run `codeintel doctor` to confirm it is detected and that
+this repo is indexed.
 
 ## Supported ops
 

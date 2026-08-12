@@ -6,31 +6,44 @@ with `reason: 'warming'` while the server is starting.
 
 ## Install prerequisite
 
-Either `uvx` or `serena` must be on `PATH` (detected via `shutil.which`, checked in that order).
-If neither is found, every call returns `ok: false` with `reason: 'engine-unavailable'`.
+`uvx` (from [uv](https://github.com/astral-sh/uv)) or a directly-installed `serena` must be on
+`PATH` (detected via `shutil.which`, checked in that order). If neither is found, every call
+returns a **safe null** with `reason: 'engine-unavailable'` — `ok` is still `true`; the contract
+never returns `ok: false`.
 
-- Preferred: install `uvx` (`pip install uv`) — the provider runs `uvx serena`.
-- Fallback: install `serena` directly and ensure the binary is on PATH.
+- Preferred: install `uvx` (`pip install uv`). The provider then fetches and runs serena from
+  source:
+  `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --project <root>`.
+  The **first** launch pulls serena via `uvx` and can take tens of seconds; later launches are fast.
+- Fallback: install `serena` on `PATH` directly — the provider runs `serena start-mcp-server …`.
 
 ## Supported ops
 
 | op | target | What it returns |
 |---|---|---|
-| `symbol` | symbol name | Definition location + all references |
-| `overview` | relative file path (or empty) | Symbols overview for the file / project |
+| `symbol` | symbol name | Definition (with body) + all references |
+| `overview` | relative file path | Symbols overview for the file |
+| `context` | symbol name | Alias for `symbol` — the LSP's contribution to the `context` fan-out |
 
-Any other `op` value returns `ok: false` with `reason: 'unsupported-op'`.
+Any other `op` value returns a safe null with `reason: 'unsupported-op'` (`ok` stays `true`).
 
 ### `symbol` detail
 
-Calls `find_symbol` and `find_referencing_symbols` in parallel, then merges the results:
+Two-step — serena's `find_referencing_symbols` requires the symbol's own `relative_path`, so it
+cannot run until `find_symbol` has located the symbol:
+
+1. `find_symbol` with `name_path_pattern: <target>`, `include_body: true` — locates the symbol
+   and returns its definition + body.
+2. `find_referencing_symbols` with the located `name_path` **and** `relative_path` — returns
+   every reference, with the line each appears on.
 
 ```
 ## Symbol: <target>
-<definition text or "(not found)">
+**<kind>** — <relative_path>:<start>-<end>
+```<body>```
 
-## References
-<referencing symbols or "(none)">
+## References (<n>)
+- <file>:<line>  (<referencing symbol>)
 ```
 
 ### `overview` detail
@@ -67,7 +80,7 @@ If `budget` is 0 or absent, the timeout defaults to **5.0 s** (`_DEFAULT_TIMEOUT
 | `'engine-unavailable'` | Neither `uvx` nor `serena` is on PATH |
 | `'warming'` | Session exists but has not finished starting |
 | `'boot-failed'` | Session failed to start (cooldown active) |
-| `'unsupported-op'` | `op` is not `symbol` or `overview` |
+| `'unsupported-op'` | `op` is not `symbol`, `overview`, or `context` |
 | `'error'` | Unexpected exception during execution |
 
 ## Envelope shape
