@@ -15,3 +15,6 @@ build/
 pathly/**/BOARD.json
 pathly/**/EVENTS.jsonl
 /EVENTS.jsonl
+
+# macOS
+.DS_Store
