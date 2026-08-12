@@ -11,6 +11,12 @@ build/
 # Local codeintel semantic index cache (regenerable)
 .codeintel/
 
+# Serena LSP project cache (regenerable, created by the lsp engine backend)
+.serena/
+
+# uv lockfile from `uv run` during local test/dev
+uv.lock
+
 # Pathly board exports (DB is authoritative)
 pathly/**/BOARD.json
 pathly/**/EVENTS.jsonl

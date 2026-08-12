@@ -117,9 +117,14 @@ def test_graph_provider_engine_field(monkeypatch):
 
     def _fake_run(method, payload, timeout_ms):
         if method == "list_projects":
-            return [{"root_path": "/repo", "name": "myproj"}]
+            return {"projects": [{"root_path": "/repo", "name": "myproj"}]}
         if method == "query_graph":
-            return [{"caller.name": "bar", "caller.file_path": "bar.py"}]
+            # Real backend shape: value-arrays aligned to columns (not a list of dicts).
+            return {
+                "columns": ["a.name", "a.qualified_name", "a.file_path", "type(c)"],
+                "rows": [["bar", "pkg.bar", "bar.py", "CALLS"]],
+                "total": 1,
+            }
         return None
 
     p = GraphProvider()
@@ -127,6 +132,9 @@ def test_graph_provider_engine_field(monkeypatch):
     r = p.build_result("callers", "x", [], 0, "/repo")
     assert r["ok"] is True
     assert r["engine"] == "graph"
+    # The real-shape row must actually be parsed into the rendered result.
+    assert r["result"] is not None
+    assert "pkg.bar" in r["result"]
 
 
 # ---------------------------------------------------------------------------
