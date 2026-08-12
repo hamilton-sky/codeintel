@@ -180,6 +180,9 @@ Config is **validated on load** — an out-of-range number, a misspelled enum, o
 | Variable | Effect |
 |---|---|
 | `CODEINTEL_HTTP_TOKEN` | Bearer token required by `serve-http` (equivalent to `--token`) |
+| `CODEINTEL_LOG_LEVEL` | `DEBUG`\|`INFO`\|`WARNING`(default)\|`ERROR` for the server logger |
+| `CODEINTEL_LOG_FORMAT=json` | Structured (JSON-per-line) logs for ELK / Splunk / Datadog |
+| `CODEINTEL_HTTP_ACCESS_LOG=1` | One log line per HTTP request (method, path, status, latency) |
 | `CODEINTEL_DEBUG=1` | Log the full traceback of any error the never-throw contract swallows (silent by default) — the switch for diagnosing an unexpected `null` |
 | `CODEINTEL_REINDEX=off` | Disable the background reindexer; queries then index inline to stay fresh |
 
@@ -239,6 +242,25 @@ if result["result"] is not None:
 ```
 
 The response is always JSON-safe. Check `result["result"] is not None` before use. Never catch an exception from the gateway — it never raises.
+
+## Operations & deployment
+
+Running codeintel as a shared service? It ships with what ops teams expect:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /healthz` | none | Liveness — always `200` (for load balancers / `livenessProbe`) |
+| `GET /readyz` | none | Readiness — `200` once the gateway is up (`readinessProbe`) |
+| `GET /metrics` | token | Prometheus exposition — request counts, latency, in-flight, build info |
+
+Plus **bearer-token auth**, **structured JSON logs** (`CODEINTEL_LOG_FORMAT=json`) with optional per-request access logs, **graceful `SIGTERM`** shutdown, a bounded connection pool, and a non-root **Dockerfile** with a healthcheck.
+
+**Full guide → [docs/deploy.md](docs/deploy.md)**: systemd, Docker / Compose, Kubernetes (liveness + readiness probes, token from a Secret), reverse-proxy TLS, a Prometheus scrape config, and a security checklist.
+
+```bash
+docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \
+  -e CODEINTEL_HTTP_TOKEN="$(openssl rand -hex 32)" codeintel
+```
 
 ## Development
 

@@ -4,6 +4,42 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-12
+
+Enterprise operability — the HTTP transport ships the endpoints, signals, and packaging a platform
+team needs to run codeintel as a shared, observable service.
+
+### Added
+- **Health & readiness probes** — `GET /healthz` (liveness) and `GET /readyz` (readiness), both
+  unauthenticated by convention, for load balancers and Kubernetes probes.
+- **Prometheus `/metrics`** — dependency-free exposition (`codeintel_requests_total{method,path,
+  status}`, `codeintel_request_duration_seconds`, `codeintel_requests_in_flight`,
+  `codeintel_build_info{version}`). Path labels are restricted to known routes, so an attacker
+  can't explode label cardinality. Auth-gated when a token is configured.
+- **Structured logging** — `CODEINTEL_LOG_FORMAT=json` (one JSON object per line),
+  `CODEINTEL_LOG_LEVEL`, and `CODEINTEL_HTTP_ACCESS_LOG=1` for per-request access lines.
+- **Graceful shutdown** — the HTTP server handles `SIGTERM`/`SIGINT`, draining in-flight requests
+  and exiting `0` (systemd- and Kubernetes-friendly).
+- **Container image** — a multi-stage, non-root `Dockerfile` with a `/healthz` HEALTHCHECK, plus
+  `.dockerignore`.
+- **Ops & governance docs** — `docs/deploy.md` (systemd, Docker/Compose, Kubernetes with probes,
+  reverse-proxy TLS, Prometheus scrape config, security checklist), `SECURITY.md`, `CONTRIBUTING.md`.
+
+### Hardened (from a security review pass)
+- **Fail closed**: `serve-http` on a non-loopback host now *refuses to start* without a token
+  unless `CODEINTEL_ALLOW_NO_AUTH=1` is set — no more accidental unauthenticated exposure (and this
+  is the container's default posture, so `docker run` with no token stops with a clear message).
+- **Graceful shutdown actually drains now**: worker threads are daemons, so `server_close()` never
+  joined them; shutdown now waits (bounded, 15s) for in-flight requests to finish before exiting,
+  so a rolling restart doesn't cut a live response. Verified end-to-end.
+- **Overload visibility**: concurrency-cap refusals are counted as `codeintel_requests_rejected_total`.
+- `/metrics` rendering is wrapped so a render error can never leave a client with no response.
+
+### Tests
+- `tests/test_enterprise.py` covers the probes, `/metrics` + auth gating, the metrics registry
+  (bounded cardinality, in-flight + rejected counters), the JSON log formatter, and the fail-closed
+  non-loopback bind. (+11 tests → 211 total.)
+
 ## [0.3.0] — 2026-08-12
 
 Reliability pass for unattended/production use: safe config, cheaper warm queries, optional auth

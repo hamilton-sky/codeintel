@@ -192,6 +192,8 @@ def code_map_handler(args: dict) -> dict:
 
 
 def run() -> None:
+    from codeintel.logconfig import configure_logging
+    configure_logging()  # logs to stderr; stdout is the MCP protocol channel
     mcp = MCPServer(name="codeintel")
 
     async def _code_query(

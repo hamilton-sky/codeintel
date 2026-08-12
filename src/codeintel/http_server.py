@@ -2,17 +2,29 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
+import os
+import signal
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from codeintel import __version__
+from codeintel.logconfig import configure_logging
+from codeintel.metrics import Metrics
 from codeintel.provider import log_swallowed
 from codeintel.server import code_doctor_handler, code_query_handler, code_status_handler
 
 _MAX_BODY_BYTES = 1_048_576       # 1 MiB
 _REQUEST_TIMEOUT_S = 60           # per-request socket read timeout — drops an idle/half-open client
 _MAX_CONCURRENT_REQUESTS = 64     # cap live worker threads so a burst can't exhaust threads/FDs
+_DRAIN_TIMEOUT_S = 15             # on shutdown, wait up to this long for in-flight requests to finish
+_ACCESS_LOG = os.environ.get("CODEINTEL_HTTP_ACCESS_LOG", "").strip().lower() in ("1", "true", "on", "yes")
+_PROM_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+_logger = logging.getLogger("codeintel")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -21,7 +33,35 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = _REQUEST_TIMEOUT_S
 
     def log_message(self, format: str, *args: object) -> None:
-        pass  # suppress default stderr noise
+        pass  # suppress default stderr noise; opt-in access logging is handled in _observe
+
+    def handle_one_request(self) -> None:
+        self._t0 = time.monotonic()
+        m = getattr(self.server, "metrics", None)
+        if m is not None:
+            m.inc_in_flight()
+        try:
+            super().handle_one_request()
+        finally:
+            if m is not None:
+                m.dec_in_flight()
+
+    def _observe(self, status: int) -> None:
+        try:
+            dur = time.monotonic() - getattr(self, "_t0", time.monotonic())
+        except Exception:
+            dur = 0.0
+        m = getattr(self.server, "metrics", None)
+        if m is not None:
+            try:
+                m.record(self.command or "?", urlparse(self.path).path, status, dur)
+            except Exception:
+                pass
+        if _ACCESS_LOG:
+            try:
+                _logger.info("%s %s -> %s (%.1fms)", self.command, self.path, status, dur * 1000.0)
+            except Exception:
+                pass
 
     def _send_json(self, status: int, data: dict) -> None:
         body = json.dumps(data).encode()
@@ -30,6 +70,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self._observe(status)
+
+    def _send_text(self, status: int, text: str, content_type: str) -> None:
+        body = text.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self._observe(status)
 
     def _authorized(self) -> bool:
         """When the server was started with a token, require ``Authorization: Bearer <token>``
@@ -79,17 +129,44 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # Liveness / readiness are UNAUTHENTICATED by convention (kubelet/load balancers don't send
+        # tokens) and reveal nothing sensitive — only up/ready.
+        if path == "/healthz":
+            self._send_json(200, {"status": "ok"})
+            return
+        if path == "/readyz":
+            try:
+                from codeintel.server import _get_gateway
+                _get_gateway()  # builds once (cached); readiness = the gateway is constructible
+                self._send_json(200, {"status": "ready"})
+            except Exception as exc:
+                log_swallowed("readyz", exc)
+                self._send_json(503, {"status": "not-ready"})
+            return
+
+        # Everything else is auth-gated when a token is configured (metrics can reveal usage
+        # patterns; status reveals engine/index state).
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
             return
-        parsed = urlparse(self.path)
-        if parsed.path != "/code/status":
-            self._send_json(404, {"error": "not-found"})
+
+        if path == "/metrics":
+            m = getattr(self.server, "metrics", None)
+            try:
+                text = m.render() if m is not None else ""
+            except Exception as exc:
+                log_swallowed("metrics.render", exc)  # never leave the client with no response
+                text = ""
+            self._send_text(200, text, _PROM_CONTENT_TYPE)
             return
-        # Optional ?project_root=... scopes the `indexed` flag to that repo.
-        project_root = (parse_qs(parsed.query).get("project_root") or [""])[0]
-        result = code_status_handler({"project_root": project_root})
-        self._send_json(200, result)
+        if path == "/code/status":
+            project_root = (parse_qs(parsed.query).get("project_root") or [""])[0]
+            self._send_json(200, code_status_handler({"project_root": project_root}))
+            return
+        self._send_json(404, {"error": "not-found"})
 
 
 class CodeIntelHTTPServer(ThreadingHTTPServer):
@@ -102,6 +179,7 @@ class CodeIntelHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.metrics = Metrics(version=__version__)
         # Stdlib ThreadingHTTPServer spawns one thread per connection with no ceiling, so many
         # slow/half-open clients could exhaust threads/FDs. Bound live workers; past the cap we
         # refuse fast with 503 rather than spawn an unbounded thread. (For a genuinely hostile
@@ -110,6 +188,10 @@ class CodeIntelHTTPServer(ThreadingHTTPServer):
 
     def process_request(self, request, client_address) -> None:
         if not self._slots.acquire(blocking=False):
+            try:
+                self.metrics.inc_overload()  # surface overload in /metrics (rejected_total)
+            except Exception:
+                pass
             try:
                 request.sendall(
                     b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -152,6 +234,10 @@ def _is_loopback(host: str) -> bool:
         return False  # a non-IP hostname is never treated as loopback
 
 
+def _no_auth_override() -> bool:
+    return os.environ.get("CODEINTEL_ALLOW_NO_AUTH", "").strip().lower() in ("1", "true", "on", "yes")
+
+
 def run(
     host: str = "127.0.0.1",
     port: int = 8766,
@@ -159,17 +245,50 @@ def run(
     allow_remote: bool = False,
     token: str | None = None,
 ) -> None:
-    if not _is_loopback(host) and not allow_remote:
-        print(f"refusing to bind non-loopback host {host!r} without --allow-remote — this would "
-              f"expose an UNAUTHENTICATED code-intel endpoint (your indexed repo) to the network",
-              file=sys.stderr)
-        raise SystemExit(2)
+    configure_logging()
+    server_token = (token or "").strip() or None
+    if not _is_loopback(host):
+        if not allow_remote:
+            print(f"refusing to bind non-loopback host {host!r} without --allow-remote — this would "
+                  f"expose a code-intel endpoint (your indexed repo) to the network", file=sys.stderr)
+            raise SystemExit(2)
+        if not server_token and not _no_auth_override():
+            # Fail closed: never serve an UNAUTHENTICATED endpoint on the network by accident (a
+            # containerized `serve-http --host 0.0.0.0` with no token stops here unless overridden).
+            print(f"refusing to serve on {host}:{port} with NO authentication — set --token or "
+                  f"CODEINTEL_HTTP_TOKEN (recommended), or set CODEINTEL_ALLOW_NO_AUTH=1 to override "
+                  f"for a trusted network", file=sys.stderr)
+            raise SystemExit(2)
+
     server = CodeIntelHTTPServer((host, port), _Handler)
-    server.auth_token = (token or "").strip() or None
-    if not _is_loopback(host) and not server.auth_token:
-        print(f"WARNING: serving codeintel on {host}:{port} with NO authentication — anyone who can "
-              f"reach this port can read your indexed repo (set --token to require a bearer token)",
-              file=sys.stderr)
-    auth_note = "  (bearer-token auth required)" if server.auth_token else ""
+    server.auth_token = server_token
+    if not _is_loopback(host) and not server_token:
+        print(f"WARNING: serving codeintel on {host}:{port} with NO authentication "
+              f"(CODEINTEL_ALLOW_NO_AUTH set) — anyone who can reach this port can read your "
+              f"indexed repo", file=sys.stderr)
+    auth_note = "  (bearer-token auth required)" if server_token else ""
     print(f"Listening on http://{host}:{port}{auth_note}")
-    server.serve_forever()
+
+    def _graceful(signum, frame) -> None:
+        # shutdown() blocks until serve_forever() returns, so it must run OFF the serving thread —
+        # spawn a helper thread to avoid deadlocking the signal handler on the main thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _graceful)
+        signal.signal(signal.SIGINT, _graceful)
+    except (ValueError, OSError):
+        pass  # not the main thread — signal handlers unavailable; rely on the caller to stop us
+
+    try:
+        server.serve_forever()
+    finally:
+        # Drain: serve_forever() has stopped accepting new connections; wait (bounded) for in-flight
+        # requests to finish before closing. Worker threads are daemons, so server_close() will NOT
+        # join them — this loop is what makes the shutdown actually graceful (a rolling restart
+        # doesn't cut a live response mid-flight).
+        deadline = time.monotonic() + _DRAIN_TIMEOUT_S
+        while server.metrics.in_flight() > 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        server.server_close()
+        print("codeintel http server stopped", file=sys.stderr)
