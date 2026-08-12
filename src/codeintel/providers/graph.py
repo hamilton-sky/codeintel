@@ -46,9 +46,15 @@ class GraphProvider:
             return self._project_cache[project_root]
 
         raw = self._run("list_projects", {}, 3000)
+        # The real codebase-memory-mcp returns {"projects": [...]}; a bare list is the
+        # older/mocked shape. Accept both so a backend contract change can't silently
+        # make every graph query report "project-not-indexed".
+        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
         name: Optional[str] = None
-        if isinstance(raw, list):
-            for entry in raw:
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
                 rp = entry.get("root_path", "")
                 if rp == project_root or (rp and project_root.startswith(rp)):
                     name = entry.get("name")
