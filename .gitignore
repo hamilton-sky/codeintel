@@ -14,3 +14,4 @@ build/
 # Pathly board exports (DB is authoritative)
 pathly/**/BOARD.json
 pathly/**/EVENTS.jsonl
+/EVENTS.jsonl
