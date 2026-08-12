@@ -31,6 +31,18 @@ class SemanticDb:
             self._conn = sqlite3.connect(self.db_path)
             self._conn.enable_load_extension(True)
             self._conn.row_factory = sqlite3.Row
+            # Concurrency: the background Reindexer writes on a daemon thread while a foreground
+            # query indexes inline — two separate connections to this one file. With the SQLite
+            # default (busy_timeout=0) the loser of that write race gets an immediate
+            # "database is locked" and silently drops its work; a busy timeout makes it wait
+            # instead, and WAL lets a search read while a reindex writes. (reset.py already
+            # cleans up the -wal/-shm siblings WAL creates.) Never-raise: if the pragmas can't
+            # be applied, fall back to default locking rather than fail to open the db.
+            try:
+                self._conn.execute("PRAGMA busy_timeout=5000")
+                self._conn.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
         return self._conn
 
     def init(self) -> None:

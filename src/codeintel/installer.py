@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 _AGENTS = ["claude", "codex", "gemini", "zed"]
+
+
+def _atomic_write_text(path: pathlib.Path, text: str) -> None:
+    """Write via a sibling temp file + os.replace so an interrupted write can never truncate
+    the user's existing agent config (which holds unrelated settings) to a partial/empty file.
+    The temp lives in the same directory as ``path`` so the replace stays on one filesystem."""
+    tmp = path.with_name(path.name + ".codeintel.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 _CONFIG: dict[str, dict] = {
     "claude": {
@@ -80,7 +90,7 @@ class Installer:
 
             config_path.parent.mkdir(parents=True, exist_ok=True)
             _set_nested(data, spec["key"], spec["value"])
-            config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _atomic_write_text(config_path, json.dumps(data, indent=2))
 
             return {
                 "agent": agent,

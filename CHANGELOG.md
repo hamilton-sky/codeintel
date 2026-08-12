@@ -4,6 +4,27 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-08-12
+
+### Fixed
+- **Semantic DB concurrency** — the background reindexer (a daemon thread) and the inline index
+  a query runs open two connections to the one cache file. With SQLite's default zero busy
+  timeout, the loser of that write race hit an immediate `database is locked` and silently
+  dropped its work. The DB layer now sets `busy_timeout` and `journal_mode=WAL`, so writers wait
+  instead of failing and a search can read while a reindex writes.
+
+### Changed
+- **Atomic writes to user-owned files** — `codeintel install` (agent config such as
+  `~/.claude/settings.json`) and `codeintel map --inject` (`CLAUDE.md` / `AGENTS.md`) now write
+  via a temp file + atomic rename, so an interrupted write can never truncate a file the tool
+  does not own. The install merge already preserved unrelated keys; this protects the write too.
+
+### Documentation
+- Rewrote the README lead to explain what codeintel does for a coding agent and what it can ask —
+  a per-operation table plus a real request/response example — and documented the four MCP tools.
+- Fixed drift: `max_chunks` is documented as **per file** (matching the code and semantic docs),
+  and the test-suite runtime note is realistic.
+
 ## [0.2.0] — 2026-08-12
 
 First public release. Distributed on PyPI as **`codecortex`** (the import package and CLI

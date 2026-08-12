@@ -1,8 +1,53 @@
 # codeintel
 
-A unified code-intelligence gateway — graph + LSP + semantic — that gives any coding agent a single safe API to search, trace, and understand any codebase.
+**One MCP tool that lets a coding agent search, trace, and *understand* a codebase — structurally, not by grepping.** codeintel unifies three engines — a call/import **graph**, an **LSP** for exact symbols, and **semantic** embedding search — behind a single `code.query` call that routes to the right engine, caches the answer, and **never throws**. The agent always gets back a clean, well-formed result to reason over.
 
 [![CI](https://github.com/hamilton-sky/codeintel/actions/workflows/ci.yml/badge.svg)](https://github.com/hamilton-sky/codeintel/actions/workflows/ci.yml)
+
+## Why an agent needs it
+
+Without structural tools, an agent dropped into unfamiliar code falls back on `grep` and reads whole files to reconstruct relationships by hand — burning tokens, missing call sites, and guessing at blast radius before it edits anything. codeintel answers those questions directly instead:
+
+- **"What calls this? What breaks if I change it?"** → the real call graph, which catches cross-file and module-level callers a text search silently misses.
+- **"Where is this symbol defined, and everywhere it's used?"** → the language server, with exact locations.
+- **"Where's the code that does X?"** (when you don't know the name) → semantic search over the repo.
+- **Always a clean answer.** Every call returns the same JSON envelope. A missing or broken backend degrades to a safe `null` *with a reason* — so the agent falls back to grep instead of crashing on an exception it can't reason its way out of.
+
+Net effect: fewer, sharper tool calls, less re-reading, and an agent that can see *structure* — callers, impact, call chains — that plain search can't.
+
+## What your agent can ask
+
+It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the default) codeintel picks the engine per operation:
+
+| Ask | `op` | Engine (auto) | Comes back as |
+|---|---|---|---|
+| Find code by meaning ("auth middleware") | `search` | semantic | ranked `path:line │ snippet` hits |
+| A symbol's definition **and** all references | `symbol` | lsp | definition body + reference list |
+| Who calls this? | `callers` | graph | caller symbols + files |
+| What does this call? | `callees` | graph | callee symbols + files |
+| Blast radius of a change | `impact` | graph | callers **and** callees together |
+| Trace a call chain up/downstream | `chain` | graph | ordered hops |
+| Find symbols by pattern | `pattern` | graph | matching nodes + locations |
+| Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
+| Everything about one symbol | `context` | graph + lsp | both views merged |
+
+Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
+
+**Example — "who uses `safe_null_result`?"**
+
+```jsonc
+// request
+{ "op": "callers", "target": "safe_null_result", "engine": "auto" }
+
+// response — always this exact envelope; `result` is ready-to-read markdown
+{
+  "ok": true, "op": "callers", "target": "safe_null_result",
+  "engine": "graph", "cached": false,
+  "result": "## Callers of safe_null_result (7)\n- …gateway [USAGE] (src/codeintel/gateway.py)\n- …providers.graph [USAGE] (src/codeintel/providers/graph.py)\n- …server [USAGE] (src/codeintel/server.py)\n- … (4 more)"
+}
+```
+
+The agent hands `result` straight to the model. If the graph backend isn't installed, the identical call returns `"result": null, "reason": "engine-unavailable"` — no exception, and the agent just falls back to its own search.
 
 ## Quickstart
 
@@ -113,7 +158,7 @@ backend      = "auto"                   # auto | graph | lsp | semantic
 semantic     = "on"                     # on | off
 reindex      = "on-demand"              # on-demand | never
 cosine_floor = 0.25                     # minimum similarity score for semantic hits
-max_chunks   = 500                      # max chunks to embed per project
+max_chunks   = 500                      # max chunks to embed per file
 model        = "BAAI/bge-small-en-v1.5" # fastembed embedding model
 ```
 
@@ -137,7 +182,16 @@ Not sure what's installed? `codeintel doctor` reports exactly which backends are
 
 ## For agents
 
-Start the HTTP server, then POST queries to `/code/query`:
+Register codeintel as an MCP server (`codeintel install`) and the agent gets four tools:
+
+| MCP tool | HTTP equivalent | Purpose |
+|---|---|---|
+| `code.query` | `POST /code/query` | The main call — search, trace, understand (the `op` table above) |
+| `code.status` | `GET /code/status` | Which engines are live + whether an index exists |
+| `code.doctor` | `POST /code/doctor` | Per-engine health + repo index status, with a fix for each gap |
+| `code.map` | — | Generate/refresh `CODE_INTEL.md`, a static orientation file for hosts without MCP |
+
+Over MCP the agent calls `code.query` directly. Over HTTP, start the server and POST to `/code/query`:
 
 ```bash
 codeintel serve-http &   # listens on 127.0.0.1:8766 by default
@@ -169,5 +223,5 @@ The response is always JSON-safe. Check `result["result"] is not None` before us
 git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
-pytest tests/ -q            # full suite, ~1s
+pytest tests/ -q            # full suite (~15s — includes live graph/LSP backend tests)
 ```

@@ -57,8 +57,12 @@ def _read_file(path: str) -> str | None:
 
 
 def _write_file(path: str, content: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
+    # Atomic: write a sibling temp file then os.replace it into place, so an interrupted
+    # write can never leave the user's CLAUDE.md/AGENTS.md truncated or half-written.
+    tmp = path + ".codeintel.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(content)
+    os.replace(tmp, path)
 
 
 def _update_block(content: str) -> tuple[str, str]:
