@@ -134,7 +134,7 @@ def test_overview_auto_falls_back_to_lsp():
 def test_empty_project_reports_no_index(tmp_path, monkeypatch):
     import codeintel.providers.semantic as sem
     empty = tmp_path / "empty"; empty.mkdir()
-    monkeypatch.setattr(sem, "_DB_PATH", tmp_path / "s.db")
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(sem, "_DEPS_OK", True)
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         r = SemanticProvider().build_result("search", "x", [], 0, str(empty))
@@ -150,7 +150,7 @@ def test_config_cosine_floor_reaches_searcher(tmp_path, monkeypatch):
         'cosine_floor = 0.99\nrerank = "off"\nrerank_candidates = 7\n'
     )
     (tmp_path / "code.py").write_text("def f():\n    return 1\n")
-    monkeypatch.setattr(sem, "_DB_PATH", tmp_path / "s.db")
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(sem, "_DEPS_OK", True)
 
     captured = {}

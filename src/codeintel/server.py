@@ -122,10 +122,18 @@ def code_status_handler(args: dict) -> dict:
             if semantic_available:
                 model = DEFAULT_MODEL
                 if project_root:
+                    try:  # report THIS repo's configured model, not the machine default
+                        from codeintel.config import load_config
+                        model = str(load_config(project_root).get("model") or DEFAULT_MODEL)
+                    except Exception:
+                        pass
                     indexed = bool(SemanticProvider().probe(project_root).get("repo_indexed"))
                 else:
+                    import glob
                     import os
-                    indexed = os.path.exists(default_db_path())
+                    # any per-model cache file (semantic.db / semantic-<hash>.db) counts as "indexed"
+                    base = os.path.dirname(default_db_path())
+                    indexed = bool(glob.glob(os.path.join(base, "semantic*.db")))
         except Exception:
             pass
 

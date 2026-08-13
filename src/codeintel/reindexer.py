@@ -102,11 +102,11 @@ class Reindexer:
         from codeintel.semantic_db import SemanticDb, default_db_path
         from codeintel.indexer import Indexer
 
-        # Same per-machine cache the SemanticProvider reads — index and search must never diverge
+        # Same per-model cache file the SemanticProvider reads — index and search must never diverge
         # onto different files. Honor the project's config so the background pass indexes exactly
-        # like the inline and CLI paths (same model, window/stride, and chunk ceilings).
+        # like the inline and CLI paths (same model → same file, plus window/stride, ceilings).
         cfg = load_config(project_root)
-        db_path = default_db_path()
+        db_path = default_db_path(str(cfg.get("model") or ""))
         pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         db = SemanticDb(db_path)
         try:

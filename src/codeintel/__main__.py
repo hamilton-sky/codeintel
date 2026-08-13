@@ -110,28 +110,32 @@ def main() -> None:
         from codeintel.semantic_db import SemanticDb, default_db_path
 
         project_root = args.project_root or os.getcwd()
-        cfg = load_config(project_root)
-
-        db_path = default_db_path()
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        db = SemanticDb(db_path)
+        # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
+        # Path.home() raising) degrades with a message, like every other subcommand, not a traceback.
         try:
-            db.init()
-            count = Indexer(
-                db,
-                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
-                window=int(cfg.get("window", 20)),
-                stride=int(cfg.get("stride", 10)),
-                max_chunks=int(cfg.get("max_chunks", 500)),
-                max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
-                chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-            ).index(project_root)
-            if count > 0:
-                print(f"Indexed {count} chunks")
-            else:
-                print("Nothing new to index")
-        finally:
-            db.close()
+            cfg = load_config(project_root)
+            db_path = default_db_path(str(cfg.get("model") or ""))
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            db = SemanticDb(db_path)
+            try:
+                db.init()
+                count = Indexer(
+                    db,
+                    model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                    window=int(cfg.get("window", 20)),
+                    stride=int(cfg.get("stride", 10)),
+                    max_chunks=int(cfg.get("max_chunks", 500)),
+                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+                    chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
+                ).index(project_root)
+                if count > 0:
+                    print(f"Indexed {count} chunks")
+                else:
+                    print("Nothing new to index")
+            finally:
+                db.close()
+        except Exception as exc:
+            print(f"index failed: {exc}")
 
         # best-effort graph reindex
         import shutil
@@ -242,8 +246,9 @@ def main() -> None:
                 state = "available" if available else "unavailable"
                 print(f"  {engine:<10} {state}")
 
+            from codeintel.config import load_config
             from codeintel.semantic_db import default_db_path
-            db_path = default_db_path()
+            db_path = default_db_path(str(load_config(project_root).get("model") or ""))
             if os.path.exists(db_path):
                 import datetime
                 mtime = os.path.getmtime(db_path)

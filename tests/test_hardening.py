@@ -24,7 +24,7 @@ def _patch_semantic(monkeypatch, tmp_path, has_index_value):
     from codeintel.indexer import Indexer
     from codeintel.searcher import Searcher
 
-    monkeypatch.setattr(sem, "_DB_PATH", tmp_path / "sem.db")
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     calls = {"index": 0}
 
     def _fake_index(self, root):

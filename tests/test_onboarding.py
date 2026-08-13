@@ -59,7 +59,7 @@ def test_setup_index_real_db(tmp_path, monkeypatch):
     (repo / "sample.py").write_text("def greet():\n    return 'hello'\n")
 
     db_path = tmp_path / "semantic.db"
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda: str(db_path))
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
 
     report = onboarding.run_setup(str(repo), do_index=True, out=io.StringIO())
     assert report["ok"] is True

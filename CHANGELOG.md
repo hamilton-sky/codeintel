@@ -4,6 +4,39 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] — 2026-08-14
+
+Embedding-model / vector-dimension safety, done right — an architect-designed replacement for the
+fix that was prepared for 0.8.2 and reverted (it caused cross-project data loss).
+
+### Fixed
+- **Changing the embedding `model` can no longer corrupt or wipe the semantic index.** The cache was
+  a single shared `~/.codeintel/semantic.db` with a hardcoded `FLOAT[384]` vec0 table; a
+  different-dimension model corrupted it (a DELETE-then-failed-INSERT dropped chunks), and a
+  same-dimension different model silently mixed incompatible vectors. The cache is now **partitioned
+  by model**: the default model keeps `semantic.db` (zero migration for existing users), any other
+  model gets its own `semantic-<hash>.db`, and the vec0 table self-dimensions from the first real
+  vector (no more hardcoded 384). Different-model repos are now **physically isolated** (separate
+  files), so they can never corrupt or wipe each other — precisely the failure the reverted attempt
+  had.
+
+### Changed
+- `SemanticProvider.build_result` and `probe` now resolve the same per-model file (fixing a latent
+  divergence — build_result used a module `_DB_PATH`, probe used `default_db_path()`).
+- `codeintel reset` sweeps every per-model cache file (scoped by project, or `--all`); changing a
+  repo's `model` switches it to a fresh file, and the old one is reclaimed by `codeintel reset`.
+
+### Hardened (from an adversarial review pass)
+- The review confirmed the cross-project wipe is now physically impossible; two follow-ups: `code.status`
+  now reports the repo's *configured* model (was hardcoded to the default), and the `index` CLI
+  degrades with a message instead of a traceback if setup fails (e.g. an unresolvable home dir).
+
+### Tests
+- New `tests/test_model_dimension.py`: the cross-project-no-wipe regression (fails against the
+  reverted global-wipe approach), self-dimensioning, dimension-mismatch skip (never wipes),
+  `default_db_path` invariants, reset sweeping model files while sparing other projects, and
+  probe/build_result resolving the same per-model file. Full suite: 295 passed.
+
 ## [0.8.2] — 2026-08-14
 
 Two compatibility fixes, both found by dogfooding.

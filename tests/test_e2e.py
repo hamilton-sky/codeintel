@@ -58,8 +58,7 @@ def fixture_repo(tmp_path):
 
 
 def test_e2e_search_returns_ranked_result(fixture_repo, tmp_path, monkeypatch):
-    db_path = tmp_path / "e2e_semantic.db"
-    monkeypatch.setattr(_sem_mod, "_DB_PATH", db_path)
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(_sem_mod, "_DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):

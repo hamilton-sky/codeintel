@@ -157,7 +157,7 @@ def test_semantic_probe_real_db_indexed(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     _make_db(db_path, os.path.realpath(str(repo)))
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda: str(db_path))
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
 
     r = SemanticProvider().probe(str(repo))
     assert r["installed"] is True and r["runnable"] is True and r["repo_indexed"] is True
@@ -172,7 +172,7 @@ def test_semantic_probe_real_db_indexed(tmp_path, monkeypatch):
 
 def test_semantic_probe_no_db(tmp_path, monkeypatch):
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda: str(tmp_path / "missing.db"))
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(tmp_path / "missing.db"))
     r = SemanticProvider().probe(str(tmp_path))
     assert r["runnable"] is True and r["repo_indexed"] is False
     assert "codeintel index" in r["remediation"]
@@ -182,7 +182,7 @@ def test_semantic_probe_corrupt_db(tmp_path, monkeypatch):
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
     db_path = tmp_path / "semantic.db"
     db_path.write_bytes(b"this is not a sqlite database")
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda: str(db_path))
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
     r = SemanticProvider().probe(str(tmp_path))
     assert r["installed"] is True and r["runnable"] is False  # unreadable → not runnable
     assert r["remediation"]

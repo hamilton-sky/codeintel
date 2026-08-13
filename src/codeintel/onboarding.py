@@ -63,7 +63,7 @@ def _bounded_index(project_root: str, *, timeout_s: float, out) -> dict:
     def _work() -> None:
         try:
             cfg = load_config(project_root)
-            db_path = default_db_path()
+            db_path = default_db_path(str(cfg.get("model") or ""))
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
             db = SemanticDb(db_path)
             try:

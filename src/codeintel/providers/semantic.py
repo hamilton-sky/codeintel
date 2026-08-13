@@ -12,8 +12,6 @@ try:
 except ImportError:
     _DEPS_OK = False
 
-_DB_PATH = pathlib.Path.home() / ".codeintel" / "semantic.db"
-
 
 class SemanticProvider:
     """Real semantic search provider backed by SemanticDb and Searcher."""
@@ -23,9 +21,10 @@ class SemanticProvider:
         return _DEPS_OK
 
     def probe(self, project_root: str) -> dict:
-        """Never-raise health check for the doctor. READ-ONLY and MODEL-FREE: it opens the db
-        read-only and counts this repo's chunks — it must NOT call SemanticDb.init() (a schema
-        write) or load fastembed. ``repo_indexed`` is project-scoped (mirrors Searcher.has_index)."""
+        """Never-raise health check for the doctor. READ-ONLY: it opens the db read-only and counts
+        this repo's chunks — it must NOT call SemanticDb.init() (a schema write) or LOAD fastembed.
+        It does resolve the project's ``model`` *name* (a cheap config read, no model load) to pick
+        the per-model cache file. ``repo_indexed`` is project-scoped (mirrors Searcher.has_index)."""
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False,
@@ -36,8 +35,10 @@ class SemanticProvider:
         import sqlite3
 
         try:
+            from codeintel.config import load_config
             from codeintel.semantic_db import default_db_path
-            db_path = default_db_path()
+            model = str(load_config(project_root).get("model") or "")
+            db_path = default_db_path(model)
         except Exception:
             db_path = ""
         if not db_path or not os.path.exists(db_path):
@@ -59,8 +60,8 @@ class SemanticProvider:
         except Exception as exc:
             return {
                 "installed": True, "runnable": False, "repo_indexed": False,
-                "detail": f"semantic.db present but unreadable ({type(exc).__name__})",
-                "remediation": "rm ~/.codeintel/semantic.db && codeintel index <root>",
+                "detail": f"semantic cache present but unreadable ({type(exc).__name__})",
+                "remediation": f"codeintel reset {project_root} && codeintel index {project_root}",
             }
         if count > 0:
             return {
@@ -95,11 +96,16 @@ class SemanticProvider:
             from codeintel.indexer import Indexer
             from codeintel.searcher import Searcher
 
+            from codeintel.semantic_db import default_db_path
+
             cfg = load_config(project_root)
             model = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
 
-            _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-            db = SemanticDb(str(_DB_PATH))
+            # Per-model cache file: index and search for this repo use the SAME model → same file,
+            # so a repo configured with a different model can never corrupt or wipe another's rows.
+            db_path = default_db_path(model)
+            pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            db = SemanticDb(db_path)
             db.init()
 
             searcher = Searcher(db, model_name=model)

@@ -97,7 +97,7 @@ def test_available_when_deps_present(monkeypatch):
 def test_search_returns_matches(tmp_path, monkeypatch):
     (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
     db_path = tmp_path / "semantic.db"
-    monkeypatch.setattr("codeintel.providers.semantic._DB_PATH", db_path)
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
@@ -135,7 +135,7 @@ def test_empty_index_safe_null(tmp_path, monkeypatch):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
     db_path = tmp_path / "semantic.db"
-    monkeypatch.setattr("codeintel.providers.semantic._DB_PATH", db_path)
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
@@ -155,7 +155,7 @@ def test_empty_index_safe_null(tmp_path, monkeypatch):
 def test_below_floor_returns_none(tmp_path, monkeypatch):
     (tmp_path / "code.py").write_text("x = 1\n")
     db_path = tmp_path / "semantic.db"
-    monkeypatch.setattr("codeintel.providers.semantic._DB_PATH", db_path)
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding), \
@@ -195,7 +195,7 @@ def test_context_op_is_accepted(monkeypatch):
 
 def test_provider_never_raises(tmp_path, monkeypatch):
     db_path = tmp_path / "semantic.db"
-    monkeypatch.setattr("codeintel.providers.semantic._DB_PATH", db_path)
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
     with patch("codeintel.semantic_db.SemanticDb.init", side_effect=RuntimeError("injected")):

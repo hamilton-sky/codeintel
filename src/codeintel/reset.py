@@ -5,12 +5,23 @@ module is pure (dry-run by default via ``apply=False``).
 """
 from __future__ import annotations
 
+import glob
 import os
 import sqlite3
 
 import sqlite_vec
 
 from codeintel.semantic_db import default_db_path
+
+
+def _cache_files() -> list[str]:
+    """Every per-model cache file (``semantic.db`` + ``semantic-<hash>.db``). Reset must sweep all
+    of them: a repo's rows can live in any model's file, and a model switch leaves orphans behind."""
+    base = os.path.dirname(default_db_path())
+    try:
+        return sorted(glob.glob(os.path.join(base, "semantic*.db")))
+    except Exception:
+        return []
 
 
 def _reset_scoped(project_root: str, path: str, apply: bool) -> dict:
@@ -37,9 +48,12 @@ def _reset_scoped(project_root: str, path: str, apply: bool) -> dict:
         count = int(row[0]) if row else 0
 
         if apply:
-            conn.execute(
-                "DELETE FROM code_embeddings WHERE chunk_id IN "
-                "(SELECT chunk_id FROM chunk_hashes WHERE project_root=?)", (real,))
+            try:
+                conn.execute(
+                    "DELETE FROM code_embeddings WHERE chunk_id IN "
+                    "(SELECT chunk_id FROM chunk_hashes WHERE project_root=?)", (real,))
+            except Exception:
+                pass  # code_embeddings is created lazily at first embed — may not exist yet
             conn.execute("DELETE FROM chunk_hashes WHERE project_root=?", (real,))
             conn.commit()
 
@@ -88,13 +102,27 @@ def run_reset(
     apply: bool = False,
     db_path: str | None = None,
 ) -> dict:
-    """Drop indexed rows for ``project_root`` (or, with ``all_projects``, remove the whole
-    cache db file plus its -wal/-shm siblings). ``apply=False`` is a dry-run: count only,
-    delete nothing. Never raises."""
+    """Drop indexed rows for ``project_root`` (or, with ``all_projects``, remove the whole cache —
+    every per-model db file plus their -wal/-shm siblings). ``apply=False`` is a dry-run: count
+    only, delete nothing. Never raises.
+
+    An explicit ``db_path`` operates on exactly that one file (the test seam / a targeted reset);
+    otherwise reset sweeps EVERY per-model cache file, so a repo's rows are cleared no matter which
+    model's file they landed in, and model-switch orphans are reclaimed."""
     try:
-        path = db_path if db_path is not None else default_db_path()
+        if db_path is not None:
+            return _reset_all(db_path, apply) if all_projects else _reset_scoped(project_root, db_path, apply)
+
+        files = _cache_files() or [default_db_path()]
         if all_projects:
-            return _reset_all(path, apply)
-        return _reset_scoped(project_root, path, apply)
+            count = sum(_reset_all(p, apply)["count"] for p in files)
+            verb = "removed" if apply else "would remove"
+            return {"ok": True, "mode": "all", "target": "ALL", "count": count,
+                    "applied": bool(apply), "detail": f"{verb} {count} index file(s) across all models"}
+        real = os.path.realpath(str(project_root))
+        count = sum(_reset_scoped(project_root, p, apply)["count"] for p in files)
+        verb = "removed" if apply else "found"
+        return {"ok": True, "mode": "scoped", "target": real, "count": count, "applied": bool(apply),
+                "detail": f"{verb} {count} indexed chunk(s) for this project"}
     except Exception as exc:
         return {"ok": True, "applied": apply, "detail": f"reset-error: {type(exc).__name__}: {exc}"}

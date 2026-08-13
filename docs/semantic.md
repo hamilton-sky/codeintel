@@ -103,7 +103,14 @@ indexing and query embedding. Embeddings are stored as raw float32 bytes in `sql
 
 ### DB location
 
-`~/.codeintel/semantic.db` (created automatically on first use).
+`~/.codeintel/semantic.db` for the default model (created automatically on first use). The cache is
+**partitioned by embedding model**: a repo configured with a non-default `model` (`.codeintel.toml`)
+uses its own `~/.codeintel/semantic-<hash>.db`. A sqlite-vec vec0 table is single-dimension and
+different models' vectors are incompatible, so isolating them by file means different-model repos
+can never corrupt or wipe each other; the vec0 table is sized to the model's real vector length on
+first embed. Rows are still partitioned by `project_root` within a shared-model file. `codeintel
+reset` sweeps every model file; changing a repo's `model` just switches it to a different file
+(reclaim the old one with `codeintel reset`).
 
 ## Search behaviour
 

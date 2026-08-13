@@ -519,6 +519,11 @@ class Indexer:
                     break
                 try:
                     vec = embeddings[j]
+                    # Create code_embeddings lazily, sized to this vector (self-dimensioning). A
+                    # returned dim != len(vec) means the file already holds a different dimension
+                    # (only reachable on a DEFAULT_MODEL size bump) — skip rather than corrupt/mix.
+                    if self.db.ensure_embeddings_table(len(vec)) != len(vec):
+                        continue
                     vec_bytes = struct.pack(f"{len(vec)}f", *vec)
                     # sqlite-vec's vec0 virtual table does NOT honor INSERT OR REPLACE — it raises
                     # UNIQUE on an existing chunk_id instead of replacing. So re-embedding a chunk
