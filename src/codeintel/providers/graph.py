@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -107,6 +108,13 @@ class GraphProvider:
         older/mocked shape — accept both. Prefer an exact ``root_path`` match; otherwise the
         LONGEST prefix match (so ``.../project/codeintel`` resolves to codeintel, not its
         parent ``.../project``). Pure + static so ``_resolve_project`` and ``probe`` share it."""
+        # Normalize the input to an absolute realpath: the backend stores absolute root_paths, so a
+        # relative ``project_root`` (e.g. `codeintel map .` passing ".") would otherwise never match
+        # — the bug where the map/query silently reported "not indexed" from inside the repo.
+        try:
+            project_root = os.path.realpath(project_root)
+        except Exception:
+            pass
         entries = raw.get("projects", []) if isinstance(raw, dict) else raw
         if not isinstance(entries, list):
             return None

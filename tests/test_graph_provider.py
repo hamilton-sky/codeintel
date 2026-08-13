@@ -1,10 +1,23 @@
 """GraphProvider tests: never-raise invariant and key behavioral guarantees."""
 from __future__ import annotations
 
+import os
 import subprocess
 
 from codeintel.providers.graph import GraphProvider
 from codeintel.server import code_status_handler
+
+
+def test_match_project_resolves_a_relative_path(tmp_path, monkeypatch):
+    # The backend stores absolute root_paths, so a relative project_root (e.g. `codeintel map .`)
+    # must be normalized before matching — otherwise resolution fails from inside the repo and the
+    # map/graph query silently reports "not indexed" (the map-stub bug).
+    real = os.path.realpath(str(tmp_path))
+    raw = {"projects": [{"name": "myrepo", "root_path": real}]}
+    monkeypatch.chdir(tmp_path)
+    assert GraphProvider._match_project(raw, ".") == "myrepo"      # relative resolves now
+    assert GraphProvider._match_project(raw, real) == "myrepo"     # absolute still works
+    assert GraphProvider._match_project(raw, os.path.join(real, "src")) == "myrepo"  # subdir prefix
 
 
 # ---------------------------------------------------------------------------

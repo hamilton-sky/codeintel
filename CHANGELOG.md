@@ -4,6 +4,32 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] — 2026-08-14
+
+Two compatibility fixes, both found by dogfooding.
+
+### Fixed
+- **Codex registration wrote the wrong file/format.** `codeintel install --agent codex` wrote a
+  Claude-style JSON `mcpServers` block to `~/.codex/config.json`, but Codex CLI reads MCP servers
+  from `~/.codex/config.toml` as `[mcp_servers.<name>]` TOML — so codeintel was never actually
+  registered with Codex. Now writes the correct TOML table, merging into (and preserving) an
+  existing `config.toml`, idempotently. (The MCP server itself was always protocol-compatible; only
+  the installer was wrong.)
+- **Graph ops failed for a relative `--project-root`.** `GraphProvider._match_project` compared the
+  raw path against the backend's absolute `root_path`, so `codeintel map .` — and any graph query
+  with a relative path — resolved to "not indexed" from inside the repo. That was the actual root
+  cause of the map emitting a stub (0.8.1 stopped the stub from clobbering a good map; this stops
+  the stub). The path is normalized with `realpath` before matching.
+
+### Tests
+- New `tests/test_installer.py` (the installer had zero tests — how the Codex bug shipped): Codex
+  TOML registration + idempotency + config preservation, the JSON agents, unknown-agent. Plus a
+  graph relative-path resolution test.
+
+_(An embedding-model-dimension safety fix was prepared for this release but reverted before publish:
+adversarial review found it could wipe other projects' rows in the shared cache when repos use
+different per-project `model` settings. It needs a redesign — tracked as a follow-up.)_
+
 ## [0.8.1] — 2026-08-13
 
 ### Fixed
