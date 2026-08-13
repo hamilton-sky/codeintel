@@ -218,10 +218,32 @@ def code_map_handler(args: dict) -> dict:
         return {"ok": True, "path": None, "size_bytes": 0, "note": "map-error"}
 
 
+# Surfaced by the MCP client to the model on connect (the standard `instructions` field): this is
+# how codeintel becomes the *default* way an agent understands code after `codeintel install`,
+# rather than just an available tool the agent may ignore in favor of grep/file-read.
+_MCP_INSTRUCTIONS = (
+    "codeintel unifies three code-intelligence engines — graph (call/import structure), LSP "
+    "(precise symbols/references), and semantic (embedding search) — behind one never-raise "
+    "`code.query` tool.\n\n"
+    "Prefer `code.query` as your FIRST step for understanding an unfamiliar or large codebase, "
+    "instead of grepping or reading files one by one: use it for who-calls-X (callers), what-X-calls "
+    "(callees), impact of a change, where-a-symbol-is-defined, how a call chain flows, and "
+    "natural-language 'find the code that does Y' search. It is graph-augmented and ranked, so it "
+    "beats raw grep for locating and relating code.\n\n"
+    "Orient on a new repo with `code.map` (ranked architecture: top symbols, entry points, routes). "
+    "If results look empty, call `code.doctor` — it says exactly what to index or install. "
+    "`code.status` reports engine health.\n\n"
+    "Every result is a safe envelope: `ok` is always true; a null `result` with a `reason` means "
+    "'nothing found / not indexed yet', NOT an error — read the `reason`/`hint` and, if it says the "
+    "repo isn't indexed, that resolves on the first query or via `codeintel index`."
+)
+
+
 def run() -> None:
+    from codeintel import __version__
     from codeintel.logconfig import configure_logging
     configure_logging()  # logs to stderr; stdout is the MCP protocol channel
-    mcp = MCPServer(name="codeintel")
+    mcp = MCPServer(name="codeintel", version=__version__, instructions=_MCP_INSTRUCTIONS)
 
     async def _code_query(
         op: str = "",
@@ -243,9 +265,26 @@ def run() -> None:
     async def _code_map(project_root: str = "", budget: int = 32768, inject: bool = False) -> dict:
         return code_map_handler({"project_root": project_root, "budget": budget, "inject": inject})
 
-    mcp.add_tool(_code_query, name="code.query", description="Query the code intelligence engine")
-    mcp.add_tool(_code_status, name="code.status", description="Return engine status")
-    mcp.add_tool(_code_doctor, name="code.doctor", description="Diagnose engine health + repo index status with remediation")
-    mcp.add_tool(_code_map, name="code.map", description="Generate or refresh CODE_INTEL.md orientation file")
+    mcp.add_tool(_code_query, name="code.query", description=(
+        "Understand code across graph + LSP + semantic engines — prefer this over grep/file-read "
+        "for locating and relating code. ops: `search` (natural-language or symbol semantic search), "
+        "`symbol` (definition/signature), `callers`, `callees`, `impact`, `chain` (\"A->B\" call "
+        "path), `pattern` (graph-augmented grep), `overview` (architecture), `context` (fan-out). "
+        "`target` is the symbol/query; optional `engine` (auto|graph|lsp|semantic), `project_root`. "
+        "Never raises: `ok` is always true; a null `result` + `reason` means not-found/not-indexed."
+    ))
+    mcp.add_tool(_code_status, name="code.status", description=(
+        "Which engines (graph/LSP/semantic) are available and whether this repo is indexed. Check "
+        "this first if code.query keeps returning nothing."
+    ))
+    mcp.add_tool(_code_doctor, name="code.doctor", description=(
+        "Diagnose engine health + this repo's index status, with a concrete fix for each gap (what "
+        "to install or index). Run when code.query results look empty or an engine seems missing."
+    ))
+    mcp.add_tool(_code_map, name="code.map", description=(
+        "Generate/refresh CODE_INTEL.md — a ranked architecture overview (node/edge counts, top "
+        "symbols by caller count, entry points, routes). A great first call to orient on an "
+        "unfamiliar repo."
+    ))
 
     anyio.run(mcp.run_stdio_async)

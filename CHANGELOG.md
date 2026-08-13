@@ -4,6 +4,20 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] — 2026-08-14
+
+### Added
+- **codeintel now advertises itself to agents**, so after `codeintel install` an agent reaches for
+  it by default rather than falling back to grep/file-read. The MCP server sets the standard
+  `instructions` field (prefer `code.query` for understanding code; how to read the never-raise
+  safe-null envelope) and reports its `version`; the four tool descriptions were rewritten from
+  throwaway one-liners into real "use this for callers/callees/impact/search/orientation" guidance.
+  Standard MCP — works across clients (Claude, Codex, …) with no hooks written into a user's config.
+
+### Tests
+- `tests/test_mcp_server.py`: the server is constructed with non-empty `instructions` (mentioning
+  `code.query`, grep, and the reason envelope) and rich per-tool descriptions. Full suite: 296 passed.
+
 ## [0.8.3] — 2026-08-14
 
 Embedding-model / vector-dimension safety, done right — an architect-designed replacement for the
