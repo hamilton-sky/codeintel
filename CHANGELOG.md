@@ -4,6 +4,49 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-08-14
+
+Unlocks graph-engine capabilities the wrapped `codebase-memory-mcp` backend already computes but that
+`code.query` never surfaced. The tool wrapped a rich backend and exposed only a search/trace subset;
+this release adds the agent-facing ops that make the graph engine useful for *changing* code, not just
+reading it. Designed via an ADR (`docs/adr/0001-graph-capability-unlock.md`).
+
+### Added
+- **`changed` — impact of your uncommitted edits.** The flagship pre-edit op: `code.query op=changed`
+  runs the backend's `detect_changes` and reports which files changed and which symbols those changes
+  ripple into — the thing a coding agent needs before an edit and can't get from grep or embeddings.
+  Never cached (it reads the live git worktree, which the content-hash cache key can't see).
+- **`hotspots` — complexity / fan-in risk.** Highest cyclomatic+cognitive-complexity, highest-fan-in
+  symbols (client-sorted) — the "where is this codebase most dangerous to change" map.
+- **`deadcode` — unreferenced non-test symbols.** In-degree-0 functions, tests and builtins filtered
+  out, biggest first.
+- **`chain` is now risk-labeled** — each call-chain hop carries a `[risk: …]` badge when the backend
+  classifies it.
+- **Agent discoverability**: the `code.query` tool description and the MCP server `instructions` now
+  name the new ops and tell an agent to run `changed` before editing.
+
+Each op maps to a backend method (`detect_changes`; `search_graph` with degree filters + complexity
+metrics; `trace_path` with `risk_labels`), rendered to bounded markdown behind the same never-raise
+safe-null contract. An empty scan (clean tree, no dead code) is a true answer (an informative string),
+not a lookup miss (safe-null).
+
+### Fixed (from adversarial review, before release)
+- **Cache staleness on the fan-out path.** `engine=both`/`all` + `changed` could serve a stale diff —
+  the cache bypass now covers the fan-out path, not just single-engine dispatch.
+- **Fragile file-marker filter.** `changed` separated real symbols from bare file/module markers by a
+  `"/"-in-label` heuristic, which leaked root-level markers (`main.py`) as fake symbols and would drop
+  real symbols whose qualified names contain `/` (e.g. Go's `github.com/org/pkg.Func`). Now filtered
+  structurally (drop when `label == file_path`), correct in both directions.
+- **False "working tree clean".** A malformed (non-`detect_changes`) backend dict rendered a cheerful
+  clean-tree message instead of degrading to safe-null; it now requires the real response shape.
+- Dogfooding fix: the backend returns duplicate `changed_files` (staged+unstaged) — now deduped.
+
+### Tests
++19 (318 passed, 1 skipped): the three new ops against captured real backend shapes; risk-label
+rendering; cache bypass on **both** single-engine and fan-out paths; the marker filter in both
+directions (root-level drop + slash-qualified-name keep); malformed-dict → safe-null; never-raise for
+all three ops. A `/simplify` pass also collapsed ~40 lines of duplicated scan→render into one helper.
+
 ## [0.8.5] — 2026-08-14
 
 More dogfooding fixes — from driving the *published* tool over real TS/React repos (brightsky-ai,

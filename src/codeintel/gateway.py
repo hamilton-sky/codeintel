@@ -20,10 +20,20 @@ _AUTO_ENGINE: dict[str, str] = {
     "chain": "graph",
     "pattern": "graph",
     "overview": "graph",
+    "changed": "graph",
+    "changes": "graph",
+    "deadcode": "graph",
+    "hotspots": "graph",
     "symbol": "lsp",
     "search": "semantic",
     "context": "both",  # fan-out; resolved in Phase 4
 }
+
+# Ops whose answer depends on live, unhashable state (the git worktree) rather than the indexed
+# content the cache key is built from — caching them would serve a stale answer within a freshness
+# generation. `changed` reads uncommitted edits; `deadcode`/`hotspots` are pure functions of the
+# index and stay cached (correctly keyed by the freshness generation).
+_UNCACHED_OPS: frozenset[str] = frozenset({"changed", "changes"})
 
 
 class Gateway:
@@ -199,9 +209,17 @@ class Gateway:
             except Exception:
                 freshness = 0
 
+            # Ops that read live, unhashable state (the git worktree) must never be served from the
+            # content-hash cache — it can't see uncommitted edits. Computed ONCE here so it covers
+            # BOTH the fan-out and the single-engine paths below (a miss on either serves a stale diff).
+            uncacheable = op_str in _UNCACHED_OPS
+
             # Fan-out: dispatch to multiple engines concurrently and merge
             if engine_str in _FANOUT_ENGINES:
-                cached_result = self._cache.get(op_str, target_str, engine_str, root_str, freshness)
+                cached_result = (
+                    None if uncacheable
+                    else self._cache.get(op_str, target_str, engine_str, root_str, freshness)
+                )
                 if cached_result is not None:
                     return {**cached_result, "cached": True}
                 if engine_str == "both":
@@ -210,11 +228,15 @@ class Gateway:
                     engines = ["graph", "lsp", "semantic"]
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
-                self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
+                if not uncacheable:
+                    self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
                 return result
 
-            # Single-engine dispatch
-            cached_result = self._cache.get(op_str, target_str, engine_str, root_str, freshness)
+            # Single-engine dispatch (`uncacheable`, computed above, also guards this path).
+            cached_result = (
+                None if uncacheable
+                else self._cache.get(op_str, target_str, engine_str, root_str, freshness)
+            )
             if cached_result is not None:
                 return {**cached_result, "cached": True}
             provider = self._provider_for(engine_str)
@@ -236,7 +258,8 @@ class Gateway:
                 if lsp_result.get("result") is not None:
                     result = lsp_result
 
-            self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
+            if not uncacheable:
+                self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
             return result
 
         except Exception as exc:

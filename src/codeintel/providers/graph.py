@@ -28,6 +28,13 @@ class GraphProvider:
                              or ``{"status": "ambiguous", "suggestions": [...]}``.
       * ``search_code``    → ``{"results": [{node, qualified_name, label, file, match_lines}]}``.
       * ``get_architecture`` → ``{project, total_nodes, total_edges, node_labels, edge_types, languages}``.
+      * ``search_graph``   → ``{"total": N, "results": [{name, qualified_name, file_path, in_degree,
+                             out_degree, complexity, cognitive, lines, is_test, is_entry_point}, ...]}``
+                             — degree filters (max_degree/min_degree/exclude_entry_points) + metrics.
+      * ``detect_changes`` → ``{"changed_files": [path, ...], "impacted_symbols": [{qualified_name,
+                             name, file_path}, ...], "changed_count": N, "depth": D}``. changed_files
+                             come DUPLICATED (staged+unstaged); impacted_symbols interleaves bare file
+                             markers (label == file_path) with real symbols.
 
     Call graph: module-level function calls are recorded as ``USAGE`` edges from the calling
     ``Module`` node; method/function-to-method calls are ``CALLS`` edges. "Who calls X" therefore
@@ -226,6 +233,61 @@ class GraphProvider:
         badge = f" [{edge}]" if edge else ""
         return f"- {label}{badge}{tail}"
 
+    def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> Optional[list[dict]]:
+        """``search_graph`` → parsed result dicts. ``None`` = backend failed/malformed (→ safe-null
+        upstream); ``[]`` = backend answered but nothing matched (→ an informative empty render).
+        Preserving that distinction is why the repo-scan ops return a string on empty-success but
+        ``None`` on can't-answer. Never raises."""
+        raw = self._run("search_graph", {"project": project, **extra}, timeout_ms)
+        if raw is None:
+            return None
+        results = raw.get("results") if isinstance(raw, dict) else raw
+        if not isinstance(results, list):
+            return None
+        return [r for r in results if isinstance(r, dict)]
+
+    @staticmethod
+    def _looks_like_test(fp: str, name: str) -> bool:
+        """Heuristic test detection. The backend's own ``is_test`` flag comes back False for pytest
+        functions (verified by dogfooding), so dead-code / hotspot scans must filter by path+name
+        or drown in test noise — this is the single most load-bearing renderer detail."""
+        f = (fp or "").lower()
+        if f.startswith(("tests/", "test/")) or "/tests/" in f or "/test/" in f:
+            return True
+        base = f.rsplit("/", 1)[-1]
+        return (base.startswith("test_") or base.endswith("_test.py")
+                or base == "conftest.py" or (name or "").startswith("test_"))
+
+    @staticmethod
+    def _is_synthetic(fp: str) -> bool:
+        """Builtins / generated nodes carry an empty or ``<...>`` file_path (e.g. <python-builtins>)."""
+        return (not fp) or fp.startswith("<")
+
+    @classmethod
+    def _is_noise(cls, r: dict) -> bool:
+        """Rows a code-quality scan should hide: builtins/generated nodes and test code (the backend's
+        own ``is_test`` is unreliable — see ``_looks_like_test``). Shared by deadcode + hotspots."""
+        fp = str(r.get("file_path") or "")
+        return cls._is_synthetic(fp) or cls._looks_like_test(fp, str(r.get("name") or ""))
+
+    def _render_scan(self, kept: list[dict], title: str, cap: int, meta_fn) -> str:
+        """Render a repo-scan op's markdown from filtered+sorted rows: ``## title (count)`` + one
+        ``- label (file)  [meta]`` line per row (top ``cap``) + a ``+N more`` note when truncated.
+        ``meta_fn(row) -> list[str]`` supplies the per-op metric badge, so deadcode/hotspots share
+        the row format and truncation note (the drift-prone parts) and differ only in their metrics."""
+        lines = []
+        for r in kept[:cap]:
+            label = str(r.get("qualified_name") or r.get("name") or "?")
+            fp = str(r.get("file_path") or "")
+            meta = meta_fn(r)
+            badge = f"  [{', '.join(meta)}]" if meta else ""
+            tail = f"  ({fp})" if fp else ""
+            lines.append(f"- {label}{tail}{badge}")
+        body = "\n".join(lines)
+        if len(kept) > cap:
+            body += f"\n… (+{len(kept) - cap} more)"
+        return f"## {title} ({len(kept)})\n" + body
+
     # ------------------------------------------------------------------ ops
 
     def _op_callers(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
@@ -269,7 +331,7 @@ class GraphProvider:
             return None
         raw = self._run(
             "trace_path",
-            {"project": project, "function_name": src, "mode": "calls"},
+            {"project": project, "function_name": src, "mode": "calls", "risk_labels": True},
             timeout_ms,
         )
         if not isinstance(raw, dict):
@@ -291,9 +353,11 @@ class GraphProvider:
                     nm = str(it.get("name") or "?")
                     qn = str(it.get("qualified_name") or "")
                     hop = it.get("hop")
+                    risk = it.get("risk")
                     label = qn or nm
                     hop_s = f" [hop {hop}]" if hop is not None else ""
-                    out.append(f"- {label}{hop_s}")
+                    risk_s = f" [risk: {risk}]" if risk else ""
+                    out.append(f"- {label}{hop_s}{risk_s}")
             return out
 
         callees = _fmt(raw.get("callees"))
@@ -378,6 +442,125 @@ class GraphProvider:
         except Exception:
             return None
 
+    # -------------------------------------------------- repo-scan ops (no target)
+    # These key on the whole index / git worktree, not a symbol — `target` is ignored. A clean/empty
+    # scan is a TRUE answer ("nothing changed", "no dead code"), not a lookup miss, so they return an
+    # informative string; only a backend failure returns None (→ safe-null upstream).
+
+    def _op_changed(self, project: str, timeout_ms: int) -> Optional[str]:
+        """Impact of the working tree's UNCOMMITTED changes: changed files → impacted symbols. The
+        flagship pre-edit op. detect_changes drives a backend-side reindex of the changed files, so
+        it gets a higher timeout floor than a plain read."""
+        try:
+            raw = self._run("detect_changes", {"project": project}, max(timeout_ms, 15000))
+            if not isinstance(raw, dict):
+                return None
+            files_raw = raw.get("changed_files")
+            syms_raw = raw.get("impacted_symbols")
+            # Guard against a non-detect_changes dict (e.g. a backend error object): if NEITHER key
+            # is a list, this isn't a real response — degrade to safe-null, NOT a false "clean tree".
+            if not isinstance(files_raw, list) and not isinstance(syms_raw, list):
+                return None
+            # The backend returns DUPLICATE changed_files (staged + unstaged views) — dedupe,
+            # order-preserving (dogfooding showed 6 real files reported as 11).
+            files, seen_f = [], set()
+            for f in files_raw if isinstance(files_raw, list) else []:
+                if isinstance(f, str) and f not in seen_f:
+                    seen_f.add(f)
+                    files.append(f)
+            # impacted_symbols interleaves real symbols with bare file/module markers whose label IS
+            # its own path (name == qualified_name == file_path). Drop those structurally by comparing
+            # label to file_path — this catches a root-level marker (`main.py`, no "/") AND avoids
+            # dropping a real symbol whose qualified name legitimately contains "/" (e.g. Go's
+            # github.com/org/pkg.Func). Files are already listed above; dedupe the rest.
+            syms, seen_s = [], set()
+            for s in syms_raw if isinstance(syms_raw, list) else []:
+                if not isinstance(s, dict):
+                    continue
+                label = str(s.get("qualified_name") or s.get("name") or "").strip()
+                fp = str(s.get("file_path") or s.get("file") or "")
+                if not label or label == fp:
+                    continue
+                key = (label, fp)
+                if key in seen_s:
+                    continue
+                seen_s.add(key)
+                syms.append((label, fp))
+            if not files and not syms:
+                return "## Changes impact\n(working tree clean — no uncommitted changes)"
+            parts = [f"## Changes impact ({len(files)} files → {len(syms)} symbols)"]
+            if files:
+                parts.append(f"### Changed files ({len(files)})")
+                parts.extend(f"- {f}" for f in files[:40])
+                if len(files) > 40:
+                    parts.append(f"… (+{len(files) - 40} more)")
+            if syms:
+                parts.append(f"### Impacted symbols ({len(syms)})")
+                for label, fp in syms[:40]:
+                    tail = f"  ({fp})" if fp and fp != label else ""
+                    parts.append(f"- {label}{tail}")
+                if len(syms) > 40:
+                    parts.append(f"… (+{len(syms) - 40} more)")
+            return "\n".join(parts)
+        except Exception:
+            return None
+
+    def _op_deadcode(self, project: str, timeout_ms: int) -> Optional[str]:
+        """Unreferenced non-test symbols (dead-code candidates): in-degree 0 Functions, entry points
+        excluded server-side, tests/builtins filtered client-side, biggest first."""
+        try:
+            rows = self._search_symbols(
+                {"label": "Function", "max_degree": 0, "exclude_entry_points": True, "limit": 200},
+                project, timeout_ms,
+            )
+            if rows is None:
+                return None
+            # `is_entry_point` is deliberate belt-and-suspenders on top of the server-side
+            # exclude_entry_points flag: it's an external-backend flag we don't independently verify,
+            # and main() shown as "dead" would be a visible embarrassment — one cheap client check.
+            kept = [r for r in rows if not self._is_noise(r) and not r.get("is_entry_point")]
+            if not kept:
+                return "## Dead-code candidates\n(none found)"
+            kept.sort(key=lambda r: r.get("lines") or 0, reverse=True)
+
+            def _meta(r: dict) -> list[str]:
+                m = []
+                if r.get("out_degree") is not None:
+                    m.append(f"out:{r.get('out_degree')}")
+                if r.get("lines") is not None:
+                    m.append(f"{r.get('lines')} lines")
+                return m
+
+            return self._render_scan(kept, "Dead-code candidates", 30, _meta)
+        except Exception:
+            return None
+
+    def _op_hotspots(self, project: str, timeout_ms: int) -> Optional[str]:
+        """Highest complexity / fan-in symbols (refactor-risk hotspots). search_graph returns rows
+        UNSORTED (name order) and caps at ``limit``, so we over-request then sort CLIENT-SIDE by
+        (complexity, in_degree). Tests/builtins filtered out."""
+        try:
+            rows = self._search_symbols(
+                {"label": "Function", "min_degree": 1, "limit": 200}, project, timeout_ms,
+            )
+            if rows is None:
+                return None
+            kept = [r for r in rows if not self._is_noise(r)]
+            if not kept:
+                return "## Complexity / fan-in hotspots\n(none found)"
+            kept.sort(key=lambda r: (r.get("complexity") or 0, r.get("in_degree") or 0), reverse=True)
+
+            def _meta(r: dict) -> list[str]:
+                m = [f"in:{r.get('in_degree') or 0} out:{r.get('out_degree') or 0}",
+                     f"cx:{r.get('complexity') or 0} cog:{r.get('cognitive') or 0}"]
+                if r.get("lines") is not None:
+                    m.append(f"{r.get('lines')} lines")
+                return m
+
+            return self._render_scan(kept, "Complexity / fan-in hotspots", 25, _meta)
+        except Exception:
+            return None
+
     def build_result(
         self,
         op: Any,
@@ -439,4 +622,10 @@ class GraphProvider:
             return self._op_pattern(target, project, timeout_ms)
         if op == "overview":
             return self._op_overview(target, project, timeout_ms)
+        if op == "changed" or op == "changes":
+            return self._op_changed(project, timeout_ms)
+        if op == "deadcode":
+            return self._op_deadcode(project, timeout_ms)
+        if op == "hotspots":
+            return self._op_hotspots(project, timeout_ms)
         return None

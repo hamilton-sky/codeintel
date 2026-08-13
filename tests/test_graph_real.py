@@ -97,6 +97,58 @@ CAP_TRACE_AMBIGUOUS = {
 }
 
 
+# detect_changes — real shape (verbatim from `codebase-memory-mcp cli detect_changes`).
+CAP_DETECT_CHANGES = {
+    "changed_files": ["src/codeintel/providers/graph.py"],
+    "changed_count": 1, "depth": 2,
+    "impacted_symbols": [
+        {"qualified_name": "codeintel.src.codeintel.providers.graph.GraphProvider._dispatch",
+         "name": "_dispatch", "file_path": "src/codeintel/providers/graph.py"}],
+}
+CAP_DETECT_CHANGES_CLEAN = {"changed_files": [], "changed_count": 0, "impacted_symbols": [], "depth": 2}
+
+# Real backend quirk (caught by dogfooding): changed_files come back DUPLICATED (staged + unstaged),
+# and impacted_symbols interleaves bare file/module markers (label is a path) with real symbols.
+CAP_DETECT_CHANGES_DUPES = {
+    "changed_files": ["src/codeintel/gateway.py", "src/codeintel/gateway.py", "src/codeintel/server.py"],
+    "impacted_symbols": [
+        {"name": "src/codeintel/gateway.py", "qualified_name": "src/codeintel/gateway.py",
+         "file_path": "src/codeintel/gateway.py"},                       # module marker → dropped
+        {"name": "Gateway", "qualified_name": "codeintel.src.codeintel.gateway.Gateway",
+         "file_path": "src/codeintel/gateway.py"},
+        {"name": "Gateway", "qualified_name": "codeintel.src.codeintel.gateway.Gateway",
+         "file_path": "src/codeintel/gateway.py"},                       # exact dup → deduped
+    ],
+}
+
+# search_graph — real envelope {"total","has_more","results":[{…rich metrics…}]}. The `is_test:false`
+# on a pytest function is the real trap the client-side path filter exists to catch.
+CAP_DEADCODE = {"total": 8, "has_more": False, "results": [
+    {"name": "test_x", "qualified_name": "codeintel.tests.test_a.test_x", "file_path": "tests/test_a.py",
+     "in_degree": 0, "out_degree": 0, "complexity": 0, "lines": 3, "is_test": False, "is_entry_point": False},
+    {"name": "unused_helper", "qualified_name": "codeintel.src.codeintel.foo.unused_helper",
+     "file_path": "src/codeintel/foo.py", "in_degree": 0, "out_degree": 2, "complexity": 4, "lines": 18,
+     "is_test": False, "is_entry_point": False},
+]}
+# Deliberately NOT complexity-sorted (backend returns name order) — proves the client-side sort.
+CAP_HOTSPOTS = {"total": 3, "has_more": False, "results": [
+    {"name": "code_status_handler", "qualified_name": "codeintel.src.codeintel.server.code_status_handler",
+     "file_path": "src/codeintel/server.py", "in_degree": 5, "out_degree": 5, "complexity": 15,
+     "cognitive": 34, "lines": 61},
+    {"name": "len", "qualified_name": "builtins.len", "file_path": "<python-builtins>",
+     "in_degree": 12, "out_degree": 0, "complexity": 0},
+    {"name": "main", "qualified_name": "codeintel.src.codeintel.__main__.main",
+     "file_path": "src/codeintel/__main__.py", "in_degree": 1, "out_degree": 41, "complexity": 33,
+     "cognitive": 110, "lines": 220},
+]}
+CAP_TRACE_RISK = {
+    "function": "code_status_handler", "direction": "both",
+    "callees": [{"name": "str", "qualified_name": "builtins.str", "hop": 2, "risk": "HIGH"}],
+    "callers": [{"name": "main", "qualified_name": "codeintel.src.codeintel.__main__.main",
+                 "hop": 1, "risk": "CRITICAL"}],
+}
+
+
 def _provider(monkeypatch, responses):
     """A GraphProvider whose _run replays captured responses keyed by method."""
     monkeypatch.setattr(
@@ -251,6 +303,174 @@ def test_run_raising_is_caught(monkeypatch):
     monkeypatch.setattr(p, "_run", _boom)
     r = p.build_result("impact", "x", [], 0, "/repo")
     assert r["ok"] is True  # never-raise holds even when _run throws mid-query
+
+
+# --------------------------------------------------------------------------- #
+# 5 — repo-scan ops: changed / deadcode / hotspots + risk-labeled chain (0.9.0)
+# --------------------------------------------------------------------------- #
+
+ROOT = "/Users/x/Documents/project/codeintel"
+
+
+def _capturing_provider(monkeypatch, method_response):
+    """Provider that records the (method, payload, timeout) of the non-list_projects call."""
+    seen: dict = {}
+    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+
+    def _cap(method, payload, timeout_ms):
+        if method == "list_projects":
+            return CAP_LIST_PROJECTS
+        seen["method"], seen["payload"], seen["timeout"] = method, payload, timeout_ms
+        return method_response
+    monkeypatch.setattr(p, "_run", _cap)
+    return p, seen
+
+
+def test_changed_renders_files_and_impacted_symbols(monkeypatch):
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert r["ok"] is True and r["result"] is not None
+    assert "Changes impact (1 files → 1 symbols)" in r["result"]
+    assert "src/codeintel/providers/graph.py" in r["result"]
+    assert "GraphProvider._dispatch" in r["result"]
+
+
+def test_changed_clean_tree_is_informative_not_null(monkeypatch):
+    # A clean tree is a TRUE answer, not a lookup miss — a string, NOT safe-null (else the op looks broken).
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES_CLEAN})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert r["result"] is not None and "working tree clean" in r["result"]
+
+
+def test_changed_dedupes_files_and_drops_module_markers(monkeypatch):
+    # Regression for the dogfood finding: 3→2 files (gateway dedup'd); 3→1 symbols (path-marker
+    # dropped, Gateway dedup'd). The header count encodes both fixes.
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES_DUPES})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert "Changes impact (2 files → 1 symbols)" in r["result"]
+    assert "Gateway" in r["result"]
+
+
+def test_changed_backend_failure_is_safe_null(monkeypatch):
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": None})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert r["ok"] is True and r["result"] is None
+
+
+def test_changed_malformed_dict_is_safe_null(monkeypatch):
+    # A dict that isn't a detect_changes shape (e.g. a backend error object) must degrade to
+    # safe-null, NOT render a false "working tree clean". (reviewer warning)
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": {"error": "boom"}})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert r["ok"] is True and r["result"] is None
+
+
+def test_changed_drops_root_level_file_markers(monkeypatch):
+    # A changed file at the project ROOT yields a marker whose label has no "/". The structural
+    # label==file_path filter drops it (a "/"-in-label check would leak it as a fake symbol).
+    resp = {"changed_files": ["main.py"], "impacted_symbols": [
+        {"name": "main.py", "qualified_name": "main.py", "file_path": "main.py"},   # root marker → dropped
+        {"name": "run", "qualified_name": "main.run", "file_path": "main.py"},      # real symbol → kept
+    ]}
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert "Changes impact (1 files → 1 symbols)" in r["result"]   # marker dropped, real symbol kept
+    assert "main.run" in r["result"]
+
+
+def test_changed_keeps_symbol_with_slash_in_qualified_name(monkeypatch):
+    # Go-style qualified names contain "/". The old "/"-in-label filter would wrongly drop them;
+    # label != file_path so the structural filter keeps them. (reviewer inverse-direction finding)
+    resp = {"changed_files": ["pkg/svc.go"], "impacted_symbols": [
+        {"name": "Serve", "qualified_name": "github.com/org/repo/pkg.Serve", "file_path": "pkg/svc.go"},
+    ]}
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert "github.com/org/repo/pkg.Serve" in r["result"]          # kept despite "/" in qualified name
+    assert "Changes impact (1 files → 1 symbols)" in r["result"]
+
+
+def test_changed_payload_ignores_target_and_raises_timeout_floor(monkeypatch):
+    p, seen = _capturing_provider(monkeypatch, CAP_DETECT_CHANGES_CLEAN)
+    p.build_result("changed", "ignored-target", [], 0, ROOT)
+    assert seen["method"] == "detect_changes"
+    assert seen["payload"] == {"project": "codeintel"}   # target never leaks into the payload
+    assert seen["timeout"] >= 15000                        # higher floor: it drives a backend reindex
+
+
+def test_deadcode_filters_tests_and_synthetic(monkeypatch):
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_DEADCODE})
+    r = p.build_result("deadcode", "", [], 0, ROOT)
+    assert r["result"] is not None
+    assert "unused_helper" in r["result"]     # real dead code kept
+    assert "test_x" not in r["result"]        # pytest fn dropped despite backend is_test:false
+
+
+def test_deadcode_all_filtered_is_informative(monkeypatch):
+    only_tests = {"total": 1, "results": [CAP_DEADCODE["results"][0]]}  # just test_x
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": only_tests})
+    r = p.build_result("deadcode", "", [], 0, ROOT)
+    assert r["result"] is not None and "none found" in r["result"]
+
+
+def test_deadcode_malformed_is_safe_null(monkeypatch):
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": {"results": "nope"}})
+    r = p.build_result("deadcode", "", [], 0, ROOT)
+    assert r["ok"] is True and r["result"] is None
+
+
+def test_deadcode_payload_has_degree_filters(monkeypatch):
+    p, seen = _capturing_provider(monkeypatch, CAP_DEADCODE)
+    p.build_result("deadcode", "", [], 0, ROOT)
+    assert seen["payload"].get("max_degree") == 0
+    assert seen["payload"].get("exclude_entry_points") is True
+    assert seen["payload"].get("label") == "Function"
+
+
+def test_hotspots_sorts_by_complexity_client_side(monkeypatch):
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_HOTSPOTS})
+    r = p.build_result("hotspots", "", [], 0, ROOT)
+    assert r["result"] is not None
+    # main (cx33) must rank above code_status_handler (cx15) despite the backend's name order.
+    assert r["result"].index("__main__.main") < r["result"].index("code_status_handler")
+    assert "builtins.len" not in r["result"]   # synthetic builtin filtered out
+    assert "cx:33" in r["result"]
+
+
+def test_hotspots_payload_has_min_degree(monkeypatch):
+    p, seen = _capturing_provider(monkeypatch, CAP_HOTSPOTS)
+    p.build_result("hotspots", "", [], 0, ROOT)
+    assert seen["payload"].get("min_degree") is not None
+    assert seen["payload"].get("label") == "Function"
+
+
+def test_chain_carries_risk_labels(monkeypatch):
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "trace_path": CAP_TRACE_RISK})
+    r = p.build_result("chain", "code_status_handler", [], 0, ROOT)
+    assert r["result"] is not None
+    assert "[risk: CRITICAL]" in r["result"] and "[risk: HIGH]" in r["result"]
+
+
+def test_chain_requests_risk_labels(monkeypatch):
+    p, seen = _capturing_provider(monkeypatch, CAP_TRACE_RISK)
+    p.build_result("chain", "code_status_handler", [], 0, ROOT)
+    assert seen["method"] == "trace_path" and seen["payload"].get("risk_labels") is True
+
+
+def test_new_ops_never_raise_when_run_throws(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+
+    def _boom(method, payload, timeout_ms):
+        if method == "list_projects":
+            return CAP_LIST_PROJECTS
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(p, "_run", _boom)
+    for op in ("changed", "deadcode", "hotspots"):
+        r = p.build_result(op, "", [], 0, ROOT)
+        assert r["ok"] is True, f"{op} must never raise"
 
 
 @pytest.mark.skipif(

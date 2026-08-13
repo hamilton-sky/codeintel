@@ -198,6 +198,36 @@ def test_cache_miss_after_content_change(tmp_path):
     assert r3["cached"] is False
 
 
+def test_changed_op_is_never_cached_but_hotspots_is():
+    # `changed` reads the live git worktree — which the content-hash cache key can't see — so it must
+    # bypass the cache or it serves a stale diff. `hotspots` is a pure function of the index → cached.
+    graph = _StubProvider("graph", "graph-data")
+    gw = Gateway(graph=graph)
+
+    c1 = gw.query(op="changed", target="", engine="graph")
+    c2 = gw.query(op="changed", target="", engine="graph")
+    assert c1["cached"] is False and c2["cached"] is False   # never a cache hit
+    assert graph.call_count == 2                              # provider re-invoked every call
+
+    graph.call_count = 0
+    h1 = gw.query(op="hotspots", target="", engine="graph")
+    h2 = gw.query(op="hotspots", target="", engine="graph")
+    assert h1["cached"] is False and h2["cached"] is True     # second served from cache
+    assert graph.call_count == 1
+
+
+def test_changed_not_cached_on_fanout_path():
+    # Regression for the reviewer's HIGH finding: the fan-out path (engine="both"/"all") must ALSO
+    # bypass the cache for `changed` — else an explicit engine="both" serves a stale diff.
+    graph = _StubProvider("graph", "graph-data")
+    lsp = _StubProvider("lsp", "lsp-data")
+    gw = Gateway(graph=graph, lsp=lsp)
+    r1 = gw.query(op="changed", target="", engine="both")
+    r2 = gw.query(op="changed", target="", engine="both")
+    assert r1["cached"] is False and r2["cached"] is False   # never a cache hit on fan-out either
+    assert graph.call_count == 2                              # re-dispatched each call, not cached
+
+
 # ---------------------------------------------------------------------------
 # Test 11: tiering off — role ignored, all ops pass
 # ---------------------------------------------------------------------------
