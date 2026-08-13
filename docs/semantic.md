@@ -26,7 +26,8 @@ Indexing is triggered automatically on every `search` call before querying.
 
 ### What gets indexed
 
-- **Extensions**: `.py` `.ts` `.js` `.go` `.rs` `.java` `.c` `.cpp` `.h` `.md`
+- **Extensions**: `.py` `.md`; TS/JS `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs`; `.go` `.rs` `.java`;
+  C/C++ `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh`
 - **Skipped directories**: `__pycache__`, `.git`, `node_modules` (and `*.egg-info`)
 
 ### Chunk strategy
@@ -48,9 +49,22 @@ Controlled by `chunk_strategy` (default `"syntax"`; set `"lines"` to force the l
   - a def longer than `max_chunk_lines` (`2 × window`) is line-windowed internally so no single
     chunk overflows the embedder (`bge-small` truncates ~512 tokens).
 
-  Anything that isn't a `.py` file, and any file that fails to parse (`SyntaxError`, a NUL byte,
-  etc.), silently falls back to line windowing — the never-raise contract holds per file, so one
-  malformed file never aborts the pass.
+  **Non-Python languages** — TypeScript/TSX, JavaScript, Go, Rust, Java, C, and C++ — are chunked
+  the same way via **tree-sitter** (`tree-sitter-language-pack`): functions/methods become whole
+  chunks and classes/impls/traits/namespaces decompose into a header plus one chunk per member,
+  through the exact same `_cover` pipeline. tree-sitter is a normal dependency but never a hard
+  requirement: if it (or a grammar) is unavailable, or a language isn't mapped, the file falls back
+  to line windowing.
+
+  Anything else (e.g. `.md`), any file that fails to parse (`SyntaxError`, a NUL byte, an
+  unavailable grammar), silently falls back to line windowing — the never-raise contract holds per
+  file, so one malformed file never aborts the pass. tree-sitter is error-tolerant, so a
+  syntactically-broken source still yields a partial tree (useful spans) rather than a fallback.
+
+  A chunk is keyed by its **start line**, so two definitions on the *same* physical line (dense
+  single-line `.d.ts` interfaces, minified/bundled JS) can't be split — they collapse into one
+  line-granular chunk. This is an inherent limit of line-based chunking, not a bug; coverage stays
+  complete and chunk ids stay unique.
 - **`"lines"`** — every file is cut into fixed overlapping windows (the pre-0.6 behaviour), a
   runtime escape hatch that reverts chunking without touching the schema.
 

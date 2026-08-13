@@ -14,7 +14,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _INDEXED_EXTS = frozenset({
-    ".py", ".ts", ".js", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".md"
+    ".py", ".md",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",       # TS/JS variants
+    ".go", ".rs", ".java",
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",    # C/C++ variants
 })
 _SKIP_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
 # Vendored / regenerable dirs skipped even without a .gitignore entry.
@@ -39,6 +42,49 @@ def _pos_int(val: object, default: int) -> int:
     except (TypeError, ValueError, OverflowError):
         return default
     return n if n > 0 else default
+
+
+# ---- tree-sitter chunking (P3): def-aligned chunks for non-Python languages -----------------
+# Extends the P1 chunker interface to TS/JS/Go/Rust/Java/C/C++ via tree-sitter, behind the same
+# _primary_spans → _cover pipeline. The grammar pack is a normal dependency but never a hard
+# requirement: if it (or a grammar) is unavailable, or a file's language config is missing, the
+# file falls back to line windowing — exactly like a Python parse failure.
+
+# file extension -> tree_sitter_language_pack language name. Only the *code* exts in
+# _INDEXED_EXTS; .md (and anything unmapped) keeps line-windowing.
+_TS_LANG_BY_EXT = {
+    ".ts": "typescript", ".tsx": "tsx", ".js": "javascript", ".jsx": "javascript",
+    ".mjs": "javascript", ".cjs": "javascript",
+    ".go": "go", ".rs": "rust", ".java": "java",
+    ".c": "c", ".h": "cpp", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
+    ".hpp": "cpp", ".hh": "cpp",
+}
+# "Leaf" definition node types — each emitted as one whole chunk (like a top-level Python def).
+_TS_FUNC_TYPES = {
+    "typescript": {"function_declaration", "generator_function_declaration", "method_definition",
+                   "method_signature", "abstract_method_signature", "function_signature"},
+    "tsx": {"function_declaration", "generator_function_declaration", "method_definition",
+            "method_signature", "abstract_method_signature", "function_signature"},
+    "javascript": {"function_declaration", "generator_function_declaration", "method_definition"},
+    "go": {"function_declaration", "method_declaration", "type_declaration"},
+    "rust": {"function_item", "function_signature_item", "struct_item", "enum_item",
+             "union_item", "type_item", "macro_definition"},
+    "java": {"method_declaration", "constructor_declaration"},
+    "c": {"function_definition", "struct_specifier", "enum_specifier", "union_specifier"},
+    "cpp": {"function_definition"},
+}
+# "Container" definition types — emitted as a header chunk + one chunk per nested member, exactly
+# like a Python class (so per-method chunks are never shadowed by a whole-class chunk).
+_TS_CONTAINER_TYPES = {
+    "typescript": {"class_declaration", "abstract_class_declaration", "interface_declaration"},
+    "tsx": {"class_declaration", "abstract_class_declaration", "interface_declaration"},
+    "javascript": {"class_declaration"},
+    "go": set(),
+    "rust": {"impl_item", "trait_item", "mod_item"},
+    "java": {"class_declaration", "interface_declaration", "enum_declaration", "record_declaration"},
+    "c": set(),
+    "cpp": {"class_specifier", "struct_specifier", "namespace_definition"},
+}
 
 
 class Indexer:
@@ -76,6 +122,7 @@ class Indexer:
             else 2 * self.window
         )
         self._embedder = None
+        self._ts_parsers: dict = {}  # per-instance tree-sitter parser cache (lang -> parser|None)
 
     def _get_embedder(self):
         if self._embedder is None:
@@ -249,16 +296,109 @@ class Indexer:
         n = len(lines)
         return self._cover(self._primary_spans(tree, n), n)
 
+    def _get_ts_parser(self, lang: str):
+        """Lazily load + cache (per instance) the tree-sitter parser for a language. Returns None
+        when ``tree-sitter-language-pack`` isn't installed or the grammar is unavailable — the
+        caller then windows (tree-sitter is a normal dep, never a hard requirement)."""
+        cache = self._ts_parsers
+        if lang in cache:
+            return cache[lang]
+        parser = None
+        try:
+            from tree_sitter_language_pack import get_parser
+            parser = get_parser(lang)
+        except Exception as exc:
+            logger.debug("tree-sitter parser for %s unavailable: %s", lang, exc)
+        cache[lang] = parser
+        return parser
+
+    @staticmethod
+    def _ts_end_line(node, n: int) -> int:
+        """0-based half-open end line of a tree-sitter node. ``end_point`` is (row, col); a col of 0
+        means the node ends at the start of that row (so the row isn't included). Clamped to
+        ``[start+1, n]``."""
+        row, col = node.end_point
+        end = row if col == 0 else row + 1
+        return min(n, max(node.start_point[0] + 1, end))
+
+    def _primary_spans_ts(self, root, lang: str, n: int) -> list[tuple[int, int]]:
+        """Def-aligned 'primary' spans from a tree-sitter tree, mirroring ``_primary_spans``: each
+        function/method → one span; each container (class/impl/trait/…) → a header span plus one
+        span per nested member. Node types the language config doesn't list are simply not treated
+        as defs — they fall into ``_cover``'s window-filled gaps, so an incomplete config degrades
+        precision, never correctness."""
+        func_types = _TS_FUNC_TYPES.get(lang, set())
+        cont_types = _TS_CONTAINER_TYPES.get(lang, set())
+        all_types = func_types | cont_types
+        if not all_types:
+            return []  # unknown language -> caller windows the whole file
+        spans: list[tuple[int, int]] = []
+
+        def nearest_defs(node):
+            """Def-type nodes reachable without crossing another def-type — top-level defs from the
+            root, a container's direct members from the container. Iterative, so deep nesting can't
+            blow the stack."""
+            found = []
+            stack = [c for c in reversed(node.children) if c.is_named]
+            while stack:
+                c = stack.pop()
+                if c.type in all_types:
+                    found.append(c)
+                else:
+                    stack.extend(g for g in reversed(c.children) if g.is_named)
+            return found
+
+        def emit(node):
+            s = node.start_point[0]
+            e = self._ts_end_line(node, n)
+            if node.type in cont_types:
+                members = sorted(nearest_defs(node), key=lambda m: m.start_point[0])
+                if members:
+                    header_end = max(s + 1, min(members[0].start_point[0], e))
+                    spans.append((s, header_end))  # header: class/impl line -> first member
+                    for m in members:
+                        emit(m)
+                    return
+            spans.append((s, e))
+
+        for node in sorted(nearest_defs(root), key=lambda x: x.start_point[0]):
+            emit(node)
+        return spans
+
+    def _chunk_treesitter(self, lines: list[str], source: str, lang: str):
+        """Parse ``source`` with tree-sitter → a complete, def-aligned cover, or ``None`` when the
+        parser is unavailable (caller windows). tree-sitter is error-tolerant, so a syntactically
+        broken file still yields a partial tree (and thus useful spans) rather than raising."""
+        parser = self._get_ts_parser(lang)
+        if parser is None:
+            return None
+        tree = parser.parse(source.encode("utf-8", errors="replace"))
+        n = len(lines)
+        return self._cover(self._primary_spans_ts(tree.root_node, lang, n), n)
+
     def _spans_for_file(
         self, filepath: Path, lines: list[str], rel_path: str
     ) -> list[tuple[int, int]]:
-        """Choose spans for one file: syntax-aware for ``.py`` under the syntax strategy (falling
-        back to windowing on any parse failure), fixed windows for everything else."""
-        if self.chunk_strategy == "syntax" and filepath.suffix.lower() == ".py":
-            try:
-                return self._chunk_python_ast(lines, "".join(lines))
-            except Exception as exc:
-                logger.debug("syntax chunking failed for %s (%s) — windowing", rel_path, exc)
+        """Choose spans for one file under the syntax strategy: ``ast`` for ``.py``, tree-sitter for
+        the mapped languages (TS/JS/Go/Rust/Java/C/C++), fixed windows for everything else and on
+        any parse/grammar failure or when tree-sitter isn't installed."""
+        if self.chunk_strategy == "syntax":
+            suffix = filepath.suffix.lower()
+            if suffix == ".py":
+                try:
+                    return self._chunk_python_ast(lines, "".join(lines))
+                except Exception as exc:
+                    logger.debug("syntax chunking failed for %s (%s) — windowing", rel_path, exc)
+            else:
+                lang = _TS_LANG_BY_EXT.get(suffix)
+                if lang is not None:
+                    try:
+                        spans = self._chunk_treesitter(lines, "".join(lines), lang)
+                        if spans is not None:
+                            return spans
+                    except Exception as exc:
+                        logger.debug("tree-sitter chunking failed for %s (%s) — windowing",
+                                     rel_path, exc)
         return self._window_spans(0, len(lines))
 
     # ---- materialisation -------------------------------------------------------------------

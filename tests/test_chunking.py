@@ -195,12 +195,19 @@ def test_nul_byte_source_falls_back_without_raising():
     assert spans == idx._window_spans(0, len(lines))
 
 
-def test_non_python_file_always_windows():
-    src = "".join(f"col{i},val{i}\n" for i in range(30))
-    lines = src.splitlines(keepends=True)
-    idx = Indexer(_mem_db())  # syntax strategy, but a .md/.ts/.csv is never AST-parsed
-    for name in ("data.md", "app.ts", "notes.txt"):
-        assert idx._spans_for_file(Path(name), lines, name) == idx._window_spans(0, len(lines))
+def test_non_code_exts_window_but_treesitter_langs_do_not():
+    # .md / unmapped exts are never parsed → line windows (as of 0.8.0 tree-sitter handles the
+    # code langs; see tests/test_treesitter.py for the def-aligned behavior)
+    csv = "".join(f"col{i},val{i}\n" for i in range(30))
+    csv_lines = csv.splitlines(keepends=True)
+    idx = Indexer(_mem_db())
+    for name in ("data.md", "notes.txt"):
+        assert idx._spans_for_file(Path(name), csv_lines, name) == idx._window_spans(0, len(csv_lines))
+    # a real .ts file with definitions is def-aligned, NOT windowed
+    ts = "function a() {\n  return 1;\n}\nfunction b() {\n  return 2;\n}\n".splitlines(keepends=True)
+    ts_spans = idx._spans_for_file(Path("app.ts"), ts, "app.ts")
+    assert ts_spans != idx._window_spans(0, len(ts))
+    assert (0, 3) in ts_spans and (3, 6) in ts_spans  # each function its own chunk
 
 
 # --------------------------------------------------------------------------- 5: "lines" parity

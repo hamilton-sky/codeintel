@@ -4,6 +4,51 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-08-13
+
+Syntax-aware chunking for **non-Python** languages via tree-sitter — TS/JS/Go/Rust/Java/C/C++
+search hits now map to whole functions/methods/classes, the same as Python did in 0.6.0. The
+roadmap's "Later" tree-sitter item, now that `ast` proved the value on Python.
+
+### Added
+- **Tree-sitter chunking** for TypeScript/TSX, JavaScript, Go, Rust, Java, C, and C++, behind the
+  Phase-1 chunker interface: functions/methods → one chunk each; classes/impls/traits/interfaces/
+  namespaces → a header chunk plus one chunk per member (never a whole-container chunk shadowing
+  its members), through the same `_cover` gapless-coverage / oversized-split pipeline as Python.
+  Node types a language config doesn't list simply fall into window-filled gaps, so an incomplete
+  map degrades precision, never correctness.
+- `tree-sitter-language-pack` is now a dependency (≈2 MB; one package covers all the grammars).
+
+### Changed
+- Under `chunk_strategy = "syntax"` (the default), non-`.py` code files are now def-aligned instead
+  of line-windowed. `.md` and unmapped extensions still window; `chunk_strategy = "lines"` still
+  forces windowing everywhere.
+- The indexer now walks the common TS/JS and C/C++ variant extensions too — `.tsx` `.jsx` `.mjs`
+  `.cjs` `.cc` `.cxx` `.hpp` `.hh` — so a TS/React or C++ repo is fully indexed (previously these
+  were silently skipped entirely).
+
+### Hardened
+- **Never a hard requirement.** If `tree-sitter-language-pack` (or a grammar) isn't installed, a
+  parser errors, or a file yields no definitions, the file falls back to line windowing per file —
+  the never-raise contract holds, so one bad file or a missing dependency never aborts the pass.
+  Parsers are cached per Indexer instance (loaded once per language, no cross-thread sharing).
+- tree-sitter is error-tolerant, so a syntactically-broken source still produces useful def-aligned
+  spans (a partial tree) rather than degrading to windows.
+
+### Tests
+- New `tests/test_treesitter.py` (15 cases): def-aligned spans for TS/Go/Rust/Java/C++ (methods
+  carved out of classes/impls/interfaces), gapless + collision-free coverage, error-tolerant
+  parsing, the parser cache, a both-ways extension/language-map guard, and every fallback (missing
+  parser, parser exception, `lines` strategy, unmapped ext). The stale `.ts-always-windows` chunking
+  test was updated to the new behavior. Full suite: 274 passed.
+
+### Hardened (from an adversarial review pass)
+- Fixed a coverage hole the review caught: `.tsx`/`.jsx`/`.cc`/… were mapped to a grammar but not
+  in the walker's indexed-extension set, so those files were silently indexed by nothing. The set
+  now includes them, with a test asserting the map and the walked set agree both ways.
+- Added the `method_signature` node type so TS/TSX **interfaces** decompose into per-method chunks
+  (previously only `abstract_method_signature`, for abstract classes, was recognized).
+
 ## [0.7.0] — 2026-08-12
 
 Hybrid reranking for the semantic engine — search results are re-ordered by fusing cosine

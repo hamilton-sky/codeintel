@@ -31,7 +31,12 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Typing :: Typed",
 ]
-dependencies = ["mcp>=1.0", "sqlite-vec>=0.1", "fastembed>=0.3"]
+dependencies = [
+    "mcp>=1.0",
+    "sqlite-vec>=0.1",
+    "fastembed>=0.3",
+    "tree-sitter-language-pack>=1.0",  # def-aligned chunking for non-Python languages (P3)
+]
 
 [project.urls]
 Homepage = "https://github.com/hamilton-sky/codeintel"
