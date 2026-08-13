@@ -195,15 +195,17 @@ def code_map_handler(args: dict) -> dict:
 
         gen = MapGenerator(provider)
         content = gen.generate(project_root, budget_bytes=budget)
-        path = gen.write(project_root, content)
-        size = len(content.encode("utf-8"))
+        path, wrote = gen.write(project_root, content)
+        # size_bytes = bytes actually written; 0 when an existing populated map was preserved
+        # (the new content was a stub) — `wrote` disambiguates for the caller.
+        size = len(content.encode("utf-8")) if wrote else 0
 
         inject_result = None
         if inject:
             inj_path, inj_action = Injector().inject(project_root)
             inject_result = {"path": inj_path, "action": inj_action}
 
-        return {"ok": True, "path": path, "size_bytes": size, "inject": inject_result}
+        return {"ok": True, "path": path, "size_bytes": size, "wrote": wrote, "inject": inject_result}
     except Exception:
         return {"ok": True, "path": None, "size_bytes": 0, "note": "map-error"}
 

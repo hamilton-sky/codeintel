@@ -166,8 +166,12 @@ def main() -> None:
         gen = MapGenerator(provider)
         try:
             content = gen.generate(project_root, budget_bytes=args.budget)
-            path = gen.write(project_root, content)
-            print(f"Wrote {path} ({len(content.encode())} bytes)")
+            path, wrote = gen.write(project_root, content)
+            if wrote:
+                print(f"Wrote {path} ({len(content.encode())} bytes)")
+            else:
+                print(f"Kept existing {path} — new map was a stub (graph empty/unindexed; "
+                      f"run `codeintel index` first)")
             if args.inject:
                 inj_path, inj_action = Injector().inject(project_root)
                 if inj_path:

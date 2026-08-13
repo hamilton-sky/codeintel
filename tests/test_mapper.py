@@ -6,8 +6,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from codeintel.mapper import MapGenerator
+from codeintel.mapper import MapGenerator, _minimal_map, _is_populated_map
 from codeintel.injector import Injector
+
+_POPULATED = (
+    "# CODE_INTEL.md — repo\n\n"
+    "## Ranked Symbols (by caller count)\n"
+    "| Symbol | File | Callers |\n|--------|------|---------|\n| `foo` | a.py | 9 |\n"
+)
 
 
 def _make_provider(ranked=None, entry=None, arch=None):
@@ -117,11 +123,59 @@ def test_generate_reads_columns_rows_shape():
 def test_write_creates_file():
     gen = MapGenerator(None)
     with tempfile.TemporaryDirectory() as d:
-        path = gen.write(d, "# content")
+        path, wrote = gen.write(d, "# content")
         expected = os.path.join(d, "CODE_INTEL.md")
-        assert path == expected
+        assert path == expected and wrote is True
         assert os.path.exists(expected)
         assert open(expected).read() == "# content"
+
+
+def test_write_preserves_populated_map_when_new_is_a_stub():
+    # the dogfooding bug: `codeintel index`'s best-effort refresh produced a stub (graph empty/
+    # unindexed at that moment) and clobbered a rich, populated CODE_INTEL.md. It must NOT.
+    gen = MapGenerator(None)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "CODE_INTEL.md")
+        open(path, "w").write(_POPULATED)
+        stub = _minimal_map(d, note="project not yet indexed")
+        assert not _is_populated_map(stub) and _is_populated_map(_POPULATED)  # sanity
+        p, wrote = gen.write(d, stub)
+        assert p == path and wrote is False          # preserved → reported as not written
+        assert open(path).read() == _POPULATED        # preserved, not stubbed
+
+
+def test_write_stub_ok_when_no_existing_map():
+    # first-ever generation of a stub is fine — there's nothing to preserve
+    gen = MapGenerator(None)
+    with tempfile.TemporaryDirectory() as d:
+        _, wrote = gen.write(d, _minimal_map(d, note="x"))
+        assert wrote is True
+        assert "Auto-generated" in open(os.path.join(d, "CODE_INTEL.md")).read()
+
+
+def test_write_populated_replaces_a_stub():
+    # a real map SHOULD replace a prior stub — the normal refresh-improves case still works
+    gen = MapGenerator(None)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "CODE_INTEL.md")
+        open(path, "w").write(_minimal_map(d, note="stale"))
+        _, wrote = gen.write(d, _POPULATED)
+        assert wrote is True
+        assert _is_populated_map(open(path).read())
+
+
+def test_entry_points_only_map_counts_as_populated():
+    # a sparse-but-real render (entry points, no arch/ranked table) is NOT a stub — it must refresh,
+    # not be misclassified and skipped (regression for the review's false-negative finding)
+    entry_only = ("# CODE_INTEL.md — repo\n\n## Ranked Symbols\n_(no symbols found)_\n\n"
+                  "## Entry Points\n- `main` (app.py)\n")
+    assert _is_populated_map(entry_only)
+    gen = MapGenerator(None)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "CODE_INTEL.md")
+        open(path, "w").write(_POPULATED)
+        _, wrote = gen.write(d, entry_only)   # real content replaces the old map, not skipped
+        assert wrote is True and "Entry Points" in open(path).read()
 
 
 # ---------------------------------------------------------------------------

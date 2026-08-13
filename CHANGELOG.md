@@ -4,6 +4,29 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-08-13
+
+### Fixed
+- **`codeintel index` no longer guts a populated `CODE_INTEL.md`.** The best-effort map refresh
+  after an index (and `codeintel map` itself) overwrote an existing populated map with a degraded
+  stub whenever the graph backend was unavailable or hadn't indexed the repo yet — a common
+  transient. `MapGenerator.write` now preserves an existing populated map when the new content is a
+  stub (a real map still refreshes it, and a first-ever stub still writes). Found by dogfooding —
+  this project's own release `index` runs had been silently stubbing its `CODE_INTEL.md`.
+- `MapGenerator.write` now returns `(path, wrote)` and the `map` CLI / `code.map` MCP tool report
+  the real outcome ("Kept existing …" + `wrote: false`) instead of claiming a write that a preserve
+  skipped.
+
+### Hardened (from an adversarial review pass)
+- A sparse-but-real map (entry points only, or a budget-truncated render) is no longer misclassified
+  as a stub — `## Entry Points` now counts as populated content, so a legitimate refresh isn't
+  skipped and the "graph empty" warning isn't shown when the graph was actually queried.
+
+### Tests
+- `tests/test_mapper.py`: a stub does not overwrite a populated map, a stub still writes when no map
+  exists, a populated map still replaces a stale stub, an entry-points-only render counts as
+  populated, and `write` reports `wrote` honestly. Full suite: 278 passed.
+
 ## [0.8.0] — 2026-08-13
 
 Syntax-aware chunking for **non-Python** languages via tree-sitter — TS/JS/Go/Rust/Java/C/C++

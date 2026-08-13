@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from codeintel.providers.graph import GraphProvider
+
+logger = logging.getLogger(__name__)
+
+# A map with any of these sections carries real, indexed orientation content. Anything without
+# them is a degraded stub: `_minimal_map` (graph unavailable / repo unindexed / generation failed),
+# or a render over an empty graph. Note the ranked marker includes "(by caller count)" — the
+# empty-graph render emits a differently-worded "## Ranked Symbols" heading that is NOT this.
+_POPULATED_MARKERS = (
+    "## Architecture Overview",
+    "## Ranked Symbols (by caller count)",
+    "## Entry Points",
+)
+
+
+def _is_populated_map(text: str) -> bool:
+    """True when the map has real content (architecture overview, a ranked-symbol table, or entry
+    points) rather than a degraded stub — used to avoid overwriting a good CODE_INTEL.md."""
+    return any(marker in text for marker in _POPULATED_MARKERS)
 
 # Real codebase-memory-mcp contract (verified live): query_graph returns {columns, rows}
 # value-arrays, module-level calls are USAGE (not only CALLS), and nodes carry `is_entry_point`
@@ -82,15 +101,38 @@ class MapGenerator:
         except Exception as exc:
             return _minimal_map(project_root, note=f"map generation failed: {exc}")
 
-    def write(self, project_root: str, content: str) -> str:
+    def write(self, project_root: str, content: str) -> tuple[str, bool]:
+        """Write CODE_INTEL.md; return ``(path, wrote)``. ``wrote`` is False when an existing
+        populated map was preserved rather than clobbered by a stub (or the write failed), so
+        callers can report the outcome honestly.
+
+        Don't clobber a good map with a degraded stub: `generate` returns a stub when the graph
+        backend is unavailable or hasn't indexed this repo yet — a common transient during
+        `codeintel index`'s best-effort refresh. Overwriting a previously-populated CODE_INTEL.md
+        with that stub silently destroys real orientation content, so when the new content is a
+        stub and an existing map is populated, preserve the existing file."""
         path = os.path.join(project_root, "CODE_INTEL.md")
+        if not _is_populated_map(content):
+            try:
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8") as f:
+                        existing = f.read()
+                    if _is_populated_map(existing):
+                        logger.warning(
+                            "CODE_INTEL.md: new map is a stub (graph empty/unavailable) — keeping "
+                            "the existing populated map at %s (run `codeintel index` to refresh)",
+                            path,
+                        )
+                        return path, False
+            except Exception:
+                pass  # can't read the existing file — fall through and write (best-effort)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
+            return path, True
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("CODE_INTEL.md write failed: %s", exc)
-        return path
+            logger.warning("CODE_INTEL.md write failed: %s", exc)
+            return path, False
 
 
 def _query_ranked_symbols(provider: GraphProvider, project: str) -> list[dict]:
