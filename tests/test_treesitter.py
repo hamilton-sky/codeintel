@@ -97,6 +97,29 @@ def test_java_class_method():
     assert 0 in starts and 1 in starts   # class header + method m
 
 
+def test_arrow_function_consts_are_def_aligned():
+    # React components / hooks / callbacks are `const X = () => {}`, not `function` declarations —
+    # they must def-align too (the common modern-TS/React case); a plain data const must NOT.
+    src = (
+        "import x from 'y';\n"              # 0
+        "\n"                                # 1
+        "export const Header = () => {\n"   # 2  arrow component
+        "  return null;\n"                  # 3
+        "};\n"                              # 4
+        "\n"                                # 5
+        "const useThing = (id) => {\n"      # 6  arrow hook
+        "  return id;\n"                    # 7
+        "};\n"                              # 8
+        "\n"                                # 9
+        "const PLAIN = 42;\n"               # 10 plain data const — NOT a def
+    )
+    spans, n = _spans("c.tsx", src)
+    _assert_gapless_cover(spans, n)
+    starts = {s for s, _ in spans}
+    assert 2 in starts and 6 in starts   # both arrow consts are their own chunks
+    assert 10 not in starts              # a plain `const x = 42` is not a def chunk
+
+
 def test_cpp_class_and_free_function():
     src = ("class C {\npublic:\n  int m() { return 1; }\n};\nint free_fn() { return 2; }\n")
     spans, n = _spans("e.cpp", src)

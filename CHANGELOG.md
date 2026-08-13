@@ -4,6 +4,29 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] — 2026-08-14
+
+More dogfooding fixes — from driving the *published* tool over real TS/React repos (brightsky-ai,
+pathly-adapters).
+
+### Fixed
+- **Arrow-function components/hooks are now def-aligned.** The tree-sitter chunker only recognized
+  `function`/`method` declarations, so `const Header = () => {…}` / `export const useThing = () => {…}`
+  — how virtually all React components and hooks (and much modern TS/JS) are written — fell back to
+  line windows. A `const`/`let` bound to an arrow or function expression is now its own chunk (a
+  plain `const x = 5` still isn't).
+
+### Added
+- **`doctor` now reports whether def-aligned chunking is active.** tree-sitter's fallback to line
+  windows was silent — a missing/broken `tree-sitter-language-pack` degraded chunking for every
+  non-Python file with no signal (which is exactly how a stale environment indexed a whole TS repo
+  as line windows). `codeintel doctor` now shows `def-aligned chunking: OFF …` with the fix when the
+  grammar pack isn't importable.
+
+### Tests
+- Arrow-function def-alignment (and that a plain data const is NOT a chunk); the doctor tree-sitter
+  advisory (shown only when off) + `run_doctor` reporting availability. Full suite: 299 passed.
+
 ## [0.8.4] — 2026-08-14
 
 ### Added

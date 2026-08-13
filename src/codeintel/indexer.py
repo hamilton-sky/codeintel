@@ -85,6 +85,22 @@ _TS_CONTAINER_TYPES = {
     "c": set(),
     "cpp": {"class_specifier", "struct_specifier", "namespace_definition"},
 }
+# JS/TS assign functions to bindings — `const C = () => {}`, `export const f = function(){}` — which
+# is how React components and hooks (and most modern TS) are written. A lexical/variable declaration
+# counts as a def ONLY when a declarator's value is a function, not a plain `const x = 5`.
+_TS_ARROW_LANGS = frozenset({"typescript", "tsx", "javascript"})
+_TS_DECL_TYPES = frozenset({"lexical_declaration", "variable_declaration"})
+_TS_FUNC_VALUE_TYPES = frozenset({"arrow_function", "function_expression", "function",
+                                  "generator_function"})
+
+
+def _ts_decl_is_function(node) -> bool:
+    """True if a lexical/variable declaration binds a function (arrow or function expression)."""
+    for child in node.children:
+        if child.type == "variable_declarator":
+            if any(gc.type in _TS_FUNC_VALUE_TYPES for gc in child.children):
+                return True
+    return False
 
 
 class Indexer:
@@ -330,19 +346,26 @@ class Indexer:
         func_types = _TS_FUNC_TYPES.get(lang, set())
         cont_types = _TS_CONTAINER_TYPES.get(lang, set())
         all_types = func_types | cont_types
+        arrow_ok = lang in _TS_ARROW_LANGS
         if not all_types:
             return []  # unknown language -> caller windows the whole file
         spans: list[tuple[int, int]] = []
 
+        def is_def(c) -> bool:
+            if c.type in all_types:
+                return True
+            # a const/let bound to an arrow/function (React components, hooks, callbacks)
+            return arrow_ok and c.type in _TS_DECL_TYPES and _ts_decl_is_function(c)
+
         def nearest_defs(node):
-            """Def-type nodes reachable without crossing another def-type — top-level defs from the
-            root, a container's direct members from the container. Iterative, so deep nesting can't
-            blow the stack."""
+            """Def nodes reachable without crossing another def — top-level defs from the root, a
+            container's direct members from the container. Iterative, so deep nesting can't blow the
+            stack. Function-bound `const`/`let` declarations count as defs (is_def)."""
             found = []
             stack = [c for c in reversed(node.children) if c.is_named]
             while stack:
                 c = stack.pop()
-                if c.type in all_types:
+                if is_def(c):
                     found.append(c)
                 else:
                     stack.extend(g for g in reversed(c.children) if g.is_named)

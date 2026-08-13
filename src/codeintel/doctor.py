@@ -102,11 +102,21 @@ def run_doctor(
                               "runnable": False, "repo_indexed": None,
                               "detail": "semantic provider unavailable", "remediation": None}
 
+    # Is def-aligned (tree-sitter) chunking active for non-Python files? The semantic engine works
+    # without it (line-window fallback) but SILENTLY — surface it so a broken/missing grammar pack
+    # doesn't degrade chunking invisibly. find_spec (not import) keeps this cheap + never-load.
+    try:
+        import importlib.util
+        treesitter = importlib.util.find_spec("tree_sitter_language_pack") is not None
+    except Exception:
+        treesitter = False
+
     ready = sum(1 for e in engines.values() if e.get("status") != "fail")
     return {
         "ok": True,
         "project_root": root,
         "deep": bool(deep),
+        "treesitter": treesitter,
         "summary": {"ready": ready, "total": len(engines),
                     "healthy": all(e.get("status") != "fail" for e in engines.values())},
         "engines": engines,
@@ -162,5 +172,10 @@ def render_doctor_text(report: dict) -> str:
         out.append("  " + c.dim(
             "tip: `codeintel setup --install-uv --install-deps --index` bootstraps the "
             "pip-installable backends; each fix: line above has the per-engine command."
+        ))
+    if report.get("treesitter") is False:
+        out.append("  " + c.dim(
+            "def-aligned chunking: OFF for non-Python — tree-sitter-language-pack not importable, "
+            "so TS/JS/Go/Rust/… fall back to line windows. fix: pip install tree-sitter-language-pack"
         ))
     return "\n".join(out)

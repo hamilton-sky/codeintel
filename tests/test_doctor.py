@@ -64,6 +64,25 @@ def test_setup_tip_footer_only_when_unhealthy():
     assert "codeintel setup" in unhealthy      # actionable guidance only when something is missing
 
 
+def test_treesitter_advisory_only_when_missing():
+    # the silent tree-sitter fallback (found by dogfooding) must be visible: an advisory when
+    # def-aligned chunking is OFF, nothing when it's on
+    base = {"project_root": "/repo", "deep": False,
+            "summary": {"ready": 3, "total": 3, "healthy": True},
+            "engines": {"semantic": {"engine": "semantic", "status": "ok", "installed": True,
+                                     "runnable": True, "repo_indexed": True, "detail": "ok",
+                                     "remediation": None}}}
+    off = doctor.render_doctor_text({**base, "treesitter": False})
+    on = doctor.render_doctor_text({**base, "treesitter": True})
+    assert "def-aligned chunking: OFF" in off and "tree-sitter-language-pack" in off
+    assert "def-aligned chunking" not in on   # no noise when it's active
+
+
+def test_run_doctor_reports_treesitter_availability():
+    r = doctor.run_doctor("/tmp/x", deep=False)
+    assert isinstance(r.get("treesitter"), bool)   # always reported (bool), never raises
+
+
 # --------------------------------------------------------------------------- #
 # never-raise + no-hang orchestration
 # --------------------------------------------------------------------------- #
