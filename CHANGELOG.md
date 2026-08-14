@@ -4,6 +4,20 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] — 2026-08-14
+
+### Added
+- **Graph viewer: hover any node metric for a plain-English definition.** The detail-panel numbers
+  (complexity / cognitive / callers-in / calls-out) now explain themselves — cyclomatic vs cognitive
+  complexity, fan-in vs fan-out — so a decorator showing "complexity 0 / 39 callers" is no longer a
+  mystery. Uses a reliable custom tooltip (native `title` silently skipped adjacent cells — it only
+  re-fires after a fresh mouse "rest").
+
+### Docs
+- README now shows both "see your code" surfaces — the interactive call graph and the `CODE_INTEL.md`
+  map — and explains what the map file is for (a static, committable orientation snapshot for agents
+  or hosts that don't speak MCP, plus the `--inject` flow into `CLAUDE.md`/`AGENTS.md`).
+
 ## [0.11.0] — 2026-08-14
 
 ### Added
