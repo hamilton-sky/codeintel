@@ -108,8 +108,8 @@
   .detail .dhead .sym{font-size:13.5px; font-weight:600; word-break:break-word; line-height:1.3}
   .detail .dhead .path{font-size:11px; color:var(--muted); margin-top:3px; word-break:break-all}
   .detail .metrics{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line)}
-  .detail .m{background:var(--panel); padding:10px 13px}
-  .detail .m .k{font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint)}
+  .detail .m{background:var(--panel); padding:10px 13px; cursor:help}
+  .detail .m .k{font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); border-bottom:1px dotted currentColor; display:inline-block; padding-bottom:1px}
   .detail .m .v{font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:2px}
   .detail .m .v.hi{color:var(--accent)}
   .detail .rel{padding:11px 15px 14px; font-size:11.5px; color:var(--muted)}
@@ -191,10 +191,10 @@
       <button class="close" id="dclose" aria-label="Close">×</button>
       <div class="dhead"><div class="sym mono" id="d-sym"></div><div class="path mono" id="d-path"></div></div>
       <div class="metrics">
-        <div class="m"><div class="k">Complexity</div><div class="v hi" id="d-cx">—</div></div>
-        <div class="m"><div class="k">Cognitive</div><div class="v" id="d-cog">—</div></div>
-        <div class="m"><div class="k">Callers (in)</div><div class="v" id="d-in">—</div></div>
-        <div class="m"><div class="k">Calls (out)</div><div class="v" id="d-out">—</div></div>
+        <div class="m" title="Cyclomatic complexity — the number of independent paths through the code (each if / for / while / case / && adds one). Higher = more branches to test and reason about. 0 = no branching, or it isn't a function body (e.g. a decorator, import, or class name)."><div class="k">Complexity</div><div class="v hi" id="d-cx">—</div></div>
+        <div class="m" title="Cognitive complexity — how hard the code is for a human to follow. Nested and broken control flow costs more than flat code; higher = harder to read."><div class="k">Cognitive</div><div class="v" id="d-cog">—</div></div>
+        <div class="m" title="Fan-in — how many other symbols call or reference this one. High fan-in = widely depended on, so a change here ripples out to many places."><div class="k">Callers (in)</div><div class="v" id="d-in">—</div></div>
+        <div class="m" title="Fan-out — how many distinct symbols this one calls. High fan-out = it coordinates or depends on a lot of other code."><div class="k">Calls (out)</div><div class="v" id="d-out">—</div></div>
       </div>
       <div class="rel" id="d-rel"></div>
     </div>
