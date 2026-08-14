@@ -138,6 +138,8 @@
   .btn-primary:hover{filter:brightness(1.06); color:var(--accent-ink)}
   .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(20px); background:var(--ink); color:var(--bg); font-size:12.5px; font-weight:550; padding:9px 15px; border-radius:9px; opacity:0; transition:opacity .2s,transform .2s; z-index:30; pointer-events:none}
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+  #tip{position:fixed; z-index:40; max-width:252px; background:var(--ink); color:var(--bg); font-size:11.5px; line-height:1.5; padding:9px 12px; border-radius:9px; box-shadow:var(--shadow); opacity:0; pointer-events:none; transition:opacity .12s}
+  #tip.show{opacity:1}
 
   @media (max-width:640px){
     .detail{width:auto; left:16px; right:16px; top:auto; bottom:16px}
@@ -191,10 +193,10 @@
       <button class="close" id="dclose" aria-label="Close">×</button>
       <div class="dhead"><div class="sym mono" id="d-sym"></div><div class="path mono" id="d-path"></div></div>
       <div class="metrics">
-        <div class="m" title="Cyclomatic complexity — the number of independent paths through the code (each if / for / while / case / && adds one). Higher = more branches to test and reason about. 0 = no branching, or it isn't a function body (e.g. a decorator, import, or class name)."><div class="k">Complexity</div><div class="v hi" id="d-cx">—</div></div>
-        <div class="m" title="Cognitive complexity — how hard the code is for a human to follow. Nested and broken control flow costs more than flat code; higher = harder to read."><div class="k">Cognitive</div><div class="v" id="d-cog">—</div></div>
-        <div class="m" title="Fan-in — how many other symbols call or reference this one. High fan-in = widely depended on, so a change here ripples out to many places."><div class="k">Callers (in)</div><div class="v" id="d-in">—</div></div>
-        <div class="m" title="Fan-out — how many distinct symbols this one calls. High fan-out = it coordinates or depends on a lot of other code."><div class="k">Calls (out)</div><div class="v" id="d-out">—</div></div>
+        <div class="m" data-tip="Cyclomatic complexity — the number of independent paths through the code (each if / for / while / case / && adds one). Higher = more branches to test and reason about. 0 = no branching, or it isn't a function body (e.g. a decorator, import, or class name)."><div class="k">Complexity</div><div class="v hi" id="d-cx">—</div></div>
+        <div class="m" data-tip="Cognitive complexity — how hard the code is for a human to follow. Nested and broken control flow costs more than flat code; higher = harder to read."><div class="k">Cognitive</div><div class="v" id="d-cog">—</div></div>
+        <div class="m" data-tip="Fan-in — how many other symbols call or reference this one. High fan-in = widely depended on, so a change here ripples out to many places."><div class="k">Callers (in)</div><div class="v" id="d-in">—</div></div>
+        <div class="m" data-tip="Fan-out — how many distinct symbols this one calls. High fan-out = it coordinates or depends on a lot of other code."><div class="k">Calls (out)</div><div class="v" id="d-out">—</div></div>
       </div>
       <div class="rel" id="d-rel"></div>
     </div>
@@ -429,6 +431,21 @@ const DATA = __DATA__;
   }
   document.querySelectorAll(".seg-btn").forEach(b=>b.onclick=()=>setLayout(b.dataset.layout));
   $("relayout").onclick=()=>setLayout(curLayout);
+
+  // ---- metric tooltips (custom + reliable — native `title` only re-fires after a fresh mouse "rest",
+  // so it silently skips adjacent cells; a per-cell mouseenter handler always fires) ----
+  const tipEl=document.createElement("div"); tipEl.id="tip"; document.body.appendChild(tipEl);
+  function showTip(el){
+    const t=el.getAttribute("data-tip"); if(!t) return;
+    tipEl.textContent=t; tipEl.classList.add("show"); tipEl.style.left="0px"; tipEl.style.top="0px";
+    const r=el.getBoundingClientRect(), tr=tipEl.getBoundingClientRect();
+    tipEl.style.left=Math.max(8, Math.min(innerWidth-tr.width-8, r.left+r.width/2-tr.width/2))+"px";
+    const y=r.top-tr.height-9; tipEl.style.top=(y<8 ? r.bottom+9 : y)+"px";
+  }
+  document.querySelectorAll(".metrics .m").forEach(m=>{
+    m.addEventListener("mouseenter",()=>showTip(m));
+    m.addEventListener("mouseleave",()=>tipEl.classList.remove("show"));
+  });
 
   // ---- exports ----
   function download(name,text,mime){ try{ const b=new Blob([text],{type:mime||"text/plain"}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),1500); toast("Downloaded "+name); }catch(e){ toast("Download blocked here — use Copy"); } }
