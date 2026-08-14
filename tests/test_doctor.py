@@ -83,6 +83,24 @@ def test_run_doctor_reports_treesitter_availability():
     assert isinstance(r.get("treesitter"), bool)   # always reported (bool), never raises
 
 
+def test_healthy_ignores_optional_graph_engine():
+    # graph is optional (external binary) — its absence must NOT mark a repo unhealthy or exit 1.
+    class _Stub:
+        available = True
+        def __init__(self, installed, runnable=True, indexed=True):
+            self._d = {"installed": installed, "runnable": runnable, "repo_indexed": indexed,
+                       "detail": "", "remediation": None}
+        def probe(self, *a, **k):
+            return dict(self._d)
+
+    r = doctor.run_doctor("/repo", graph=_Stub(False, False, False),
+                          lsp=_Stub(True), semantic=_Stub(True))
+    assert r["engines"]["graph"]["status"] == "fail"
+    assert r["summary"]["healthy"] is True          # semantic + lsp ready ⇒ healthy despite graph
+    text = doctor.render_doctor_text(r)
+    assert "optional" in text                        # render frames graph as optional, not a failure
+
+
 # --------------------------------------------------------------------------- #
 # never-raise + no-hang orchestration
 # --------------------------------------------------------------------------- #

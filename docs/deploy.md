@@ -64,7 +64,9 @@ For multiple callers with different privileges, define a token→role map in `~/
 ```toml
 [roles]
 admin    = ["*"]
-reader   = ["search", "symbol", "overview", "callers", "callees", "impact", "chain", "context"]
+reader   = ["search", "symbol", "overview", "callers", "callees", "impact", "chain", "context",
+            "changed", "deadcode", "hotspots"]   # list EVERY op the role may run — a new op is
+                                                 # denied to a restricted role until it's added here
 searcher = ["search", "context"]
 
 [tokens]                                  # generate values with `codeintel gen-token`

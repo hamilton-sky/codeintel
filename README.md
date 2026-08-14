@@ -26,10 +26,13 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Who calls this? | `callers` | graph | caller symbols + files |
 | What does this call? | `callees` | graph | callee symbols + files |
 | Blast radius of a change | `impact` | graph | callers **and** callees together |
-| Trace a call chain up/downstream | `chain` | graph | ordered hops |
+| Trace a call chain up/downstream | `chain` | graph | ordered, risk-labeled hops |
 | Find symbols by pattern | `pattern` | graph | matching nodes + locations |
 | Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
 | Everything about one symbol | `context` | graph + lsp | both views merged |
+| **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
+| Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
+| Unreferenced (dead) code | `deadcode` | graph | non-test symbols with no callers |
 
 Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
 
@@ -65,10 +68,20 @@ The agent hands `result` straight to the model. If the graph backend isn't insta
 pip install codecortex
 ```
 
-This installs the `codeintel` CLI; the **semantic** engine works out of the box. The **graph**
-and **LSP** engines use external backends (`codebase-memory-mcp`, and serena via `uvx`) —
-run `codeintel doctor` to see what's available and how to enable the rest. (On PyPI the
+This installs the `codeintel` CLI; the **semantic** engine works out of the box. (On PyPI the
 distribution is `codecortex` because `codeintel` was taken; the CLI and import stay `codeintel`.)
+
+**One command prepares the rest and indexes your repo:**
+
+```bash
+codeintel setup --all /path/to/your/project
+```
+
+This installs `uv` (for the LSP engine), warms serena, downloads the embedding model, indexes the
+repo, and prints a health report ending in a **Next:** list — exactly what's ready and the one
+remaining step. It's idempotent, so re-running is safe. The **graph** engine (`codebase-memory-mcp`)
+is an *optional* external binary that adds who-calls / impact / hotspots / `changed`; codeintel is
+fully usable without it.
 
 Or from source:
 
@@ -78,17 +91,10 @@ cd codeintel
 pip install -e .
 ```
 
-Register with your AI agent(s):
+Register with your AI agent(s), then query:
 
 ```bash
 codeintel install            # registers with Claude, Codex, Gemini, Zed
-```
-
-Index a project, check what's ready, and run your first query:
-
-```bash
-codeintel index /path/to/your/project
-codeintel doctor /path/to/your/project    # which engines are ready + how to fix the rest
 codeintel query --op search --target "authentication middleware"
 ```
 
@@ -140,6 +146,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 - **[Architecture](docs/architecture.md)** — layers, the `CodeProvider` protocol, the safe-null contract, caching, freshness (ASCII + Mermaid).
 - **[Query flow](docs/query-flow.md)** — request lifecycle, engine selection, fan-out & merge, and why it never throws.
 - **[Map file](docs/map-file.md)** — the static `CODE_INTEL.md` orientation layer for hosts with no MCP support.
+- **[Benchmarks](docs/benchmarks.md)** — real numbers at scale: 25 k chunks indexed in ~8 min, ~235 ms warm queries, 60 MB index.
 - Engine references: **[graph](docs/graph.md)** · **[lsp](docs/lsp.md)** · **[semantic](docs/semantic.md)**.
 
 ## CLI reference
@@ -147,7 +154,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | Command | Purpose |
 |---|---|
 | `codeintel install [--agent claude\|codex\|gemini\|zed\|all]` | Register codeintel with AI agent(s) |
-| `codeintel setup [project_root] [--index] [--warm] [--install-uv]` | Check backends + optionally index this repo; ends with a health report |
+| `codeintel setup [project_root] [--all] [--index] [--warm] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |
 | `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote] [--token TOKEN]` | Start the HTTP transport (loopback-only unless `--allow-remote`; `--token` requires a bearer token on every request) |

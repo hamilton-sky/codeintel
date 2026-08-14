@@ -4,6 +4,46 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-08-14
+
+Two things that move codeintel from "works, with caveats" toward "just install it": a real
+**one-command setup**, and a **published scale benchmark**.
+
+### Added
+- **`codeintel setup --all` — one-command setup.** Installs every automatable backend (uv for the LSP
+  engine, the embedding model, a serena warm-up), indexes the repo, and prints a health report ending
+  in a **Next:** list — exactly what's ready and the one remaining step. Idempotent: it skips what's
+  already installed, so it's safe to re-run. Previously a user had to know to combine
+  `--install-uv --install-deps --index --warm`; now it's one flag (the individual flags still work).
+- **Scale benchmark** — [docs/benchmarks.md](docs/benchmarks.md): a full 1,449-file TS/React monorepo →
+  **25,313 chunks indexed cold in ~8.3 min** (~51 chunks/sec, ~1.7 GB peak RSS, **60 MB** on-disk
+  index); **warm `code.query` search p50 235 ms / p95 251 ms** (all queries returned relevant hits).
+  Reproducible, with methodology and an extrapolation to the 100k-chunk ceiling.
+
+### Changed
+- **Graph is now genuinely optional, not a half-install.** It needs an external binary codeintel
+  can't auto-install (`codebase-memory-mcp`), so `doctor`'s health model treats it as optional: a repo
+  with **semantic + LSP** ready is *healthy* (and `setup --all` **exits 0**) even without the graph
+  binary. `doctor` notes graph is "optional — an external backend; codeintel works without it," and its
+  guidance is platform-aware (e.g. `Darwin/arm64`).
+- `codeintel doctor`'s unhealthy tip and the README Quickstart now lead with `codeintel setup --all`.
+- Docs refreshed to the current op set: README's op table + `docs/deploy.md`'s RBAC role example now
+  list `changed`/`deadcode`/`hotspots`; `docs/architecture.md` documents the `changed` cache bypass.
+
+### Fixed (from adversarial review, before release)
+- **`--warm` on a fresh machine.** The warm step read the *pre-install* preflight, so it printed a
+  self-contradictory "warm lsp: fail" directly under "install uv: ok" and never booted serena. It now
+  re-probes (deep) *after* the install loop, so a just-installed `uv` is visible.
+- **`setup --all` exit code.** It exited 1 (and rendered red) on the common no-graph machine because
+  `healthy` required all three engines — graph is now optional (above), so a successful setup exits 0.
+- **`_next_steps` hardened** to degrade to an empty list on a malformed doctor dict, matching every
+  sibling helper's never-raise discipline.
+
+### Tests
+Idempotent-install skip, optional-graph health + render, warm-lsp re-probe (fresh not stale),
+`_next_steps` never-raises on malformed input, and the diagnose-only → `--all` hint. Full suite:
+**326 passed, 1 skipped**.
+
 ## [0.9.0] — 2026-08-14
 
 Unlocks graph-engine capabilities the wrapped `codebase-memory-mcp` backend already computes but that

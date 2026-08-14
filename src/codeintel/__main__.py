@@ -77,6 +77,9 @@ def main() -> None:
     # setup subcommand
     setup_parser = subparsers.add_parser("setup", parents=[color_parent], help="Prepare backends and optionally index this repo")
     setup_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    setup_parser.add_argument("--all", action="store_true", dest="all_steps",
+                              help="One-command setup: do everything automatable (uv + deps + index + "
+                                   "warm serena). Idempotent — skips what's already installed.")
     setup_parser.add_argument("--install-uv", action="store_true", help="Run `pip install uv` (provides uvx for the LSP engine)")
     setup_parser.add_argument("--install-deps", action="store_true", help="Run `pip install -e .` (semantic engine deps)")
     setup_parser.add_argument("--index", action="store_true", help="Index this repo now (first run downloads the ~50MB model)")
@@ -284,12 +287,13 @@ def main() -> None:
             from codeintel import onboarding
 
             project_root = args.project_root or os.getcwd()
+            all_steps = getattr(args, "all_steps", False)  # --all implies every automatable step
             report = onboarding.run_setup(
                 project_root,
-                install_uv=args.install_uv,
-                install_deps=args.install_deps,
-                do_index=args.index,
-                warm_lsp=args.warm,
+                install_uv=args.install_uv or all_steps,
+                install_deps=args.install_deps or all_steps,
+                do_index=args.index or all_steps,
+                warm_lsp=args.warm or all_steps,
             )
             if args.json:
                 import json as _json

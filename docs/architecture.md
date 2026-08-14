@@ -110,9 +110,12 @@ flowchart LR
 
 ## Content-hash cache
 
-`cache.py` keys results by `(op, target, engine, project_root)`. A repeated query on an unchanged
-file is served from cache (`cached: true`); an edit changes the content hash and forces a refresh.
-This keeps hot paths cheap without ever serving stale results across an edit.
+`cache.py` keys results by `(op, target, engine, project_root)` plus a freshness generation. A
+repeated query on an unchanged file is served from cache (`cached: true`); an edit changes the
+content hash and forces a refresh. This keeps hot paths cheap without ever serving stale results
+across an edit. Ops whose answer depends on live, unhashable state — the `changed` op reads the
+uncommitted git worktree — bypass the cache entirely (`gateway._UNCACHED_OPS`), on both the
+single-engine and fan-out paths, since the content-hash key can't see that state.
 
 ## Freshness / reindex seam
 

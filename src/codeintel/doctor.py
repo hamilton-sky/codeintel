@@ -11,6 +11,9 @@ import os
 from typing import Any, Callable, Optional
 
 _ENGINES = ("graph", "lsp", "semantic")
+# Graph needs an external native binary (codebase-memory-mcp) codeintel can't auto-install, so a
+# missing graph engine does NOT make a repo "unhealthy" — the tool is fully usable on semantic + lsp.
+_OPTIONAL_ENGINES = frozenset({"graph"})
 
 
 def _status_for(report: dict) -> str:
@@ -112,13 +115,17 @@ def run_doctor(
         treesitter = False
 
     ready = sum(1 for e in engines.values() if e.get("status") != "fail")
+    # "healthy" ignores OPTIONAL engines (graph): a repo with semantic + lsp ready is healthy even
+    # without the external graph binary. `ready`/`total` stay literal (all three) for transparency.
+    healthy = all(
+        e.get("status") != "fail" for n, e in engines.items() if n not in _OPTIONAL_ENGINES
+    )
     return {
         "ok": True,
         "project_root": root,
         "deep": bool(deep),
         "treesitter": treesitter,
-        "summary": {"ready": ready, "total": len(engines),
-                    "healthy": all(e.get("status") != "fail" for e in engines.values())},
+        "summary": {"ready": ready, "total": len(engines), "healthy": healthy},
         "engines": engines,
     }
 
@@ -168,10 +175,16 @@ def render_doctor_text(report: dict) -> str:
     tail = "" if report.get("deep") else c.dim("  (run with --deep to boot-check serena)")
     out.append("")
     out.append(f"  {count} engines ready for this repo.{tail}")
+    opt_down = [n for n in _ENGINES
+                if n in _OPTIONAL_ENGINES and (engines.get(n) or {}).get("status") == "fail"]
+    if opt_down:
+        out.append("  " + c.dim(
+            f"({', '.join(opt_down)} optional — an external backend; codeintel works without it)"
+        ))
     if healthy is False:
         out.append("  " + c.dim(
-            "tip: `codeintel setup --install-uv --install-deps --index` bootstraps the "
-            "pip-installable backends; each fix: line above has the per-engine command."
+            "tip: `codeintel setup --all` installs + indexes everything automatable in one command; "
+            "each fix: line above has the per-engine command."
         ))
     if report.get("treesitter") is False:
         out.append("  " + c.dim(
