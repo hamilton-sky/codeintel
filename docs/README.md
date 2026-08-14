@@ -10,6 +10,7 @@ explain how the system is put together and how each piece behaves.
 | [architecture.md](architecture.md) | The layered design, the `CodeProvider` protocol, the safe-null contract, caching, freshness, transports. **Read this first.** |
 | [query-flow.md](query-flow.md) | The request lifecycle — engine selection, fan-out & merge, caching, and why the gateway never throws. Mermaid + ASCII. |
 | [map-file.md](map-file.md) | The static `CODE_INTEL.md` orientation layer (`codeintel map`) — for hosts with no MCP support. |
+| [graph-viewer.md](graph-viewer.md) | `codeintel graph` — the call graph as `{nodes,edges}` JSON, or a **self-contained interactive HTML viewer** for any repo (layouts, metrics, export). |
 
 ## Engine references
 
