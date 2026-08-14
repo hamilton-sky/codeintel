@@ -9,6 +9,8 @@ there is no running UI app. It follows a strict **data→renderer** split — th
 deterministic structure (no hallucinated edges), and a template renders it — so the same JSON payload
 can feed the built-in viewer, an external tool, or an agent.
 
+![codeintel's own call graph in the viewer — nodes sized by complexity, colored by module, with the layout switcher, legend, and toolbar.](images/graph-codeintel.png)
+
 ## Usage
 
 ```bash
