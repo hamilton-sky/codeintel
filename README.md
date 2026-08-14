@@ -12,6 +12,14 @@ Prefer plain text? `codeintel map` writes a **readable architecture overview** t
 
 <img src="docs/images/code-intel-map.png" width="520" alt="CODE_INTEL.md — the codeintel map: an architecture overview with node/edge counts and symbols ranked by caller count.">
 
+**What `CODE_INTEL.md` is for.** It's a *static, committable* snapshot of a codebase's shape — meant to be read (by a person or an agent) **first**, instead of reconstructing structure by grepping. It covers the cases the live `code.query` tool doesn't:
+
+- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a pointer into `CLAUDE.md` / `AGENTS.md`, so an agent picks up the codebase's structure automatically at the start of a session.
+- **A committed, diffable overview.** It lives *in the repo* — reviewable in a PR, browsable on GitHub, available offline. Re-run `codeintel map` after `codeintel index` to refresh it.
+- **The load-bearing code at a glance.** Ranking symbols by caller count surfaces what most of the codebase depends on (the risky-to-change core) plus the entry points — the first things a newcomer, or an agent, should understand before touching anything.
+
+See **[docs/map-file.md](docs/map-file.md)** for the format and the `--inject` flow.
+
 ## Why an agent needs it
 
 Without structural tools, an agent dropped into unfamiliar code falls back on `grep` and reads whole files to reconstruct relationships by hand — burning tokens, missing call sites, and guessing at blast radius before it edits anything. codeintel answers those questions directly instead:
