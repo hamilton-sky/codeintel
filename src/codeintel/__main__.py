@@ -209,8 +209,12 @@ def main() -> None:
                     f.write(grapher.render_html(payload))
                 print(f"Wrote {out}  ({n} nodes, {e} edges) — open it in any browser")
                 if not n:
-                    print(f"  (graph empty: {payload.get('reason', 'no data')} — run "
-                          f"`codeintel doctor` to check the graph backend + index)")
+                    reason = payload.get("reason")
+                    if reason:
+                        print(f"  (graph empty: {reason} — run `codeintel doctor` to check the "
+                              f"graph backend + index)")
+                    else:
+                        print("  (no internal call edges found for this repo)")
             else:
                 import json as _json
                 print(_json.dumps(payload, indent=2))

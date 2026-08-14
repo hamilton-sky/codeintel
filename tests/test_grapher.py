@@ -92,3 +92,36 @@ def test_render_html_escapes_script_close():
     payload = {"project": "x", "nodes": [{"id": "a", "label": "a</script><b>", "file": "a.py"}], "edges": []}
     html = grapher.render_html(payload)
     assert "</script><b>" not in html   # the sequence is escaped in the embedded JSON
+
+
+def test_viewer_template_has_no_innerhtml_sink():
+    # Regression for the DOM-XSS finding: untrusted symbol/directory names must NEVER reach
+    # `.innerHTML` — the viewer builds every label via createElement + textContent.
+    tpl = open(grapher._template_path(), encoding="utf-8").read()
+    assert ".innerHTML=" not in tpl and ".innerHTML =" not in tpl
+
+
+def test_render_html_never_raises_on_unserializable_payload():
+    # `default=str` keeps json.dumps from raising on an unexpected value → contract: never raises.
+    html = grapher.render_html({"project": "x", "nodes": [{"id": "a", "label": "a", "bad": {1, 2}}], "edges": []})
+    assert isinstance(html, str) and "<title>" in html
+
+
+def test_build_payload_node_count_bounded_by_edges(monkeypatch):
+    many = [{"a.qualified_name": f"m.f{i}", "a.name": f"f{i}", "a.file_path": "src/m.py",
+             "b.qualified_name": f"m.g{i}", "b.name": f"g{i}", "b.file_path": "src/m.py", "type(c)": "CALLS"}
+            for i in range(200)]
+    _wire(monkeypatch, rows=many)
+    p = grapher.build_graph_payload("/repo", limit=15)
+    assert len(p["edges"]) == 15
+    assert len(p["nodes"]) <= 2 * len(p["edges"])          # nodes provably bounded by edges
+
+
+def test_build_payload_tolerates_none_metrics(monkeypatch):
+    search = [{"qualified_name": "m.f", "name": "f", "file_path": "src/m.py", "complexity": None}]
+    rows = [{"a.qualified_name": "m.f", "a.name": "f", "a.file_path": "src/m.py",
+             "b.qualified_name": "m.g", "b.name": "g", "b.file_path": "src/m.py", "type(c)": "CALLS"}]
+    _wire(monkeypatch, search=search, rows=rows)
+    p = grapher.build_graph_payload("/repo")
+    f = next(n for n in p["nodes"] if n["label"] == "f")
+    assert f["complexity"] == 0                             # None metric → 0, never crashes

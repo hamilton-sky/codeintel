@@ -28,6 +28,10 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
             limit = max(1, min(2000, int(limit)))
         except Exception:
             limit = 220
+        try:
+            timeout_ms = int(timeout_ms)
+        except Exception:
+            timeout_ms = 8000
         from codeintel.providers.graph import GraphProvider
         p = GraphProvider()
         if not getattr(p, "available", False):
@@ -95,11 +99,17 @@ def _template_path() -> str:
 def render_html(payload: dict) -> str:
     """Wrap a graph payload in the self-contained interactive viewer template. Never raises."""
     try:
-        data = json.dumps(payload).replace("</", "<\\/")  # safe to inline inside <script>
+        # default=str → serialization can't raise on an unexpected value; "</" escape keeps the
+        # JSON inside the <script> element (the template's viewer JS re-emits every string via
+        # textContent, so there is no innerHTML/XSS sink downstream).
+        data = json.dumps(payload, default=str).replace("</", "<\\/")
         with open(_template_path(), encoding="utf-8") as f:
             return f.read().replace("__DATA__", data)
     except Exception as exc:
         log_swallowed("grapher.render_html", exc)
-        body = json.dumps(payload, indent=2).replace("&", "&amp;").replace("<", "&lt;")
+        try:
+            body = json.dumps(payload, indent=2, default=str).replace("&", "&amp;").replace("<", "&lt;")
+        except Exception:
+            body = "(graph payload unavailable)"
         return ("<!doctype html><meta charset=utf-8><title>codeintel graph</title>"
                 "<pre style='font:13px ui-monospace,monospace;padding:16px'>" + body + "</pre>")

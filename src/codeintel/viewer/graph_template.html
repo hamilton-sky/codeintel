@@ -339,9 +339,14 @@ const DATA = __DATA__;
     $("d-cx").textContent=n.complexity||0; $("d-cog").textContent=n.cognitive||0;
     $("d-in").textContent=n._in; $("d-out").textContent=n._out;
     const nbrs=[...n._adj].map(j=>nodes[j]);
-    const chips=nbrs.slice(0,14).map(m=>'<span class="chip" data-id="'+m.id.replace(/"/g,'')+'">'+m.label+'</span>').join("");
-    $("d-rel").innerHTML='<b>'+nbrs.length+'</b> connected symbol'+(nbrs.length===1?'':'s')+(nbrs.length?'<div class="chips">'+chips+'</div>':'');
-    $("d-rel").querySelectorAll(".chip").forEach(ch=>ch.onclick=()=>{ const idx=idIndex.get(ch.dataset.id); if(idx!=null) select(idx); });
+    // Build with DOM + textContent (never parses markup) — untrusted symbol names must NOT reach innerHTML.
+    const rel=$("d-rel"); rel.textContent="";
+    const nb=document.createElement("b"); nb.textContent=String(nbrs.length);
+    rel.appendChild(nb); rel.appendChild(document.createTextNode(" connected symbol"+(nbrs.length===1?"":"s")));
+    if(nbrs.length){ const wrap=document.createElement("div"); wrap.className="chips";
+      nbrs.slice(0,14).forEach(m=>{ const c=document.createElement("span"); c.className="chip"; c.textContent=m.label;
+        c.onclick=()=>{ const idx=idIndex.get(m.id); if(idx!=null) select(idx); }; wrap.appendChild(c); });
+      rel.appendChild(wrap); }
     $("detail").classList.add("show");
   }
   function deselect(){ selected=null; clearHi(); $("detail").classList.remove("show"); }
@@ -363,7 +368,10 @@ const DATA = __DATA__;
 
   // ---- legend + header ----
   $("sub").textContent=nodes.length+" nodes · "+edges.length+" edges · "+DATA.project;
-  $("mods").innerHTML=modules.map(m=>'<div class="row"><span class="sw" style="background:'+modColor.get(m)+'"></span>'+m+'</div>').join("");
+  { const el=$("mods"); el.textContent="";   // module names are untrusted dir paths → DOM + textContent, never innerHTML
+    modules.forEach(m=>{ const row=document.createElement("div"); row.className="row";
+      const sw=document.createElement("span"); sw.className="sw"; sw.style.background=modColor.get(m);
+      row.appendChild(sw); row.appendChild(document.createTextNode(m)); el.appendChild(row); }); }
   $("fit").onclick=fit;
 
   // ---- layout options ----
