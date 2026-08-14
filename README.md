@@ -114,6 +114,45 @@ codeintel install            # registers with Claude, Codex, Gemini, Zed
 codeintel query --op search --target "authentication middleware"
 ```
 
+### Enable native Codex integration
+
+`codeintel` is an MCP server, so Codex can call its tools directly rather than invoking the CLI.
+After installing the package, explicitly register it with Codex:
+
+```bash
+codeintel install --agent codex
+```
+
+This safely adds a `[mcp_servers.codeintel]` entry to `~/.codex/config.toml` without changing your
+other Codex settings. Registration is deliberately opt-in: installing a Python package should not
+silently modify an agent's configuration. Start a new Codex task (or restart Codex) after
+registration; the refreshed task will have native `code.query`, `code.status`, `code.doctor`, and
+`code.map` MCP tools available.
+
+For a fully prepared local setup, run:
+
+```bash
+codeintel setup --all /path/to/your/project && codeintel install --agent codex
+```
+
+### Enable native Claude Code integration
+
+After installing the package, explicitly register it with Claude Code:
+
+```bash
+codeintel install --agent claude
+```
+
+This adds the `codeintel` MCP server to `~/.claude/settings.json` while preserving your existing
+settings. Start a new Claude Code session after registration so it can load the native
+`code.query`, `code.status`, `code.doctor`, and `code.map` MCP tools.
+
+For a fully prepared local setup, run:
+
+```bash
+codeintel setup --all /path/to/your/project && codeintel install --agent claude
+```
+
 ## How it works
 
 A `Gateway` receives every query and dispatches it to one of three providers — graph (structural relationships), LSP (precise symbol resolution), or semantic (embedding-based search) — based on the operation type. Each provider is fully isolated: if it is unavailable or raises an exception, the gateway catches it and returns a safe-null envelope. The caller always gets a well-formed response with no exception to catch.
