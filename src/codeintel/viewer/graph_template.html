@@ -1,0 +1,482 @@
+<meta charset="utf-8">
+<title>codeintel Call Graph</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* ---- tokens: light on bare :root, dark via media (system) + [data-theme] (explicit) ---- */
+  :root{
+    --bg:#e9edf1; --canvas:#f6f8fb; --panel:#ffffff; --panel-2:#f2f5f8;
+    --ink:#182130; --muted:#586472; --faint:#8b96a4;
+    --line:#d7dee6; --edge:#aab6c3; --edge-strong:#7d8b99;
+    --accent:#0c8ba6; --accent-ink:#ffffff; --accent-soft:rgba(12,139,166,.12);
+    --shadow:0 6px 24px rgba(24,33,48,.10),0 1px 3px rgba(24,33,48,.08);
+    --node-stroke:rgba(255,255,255,.85);
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --bg:#0b0f14; --canvas:#0e131a; --panel:#141b24; --panel-2:#101720;
+    --ink:#e0e8f1; --muted:#8695a5; --faint:#5d6b7b;
+    --line:#212a35; --edge:#38434f; --edge-strong:#5a6a79;
+    --accent:#34c3dc; --accent-ink:#05242b; --accent-soft:rgba(52,195,220,.14);
+    --shadow:0 8px 30px rgba(0,0,0,.5); --node-stroke:rgba(10,15,20,.9);
+  }}
+  :root[data-theme="dark"]{
+    --bg:#0b0f14; --canvas:#0e131a; --panel:#141b24; --panel-2:#101720;
+    --ink:#e0e8f1; --muted:#8695a5; --faint:#5d6b7b;
+    --line:#212a35; --edge:#38434f; --edge-strong:#5a6a79;
+    --accent:#34c3dc; --accent-ink:#05242b; --accent-soft:rgba(52,195,220,.14);
+    --shadow:0 8px 30px rgba(0,0,0,.5); --node-stroke:rgba(10,15,20,.9);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
+  }
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #app{display:flex; flex-direction:column; height:100vh}
+
+  /* ---- header / toolbar ---- */
+  header{
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    padding:12px 18px; background:var(--panel); border-bottom:1px solid var(--line);
+    z-index:5;
+  }
+  .brand{display:flex; flex-direction:column; gap:1px; margin-right:4px}
+  .brand h1{margin:0; font-size:15px; font-weight:650; letter-spacing:-.01em}
+  .brand h1 b{color:var(--accent)}
+  .brand .sub{font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums}
+  .spacer{flex:1}
+  .search{
+    display:flex; align-items:center; gap:7px; background:var(--panel-2);
+    border:1px solid var(--line); border-radius:8px; padding:6px 10px; min-width:180px;
+  }
+  .search svg{width:14px;height:14px;color:var(--faint);flex:none}
+  .search input{border:0;background:transparent;color:var(--ink);font-size:12.5px;width:100%;outline:none}
+  .tools{display:flex; gap:6px; flex-wrap:wrap}
+  button.tool{
+    font:inherit; font-size:12px; font-weight:550; cursor:pointer;
+    color:var(--ink); background:var(--panel-2); border:1px solid var(--line);
+    padding:7px 11px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
+    transition:border-color .12s,background .12s,transform .06s;
+  }
+  button.tool:hover{border-color:var(--accent); color:var(--accent)}
+  button.tool:active{transform:translateY(1px)}
+  button.tool:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  button.tool svg{width:14px;height:14px}
+  .tool.ghost{background:transparent}
+  .seg{display:inline-flex; background:var(--panel-2); border:1px solid var(--line); border-radius:9px; padding:2px; gap:2px}
+  .seg-btn{font:inherit; font-size:12px; font-weight:550; cursor:pointer; color:var(--muted); background:transparent; border:0; padding:6px 11px; border-radius:7px; transition:color .12s,background .12s}
+  .seg-btn:hover{color:var(--ink)}
+  .seg-btn.active{background:var(--panel); color:var(--accent); box-shadow:0 1px 2px rgba(0,0,0,.10)}
+  .seg-btn:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+
+  /* ---- stage ---- */
+  main{position:relative; flex:1; overflow:hidden; background:
+     radial-gradient(120% 120% at 50% 0%, color-mix(in srgb,var(--canvas) 100%, var(--accent) 3%), var(--canvas) 60%);}
+  svg#graph{position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none}
+  svg#graph.panning{cursor:grabbing}
+  .edge{stroke:var(--edge); stroke-width:1; fill:none; transition:stroke .15s,opacity .15s}
+  .edge.usage{stroke-dasharray:2 3}
+  .node circle{stroke:var(--node-stroke); stroke-width:1.5; cursor:pointer; transition:stroke .12s}
+  .node text{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px;
+    fill:var(--ink); paint-order:stroke; stroke:var(--canvas); stroke-width:2.6px; stroke-linejoin:round;
+    pointer-events:none; opacity:.9;
+  }
+  .node.dim{opacity:.16}
+  .edge.dim{opacity:.05}
+  .node.sel circle{stroke:var(--accent); stroke-width:3}
+  .edge.lit{stroke:var(--accent); stroke-width:1.8; opacity:.95}
+
+  /* ---- overlay panels ---- */
+  .panel{
+    position:absolute; background:color-mix(in srgb,var(--panel) 88%, transparent);
+    backdrop-filter:blur(8px); border:1px solid var(--line); border-radius:12px;
+    box-shadow:var(--shadow); z-index:4;
+  }
+  .legend{left:16px; bottom:16px; padding:12px 14px; max-width:210px}
+  .legend h3{margin:0 0 8px; font-size:10.5px; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); font-weight:650}
+  .legend .row{display:flex; align-items:center; gap:8px; font-size:11.5px; margin:4px 0; color:var(--muted)}
+  .legend .sw{width:11px;height:11px;border-radius:50%;flex:none;border:1px solid var(--node-stroke)}
+  .legend .mods{display:flex; flex-direction:column; gap:2px; margin-top:8px; max-height:180px; overflow:auto}
+  .legend .size-key{display:flex;align-items:flex-end;gap:6px;margin-top:2px}
+  .legend .size-key .dot{background:var(--faint);border-radius:50%;border:1px solid var(--node-stroke)}
+
+  .detail{right:16px; top:16px; width:288px; padding:0; overflow:hidden; display:none}
+  .detail.show{display:block}
+  .detail .dhead{padding:13px 15px 11px; border-bottom:1px solid var(--line); background:var(--accent-soft)}
+  .detail .dhead .sym{font-size:13.5px; font-weight:600; word-break:break-word; line-height:1.3}
+  .detail .dhead .path{font-size:11px; color:var(--muted); margin-top:3px; word-break:break-all}
+  .detail .metrics{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line)}
+  .detail .m{background:var(--panel); padding:10px 13px}
+  .detail .m .k{font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint)}
+  .detail .m .v{font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:2px}
+  .detail .m .v.hi{color:var(--accent)}
+  .detail .rel{padding:11px 15px 14px; font-size:11.5px; color:var(--muted)}
+  .detail .rel b{color:var(--ink); font-weight:600}
+  .detail .rel .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+  .detail .rel .chip{font-family:ui-monospace,monospace; font-size:10.5px; background:var(--panel-2); border:1px solid var(--line); border-radius:5px; padding:2px 6px; color:var(--ink); cursor:pointer}
+  .detail .rel .chip:hover{border-color:var(--accent);color:var(--accent)}
+  .detail .close{position:absolute; right:9px; top:9px; width:24px;height:24px; border:0; background:transparent; color:var(--muted); cursor:pointer; border-radius:6px; font-size:16px; line-height:1}
+  .detail .close:hover{background:var(--panel-2);color:var(--ink)}
+
+  .hint{position:absolute; right:16px; bottom:16px; font-size:11px; color:var(--faint); text-align:right; z-index:3; pointer-events:none; line-height:1.7}
+  .hint kbd{font-family:ui-monospace,monospace; background:var(--panel-2); border:1px solid var(--line); border-bottom-width:2px; border-radius:4px; padding:0 4px; color:var(--muted); font-size:10px}
+
+  /* ---- export modal ---- */
+  .scrim{position:fixed; inset:0; background:rgba(8,12,17,.55); z-index:20; display:none; align-items:center; justify-content:center; padding:24px}
+  .scrim.show{display:flex}
+  .modal{width:min(680px,100%); max-height:86vh; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); overflow:hidden}
+  .modal header{background:var(--panel); border-bottom:1px solid var(--line); padding:14px 18px}
+  .modal header h2{margin:0; font-size:14px; font-weight:600}
+  .modal header .mono{font-size:11.5px; color:var(--muted); margin-top:2px}
+  .modal .body{padding:14px 18px; overflow:auto}
+  .modal textarea{width:100%; height:300px; resize:vertical; border:1px solid var(--line); border-radius:9px; background:var(--panel-2); color:var(--ink); padding:12px; font-family:ui-monospace,monospace; font-size:11.5px; line-height:1.55; outline:none}
+  .modal textarea:focus{border-color:var(--accent)}
+  .modal .foot{display:flex; gap:8px; justify-content:flex-end; padding:12px 18px; border-top:1px solid var(--line)}
+  .btn-primary{background:var(--accent); color:var(--accent-ink); border:1px solid var(--accent); font-weight:600}
+  .btn-primary:hover{filter:brightness(1.06); color:var(--accent-ink)}
+  .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(20px); background:var(--ink); color:var(--bg); font-size:12.5px; font-weight:550; padding:9px 15px; border-radius:9px; opacity:0; transition:opacity .2s,transform .2s; z-index:30; pointer-events:none}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+
+  @media (max-width:640px){
+    .detail{width:auto; left:16px; right:16px; top:auto; bottom:16px}
+    .legend{display:none}
+    .hint{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div id="app">
+  <header>
+    <div class="brand">
+      <h1><b>code</b>intel · call graph</h1>
+      <div class="sub" id="sub">— nodes · — edges</div>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="search" type="text" placeholder="Filter symbols…" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="seg" id="layouts" role="group" aria-label="Layout">
+      <button class="seg-btn active" data-layout="force" title="Force-directed — organic clusters">Force</button>
+      <button class="seg-btn" data-layout="radial" title="Radial — rings by distance from the busiest hub">Radial</button>
+      <button class="seg-btn" data-layout="layered" title="Layered — top-down call flow">Layered</button>
+      <button class="seg-btn" data-layout="cluster" title="Modules — grouped by file/module">Modules</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="tools">
+      <button class="tool ghost" id="relayout" title="Re-run the layout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Relayout</button>
+      <button class="tool ghost" id="fit" title="Fit graph to view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m0 8v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3m0-8V5a2 2 0 0 0-2-2h-3"/></svg>Fit</button>
+      <button class="tool" data-export="json"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>JSON</button>
+      <button class="tool" data-export="md"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15V9l3 3 3-3v6M17 9v6M20 12l-3 3"/></svg>Markdown</button>
+      <button class="tool" data-export="svg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>SVG</button>
+      <button class="tool" data-export="png"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-5-5L5 21"/></svg>PNG</button>
+    </div>
+  </header>
+
+  <main>
+    <svg id="graph"><g id="viewport"><g id="edges"></g><g id="nodes"></g></g></svg>
+
+    <div class="panel legend">
+      <h3>Modules</h3>
+      <div class="mods" id="mods"></div>
+      <h3 style="margin-top:12px">Node size = complexity</h3>
+      <div class="size-key">
+        <span class="dot" style="width:8px;height:8px"></span><span class="dot" style="width:14px;height:14px"></span><span class="dot" style="width:22px;height:22px"></span>
+        <span style="font-size:11px;color:var(--muted);margin-left:2px">low → high</span>
+      </div>
+    </div>
+
+    <div class="panel detail" id="detail">
+      <button class="close" id="dclose" aria-label="Close">×</button>
+      <div class="dhead"><div class="sym mono" id="d-sym"></div><div class="path mono" id="d-path"></div></div>
+      <div class="metrics">
+        <div class="m"><div class="k">Complexity</div><div class="v hi" id="d-cx">—</div></div>
+        <div class="m"><div class="k">Cognitive</div><div class="v" id="d-cog">—</div></div>
+        <div class="m"><div class="k">Callers (in)</div><div class="v" id="d-in">—</div></div>
+        <div class="m"><div class="k">Calls (out)</div><div class="v" id="d-out">—</div></div>
+      </div>
+      <div class="rel" id="d-rel"></div>
+    </div>
+
+    <div class="hint">
+      drag <kbd>node</kbd> to pin · drag <kbd>space</kbd> to pan · <kbd>scroll</kbd> to zoom · <kbd>click</kbd> to inspect
+    </div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim">
+  <div class="modal">
+    <header><h2 id="mtitle">Export</h2><div class="mono" id="msub"></div></header>
+    <div class="body"><textarea id="mtext" readonly spellcheck="false"></textarea></div>
+    <div class="foot">
+      <button class="tool ghost" id="mclose">Close</button>
+      <button class="tool" id="mdownload">Download file</button>
+      <button class="tool btn-primary" id="mcopy">Copy to clipboard</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const DATA = __DATA__;
+(function(){
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion:reduce)").matches;
+  const PALETTE = ["#4c9fd6","#9a86e0","#d6895b","#5cbf92","#d97ba6","#c9a54b","#6f7fd6","#57b8c4","#b07cc9","#7f8c99","#d0687a","#63b06a"];
+  const nodes = DATA.nodes.map(n=>Object.assign({},n));
+  const idIndex = new Map(nodes.map((n,i)=>[n.id,i]));
+  const edges = DATA.edges.filter(e=>idIndex.has(e.from)&&idIndex.has(e.to))
+                          .map(e=>({source:idIndex.get(e.from),target:idIndex.get(e.to),type:e.type}));
+
+  // module = the file's directory (generalizes to any repo layout); root files → "(root)"
+  const moduleOf = f => { const s=String(f||""); const i=Math.max(s.lastIndexOf("/"),s.lastIndexOf("\\")); return i>0 ? s.slice(0,i) : "(root)"; };
+  const modules=[]; const modColor=new Map();
+  nodes.forEach(n=>{ const m=moduleOf(n.file); if(!modColor.has(m)){ modColor.set(m,PALETTE[modules.length%PALETTE.length]); modules.push(m);} n._mod=m; });
+
+  // degree within this subgraph + node radius from complexity (fallback degree)
+  nodes.forEach(n=>{n._in=0;n._out=0;n._adj=new Set();});
+  edges.forEach(e=>{ nodes[e.source]._out++; nodes[e.target]._in++; nodes[e.source]._adj.add(e.target); nodes[e.target]._adj.add(e.source);});
+  const maxCx = Math.max(1,...nodes.map(n=>n.complexity||0));
+  nodes.forEach(n=>{ const c=n.complexity||0; const base=c>0?Math.sqrt(c/maxCx):Math.sqrt((n._in+n._out+1)/12);
+    n._r = Math.max(5, Math.min(23, 6+base*17)); });
+
+  // ---- layout: seed on a circle, then force sim ----
+  const W0=1200,H0=820;
+  nodes.forEach((n,i)=>{ const a=i/nodes.length*Math.PI*2; n.x=W0/2+Math.cos(a)*300+(i%7-3)*12; n.y=H0/2+Math.sin(a)*300+(i%5-2)*12; n.vx=0; n.vy=0; n.fx=null; n.fy=null;});
+  let alpha=1;
+  function tick(){
+    const k=alpha;
+    // repulsion (O(n^2), fine for ~120 nodes)
+    for(let i=0;i<nodes.length;i++){ const a=nodes[i];
+      for(let j=i+1;j<nodes.length;j++){ const b=nodes[j];
+        let dx=a.x-b.x, dy=a.y-b.y, d2=dx*dx+dy*dy||0.01; const d=Math.sqrt(d2);
+        const rep=(2600)/d2*k; const fx=dx/d*rep, fy=dy/d*rep;
+        a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
+      }}
+    // springs
+    for(const e of edges){ const a=nodes[e.source], b=nodes[e.target];
+      let dx=b.x-a.x, dy=b.y-a.y, d=Math.sqrt(dx*dx+dy*dy)||0.01; const ideal=90+a._r+b._r;
+      const f=(d-ideal)*0.028*k; const fx=dx/d*f, fy=dy/d*f;
+      a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
+    }
+    // gravity to center
+    for(const n of nodes){ n.vx+=(W0/2-n.x)*0.006*k; n.vy+=(H0/2-n.y)*0.006*k; }
+    for(const n of nodes){ if(n.fx!=null){n.x=n.fx;n.y=n.fy;n.vx=0;n.vy=0;continue;}
+      n.vx*=0.86; n.vy*=0.86; n.x+=Math.max(-30,Math.min(30,n.vx)); n.y+=Math.max(-30,Math.min(30,n.vy)); }
+    alpha*=0.985;
+  }
+
+  // ---- render ----
+  const svg=document.getElementById("graph"), vp=document.getElementById("viewport");
+  const gEdges=document.getElementById("edges"), gNodes=document.getElementById("nodes");
+  const NS="http://www.w3.org/2000/svg";
+  const edgeEls=edges.map(e=>{ const l=document.createElementNS(NS,"line"); l.setAttribute("class","edge"+(e.type==="USAGE"?" usage":"")); gEdges.appendChild(l); return l;});
+  const nodeEls=nodes.map((n,i)=>{
+    const g=document.createElementNS(NS,"g"); g.setAttribute("class","node"); g.dataset.i=i;
+    const c=document.createElementNS(NS,"circle"); c.setAttribute("r",n._r); c.setAttribute("fill",modColor.get(n._mod));
+    const t=document.createElementNS(NS,"text"); t.setAttribute("y",n._r+10); t.setAttribute("text-anchor","middle"); t.textContent=n.label;
+    g.appendChild(c); g.appendChild(t); gNodes.appendChild(g); return g;
+  });
+  function draw(){
+    for(let i=0;i<edges.length;i++){ const e=edges[i], a=nodes[e.source], b=nodes[e.target], el=edgeEls[i];
+      el.setAttribute("x1",a.x); el.setAttribute("y1",a.y); el.setAttribute("x2",b.x); el.setAttribute("y2",b.y);}
+    for(let i=0;i<nodes.length;i++){ nodeEls[i].setAttribute("transform","translate("+nodes[i].x+","+nodes[i].y+")"); }
+  }
+  let running=true, ticks=0;
+  function loop(){ if(running){ tick(); draw(); ticks++; if(alpha<0.02||ticks>600){running=false; fit();} } requestAnimationFrame(loop); }
+  if(reduce){ for(let i=0;i<420;i++) tick(); draw(); fit(); } else loop();
+
+  // ---- pan / zoom ----
+  let view={x:0,y:0,k:1};
+  function apply(){ vp.setAttribute("transform","translate("+view.x+","+view.y+") scale("+view.k+")"); }
+  function fit(){
+    let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+    for(const n of nodes){ minX=Math.min(minX,n.x-n._r); minY=Math.min(minY,n.y-n._r); maxX=Math.max(maxX,n.x+n._r); maxY=Math.max(maxY,n.y+n._r);}
+    const bw=maxX-minX,bh=maxY-minY, rect=svg.getBoundingClientRect();
+    const k=Math.min(rect.width/(bw+80), rect.height/(bh+80), 1.6);
+    view.k=k; view.x=rect.width/2-(minX+bw/2)*k; view.y=rect.height/2-(minY+bh/2)*k; apply();
+  }
+  svg.addEventListener("wheel",ev=>{ ev.preventDefault(); const rect=svg.getBoundingClientRect();
+    const mx=ev.clientX-rect.left,my=ev.clientY-rect.top; const s=Math.exp(-ev.deltaY*0.0015);
+    const nk=Math.max(0.15,Math.min(5,view.k*s)); view.x=mx-(mx-view.x)*(nk/view.k); view.y=my-(my-view.y)*(nk/view.k); view.k=nk; apply();
+  },{passive:false});
+
+  // ---- drag (node) + pan (bg) + tap-to-select via pointer events ----
+  // A "tap" (pointerdown→up with no movement) selects; a drag moves. We resolve selection on
+  // pointerup rather than the native click event, which pointer-capture makes unreliable.
+  let drag=null,pan=null,down=null,moved=false;
+  svg.addEventListener("pointerdown",ev=>{
+    const g=ev.target.closest(".node");
+    const rect=svg.getBoundingClientRect(), px=ev.clientX-rect.left, py=ev.clientY-rect.top;
+    moved=false; down={px,py};
+    if(g){ const i=+g.dataset.i; drag={i}; nodes[i].fx=nodes[i].x; nodes[i].fy=nodes[i].y; alpha=Math.max(alpha,0.4); running=true; svg.setPointerCapture(ev.pointerId); }
+    else { pan={sx:px,sy:py,vx:view.x,vy:view.y}; svg.classList.add("panning"); svg.setPointerCapture(ev.pointerId); }
+  });
+  svg.addEventListener("pointermove",ev=>{
+    const rect=svg.getBoundingClientRect(), px=ev.clientX-rect.left, py=ev.clientY-rect.top;
+    if(down && (Math.abs(px-down.px)>4 || Math.abs(py-down.py)>4)) moved=true;
+    if(drag){ nodes[drag.i].fx=(px-view.x)/view.k; nodes[drag.i].fy=(py-view.y)/view.k; if(reduce) draw(); }
+    else if(pan){ view.x=pan.vx+(px-pan.sx); view.y=pan.vy+(py-pan.sy); apply(); }
+  });
+  function endPtr(){
+    if(drag){ if(!moved) select(drag.i); nodes[drag.i].fx=null; nodes[drag.i].fy=null; drag=null; }
+    else if(pan){ if(!moved) deselect(); pan=null; svg.classList.remove("panning"); }
+    down=null;
+  }
+  svg.addEventListener("pointerup",endPtr); svg.addEventListener("pointercancel",endPtr);
+
+  // ---- selection / detail ----
+  let selected=null;
+  const $=id=>document.getElementById(id);
+  function clearHi(){ nodeEls.forEach(e=>e.classList.remove("dim","sel")); edgeEls.forEach(e=>e.classList.remove("dim","lit")); }
+  function select(i){
+    selected=i; clearHi(); const n=nodes[i];
+    nodeEls.forEach((e,j)=>{ if(j!==i&&!n._adj.has(j)) e.classList.add("dim"); });
+    nodeEls[i].classList.add("sel");
+    edges.forEach((e,k)=>{ if(e.source===i||e.target===i) edgeEls[k].classList.add("lit"); else edgeEls[k].classList.add("dim"); });
+    $("d-sym").textContent=n.label; $("d-path").textContent=n.file;
+    $("d-cx").textContent=n.complexity||0; $("d-cog").textContent=n.cognitive||0;
+    $("d-in").textContent=n._in; $("d-out").textContent=n._out;
+    const nbrs=[...n._adj].map(j=>nodes[j]);
+    const chips=nbrs.slice(0,14).map(m=>'<span class="chip" data-id="'+m.id.replace(/"/g,'')+'">'+m.label+'</span>').join("");
+    $("d-rel").innerHTML='<b>'+nbrs.length+'</b> connected symbol'+(nbrs.length===1?'':'s')+(nbrs.length?'<div class="chips">'+chips+'</div>':'');
+    $("d-rel").querySelectorAll(".chip").forEach(ch=>ch.onclick=()=>{ const idx=idIndex.get(ch.dataset.id); if(idx!=null) select(idx); });
+    $("detail").classList.add("show");
+  }
+  function deselect(){ selected=null; clearHi(); $("detail").classList.remove("show"); }
+  $("dclose").onclick=deselect;
+  nodeEls.forEach((g,i)=>{
+    g.addEventListener("mouseenter",()=>{ if(selected!=null) return; const n=nodes[i];
+      nodeEls.forEach((e,j)=>{ if(j!==i&&!n._adj.has(j)) e.classList.add("dim"); });
+      edges.forEach((e,k)=>{ if(e.source===i||e.target===i) edgeEls[k].classList.add("lit"); else edgeEls[k].classList.add("dim"); }); });
+    g.addEventListener("mouseleave",()=>{ if(selected==null) clearHi(); });
+  });
+
+  // ---- search ----
+  $("search").addEventListener("input",e=>{
+    const q=e.target.value.trim().toLowerCase(); if(selected!=null) deselect();
+    if(!q){ clearHi(); return; }
+    nodeEls.forEach((el,i)=>{ const hit=nodes[i].label.toLowerCase().includes(q)||nodes[i].file.toLowerCase().includes(q); el.classList.toggle("dim",!hit); });
+    edgeEls.forEach(el=>el.classList.add("dim"));
+  });
+
+  // ---- legend + header ----
+  $("sub").textContent=nodes.length+" nodes · "+edges.length+" edges · "+DATA.project;
+  $("mods").innerHTML=modules.map(m=>'<div class="row"><span class="sw" style="background:'+modColor.get(m)+'"></span>'+m+'</div>').join("");
+  $("fit").onclick=fit;
+
+  // ---- layout options ----
+  let animRAF=null, curLayout="force";
+  function unpin(){ nodes.forEach(n=>{n.fx=null;n.fy=null;}); }
+  function hub(){ let bi=0,bd=-1; nodes.forEach((n,i)=>{const d=n._in+n._out; if(d>bd){bd=d;bi=i;}}); return bi; }
+  function radialTargets(){                 // rings by BFS distance from the busiest hub
+    const root=hub(), dist=new Array(nodes.length).fill(-1); dist[root]=0; const q=[root];
+    while(q.length){ const c=q.shift(); for(const nb of nodes[c]._adj){ if(dist[nb]<0){dist[nb]=dist[c]+1; q.push(nb);} } }
+    let maxD=0; dist.forEach(d=>{ if(d>maxD)maxD=d; });
+    const layers={}; nodes.forEach((n,i)=>{ const d=dist[i]<0?maxD+1:dist[i]; (layers[d]=layers[d]||[]).push(i); });
+    const tg={};
+    Object.keys(layers).forEach(dk=>{ const d=+dk, arr=layers[dk], R=d*145;
+      arr.forEach((i,k)=>{ const a=(k/arr.length)*Math.PI*2 + d*0.5; tg[i]={x:W0/2+Math.cos(a)*R, y:H0/2+Math.sin(a)*R}; }); });
+    tg[root]={x:W0/2,y:H0/2}; return tg;
+  }
+  function layeredTargets(){                 // top-down: sources at top, callees below (Kahn BFS; cycles get discovery layer)
+    const out=nodes.map(()=>[]), indeg=nodes.map(()=>0);
+    edges.forEach(e=>{ out[e.source].push(e.target); indeg[e.target]++; });
+    let cur=[]; nodes.forEach((n,i)=>{ if(indeg[i]===0) cur.push(i); }); if(!cur.length) cur=[hub()];
+    const layer=nodes.map(()=>0), seen=new Set(cur); let L=0;
+    while(cur.length){ const nx=[]; for(const c of cur){ layer[c]=L; for(const t of out[c]) if(!seen.has(t)){ seen.add(t); nx.push(t); } } cur=nx; L++; }
+    nodes.forEach((n,i)=>{ if(!seen.has(i)) layer[i]=L; });
+    const byL={}; nodes.forEach((n,i)=>{ (byL[layer[i]]=byL[layer[i]]||[]).push(i); });
+    const tg={};
+    Object.keys(byL).forEach(lk=>{ const arr=byL[lk], gx=Math.max(62,960/Math.max(arr.length,1));
+      arr.forEach((i,k)=>{ tg[i]={x:W0/2+(k-(arr.length-1)/2)*gx, y:70+(+lk)*104}; }); });
+    return tg;
+  }
+  function clusterTargets(){                 // group by module into tight, separated discs
+    const byMod={}; nodes.forEach((n,i)=>{ (byMod[n._mod]=byMod[n._mod]||[]).push(i); });
+    const M=modules.length, centers={};
+    modules.forEach((m,k)=>{ const a=(k/M)*Math.PI*2 - Math.PI/2; centers[m]={x:W0/2+Math.cos(a)*400, y:H0/2+Math.sin(a)*330}; });
+    const tg={};
+    Object.keys(byMod).forEach(m=>{ const arr=byMod[m], c=centers[m];
+      arr.forEach((i,k)=>{ const r=10*Math.sqrt(k+0.5), a=k*2.399963229; tg[i]={x:c.x+Math.cos(a)*r, y:c.y+Math.sin(a)*r}; }); }); // phyllotaxis
+    return tg;
+  }
+  function animateTo(targets){
+    if(animRAF) cancelAnimationFrame(animRAF); running=false; unpin();
+    const start=nodes.map(n=>({x:n.x,y:n.y})); let f=0; const N=reduce?1:46;
+    (function step(){ f++; const t=Math.min(1,f/N), e=1-Math.pow(1-t,3);
+      nodes.forEach((n,i)=>{ const g=targets[i]; if(g){ n.x=start[i].x+(g.x-start[i].x)*e; n.y=start[i].y+(g.y-start[i].y)*e; n.vx=0; n.vy=0; } });
+      draw(); if(f<N){ animRAF=requestAnimationFrame(step); } else { animRAF=null; fit(); } })();
+  }
+  function runForce(){ if(animRAF){ cancelAnimationFrame(animRAF); animRAF=null; } unpin(); alpha=1; ticks=0; running=true;
+    if(reduce){ for(let i=0;i<440;i++) tick(); draw(); fit(); running=false; } }
+  function setLayout(name){
+    curLayout=name; if(selected!=null) deselect();
+    document.querySelectorAll(".seg-btn").forEach(b=>b.classList.toggle("active", b.dataset.layout===name));
+    if(name==="force") runForce();
+    else if(name==="radial") animateTo(radialTargets());
+    else if(name==="layered") animateTo(layeredTargets());
+    else if(name==="cluster") animateTo(clusterTargets());
+  }
+  document.querySelectorAll(".seg-btn").forEach(b=>b.onclick=()=>setLayout(b.dataset.layout));
+  $("relayout").onclick=()=>setLayout(curLayout);
+
+  // ---- exports ----
+  function download(name,text,mime){ try{ const b=new Blob([text],{type:mime||"text/plain"}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),1500); toast("Downloaded "+name); }catch(e){ toast("Download blocked here — use Copy"); } }
+  function toMarkdown(){
+    const byCx=[...nodes].sort((a,b)=>(b.complexity||0)-(a.complexity||0));
+    let s="# codeintel call graph — "+DATA.project+"\n\n"+nodes.length+" symbols · "+edges.length+" call edges\n\n## Hotspots (by complexity)\n\n| symbol | file | cx | cog | in | out |\n|---|---|--:|--:|--:|--:|\n";
+    byCx.slice(0,25).forEach(n=>{ s+="| `"+n.label+"` | "+n.file+" | "+(n.complexity||0)+" | "+(n.cognitive||0)+" | "+n._in+" | "+n._out+" |\n"; });
+    s+="\n## Call edges\n\n";
+    edges.forEach(e=>{ s+="- `"+nodes[e.source].label+"` → `"+nodes[e.target].label+"`  ("+e.type+")\n"; });
+    return s;
+  }
+  function serializeSVG(){
+    const rect=svg.getBoundingClientRect();
+    const cs=getComputedStyle(document.body); const bg=cs.getPropertyValue("--canvas").trim()||"#0e131a";
+    const ink=cs.getPropertyValue("--ink").trim(), edge=cs.getPropertyValue("--edge").trim(), estr=cs.getPropertyValue("--node-stroke").trim();
+    const clone=svg.cloneNode(true); clone.setAttribute("xmlns",NS); clone.setAttribute("width",rect.width); clone.setAttribute("height",rect.height);
+    clone.setAttribute("viewBox","0 0 "+rect.width+" "+rect.height);
+    // inline the theme colors so the exported file is standalone
+    clone.querySelectorAll(".edge").forEach(e=>{e.setAttribute("stroke",edge);e.setAttribute("stroke-width","1");});
+    clone.querySelectorAll(".node text").forEach(t=>{t.setAttribute("fill",ink);t.setAttribute("stroke",bg);t.setAttribute("stroke-width","2.6");t.style.fontFamily="ui-monospace,Menlo,monospace";t.style.fontSize="9.5px";});
+    clone.querySelectorAll(".node circle").forEach(c=>{c.setAttribute("stroke",estr);c.setAttribute("stroke-width","1.5");});
+    const style=document.createElementNS(NS,"style"); style.textContent=".node text{font-family:ui-monospace,Menlo,monospace;font-size:9.5px}";
+    clone.insertBefore(style,clone.firstChild);
+    const rc=document.createElementNS(NS,"rect"); rc.setAttribute("x",0);rc.setAttribute("y",0);rc.setAttribute("width",rect.width);rc.setAttribute("height",rect.height);rc.setAttribute("fill",bg);
+    clone.insertBefore(rc,clone.firstChild);
+    return '<?xml version="1.0" encoding="UTF-8"?>\n'+new XMLSerializer().serializeToString(clone);
+  }
+  const EX={
+    json:{title:"Export · JSON",sub:"the graph payload — the shape `code.query --format json` emits",name:"codeintel-graph.json",mime:"application/json",make:()=>JSON.stringify(DATA,null,2)},
+    md:{title:"Export · Markdown",sub:"hotspots table + call edges — the same content `code.query` returns as text",name:"codeintel-graph.md",mime:"text/markdown",make:toMarkdown},
+    svg:{title:"Export · SVG",sub:"the current view as a standalone vector image",name:"codeintel-graph.svg",mime:"image/svg+xml",make:serializeSVG},
+  };
+  let cur=null;
+  function openModal(kind){
+    if(kind==="png"){ return exportPNG(); }
+    const spec=EX[kind]; cur=spec; $("mtitle").textContent=spec.title; $("msub").textContent=spec.sub;
+    const txt=spec.make(); $("mtext").value=txt; $("scrim").classList.add("show"); $("mtext").scrollTop=0;
+  }
+  document.querySelectorAll("[data-export]").forEach(b=>b.onclick=()=>openModal(b.dataset.export));
+  $("mclose").onclick=()=>$("scrim").classList.remove("show");
+  $("scrim").addEventListener("click",e=>{ if(e.target===$("scrim")) $("scrim").classList.remove("show"); });
+  $("mcopy").onclick=async()=>{ try{ await navigator.clipboard.writeText($("mtext").value); toast("Copied to clipboard"); }catch(e){ $("mtext").select(); document.execCommand&&document.execCommand("copy"); toast("Copied"); } };
+  $("mdownload").onclick=()=>{ if(cur) download(cur.name,$("mtext").value,cur.mime); };
+
+  function exportPNG(){
+    const svgText=serializeSVG(); const rect=svg.getBoundingClientRect(); const scale=2;
+    const img=new Image(); const blob=new Blob([svgText],{type:"image/svg+xml"}); const url=URL.createObjectURL(blob);
+    img.onload=()=>{ const cv=document.createElement("canvas"); cv.width=rect.width*scale; cv.height=rect.height*scale;
+      const ctx=cv.getContext("2d"); ctx.scale(scale,scale); ctx.drawImage(img,0,0); URL.revokeObjectURL(url);
+      cv.toBlob(b=>{ if(!b){toast("PNG export blocked here");return;} const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download="codeintel-graph.png"; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),1500); toast("Downloaded codeintel-graph.png"); },"image/png"); };
+    img.onerror=()=>{toast("PNG export unavailable here");URL.revokeObjectURL(url);};
+    img.src=url;
+  }
+
+  // ---- toast ----
+  let tt; function toast(m){ const el=$("toast"); el.textContent=m; el.classList.add("show"); clearTimeout(tt); tt=setTimeout(()=>el.classList.remove("show"),1900); }
+  addEventListener("keydown",e=>{ if(e.key==="Escape"){ $("scrim").classList.remove("show"); deselect(); } });
+})();
+</script>

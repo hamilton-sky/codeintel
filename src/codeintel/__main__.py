@@ -68,6 +68,13 @@ def main() -> None:
     map_parser.add_argument("--inject", action="store_true", help="Inject reference block into CLAUDE.md/AGENTS.md")
     map_parser.add_argument("--budget", type=int, default=32768, help="Byte budget for CODE_INTEL.md (default: 32768)")
 
+    # graph subcommand — interactive call-graph view (HTML) or the raw {nodes,edges} JSON
+    graph_parser = subparsers.add_parser("graph", help="Build an interactive call-graph view (--html) or emit the graph as JSON — works on any indexed repo")
+    graph_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    graph_parser.add_argument("--html", action="store_true", help="Write a self-contained interactive HTML viewer (default: print JSON)")
+    graph_parser.add_argument("--out", default=None, help="Output path for --html (default: codeintel-graph.html)")
+    graph_parser.add_argument("--limit", type=int, default=220, help="Max call edges to include (default: 220)")
+
     # doctor subcommand
     doctor_parser = subparsers.add_parser("doctor", parents=[color_parent], help="Diagnose engine health + index status for a repo")
     doctor_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
@@ -188,6 +195,27 @@ def main() -> None:
         except Exception as exc:
             # Never-raise parity with the MCP code.map handler — degrade, don't crash.
             print(f"map failed: {exc}")
+        sys.exit(0)
+
+    elif args.command == "graph":
+        from codeintel import grapher
+        project_root = args.project_root or os.getcwd()
+        try:
+            payload = grapher.build_graph_payload(project_root, limit=args.limit)
+            n, e = len(payload.get("nodes", [])), len(payload.get("edges", []))
+            if args.html:
+                out = args.out or "codeintel-graph.html"
+                with open(out, "w", encoding="utf-8") as f:
+                    f.write(grapher.render_html(payload))
+                print(f"Wrote {out}  ({n} nodes, {e} edges) — open it in any browser")
+                if not n:
+                    print(f"  (graph empty: {payload.get('reason', 'no data')} — run "
+                          f"`codeintel doctor` to check the graph backend + index)")
+            else:
+                import json as _json
+                print(_json.dumps(payload, indent=2))
+        except Exception as exc:
+            print(f"graph failed: {exc}")
         sys.exit(0)
 
     elif args.command == "query":

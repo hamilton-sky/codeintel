@@ -4,6 +4,25 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`codeintel graph` — see any codebase as an interactive call graph.** `codeintel graph <repo>`
+  emits the graph engine's structure as `{nodes, edges}` **JSON** (machine-readable — the data→renderer
+  contract); `codeintel graph <repo> --html` wraps it in a **single self-contained HTML viewer** (data
+  embedded, zero external deps, opens offline in any browser). The viewer is a force-directed graph with
+  four **layouts** (force / radial / layered / module-clustered), click-to-inspect symbol metrics
+  (complexity, cognitive, fan-in/out), search, and **export** (JSON / Markdown / SVG / PNG). codeintel
+  stays headless — the CLI produces the data *and* the picture; there is no server or UI framework.
+  Nodes are sized by complexity and colored by directory, so it generalizes to any repo layout. The
+  viewer template ships with the package (`src/codeintel/viewer/`).
+
+### Removed
+- Deleted stale workspace docs `ASSESSMENT.md` and `HANDOFF.md` — 2026-08-12 review/handoff artifacts
+  describing a since-fixed state (per-request gateway rebuild, an unverified graph engine, 86/93 tests);
+  they no longer reflect the code and nothing references them. (`docs/adr/0001-…` is kept — unlike those,
+  it documents a current, shipped decision.)
+
 ## [0.10.0] — 2026-08-14
 
 Two things that move codeintel from "works, with caveats" toward "just install it": a real
