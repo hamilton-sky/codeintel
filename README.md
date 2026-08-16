@@ -195,6 +195,9 @@ against the built wheel in a clean environment: it registers Codex and Claude Co
 `code.query` over a fixture repo. A release that writes a config no host reads, or that returns
 `ok: true` with nothing in it, fails there instead of on your machine.
 
+> Full reference — what each host reads, the absolute-path rationale, and troubleshooting:
+> **[docs/install.md](docs/install.md)**.
+
 ## How it works
 
 A `Gateway` receives every query and dispatches it to one of three providers — graph (structural relationships), LSP (precise symbol resolution), or semantic (embedding-based search) — based on the operation type. Each provider is fully isolated: if it is unavailable or raises an exception, the gateway catches it and returns a safe-null envelope. The caller always gets a well-formed response with no exception to catch.
@@ -241,6 +244,7 @@ Pass `--engine auto` (the default) and codeintel chooses the best engine per ope
 Full system docs live in [`docs/`](docs/) — start with the index:
 
 - **[Architecture](docs/architecture.md)** — layers, the `CodeProvider` protocol, the safe-null contract, caching, freshness (ASCII + Mermaid).
+- **[Install & registration](docs/install.md)** — what each agent host actually reads, why the registered command is an absolute path, and the three levels of proof that registration worked.
 - **[Query flow](docs/query-flow.md)** — request lifecycle, engine selection, fan-out & merge, and why it never throws.
 - **[Map file](docs/map-file.md)** — the static `CODE_INTEL.md` orientation layer for hosts with no MCP support.
 - **[Benchmarks](docs/benchmarks.md)** — real numbers at scale: 25 k chunks indexed in ~8 min, ~235 ms warm queries, 60 MB index.
@@ -375,7 +379,7 @@ docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \
 git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
-pytest tests/ -q            # ~390 tests, ~35s (live graph/LSP backend tests skip when absent)
+pytest tests/ -q            # ~410 tests, ~35s (live graph/LSP backend tests skip when absent)
 ```
 
 **Release gate.** The unit suite runs against the source tree, so it cannot see a packaging break, a
