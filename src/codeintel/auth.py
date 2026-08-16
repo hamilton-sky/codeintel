@@ -38,9 +38,11 @@ class TokenAuth:
     """Resolves a bearer token to a role and builds the matching op policy. Tokens are held as
     sha256 hashes; a presented token is hashed and looked up in O(1). Immutable; thread-safe."""
 
-    def __init__(self, token_hash_to_role: dict[str, str], role_ops: dict[str, list[str]]) -> None:
+    def __init__(self, token_hash_to_role: dict[str, str], role_ops: dict[str, list[str]],
+                 role_roots: dict[str, list[str]] | None = None) -> None:
         self._tokens = token_hash_to_role
         self._role_ops = role_ops
+        self._role_roots = role_roots or {}
 
     @property
     def enabled(self) -> bool:
@@ -56,13 +58,19 @@ class TokenAuth:
     def build_policy(self) -> TieringPolicy:
         """A role with ops ``["*"]`` (or none) is unrestricted → omit it from the rules, since
         TieringPolicy treats a role absent from its rules as full-access. Every other role maps to
-        its explicit op allowlist (an empty list = deny all ops, a fail-safe default)."""
+        its explicit op allowlist (an empty list = deny all ops, a fail-safe default).
+
+        ``enabled`` is True whenever RBAC is configured at all — NOT merely when some role has a
+        restricted op list. It used to be ``bool(rules)``, which meant a config whose roles were
+        all ``["*"]`` produced a disabled policy, and a disabled policy enforces no root scoping
+        either. Op behavior is unchanged (a role absent from rules is still unrestricted); this
+        only ensures the root allowlist is actually consulted."""
         rules: dict[str, list[str]] = {}
         for role, ops in self._role_ops.items():
             if _ALL in ops:
                 continue  # unrestricted
             rules[role] = list(ops)
-        return TieringPolicy(enabled=bool(rules), rules=rules)
+        return TieringPolicy(enabled=True, rules=rules, roots=dict(self._role_roots))
 
 
 def _auth_config_path() -> pathlib.Path | None:
@@ -99,6 +107,19 @@ def load_auth() -> TokenAuth:
             logger.warning("auth: role %r ops must be a list (got %r) — denying all ops for it", role, ops)
             role_ops[str(role)] = []
 
+    roots_section = data.get("roots")
+    raw_roots: dict = roots_section if isinstance(roots_section, dict) else {}
+    role_roots: dict[str, list[str]] = {}
+    for role, paths in raw_roots.items():
+        if isinstance(paths, list):
+            role_roots[str(role)] = [str(r) for r in paths]
+        else:
+            # Same fail-CLOSED rule as ops: a bare string (`reader = "/srv/repo"`) is a typo, and
+            # guessing it meant a one-element list would hand out access the operator never wrote.
+            logger.warning("auth: role %r roots must be a list (got %r) — denying all paths for it",
+                           role, paths)
+            role_roots[str(role)] = []
+
     tokens_section = data.get("tokens")
     raw_tokens: dict = tokens_section if isinstance(tokens_section, dict) else {}
     token_hash_to_role: dict[str, str] = {}
@@ -107,6 +128,7 @@ def load_auth() -> TokenAuth:
         # A token mapped to an undefined role fails safe: define it as deny-all (empty op list).
         if role not in role_ops:
             role_ops[role] = []
+        role_roots.setdefault(role, [])
         tok = str(tok)
         if tok[:len(_SHA_PREFIX)].lower() == _SHA_PREFIX:  # case-insensitive `sha256:` prefix
             h = tok[len(_SHA_PREFIX):].strip().lower()
@@ -118,4 +140,13 @@ def load_auth() -> TokenAuth:
     if not token_hash_to_role:
         logger.warning("auth: %s defines no usable [tokens] — RBAC is OFF (no token→role mapping)", path)
 
-    return TokenAuth(token_hash_to_role, role_ops)
+    # A configured-but-unscoped RBAC deployment is the exact shape of the hole this closes, so say
+    # so at load time rather than letting the operator discover it as a wall of 403s.
+    unscoped = sorted(r for r in role_ops if not role_roots.get(r))
+    if token_hash_to_role and unscoped:
+        logger.warning(
+            "auth: roles %s have no [roots] entry and may target NO project — add a [roots] table "
+            "(e.g. `%s = [\"/srv/repos/team-a\"]`, or `= [\"*\"]` for unrestricted)",
+            ", ".join(unscoped), unscoped[0])
+
+    return TokenAuth(token_hash_to_role, role_ops, role_roots)

@@ -11,6 +11,7 @@ import pytest
 
 from codeintel.auth import TokenAuth, load_auth
 from codeintel.http_server import CodeIntelHTTPServer, _Handler
+from codeintel.reindexer import Reindexer
 
 # --------------------------------------------------------------------------- auth config loading
 
@@ -163,7 +164,8 @@ def test_denied_op_does_no_reindex_work(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(rx, "maybe_reindex", lambda root: calls.__setitem__("n", calls["n"] + 1))
     gw = Gateway(graph=None, lsp=None, semantic=None,
-                 policy=TieringPolicy(enabled=True, rules={"reader": ["search"]}), reindexer=rx)
+                 policy=TieringPolicy(enabled=True, rules={"reader": ["search"]},
+                                      roots={"reader": ["*"]}), reindexer=rx)
     denied = gw.query(op="impact", target="x", role="reader", project_root="/tmp/x")
     assert denied["reason"] == "op-not-allowed-for-role"
     assert calls["n"] == 0                              # policy denial skips reindex entirely
@@ -176,3 +178,152 @@ def test_rbac_healthz_still_unauthenticated(rbac_server):
     c.request("GET", "/healthz")
     assert c.getresponse().status == 200  # probes never require a token, even under RBAC
     c.close()
+
+
+# --------------------------------------------------------------------------- project scoping
+#
+# RBAC used to scope only WHICH OPS a token may call, never WHICH DIRECTORY it may point them at.
+# Since `project_root` arrives in the request body, the least-privileged documented role
+# (`searcher = ["search", "context"]`) could name any directory the server process could read, and
+# the semantic provider would walk, index, and return its contents. Demonstrated against a live
+# server before the fix. These pin the closure.
+
+def _scoped(roots, rules=None):
+    from codeintel.gateway import Gateway
+    from codeintel.policy import TieringPolicy
+    return Gateway(graph=None, lsp=None, semantic=None,
+                   policy=TieringPolicy(enabled=True, rules=rules or {}, roots=roots),
+                   reindexer=Reindexer())
+
+
+def test_a_role_may_not_target_a_project_outside_its_roots(tmp_path):
+    allowed, forbidden = tmp_path / "allowed", tmp_path / "secret"
+    allowed.mkdir(); forbidden.mkdir()
+    gw = _scoped({"reader": [str(allowed)]})
+
+    denied = gw.query(op="search", target="x", role="reader", project_root=str(forbidden))
+    assert denied["result"] is None
+    assert denied["reason"] == "root-not-allowed-for-role"
+    assert "auth.toml" in denied["hint"]
+
+
+def test_a_role_may_target_its_own_root_and_below(tmp_path):
+    allowed = tmp_path / "allowed"
+    (allowed / "pkg").mkdir(parents=True)
+    gw = _scoped({"reader": [str(allowed)]})
+
+    for root in (str(allowed), str(allowed / "pkg")):
+        res = gw.query(op="search", target="x", role="reader", project_root=root)
+        assert res.get("reason") != "root-not-allowed-for-role", root
+
+
+def test_a_sibling_sharing_a_name_prefix_is_not_inside_the_root(tmp_path):
+    """String-prefix containment would let `/srv/repo-secrets` pass for a root of `/srv/repo`."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo-secrets").mkdir()
+    gw = _scoped({"reader": [str(tmp_path / "repo")]})
+
+    denied = gw.query(op="search", target="x", role="reader",
+                      project_root=str(tmp_path / "repo-secrets"))
+    assert denied["reason"] == "root-not-allowed-for-role"
+
+
+def test_dot_dot_traversal_cannot_escape_an_allowed_root(tmp_path):
+    allowed, forbidden = tmp_path / "allowed", tmp_path / "secret"
+    allowed.mkdir(); forbidden.mkdir()
+    gw = _scoped({"reader": [str(allowed)]})
+
+    denied = gw.query(op="search", target="x", role="reader",
+                      project_root=str(allowed / ".." / "secret"))
+    assert denied["reason"] == "root-not-allowed-for-role"
+
+
+def test_a_symlink_out_of_an_allowed_root_does_not_escape(tmp_path):
+    allowed, forbidden = tmp_path / "allowed", tmp_path / "secret"
+    allowed.mkdir(); forbidden.mkdir()
+    (allowed / "escape").symlink_to(forbidden, target_is_directory=True)
+    gw = _scoped({"reader": [str(allowed)]})
+
+    denied = gw.query(op="search", target="x", role="reader",
+                      project_root=str(allowed / "escape"))
+    assert denied["reason"] == "root-not-allowed-for-role"
+
+
+@pytest.mark.parametrize("roots", [{}, {"reader": []}, {"other": ["/srv"]}])
+def test_an_undeclared_or_empty_root_list_denies_everything(tmp_path, roots):
+    """Fails CLOSED, unlike the op allowlist. A root list that defaults to "everywhere" would be
+    the whole vulnerability with extra configuration."""
+    gw = _scoped(roots)
+    denied = gw.query(op="search", target="x", role="reader", project_root=str(tmp_path))
+    assert denied["reason"] == "root-not-allowed-for-role"
+
+
+def test_a_wildcard_root_is_unrestricted(tmp_path):
+    gw = _scoped({"admin": ["*"]})
+    res = gw.query(op="search", target="x", role="admin", project_root=str(tmp_path))
+    assert res.get("reason") != "root-not-allowed-for-role"
+
+
+def test_scoping_is_inert_when_rbac_is_off(tmp_path):
+    """The local stdio path passes role="" with RBAC disabled — it must stay unrestricted, or
+    every ordinary `codeintel query` breaks."""
+    from codeintel.gateway import Gateway
+    from codeintel.policy import TieringPolicy
+    gw = Gateway(graph=None, lsp=None, semantic=None,
+                 policy=TieringPolicy(enabled=False), reindexer=Reindexer())
+    res = gw.query(op="search", target="x", role="", project_root=str(tmp_path))
+    assert res.get("reason") != "root-not-allowed-for-role"
+
+
+def test_a_denied_root_does_no_work_at_all(tmp_path, monkeypatch):
+    """The denial must land BEFORE maybe_reindex: an out-of-scope path must not even be walked,
+    or the check leaks existence and burns the exact indexing work it is meant to prevent."""
+    from codeintel.gateway import Gateway
+    from codeintel.policy import TieringPolicy
+    rx = Reindexer()
+    calls = {"n": 0}
+    monkeypatch.setattr(rx, "maybe_reindex", lambda root: calls.__setitem__("n", calls["n"] + 1))
+    gw = Gateway(graph=None, lsp=None, semantic=None,
+                 policy=TieringPolicy(enabled=True, roots={"reader": ["/srv/allowed"]}),
+                 reindexer=rx)
+
+    gw.query(op="search", target="x", role="reader", project_root=str(tmp_path))
+    assert calls["n"] == 0
+
+
+def test_load_auth_parses_the_roots_table(tmp_path, monkeypatch):
+    cfg = tmp_path / "auth.toml"
+    cfg.write_text(
+        '[roles]\nreader = ["search"]\n'
+        '[roots]\nreader = ["/srv/repos/team-a"]\n'
+        '[tokens]\n"tok" = "reader"\n'
+    )
+    monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(cfg))
+    policy = load_auth().build_policy()
+
+    assert policy.is_root_allowed("reader", "/srv/repos/team-a") is True
+    assert policy.is_root_allowed("reader", "/srv/repos/team-b") is False
+
+
+def test_load_auth_roots_as_a_bare_string_fails_closed(tmp_path, monkeypatch):
+    """`reader = "/srv/repo"` without brackets is a typo; reading it as one allowed path would
+    hand out access the operator never wrote."""
+    cfg = tmp_path / "auth.toml"
+    cfg.write_text('[roles]\nreader = ["search"]\n[roots]\nreader = "/srv/repo"\n'
+                   '[tokens]\n"tok" = "reader"\n')
+    monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(cfg))
+
+    assert load_auth().build_policy().is_root_allowed("reader", "/srv/repo") is False
+
+
+def test_an_all_wildcard_ops_config_still_enforces_roots(tmp_path, monkeypatch):
+    """`enabled` was `bool(rules)`, so a config whose roles were all `["*"]` produced a DISABLED
+    policy — and a disabled policy enforces no root scoping either."""
+    cfg = tmp_path / "auth.toml"
+    cfg.write_text('[roles]\nadmin = ["*"]\n[roots]\nadmin = ["/srv/only"]\n'
+                   '[tokens]\n"tok" = "admin"\n')
+    monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(cfg))
+    policy = load_auth().build_policy()
+
+    assert policy.is_allowed("admin", "anything") is True         # ops still unrestricted
+    assert policy.is_root_allowed("admin", "/srv/elsewhere") is False

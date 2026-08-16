@@ -1,11 +1,35 @@
 from __future__ import annotations
 
+import os
+
+_ALL = "*"
+
+
+def _normalize_root(path: str) -> str:
+    """An absolute, symlink-resolved root for containment comparison. Resolving BOTH sides is what
+    makes `..` traversal and symlink escapes ineffective: `/srv/a/../../etc` normalizes to `/etc`
+    and simply fails the prefix test."""
+    try:
+        return os.path.realpath(path).rstrip(os.sep) or os.sep
+    except Exception:
+        return ""
+
 
 class TieringPolicy:
-    """Role/op access policy — disabled by default (all ops allowed).
+    """Role access policy — disabled by default (everything allowed).
 
-    When enabled, a role present in *rules* is restricted to only the ops
-    listed for it.  A role absent from *rules* gets full access regardless.
+    Two independent dimensions, and they are NOT interchangeable:
+
+    * **ops** (*rules*) — which operations a role may call. A role absent from *rules* is
+      unrestricted, which is why an op allowlist alone is fail-open by design.
+    * **roots** — which project directories a role may point those operations AT. This one fails
+      CLOSED: a role with no roots declared may target nothing.
+
+    The asymmetry is deliberate. `project_root` arrives in the request body, so without a root
+    allowlist any role that can call `search` can direct the server to walk, index, and return the
+    contents of any directory the server process can read — the op allowlist never sees it. Scoping
+    operations while leaving the target unbounded is not a partial restriction; it is none.
+
     Immutable after construction; safe to share across threads.
     """
 
@@ -13,11 +37,18 @@ class TieringPolicy:
         self,
         enabled: bool = False,
         rules: dict[str, list[str]] | None = None,
+        roots: dict[str, list[str]] | None = None,
     ) -> None:
         self._enabled = enabled
         self._rules: dict[str, list[str]] = (
             {role: list(ops) for role, ops in rules.items()} if rules else {}
         )
+        self._roots: dict[str, list[str]] = {}
+        for role, paths in (roots or {}).items():
+            if _ALL in paths:
+                self._roots[role] = [_ALL]
+            else:
+                self._roots[role] = [r for r in (_normalize_root(p) for p in paths) if r]
 
     def is_allowed(self, role: str, op: str) -> bool:
         if not self._enabled:
@@ -26,3 +57,21 @@ class TieringPolicy:
         if allowed_ops is None:
             return True
         return op in allowed_ops
+
+    def is_root_allowed(self, role: str, project_root: str) -> bool:
+        """May *role* target *project_root*? Fails closed when RBAC is on.
+
+        Containment is computed on realpaths of both sides, so `..` segments and symlinks cannot
+        walk out of an allowed root. An empty/blank project_root is denied under RBAC rather than
+        silently meaning "the server's cwd"."""
+        if not self._enabled:
+            return True
+        allowed = self._roots.get(role)
+        if not allowed:                      # undeclared or explicitly empty → nothing permitted
+            return False
+        if _ALL in allowed:
+            return True
+        target = _normalize_root(project_root)
+        if not target:
+            return False
+        return any(target == root or target.startswith(root + os.sep) for root in allowed)

@@ -19,7 +19,7 @@ Per-repo settings live in `.codeintel.toml` (see the README). Operational settin
 |---|---|---|
 | `CODEINTEL_HTTP_TOKEN` | — | Require `Authorization: Bearer <token>` on every request. **Set this for any non-loopback bind.** |
 | `CODEINTEL_ALLOW_NO_AUTH` | — | `1` to explicitly serve **unauthenticated** on a non-loopback host (a trusted network). Without a token *or* this, a non-loopback bind refuses to start. |
-| `CODEINTEL_AUTH_CONFIG` | `~/.codeintel/auth.toml` | Path to the RBAC token→role config (see §3). Enables per-token roles + op scopes. |
+| `CODEINTEL_AUTH_CONFIG` | `~/.codeintel/auth.toml` | Path to the RBAC token→role config (see §3). Enables per-token roles, op scopes, and the REQUIRED per-role project-root scopes. |
 | `CODEINTEL_LOG_LEVEL` | `WARNING` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
 | `CODEINTEL_LOG_FORMAT` | plain | `json` for structured logs (ELK / Splunk / Datadog) |
 | `CODEINTEL_HTTP_ACCESS_LOG` | off | `1` to log one line per request (method, path, status, latency) |
@@ -59,7 +59,7 @@ Binding a non-loopback host **requires** `--allow-remote` **and** authentication
 ### Role-based access control (RBAC)
 
 For multiple callers with different privileges, define a token→role map in `~/.codeintel/auth.toml`
-(or `$CODEINTEL_AUTH_CONFIG`). Each role lists the ops it may run; `["*"]` means all.
+(or `$CODEINTEL_AUTH_CONFIG`). Each role lists the ops it may run (`["*"]` means all) **and** the project roots it may target. Both are needed: ops without roots leaves the target unbounded.
 
 ```toml
 [roles]
@@ -68,6 +68,18 @@ reader   = ["search", "symbol", "overview", "callers", "callees", "impact", "cha
             "changed", "deadcode", "hotspots"]   # list EVERY op the role may run — a new op is
                                                  # denied to a restricted role until it's added here
 searcher = ["search", "context"]
+
+# REQUIRED. Which project directories each role may point those ops AT.
+# `project_root` arrives in the REQUEST BODY, so an op allowlist alone bounds nothing: a role with
+# `search` and no [roots] entry could name any directory the server process can read, and the
+# semantic engine would walk, index, and return its contents. This table fails CLOSED — a role
+# absent from it may target NOTHING. Paths are compared after resolving symlinks and `..`, so
+# neither can walk out of an allowed root, and a sibling like `/srv/repo-secrets` is not inside
+# `/srv/repo`. Use `["*"]` only when a role genuinely should reach every readable path.
+[roots]
+admin    = ["*"]
+reader   = ["/srv/repos/team-a", "/srv/repos/team-b"]
+searcher = ["/srv/repos/team-a"]
 
 [tokens]                                  # generate values with `codeintel gen-token`
 "REPLACE-admin-token"  = "admin"

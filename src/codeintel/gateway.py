@@ -206,14 +206,21 @@ class Gateway:
             engine_str = str(engine or "").strip() or "auto"
             was_auto = engine_str == "auto"
 
-            # Policy check FIRST — a role denied for this op does NO work (no reindex, no dispatch,
-            # no cache lookup). Applies to the modern provider path; the legacy list path has none.
-            if (
-                self._legacy_providers is None
-                and self._policy is not None
-                and not self._policy.is_allowed(role, op_str)
-            ):
-                return safe_null_result(op_str, target_str, reason="op-not-allowed-for-role")
+            # Policy check FIRST — a role denied here does NO work (no reindex, no dispatch, no
+            # cache lookup, and critically no on-demand indexing walk). Applies to the modern
+            # provider path; the legacy list path has none.
+            if self._legacy_providers is None and self._policy is not None:
+                if not self._policy.is_allowed(role, op_str):
+                    return safe_null_result(op_str, target_str, reason="op-not-allowed-for-role")
+                # `project_root` arrives in the request body. Without this check any role able to
+                # call `search` could name ANY directory the server process can read, and the
+                # semantic provider would walk, index, and return its contents — an op allowlist
+                # never sees the target. Denied before maybe_reindex, so a rejected path is not
+                # even touched.
+                if not self._policy.is_root_allowed(role, str(project_root or "")):
+                    return safe_null_result(op_str, target_str, reason="root-not-allowed-for-role",
+                                            hint="this token's role is not scoped to that "
+                                                 "project_root (see the [roots] table in auth.toml)")
 
             try:
                 self._reindexer.maybe_reindex(str(project_root or ""))

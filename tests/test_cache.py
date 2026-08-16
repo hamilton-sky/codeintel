@@ -2,7 +2,9 @@
 can't grow the query cache without limit. Real cache object, no mocks."""
 from __future__ import annotations
 
-from codeintel.cache import ContentHashCache
+import hashlib
+
+from codeintel.cache import ContentHashCache, _compute_hash
 
 
 def _result(tag: str) -> dict:
@@ -59,3 +61,49 @@ def test_capacity_is_never_exceeded():
     # The 5 most recent survive; older keys are gone.
     assert _get(c, "k49") is not None
     assert _get(c, "k0") is None
+
+
+# --------------------------------------------------------------------------- relative targets
+
+def test_a_relative_target_hashes_the_file_inside_the_project_root(tmp_path, monkeypatch):
+    """`overview` takes a REPO-RELATIVE path (it becomes serena's `relative_path`). This resolved
+    the target against the process cwd instead, so for a long-lived server answering for arbitrary
+    project roots the file was almost never found — and every such entry silently fell back to
+    hashing the string, which cannot change when the file does.
+    """
+    (tmp_path / "src").mkdir()
+    f = tmp_path / "src" / "app.py"
+    f.write_text("def a(): pass\n")
+    monkeypatch.chdir(tmp_path.parent)          # cwd deliberately NOT the project root
+
+    before = _compute_hash("src/app.py", str(tmp_path))
+    assert before != hashlib.sha256(b"src/app.py").hexdigest(), "fell back to hashing the string"
+
+    f.write_text("def a(): pass\ndef b(): pass\n")
+    assert _compute_hash("src/app.py", str(tmp_path)) != before, "an edit must change the hash"
+
+
+def test_an_absolute_target_still_hashes_its_content(tmp_path):
+    f = tmp_path / "app.py"
+    f.write_text("x = 1\n")
+    before = _compute_hash(str(f), str(tmp_path))
+    f.write_text("x = 2\n")
+    assert _compute_hash(str(f), str(tmp_path)) != before
+
+
+def test_a_relative_target_escaping_the_root_is_not_hashed(tmp_path):
+    """Containment still applies after joining — `../secret.py` must not be read just because it
+    resolves to a real file."""
+    outside = tmp_path / "secret.py"
+    outside.write_text("token = 'sekrit'\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    assert _compute_hash("../secret.py", str(proj)) == \
+        hashlib.sha256(b"../secret.py").hexdigest()
+
+
+def test_a_symbol_target_that_is_not_a_file_still_hashes_the_string(tmp_path):
+    """Most targets are symbol names, not paths; they must keep falling back cleanly."""
+    assert _compute_hash("safe_null_result", str(tmp_path)) == \
+        hashlib.sha256(b"safe_null_result").hexdigest()

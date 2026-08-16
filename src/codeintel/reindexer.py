@@ -87,13 +87,32 @@ class Reindexer:
             return False
 
     def _do_reindex(self, project_root: str) -> None:
+        """Run both passes independently, then always advance the generation.
+
+        These used to share one try block, semantic first. A semantic failure — a blocked model
+        download on an air-gapped host, a full disk, a corrupt vector DB — therefore skipped the
+        graph pass AND skipped the generation bump. The bump is the ONLY cache invalidation for
+        non-file targets (`callers`, `impact`, `chain`, `hotspots`: `_compute_hash` of a symbol
+        name never changes), so the counter stayed pinned at 0 for the life of the process and
+        every cached answer was served `ok: true, cached: true` forever, however far the code
+        moved on. A persistent failure retries every debounce window and fails identically, so
+        this was permanent rather than transient.
+
+        Silent, confident staleness is the worst failure this codebase can produce, so the
+        generation now advances in a `finally`: one engine's outage degrades that engine's
+        freshness, never the cache's correctness."""
         try:
-            self._semantic_reindex(project_root)
-            self._graph_reindex(project_root)
+            try:
+                self._semantic_reindex(project_root)
+            except Exception as exc:
+                logger.warning("semantic reindex failed for %s: %s", project_root, exc)
+            try:
+                self._graph_reindex(project_root)
+            except Exception as exc:
+                logger.warning("graph reindex failed for %s: %s", project_root, exc)
+        finally:
             with self._lock:
                 self._generation[project_root] = self._generation.get(project_root, 0) + 1
-        except Exception as exc:
-            logger.warning("Reindexer._do_reindex failed for %s: %s", project_root, exc)
 
     def _semantic_reindex(self, project_root: str) -> None:
         import pathlib

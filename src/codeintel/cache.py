@@ -9,9 +9,20 @@ from codeintel.provider import Result
 
 
 def _compute_hash(target: str, project_root: str) -> str:
+    """The cache key's content component: a file target hashes its BYTES, so an edit invalidates.
+
+    A relative target must be resolved against ``project_root``, not the process cwd. It used to
+    use ``os.path.realpath(target)`` alone — and the ops whose target is a path take it
+    repo-relative (`overview` passes it straight through as serena's ``relative_path``). The
+    server is a long-lived singleton answering for whichever ``project_root`` a caller names, so
+    its cwd matches at most one repo and usually none: `inside_root` was false, and every such
+    entry silently fell back to hashing the *string*, which never changes when the file does.
+    That is exactly the "an edit forces a refresh" guarantee docs/architecture.md advertises."""
     try:
         root = os.path.realpath(project_root) if project_root else ""
-        path = os.path.realpath(target)
+        # Relative targets resolve inside the project; absolute ones are already anchored.
+        raw = target if os.path.isabs(target) or not root else os.path.join(root, target)
+        path = os.path.realpath(raw)
         inside_root = (root and path.startswith(root + os.sep)) or path == root
         if inside_root and os.path.isfile(path):
             with open(path, "rb") as fh:

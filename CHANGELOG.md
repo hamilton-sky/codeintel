@@ -4,6 +4,48 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-08-16
+
+Found by adversarial review, then reproduced against a live server before fixing and again after.
+**If you run the HTTP transport with RBAC, this is a required upgrade and it needs a config
+change** — see Breaking below.
+
+### Security
+- **RBAC scoped operations but never targets, so any token could read any readable directory.**
+  `auth.toml` mapped token → role → allowed *ops*. `project_root` arrives in the request body and
+  reached the providers unchecked, so the least-privileged role in this project's own documentation
+  (`searcher = ["search", "context"]`) could name an arbitrary path; the semantic engine would then
+  walk it, index it, and return its contents as search snippets. Confirmed by exploit against a
+  running server: a `searcher` token read a file from a directory it was never granted.
+  Roles now carry a `[roots]` allowlist, enforced before any work — before the reindex, so a
+  rejected path is never even walked. Comparison resolves symlinks and `..` on both sides, so
+  neither escapes an allowed root, and `/srv/repo-secrets` is not inside `/srv/repo`.
+- **A config whose roles were all `["*"]` disabled the policy entirely**, and a disabled policy
+  enforced no root scoping either. `build_policy` set `enabled=bool(rules)`; it is now True
+  whenever RBAC is configured. Op behavior is unchanged.
+
+### Fixed
+- **A semantic-engine failure permanently froze cache invalidation.** Both reindex passes shared
+  one `try`, semantic first, so a blocked model download, full disk, or corrupt vector DB skipped
+  the graph pass *and* the freshness-generation bump. That bump is the only invalidation for
+  non-file targets — `callers`, `impact`, `chain`, `hotspots`, whose content hash is of a symbol
+  name and never changes — so the counter stayed pinned at 0 for the process lifetime and cached
+  answers were served `ok: true, cached: true` indefinitely. The passes are now independent and
+  the generation advances in a `finally`.
+- **Content-hash invalidation never engaged for relative targets.** `_compute_hash` resolved the
+  target against the process's working directory rather than `project_root`, and the ops that take
+  a path take it repo-relative. For a long-lived server answering for arbitrary roots the file was
+  effectively never found, so entries fell back to hashing the *string* — which cannot change when
+  the file does. This contradicted the guarantee in docs/architecture.md that "an edit changes the
+  content hash and forces a refresh".
+
+### Breaking
+- **RBAC deployments must add a `[roots]` table.** A role with no entry may now target nothing.
+  This fails closed on purpose: a root allowlist defaulting to "everywhere" would be the
+  vulnerability above with extra configuration. `load_auth` logs the exact line to add at startup
+  rather than leaving you to discover it as 403s. Deployments without an `auth.toml` — every local
+  stdio and CLI user — are unaffected.
+
 ## [0.13.2] — 2026-08-16
 
 **0.13.1's reindex fix was itself wrong.** Upgrade over it.

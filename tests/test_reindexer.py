@@ -200,3 +200,63 @@ def test_graph_reindex_never_raises(monkeypatch):
     monkeypatch.setattr("codeintel.providers.graph.GraphProvider",
                         lambda: (_ for _ in ()).throw(RuntimeError("backend exploded")))
     Reindexer()._graph_reindex("/repo")          # must return normally
+
+
+# --------------------------------------------------------------------------- freshness generation
+
+def test_a_semantic_failure_does_not_block_the_graph_pass_or_freeze_freshness(monkeypatch):
+    """These shared one try block, semantic first. A semantic failure — a blocked model download
+    on an air-gapped host, a full disk, a corrupt vector DB — skipped the graph pass AND skipped
+    the generation bump. That bump is the only cache invalidation for non-file targets
+    (`callers`, `impact`, `hotspots`: the hash of a symbol name never changes), so the counter
+    stayed pinned at 0 and every cached answer came back `ok: true, cached: true` forever, however
+    far the code moved on. A persistent cause retries and fails identically, so it never recovered.
+    """
+    r = Reindexer()
+    ran = {"graph": False}
+    monkeypatch.setattr(r, "_semantic_reindex",
+                        lambda root: (_ for _ in ()).throw(RuntimeError("model download blocked")))
+    monkeypatch.setattr(r, "_graph_reindex", lambda root: ran.__setitem__("graph", True))
+
+    before = r.generation("/repo")
+    r._do_reindex("/repo")
+
+    assert ran["graph"] is True, "the graph pass must not be collateral damage"
+    assert r.generation("/repo") > before, "freshness must advance so caches still invalidate"
+
+
+def test_a_graph_failure_also_advances_freshness(monkeypatch):
+    r = Reindexer()
+    monkeypatch.setattr(r, "_semantic_reindex", lambda root: None)
+    monkeypatch.setattr(r, "_graph_reindex",
+                        lambda root: (_ for _ in ()).throw(RuntimeError("backend down")))
+
+    before = r.generation("/repo")
+    r._do_reindex("/repo")
+    assert r.generation("/repo") > before
+
+
+def test_both_engines_failing_still_advances_freshness(monkeypatch, caplog):
+    """Worst case: a cache that never invalidates is more dangerous than one that misses."""
+    r = Reindexer()
+    for name in ("_semantic_reindex", "_graph_reindex"):
+        monkeypatch.setattr(r, name, lambda root: (_ for _ in ()).throw(RuntimeError("down")))
+
+    before = r.generation("/repo")
+    with caplog.at_level(logging.WARNING):
+        r._do_reindex("/repo")
+
+    assert r.generation("/repo") > before
+    assert "semantic reindex failed" in caplog.text and "graph reindex failed" in caplog.text
+
+
+def test_repeated_failures_keep_advancing_rather_than_pinning_at_zero(monkeypatch):
+    """The permanence was the harm: a persistent failure retried every debounce window and left
+    the counter at 0 for the life of the process."""
+    r = Reindexer()
+    for name in ("_semantic_reindex", "_graph_reindex"):
+        monkeypatch.setattr(r, name, lambda root: (_ for _ in ()).throw(RuntimeError("down")))
+
+    for _ in range(3):
+        r._do_reindex("/repo")
+    assert r.generation("/repo") == 3
