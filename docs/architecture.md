@@ -94,7 +94,13 @@ Every response is the same shape, and `ok` is always `true` at the tool boundary
 ```
 
 - `result: null` never means "crash" — it means *found nothing* or *engine not installed*.
-- `reason` distinguishes the two (`no-result` vs `engine-unavailable`, …).
+- `reason` distinguishes them: `no-result`, `engine-unavailable`, `project-not-indexed`,
+  `not-in-graph` (the symbol is absent from the index — in practice, a stale index),
+  `unsupported-op`, `root-not-allowed-for-role` (RBAC), `warming` (the LSP session is booting).
+- `hint` carries the command that resolves that `reason`, where one exists.
+- `reindexing` marks an answer served while a reindex was in flight: it reflects the last
+  *completed* index. Structural targets hash a symbol name rather than file bytes, so nothing else
+  in the envelope could reveal it.
 - The invariant is **tested by fault injection**, not just convention (`tests/test_never_raise.py`).
 
 ```mermaid

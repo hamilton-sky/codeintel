@@ -24,8 +24,27 @@ this repo is indexed.
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | (ignored) | Impact of the **uncommitted git worktree**: changed files → impacted symbols (via `detect_changes`) |
-| `deadcode` | (ignored) | Unreferenced non-test symbols — dead-code candidates, biggest first (via `search_graph`, in-degree 0) |
+| `deadcode` | (ignored) | Unreferenced non-test symbols — dead-code candidates, biggest first (via `search_graph`, in-degree 0), then **verified against the source** (see below) |
 | `hotspots` | (ignored) | Highest complexity / fan-in symbols — refactor-risk hotspots (via `search_graph`, client-sorted) |
+
+### Why `deadcode` re-reads the source
+
+In-degree 0 means "nothing *calls* this". A function passed as a **reference** — a React event
+handler, an `addEventListener` argument, any framework callback — has in-degree 0 while being
+entirely live. On a real TypeScript repo the raw graph answer was 181 candidates of which every
+one sampled was live code, and an agent acting on that deletes working code.
+
+So candidates are checked against the source with a bounded word-boundary scan; a name appearing
+anywhere beyond its own definition drops out. The same repo returns 4. Generated output, vendored
+trees and retired directories are excluded from both the scan and the ranking — a checked-in
+minified bundle otherwise supplies enough occurrences to vouch for a genuinely dead name, and
+ranks as the most complex "function" in the repo.
+
+The result says which verification actually ran: a full source check, a missing `project_root`, or
+a repo past the scan cap. It is a name-frequency heuristic and errs toward hiding real dead code
+rather than reporting live code as dead — it cannot see a symbol reached only through a decorator
+registry, `getattr` dispatch, an object-literal property a library calls, or a name in a template,
+YAML or TOML. Treat the output as candidates.
 
 The three repo-scan ops (`changed`, `deadcode`, `hotspots`) key on the whole index / git state, not a
 symbol, so `target` is ignored. An empty scan (clean tree, no dead code) is a **true answer** and

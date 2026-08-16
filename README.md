@@ -48,7 +48,7 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Everything about one symbol | `context` | graph + lsp | both views merged |
 | **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
 | Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
-| Unreferenced (dead) code | `deadcode` | graph | non-test symbols with no callers |
+| Unreferenced (dead) code | `deadcode` | graph | non-test symbols with no callers, **verified against the source** |
 
 Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
 
@@ -225,7 +225,19 @@ Every `Gateway.query()` call returns a dict with exactly these keys:
 {"ok": true, "op": "search", "target": "auth", "result": null, "engine": "semantic", "cached": false}
 ```
 
-`ok` is always `true`. `result` is `null` when no provider has an answer — never an exception, never a 500. An optional `reason` key explains null results (e.g. `"engine-unavailable"`, `"no-result"`). Callers must check `result is not None` before using the value.
+`ok` is always `true`. `result` is `null` when no provider has an answer — never an exception, never a 500. Callers must check `result is not None` before using the value.
+
+The optional keys are the ones worth reading when an answer surprises you:
+
+| Key | Meaning |
+|---|---|
+| `reason` | Why `result` is null — `engine-unavailable`, `no-result`, `not-in-graph` (the symbol isn't in the index — usually a stale index), `project-not-indexed`, `unsupported-op`, `root-not-allowed-for-role` (RBAC) |
+| `hint` | The specific command that resolves this `reason`, when there is one |
+| `engine` | Which engine actually answered — not necessarily the one you asked for, under `auto` |
+| `cached` | Whether it came from the content-hash cache |
+| `reindexing` | Present and `true` when a reindex was running, i.e. the answer reflects the last *completed* index. See [Keeping answers fresh](#keeping-answers-fresh) |
+
+`codeintel query --json` prints this envelope from the CLI.
 
 ## Engines
 
@@ -297,6 +309,14 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel gen-token` | Print a secure random bearer token (for `serve-http` / RBAC `auth.toml`) |
 
 Human-facing commands (`doctor`, `status`, `query`, `setup`, `reset`) honor `--no-color` / `NO_COLOR` and `--ascii`, and auto-degrade to plain text when piped.
+
+**Exit codes**, so a `make` target or CI step can gate on `$?`:
+
+| | |
+|---|---|
+| `0` | The command did its job. For `query` this includes an empty result — "nothing found" is an answer, not a failure. |
+| `1` | The command could not do its job: a file it exists to write wasn't written (`map`, `graph`), an index didn't happen (`index`), a project root doesn't exist, or an engine is unhealthy (`doctor`, `setup`). |
+| `2` | Bad usage — an unknown command or a missing required flag. |
 
 ## Config
 
@@ -433,7 +453,7 @@ git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
 
-pytest tests/ -q            # ~494 tests, ~35s; fails under 83% coverage
+pytest tests/ -q            # ~620 tests, ~30s; fails under 83% coverage
 ruff check src tests        # lint
 mypy                        # types (src/ only)
 ```

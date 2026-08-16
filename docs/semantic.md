@@ -12,6 +12,27 @@ published package) installs them automatically. No separate binary or PATH entry
 If either import fails, `available` is `False` and every call returns `ok: false` with
 `reason: 'engine-unavailable'`.
 
+## What is not indexed
+
+Retrieval quality is set by the corpus before it is set by the ranking. Excluded at index time:
+
+- **Generated and vendored trees** — `dist/`, `build/`, `out/`, `target/`, `vendor/`,
+  `third_party/`, `node_modules/`, `site-packages/`, `.next/`, `.nuxt/`, and friends.
+- **Retired trees** — `.archive/`, `_archive/`, `.backup/`, `.old/`, `.deprecated/`.
+- **Binary files wearing a source extension** — detected the way `git` does, by a NUL byte in the
+  opening block. A compiled artifact named `.py` was otherwise embedded as replacement-character
+  garbage that then competed for rank against real code.
+- **Chunks with no word content** — a run of `---`, `===`, a lone `#` or brace. Such a chunk
+  embeds to a vector that matches everything weakly, so it surfaces for any query.
+
+The effect is not marginal. Re-indexing a 14,707-file monorepo after these landed took it from
+**40,121 chunks / 208 MB to 18,133 chunks / 47 MB**, and moved the top hit for "websocket reconnect
+logic" from an archived markdown file's blank line to `connect(wsUrl, accessToken, …)`.
+
+> These apply at **index time**, so an already-indexed repository keeps its old chunks until you
+> re-run `codeintel index <repo>`.
+
+
 ## Supported ops
 
 | op | Description |
