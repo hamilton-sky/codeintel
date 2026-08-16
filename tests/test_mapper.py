@@ -228,3 +228,59 @@ def test_inject_updates_existing_block():
         assert content.count("<!-- codeintel-map-start -->") == 1
         assert content.count("<!-- codeintel-map-end -->") == 1
         assert "old content" not in content
+
+
+# --------------------------------------------------------------------------- injector safety
+
+def test_inject_never_duplicates_the_users_own_content(tmp_path, monkeypatch):
+    """A CLAUDE.md holding an END marker without its START — a hand-edit, a bad merge, or this
+    function's own append branch — made every subsequent --inject re-emit the text between the
+    stray marker and the block, growing without bound. CLAUDE.md is prompt context, so this
+    silently degraded the agent it serves."""
+    from codeintel.injector import _END_MARKER, Injector
+
+    monkeypatch.chdir(tmp_path)
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text(f"# rules\n{_END_MARKER}\nImportant instruction B\n")
+
+    sizes, counts = [], []
+    for _ in range(3):
+        Injector().inject(str(tmp_path))
+        text = claude.read_text()
+        sizes.append(len(text))
+        counts.append(text.count("Important instruction B"))
+
+    assert counts == [1, 1, 1], f"user content duplicated: {counts}"
+    assert sizes[0] == sizes[1] == sizes[2], f"file grew on every run: {sizes}"
+
+
+def test_inject_preserves_file_mode_and_line_endings(tmp_path, monkeypatch):
+    """os.replace installs a NEW inode, so the original's permissions were dropped for the umask
+    and universal-newline mode rewrote CRLF to LF — a whole-file diff on every --inject."""
+    from codeintel.injector import Injector
+
+    monkeypatch.chdir(tmp_path)
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_bytes(b"# rules\r\nline A\r\n")
+    os.chmod(claude, 0o600)
+
+    Injector().inject(str(tmp_path))
+
+    assert os.stat(claude).st_mode & 0o777 == 0o600, "file permissions were widened"
+    assert b"\r\n" in claude.read_bytes(), "the file's CRLF line endings were rewritten"
+
+
+def test_inject_writes_through_a_symlinked_rules_file(tmp_path, monkeypatch):
+    """A symlinked CLAUDE.md (dotfile manager, shared team rules) was replaced by a regular file,
+    orphaning the real source."""
+    from codeintel.injector import Injector
+
+    monkeypatch.chdir(tmp_path)
+    real = tmp_path / "shared-rules.md"
+    real.write_text("# team rules\n")
+    (tmp_path / "CLAUDE.md").symlink_to(real)
+
+    Injector().inject(str(tmp_path))
+
+    assert (tmp_path / "CLAUDE.md").is_symlink(), "the symlink was replaced by a regular file"
+    assert "codeintel" in real.read_text().lower(), "the block did not reach the link target"

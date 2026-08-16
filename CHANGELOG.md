@@ -78,6 +78,40 @@ change** — see Breaking below.
   trailing-comma artifact survived the filter — the one fail-OPEN case in an otherwise
   fail-closed model. Blank entries are now dropped before normalization.
 
+### Fixed (third pass — whole-surface audit)
+- **`codeintel reset` could not repair a corrupt cache and reported success anyway.** sqlite
+  refuses to open a corrupt file, so there were no rows to DELETE and the aggregate synthesized
+  "removed 0 indexed chunk(s)" while discarding the per-file error. `doctor` diagnoses the
+  corruption and prescribes `reset`, so the user was left in a loop that could never terminate.
+  An unreadable cache is now removed (it is a rebuildable cache, not user data), the reason is
+  reported, and per-file failures reach the summary instead of being summed away.
+- **`codeintel map --inject` could duplicate your own instructions without bound.** A `CLAUDE.md`
+  holding an END marker without its START — a hand-edit, a bad merge, or this function's own
+  append branch — made every run re-emit the text between the stray marker and the block: one
+  extra copy per invocation. `CLAUDE.md` is prompt context, so this silently degraded the agent
+  it exists to help. The end marker is now searched for *after* the start.
+- **`--inject` widened file permissions, rewrote line endings, and replaced symlinks.** The
+  atomic-write pattern installs a new inode, which dropped the original's mode, converted a CRLF
+  file to LF (a whole-file diff on every run), and replaced a symlinked rules file with a regular
+  one. Mode is now carried across, line endings preserved, and the link target written through.
+- **`codeintel install` widened `~/.claude.json` from 0600 to 0644 and orphaned symlinked
+  configs.** That file holds OAuth tokens and per-server `env` secrets. Same root cause and same
+  fix as above; a newly created config is written 0600 rather than inheriting the umask.
+- **`install` destroyed a `~/.claude.json` that wasn't a JSON object.** A top-level array or
+  string was silently replaced with `{}` and overwritten, exit 0, reported "registered" — the one
+  branch that lost data where every sibling fails safe. It now refuses and says why.
+- **~200x memory amplification on a single long line.** Chunk splitting is line-based, so a
+  minified bundle or generated one-liner became one unsplittable chunk: a 20MB single-line file
+  peaked at **3.4 GB** RSS through the embedder, on the reindexer's daemon thread inside the
+  long-lived MCP server. Chunk text is now capped by characters as well as lines — the same file
+  now peaks at 455 MB.
+- **Every runtime failure in `graph` and `map` exited 0**, so a `make` or CI step gating on `$?`
+  saw success while no file was written. Both now exit 1 on failure. `query`/`status` keep exit 0,
+  where an empty result is the never-raise contract rather than an error.
+- **`codeintel index` reported "Nothing new to index" on unrecoverable failure** (`-1` fell into
+  the `else` of a `> 0` test), and accepted a project root that does not exist — a mistyped path
+  in a script was indistinguishable from a clean incremental run. Both now fail loudly and exit 1.
+
 ### Known limitations (not fixed here, deliberately)
 - **Non-file targets can be stale for up to the reindex debounce (~30s).** For symbol-name and
   free-text targets the content hash is constant, so the freshness generation is the only
@@ -87,6 +121,16 @@ change** — see Breaking below.
 - **A `codeintel index` run in another terminal does not immediately invalidate a running
   server's cache.** The CLI builds a throwaway `Reindexer`, so its generation bump is invisible to
   the long-lived server, which self-heals on its own next reindex.
+- **Zed registration fails on a real Zed `settings.json`,** which is JSONC (comments + trailing
+  commas) while the installer parses strict JSON. It fails safe — the file is left untouched — but
+  the error is opaque and Zed users cannot register.
+- **Other subcommands still accept a project root that does not exist** (`setup`, `status`, `map`,
+  `graph` will render confident output for a directory that isn't there). Only `index` validates.
+- **Binary files with a source extension are indexed** as replacement-character garbage, competing
+  in search ranking. There is no content sniff before chunking.
+- **A vector-dimension mismatch is a dead end via the advised command:** scoped `reset` deletes
+  rows but never drops the fixed-dimension table, so the advice to run it does not resolve the
+  warning. `reset --all` does.
 - **Background reindexes have no in-flight guard.** The debounce timestamp is set when a reindex
   is *submitted*, not when it completes, so on a repo whose reindex outlasts the debounce window
   overlapping passes can stack.

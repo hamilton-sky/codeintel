@@ -6,7 +6,9 @@ from typing import Any
 from codeintel.commands._common import never_raise, resolve_root
 
 
-@never_raise("graph failed: {exc}")
+# code=1: this command's job is to WRITE A FILE. Exiting 0 after failing to write it
+# reports success to any `make`/CI step gating on $? while nothing was produced.
+@never_raise("graph failed: {exc}", code=1)
 def run(args: Any) -> int:
     from codeintel import grapher
 

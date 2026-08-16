@@ -14,6 +14,7 @@ but not sufficient, so `install` now also completes a real MCP handshake.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from codeintel.installer import (
@@ -514,3 +515,49 @@ def test_registered_command_never_raises_on_a_corrupt_config(tmp_path, monkeypat
     (tmp_path / ".claude.json").write_text("{ not json at all ")
     assert registered_command(_CONFIG["claude"])[1] is None
     assert collect_registrations() == []
+
+
+def test_install_preserves_config_permissions(tmp_path, monkeypatch):
+    """~/.claude.json holds OAuth tokens and per-server env secrets and is typically 0600.
+    os.replace installs a NEW inode, so the mode was dropped for whatever the umask gave —
+    quietly widening a secrets file to world-readable 0644."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    cfg = tmp_path / ".claude.json"
+    cfg.write_text(json.dumps({"oauthAccount": {"token": "secret"}, "mcpServers": {}}))
+    os.chmod(cfg, 0o600)
+
+    assert Installer().register("claude")["ok"]
+
+    assert os.stat(cfg).st_mode & 0o777 == 0o600, "a secrets file was widened"
+    assert json.loads(cfg.read_text())["oauthAccount"]["token"] == "secret"
+
+
+def test_install_writes_through_a_symlinked_config(tmp_path, monkeypatch):
+    """chezmoi/stow/yadm users keep ~/.claude.json as a symlink into a dotfiles repo. Replacing
+    it with a regular file orphans the source, so the registration silently diverges."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    source = tmp_path / "dotfiles-claude.json"
+    source.write_text(json.dumps({"numStartups": 9, "mcpServers": {}}))
+    (tmp_path / ".claude.json").symlink_to(source)
+
+    assert Installer().register("claude")["ok"]
+
+    assert (tmp_path / ".claude.json").is_symlink(), "the symlink was replaced by a regular file"
+    assert "codeintel" in json.loads(source.read_text())["mcpServers"]
+
+
+def test_install_refuses_to_overwrite_a_non_object_config(tmp_path, monkeypatch):
+    """Every other malformed-input path fails safe (invalid JSON -> failed, no write). Silently
+    substituting {} made this the one branch that DESTROYED the file: a top-level array was
+    replaced wholesale, exit 0, reported "registered"."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    cfg = tmp_path / ".claude.json"
+    cfg.write_text("[1, 2, 3]\n")
+
+    result = Installer().register("claude")
+
+    assert result["ok"] is False
+    assert cfg.read_text() == "[1, 2, 3]\n", "the user's file was overwritten"

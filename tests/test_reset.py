@@ -135,3 +135,47 @@ def test_reset_missing_db_idempotent(tmp_path):
     all_reset = run_reset("/any/project", all_projects=True, apply=True, db_path=str(db_path))
     assert all_reset["ok"] is True
     assert all_reset["count"] == 0
+
+
+def test_reset_actually_recovers_from_a_corrupt_cache(tmp_path, monkeypatch):
+    """`reset` is documented as "recover from a corrupt or stale DB", and this is the corrupt
+    case — sqlite refuses to open the file, so there are no rows to DELETE. It reported
+    "removed 0 indexed chunk(s)" and exited 0, leaving the user in a loop: doctor diagnoses the
+    corruption and prescribes reset, reset no-ops and claims success, doctor repeats forever.
+    """
+    from codeintel import reset as _reset
+
+    db = tmp_path / "semantic.db"
+    db.write_bytes(os.urandom(4096))                    # not a database
+    monkeypatch.setattr(_reset, "_cache_files", lambda: [str(db)])
+
+    report = _reset.run_reset(str(tmp_path), apply=True)
+
+    assert not db.exists(), "the unreadable cache must be removed so it can be rebuilt"
+    assert "unreadable" in report["detail"]
+    assert "codeintel index" in report["detail"]        # names the way forward
+
+
+def test_a_reset_failure_is_not_reported_as_success(tmp_path, monkeypatch):
+    """The aggregate summed per-file counts and synthesized its own success line, discarding the
+    per-file error — which is how a failed reset became indistinguishable from a clean one."""
+    from codeintel import reset as _reset
+
+    monkeypatch.setattr(_reset, "_reset_scoped",
+                        lambda root, path, apply: {"count": 0, "error": "DatabaseError: nope",
+                                                   "detail": "reset-error: db unreadable"})
+    monkeypatch.setattr(_reset, "_cache_files", lambda: ["/tmp/whatever.db"])
+
+    report = _reset.run_reset(str(tmp_path), apply=True)
+    assert report["failed"] is True
+    assert "reset-error" in report["detail"]
+
+
+def test_a_healthy_reset_still_reports_plainly(tmp_path, monkeypatch):
+    from codeintel import reset as _reset
+    monkeypatch.setattr(_reset, "_reset_scoped", lambda root, path, apply: {"count": 7})
+    monkeypatch.setattr(_reset, "_cache_files", lambda: ["/tmp/whatever.db"])
+
+    report = _reset.run_reset(str(tmp_path), apply=True)
+    assert report["failed"] is False
+    assert report["detail"] == "removed 7 indexed chunk(s) for this project"

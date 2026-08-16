@@ -486,9 +486,11 @@ def test_graph_html_explains_an_empty_graph(monkeypatch, capsys, tmp_path):
 
 
 def test_graph_degrades_instead_of_tracebacking(monkeypatch, capsys):
+    """Degrades with a message — but exits NON-ZERO. This command's job is to write a file, and
+    exiting 0 having failed to write it reports success to any make/CI step gating on $?."""
     monkeypatch.setattr("codeintel.grapher.build_graph_payload",
                         lambda root, limit=220: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert import_module("codeintel.commands.graph").run(_graph_args()) == 0
+    assert import_module("codeintel.commands.graph").run(_graph_args()) == 1
     assert "graph failed: boom" in capsys.readouterr().out
 
 
@@ -547,7 +549,7 @@ def test_map_degrades_instead_of_tracebacking(monkeypatch, capsys):
                         lambda provider: (_ for _ in ()).throw(RuntimeError("boom")))
 
     args = _args(project_root=None, inject=False, budget=32768)
-    assert import_module("codeintel.commands.map").run(args) == 0
+    assert import_module("codeintel.commands.map").run(args) == 1, "a failed write must not exit 0"
     assert "map failed: boom" in capsys.readouterr().out
 
 
@@ -699,7 +701,8 @@ def test_index_says_so_when_nothing_changed(monkeypatch, tmp_path, capsys):
 def test_index_closes_the_db_even_when_indexing_raises(monkeypatch, tmp_path, capsys):
     """A leaked sqlite handle on the failure path is how the next run inherits a locked DB."""
     seen = _stub_index(monkeypatch, tmp_path, indexer_exc=RuntimeError("model download failed"))
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    # Exits non-zero: the index did not happen, and a script must be able to tell.
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
     assert seen["db"].closed is True
     assert "index failed: model download failed" in capsys.readouterr().out
 
@@ -771,3 +774,21 @@ def test_gen_token_prints_a_fresh_urlsafe_token(capsys):
     assert first != second
     assert len(first) >= 40                                  # 32 random bytes, base64url-encoded
     assert set(first) <= set(string.ascii_letters + string.digits + "-_")
+
+
+def test_index_rejects_a_project_root_that_is_not_a_directory(tmp_path, capsys):
+    """`codeintel index /typo/path` walked nothing, found nothing, and printed "Nothing new to
+    index" at exit 0 — indistinguishable from a correct incremental run, which is the worst
+    possible response to a mistyped path in a script."""
+    missing = str(tmp_path / "does-not-exist")
+    assert import_module("codeintel.commands.index").run(_args(project_root=missing)) == 1
+    assert "not a directory" in capsys.readouterr().out
+
+
+def test_index_reports_an_unrecoverable_indexer_failure(monkeypatch, tmp_path, capsys):
+    """Indexer.index() returns -1 for an unrecoverable failure; a `> 0` test sent that into the
+    "Nothing new to index" branch, so total failure read as a clean no-op."""
+    _stub_index(monkeypatch, tmp_path, count=-1)
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
+    out = capsys.readouterr().out
+    assert "index failed" in out and "Nothing new to index" not in out

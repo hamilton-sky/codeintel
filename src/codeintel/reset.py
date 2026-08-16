@@ -6,12 +6,15 @@ module is pure (dry-run by default via ``apply=False``).
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import sqlite3
 
 import sqlite_vec
 
 from codeintel.semantic_db import default_db_path
+
+_logger = logging.getLogger("codeintel")
 
 
 def _cache_files() -> list[str]:
@@ -62,8 +65,21 @@ def _reset_scoped(project_root: str, path: str, apply: bool) -> dict:
                 "applied": bool(apply),
                 "detail": f"{verb} {count} indexed chunk(s) for this project"}
     except Exception as exc:
+        # `reset` exists to "recover from a corrupt or stale DB", and this is precisely the
+        # corrupt case — sqlite refuses to open the file at all, so there are no rows to DELETE.
+        # Reporting "removed 0 chunks" left the user in a loop: doctor diagnoses the corruption
+        # and prescribes reset, reset no-ops and claims success, doctor repeats forever. When the
+        # cache is unreadable the only repair is to remove the file; it is a rebuildable cache,
+        # not user data.
+        if apply and _looks_unreadable(exc):
+            removed = _discard_cache_file(path)
+            outcome = ("removed it; run `codeintel index` to rebuild" if removed
+                       else "could not remove it — delete it by hand")
+            return {"ok": True, "mode": "scoped", "target": real, "count": 0,
+                    "applied": True, "recovered": removed,
+                    "detail": f"cache was unreadable ({type(exc).__name__}) — {outcome}: {path}"}
         return {"ok": True, "mode": "scoped", "target": real, "count": 0,
-                "applied": bool(apply),
+                "applied": bool(apply), "error": f"{type(exc).__name__}: {exc}",
                 "detail": f"reset-error: db unreadable/locked ({type(exc).__name__}: {exc})"}
     finally:
         if conn is not None:
@@ -95,6 +111,27 @@ def _reset_all(path: str, apply: bool) -> dict:
             "applied": bool(apply), "detail": detail}
 
 
+def _looks_unreadable(exc: Exception) -> bool:
+    """Whether *exc* means "this file is not a usable sqlite cache" (as opposed to e.g. a lock)."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(s in text for s in ("not a database", "file is encrypted", "malformed",
+                                   "databaseerror", "disk image"))
+
+
+def _discard_cache_file(db_path: str) -> bool:
+    """Delete an unreadable cache file (and its WAL/SHM siblings). Rebuildable by design."""
+    ok = False
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.unlink(db_path + suffix)
+            ok = ok or suffix == ""
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _logger.warning("reset: could not remove %s%s: %s", db_path, suffix, exc)
+    return ok
+
+
 def run_reset(
     project_root: str,
     *,
@@ -120,9 +157,17 @@ def run_reset(
             return {"ok": True, "mode": "all", "target": "ALL", "count": count,
                     "applied": bool(apply), "detail": f"{verb} {count} index file(s) across all models"}
         real = os.path.realpath(str(project_root))
-        count = sum(_reset_scoped(project_root, p, apply)["count"] for p in files)
+        results = [_reset_scoped(project_root, p, apply) for p in files]
+        count = sum(r["count"] for r in results)
         verb = "removed" if apply else "found"
+        # Surface per-file trouble instead of summing counts and synthesizing a success line —
+        # discarding these is what made a failed reset indistinguishable from a clean one.
+        problems = [r["detail"] for r in results if r.get("error") or r.get("recovered") is not None]
+        detail = f"{verb} {count} indexed chunk(s) for this project"
+        if problems:
+            detail = "\n".join([*problems, detail])
         return {"ok": True, "mode": "scoped", "target": real, "count": count, "applied": bool(apply),
-                "detail": f"{verb} {count} indexed chunk(s) for this project"}
+                "detail": detail,
+                "failed": any(r.get("error") for r in results)}
     except Exception as exc:
         return {"ok": True, "applied": apply, "detail": f"reset-error: {type(exc).__name__}: {exc}"}

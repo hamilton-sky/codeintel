@@ -13,6 +13,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Hard ceiling on the characters embedded for ONE chunk. Line-based splitting cannot bound a
+# minified or generated single-line file, and the embedder's memory use scales with input size.
+# Generous enough that no hand-written function is affected.
+_MAX_CHUNK_CHARS = 200_000
+
 _INDEXED_EXTS = frozenset({
     ".py", ".md",
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",       # TS/JS variants
@@ -489,6 +494,17 @@ class Indexer:
             if not chunk_lines:
                 continue
             chunk_text = "".join(chunk_lines)
+            # Cap chunk BYTES, not just lines. `_maybe_split` splits on line boundaries, so a
+            # minified bundle or a generated one-liner is a single unsplittable chunk however
+            # large: a 20MB one-line .py peaked at 3.4GB RSS through the embedder, and a 40MB
+            # one extrapolates past 8GB. That runs on the reindexer's daemon thread inside the
+            # long-lived MCP server, so it can take the agent host down, not just a CLI run.
+            # Truncation is the right trade — the head of a chunk carries its identifying
+            # content, and an over-long minified line has no retrieval value past that anyway.
+            if len(chunk_text) > _MAX_CHUNK_CHARS:
+                logger.warning("truncating an oversized chunk in %s (%d chars) to %d",
+                               rel_path, len(chunk_text), _MAX_CHUNK_CHARS)
+                chunk_text = chunk_text[:_MAX_CHUNK_CHARS]
             if not chunk_text.strip():
                 # EC3.4: never embed empty/whitespace-only chunks (zero vectors pollute results).
                 chunk_count += 1

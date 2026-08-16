@@ -34,9 +34,30 @@ def _atomic_write_text(path: pathlib.Path, text: str) -> None:
     """Write via a sibling temp file + os.replace so an interrupted write can never truncate
     the user's existing agent config (which holds unrelated settings) to a partial/empty file.
     The temp lives in the same directory as ``path`` so the replace stays on one filesystem."""
-    tmp = path.with_name(path.name + ".codeintel.tmp")
+    #
+    # os.replace installs a NEW inode, which without care also (a) drops the original's
+    # permissions in favour of the umask — ~/.claude.json holds OAuth tokens and per-server env
+    # secrets and is typically 0600, so this quietly widened it to 0644 — and (b) replaces a
+    # symlinked config (chezmoi/stow/yadm) with a regular file, orphaning the real source.
+    target = pathlib.Path(os.path.realpath(path))
+    try:
+        mode: int | None = target.stat().st_mode & 0o7777
+    except OSError:
+        mode = None
+
+    tmp = target.with_name(target.name + ".codeintel.tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    if mode is not None:
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+    else:
+        try:                       # a config we are creating holds secrets — don't inherit 0644
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+    os.replace(tmp, target)
 
 
 # Per-agent registration recipe.
@@ -292,7 +313,13 @@ class Installer:
         if config_path.exists():
             data = json.loads(config_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                data = {}
+                # Every other malformed-input path here fails safe (invalid JSON → failed, no
+                # write). Silently substituting {} made this the one branch that DESTROYED the
+                # file: a top-level array or string was replaced wholesale, exit 0, reported
+                # "registered". Refuse instead — the user can look at it and decide.
+                raise ValueError(
+                    f"{config_path} does not contain a JSON object (found "
+                    f"{type(data).__name__}) — refusing to overwrite it; move it aside and retry")
         else:
             data = {}
 

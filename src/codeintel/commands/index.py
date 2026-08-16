@@ -12,6 +12,13 @@ def run(args: Any) -> int:
     from codeintel.semantic_db import SemanticDb, default_db_path
 
     project_root = resolve_root(args)
+    # Validate before doing anything. `codeintel index /typo/path` walked nothing, found nothing,
+    # and printed "Nothing new to index" at exit 0 — indistinguishable from a correct incremental
+    # run, which is the worst possible response to a mistyped path in a script.
+    if not os.path.isdir(project_root):
+        print(f"index failed: not a directory: {project_root}")
+        return 1
+    failed = False
     # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
     # Path.home() raising) degrades with a message, like every other subcommand, not a traceback.
     try:
@@ -32,12 +39,18 @@ def run(args: Any) -> int:
             ).index(project_root)
             if count > 0:
                 print(f"Indexed {count} chunks")
+            elif count < 0:
+                # Indexer.index() returns -1 for an unrecoverable failure. `> 0` sent that into
+                # the "Nothing new to index" branch, so a total failure read as a clean no-op.
+                print("index failed — the indexer could not complete (see the warnings above)")
+                failed = True
             else:
                 print("Nothing new to index")
         finally:
             db.close()
     except Exception as exc:
         print(f"index failed: {exc}")
+        failed = True
 
     # best-effort graph reindex
     import shutil
@@ -60,4 +73,4 @@ def run(args: Any) -> int:
     except Exception:
         pass
 
-    return 0
+    return 1 if failed else 0
