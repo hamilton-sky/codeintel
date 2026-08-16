@@ -5,6 +5,8 @@ backend returns (search_graph result dicts, query_graph column→value row dicts
 """
 from __future__ import annotations
 
+import json
+
 from codeintel import grapher
 from codeintel.providers.graph import GraphProvider
 
@@ -125,3 +127,34 @@ def test_build_payload_tolerates_none_metrics(monkeypatch):
     p = grapher.build_graph_payload("/repo")
     f = next(n for n in p["nodes"] if n["label"] == "f")
     assert f["complexity"] == 0                             # None metric → 0, never crashes
+
+
+def test_the_graph_payload_never_carries_the_backends_project_id(monkeypatch, tmp_path):
+    """`codeintel graph` was a FIFTH renderer leaking the home path: 646 node ids of the form
+    `Users-<user>-Documents-...` on one repo, in a JSON payload people open and share."""
+    from codeintel import grapher
+
+    rows = [{"a.qualified_name": "Users-alice-Documents-project-app.src.a.f", "a.name": "f",
+             "a.file_path": "src/a.py",
+             "b.qualified_name": "Users-alice-Documents-project-app.src.b.g", "b.name": "g",
+             "b.file_path": "src/b.py", "type(c)": "CALLS"}]
+
+    class _P:
+        available = True
+
+        def _resolve_project(self, root):
+            return "Users-alice-Documents-project-app"
+
+        def _search_symbols(self, *a, **k):
+            return []
+
+        def _query_rows(self, *a, **k):
+            return rows
+
+    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", _P)
+    payload = grapher.build_graph_payload(str(tmp_path), limit=10)
+
+    blob = json.dumps(payload)
+    assert "Users-alice" not in blob, "the payload leaks the author's home directory layout"
+    assert payload["project"] == tmp_path.name       # names the repo, not the backend id
+    assert {n["id"] for n in payload["nodes"]} == {"src.a.f", "src.b.g"}

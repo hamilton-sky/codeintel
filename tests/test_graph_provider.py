@@ -572,3 +572,76 @@ def test_probe_stays_quiet_when_the_project_root_matches(monkeypatch, tmp_path):
     probe = gp.probe(str(tmp_path))
     assert "NOT indexed" not in probe["detail"]
     assert probe["remediation"] is None
+
+
+@pytest.mark.parametrize("name", [
+    "use-toast.ts", "1731900000000-CreateInitialTables.ts", "1-tool-interfaces.md",
+    "EC-1.1: Empty workflow plan", "my-component.spec.ts",
+])
+def test_a_kebab_case_filename_is_not_mistaken_for_a_project_slug(name):
+    """"hyphen ⇒ project slug" was wrong: kebab-case FILENAMES are the dominant TS/JS convention,
+    so `use-toast.ts` rendered as `ts` — 985 names in one real repo, 811 in another. The `changed`
+    op takes exactly this path, because its rows carry `name` and no `qualified_name`."""
+    from codeintel.providers.graph import _strip_project_prefix
+
+    assert _strip_project_prefix(name) == name
+
+
+@pytest.mark.parametrize("qn,expected", [
+    ("Users-alice-Documents-project-myrepo.src.pkg.fn", "src.pkg.fn"),
+    ("my-repo.src.pkg.fn", "src.pkg.fn"),
+])
+def test_a_real_project_slug_is_still_stripped(qn, expected):
+    from codeintel.providers.graph import _strip_project_prefix
+
+    assert _strip_project_prefix(qn) == expected
+
+
+def test_the_reference_scan_reads_the_file_types_that_hold_references():
+    """A name can be referenced from a file that is not "source" in the graph's sense — SCSS
+    `@include button-base` is the case that shipped, naming live styles as dead while the note
+    claimed verification had succeeded. That is worse than not verifying at all."""
+    from codeintel.providers.graph import _VERIFY_EXTS
+
+    for ext in (".scss", ".css", ".html", ".vue", ".svelte", ".yaml", ".toml", ".json", ".md"):
+        assert ext in _VERIFY_EXTS, f"{ext} can hold a reference the graph cannot see"
+
+
+def test_scss_references_keep_a_symbol_off_the_dead_list(tmp_path):
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / "buttons.scss").write_text(
+        "@mixin button-base { color: red }\n.btn { @include button-base; }\n")
+    kept, state = _drop_referenced_symbols([{"name": "button-base"}], str(tmp_path))
+
+    assert state == "ok"
+    assert kept == [], "a SCSS @include is a reference"
+
+
+def test_probe_picks_the_same_duplicate_entry_the_resolver_did(monkeypatch, tmp_path):
+    """`_project_root_of` returned the FIRST entry with that name rather than the one
+    `_match_project` chose, so a stale duplicate registration produced a false "not indexed on its
+    own" warning about a correctly-indexed repo."""
+    from codeintel.providers.graph import GraphProvider
+
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                        # type: ignore[attr-defined]
+    monkeypatch.setattr(gp, "_run", lambda *a, **k: {"projects": [
+        {"name": "myrepo", "root_path": "/elsewhere/myrepo", "nodes": 10},     # stale, listed first
+        {"name": "myrepo", "root_path": str(tmp_path), "nodes": 900},          # the one chosen
+    ]})
+
+    probe = gp.probe(str(tmp_path))
+    assert "NOT indexed" not in probe["detail"], "false alarm on a correctly-indexed repo"
+    assert probe["remediation"] is None
+
+
+def test_same_dir_is_case_insensitive_where_the_filesystem_is(tmp_path):
+    """`realpath` resolves symlinks but does not canonicalise CASE, and macOS APFS is
+    case-insensitive — so one directory under two spellings compared as two, and a correctly
+    indexed repo read as unindexed."""
+    from codeintel.providers.graph import _same_dir
+
+    assert _same_dir(str(tmp_path), str(tmp_path)) is True
+    assert _same_dir(str(tmp_path), str(tmp_path) + "/") is True
+    assert _same_dir(str(tmp_path), str(tmp_path / "..")) is False

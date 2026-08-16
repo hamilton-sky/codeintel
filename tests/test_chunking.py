@@ -432,3 +432,32 @@ def test_generated_and_retired_trees_are_not_indexed(directory, tmp_path):
     finally:
         db.close()
     assert names == ["live.py"]
+
+
+@pytest.mark.parametrize("path,indexed", [
+    ("src/build/__init__.py", True),      # pypa/build: the package IS src/build
+    ("coverage/__init__.py", True),       # coverage.py: the package IS coverage
+    ("src/generated/client.ts", True),    # a committed API client is real source
+    ("src/vendor/vendor.service.ts", True),   # a NestJS "vendor" domain module
+    ("build/lib/pkg/mod.py", False),      # root-level build output
+    ("dist/bundle.js", False),
+    ("vendor/dep/lib.go", False),
+])
+def test_generated_names_are_only_ignored_at_the_repo_root(path, indexed, tmp_path):
+    """The ignore list matched a basename at ANY depth, so real packages vanished: pypa/build
+    indexed 0 files, coverage.py's collector was unreachable, and a NestJS vendor module was gone.
+    At the root these names are almost always output; one level down they are somebody's package."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("def thing(): pass\n")
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        found = {str(f.relative_to(tmp_path)) for f in Indexer(db)._walk_files(tmp_path)}
+    finally:
+        db.close()
+    assert (path in found) is indexed

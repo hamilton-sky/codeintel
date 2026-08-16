@@ -29,15 +29,23 @@ _INDEXED_EXTS = frozenset({
     ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",    # C/C++ variants
 })
 _SKIP_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
+# Directory names that mean "generated" only at the REPO ROOT. Matching them at any depth hid real
+# source: `coverage/` is the coverage.py package, `src/build/` is pypa/build's entire codebase
+# (which indexed 0 files), `src/generated/` is a committed API client, and a NestJS `vendor`
+# domain module is a first-class part of the app. At the root they are almost always output; one
+# level down they are almost always somebody's package.
+_ROOT_ONLY_IGNORES = frozenset({
+    "out", "vendor", "vendored", "third_party", "thirdparty", "site-packages", "coverage",
+    "generated", "dist", "build", "target",
+})
 # Vendored / regenerable dirs skipped even without a .gitignore entry.
 _DEFAULT_IGNORES = frozenset({
-    ".venv", "venv", "env", "dist", "build", "target",
+    ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".tox", ".idea", ".vscode", ".cache",
     # Generated output and retired trees. Without these a search for "websocket reconnect logic"
     # on a real repo returned an ARCHIVED markdown file's blank line as the top hit and the actual
     # implementation second: the corpus, not the ranking, was the problem.
-    "out", "vendor", "vendored", "third_party", "thirdparty", "site-packages", "coverage",
-    "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
+    ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
     ".archive", ".archived", "_archive", "_archived", ".backup", ".backups", ".old",
     ".deprecated", ".trash",
 })
@@ -128,6 +136,21 @@ def _has_substance(text: str) -> bool:
     was the top hit for a real search. Anything stricter starts rejecting real one-line code:
     `x = 1` has two word characters and belongs in the index."""
     return any(ch.isalpha() for ch in text)
+
+
+def _is_source_package(path) -> bool:
+    """Whether a directory announces itself as a package rather than build output.
+
+    `coverage/` at a repo root is ambiguous: it is the coverage.py PACKAGE in that project and a
+    report directory in most others. A package carries an `__init__.py` or a manifest; a report
+    directory carries HTML and XML."""
+    for marker in ("__init__.py", "package.json", "index.ts", "index.js", "go.mod", "Cargo.toml"):
+        try:
+            if (path / marker).is_file():
+                return True
+        except OSError:
+            return False
+    return False
 
 
 def _looks_binary(path) -> bool:
@@ -257,14 +280,18 @@ class Indexer:
 
         So every candidate is resolved and required to land back under the resolved root."""
         ignores = set(_SKIP_DIRS) | set(_DEFAULT_IGNORES) | self._load_gitignore(root)
+        real_root_str = str(root)
         try:
             real_root = os.path.realpath(root)
         except Exception:
             real_root = str(root)
         for dirpath, dirnames, filenames in os.walk(root):
+            at_root = os.path.realpath(dirpath) == os.path.realpath(real_root_str)
             dirnames[:] = [
                 d for d in dirnames
                 if d not in ignores and not d.endswith(".egg-info")
+                and not (at_root and d.lower() in _ROOT_ONLY_IGNORES
+                         and not _is_source_package(Path(dirpath) / d))
             ]
             for fname in filenames:
                 if fname in ignores:

@@ -32,7 +32,11 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
             timeout_ms = int(timeout_ms)
         except Exception:
             timeout_ms = 8000
-        from codeintel.providers.graph import GraphProvider
+        from codeintel.providers.graph import (
+            GraphProvider,
+            _repo_display_name,
+            _strip_project_prefix,
+        )
         p = GraphProvider()
         if not getattr(p, "available", False):
             return {**_EMPTY, "reason": "engine-unavailable"}
@@ -43,7 +47,7 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
         # per-symbol metrics (same search_graph the `hotspots` op uses)
         metrics: dict[str, dict] = {}
         for r in (p._search_symbols({"label": "Function", "min_degree": 1, "limit": 600}, project, timeout_ms) or []):
-            qn = str(r.get("qualified_name") or "")
+            qn = _strip_project_prefix(str(r.get("qualified_name") or ""))
             if qn:
                 metrics[qn] = r
 
@@ -75,7 +79,11 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
         for e in (p._query_rows(cypher, project, timeout_ms) or []):
             if len(edges) >= limit:
                 break
-            aq, bq = str(e.get("a.qualified_name") or ""), str(e.get("b.qualified_name") or "")
+            # Strip here, not only on the metrics side: node ids feed the JSON payload, and 646
+            # of them carried `Users-<user>-Documents-...` on one repo. They must also match the
+            # already-stripped `metrics` keys, or every node loses its complexity numbers.
+            aq = _strip_project_prefix(str(e.get("a.qualified_name") or ""))
+            bq = _strip_project_prefix(str(e.get("b.qualified_name") or ""))
             af, bf = str(e.get("a.file_path") or ""), str(e.get("b.file_path") or "")
             if not aq or not bq or aq == bq or _synth(af) or _synth(bf):
                 continue
@@ -86,7 +94,13 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
                 edges.append({"from": aq, "to": bq, "type": str(e.get("type(c)") or "")})
 
         nodes = list(nodes_by_id.values())
-        return {"project": project, "engine": "graph", "op": "callgraph", "nodes": nodes, "edges": edges}
+        # The payload names the REPO, not the backend's internal project id — which for a
+        # path-slug registration is the author's flattened home directory, written into a file
+        # people open in a browser and share.
+        return {
+            "project": _repo_display_name(str(project_root or "")) or project,
+            "engine": "graph", "op": "callgraph", "nodes": nodes, "edges": edges,
+        }
     except Exception as exc:
         log_swallowed("grapher.build_graph_payload", exc)
         return {**_EMPTY, "reason": "error"}

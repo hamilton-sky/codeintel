@@ -27,6 +27,15 @@ _GRAPH_OPS = frozenset({
 })
 
 
+# Trailing segments that mean "this is a filename, not a dotted module path".
+_FILE_EXTENSIONS = frozenset({
+    "py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs", "java", "kt", "rb", "php",
+    "cs", "swift", "scala", "c", "h", "cpp", "cc", "hpp", "css", "scss", "less", "html", "vue",
+    "svelte", "md", "mdx", "rst", "txt", "json", "yaml", "yml", "toml", "ini", "cfg", "xml",
+    "sql", "sh", "bash", "zsh", "graphql", "proto",
+})
+
+
 def _strip_project_prefix(qualified_name: str) -> str:
     """Drop the backend's project id from the head of a qualified name.
 
@@ -42,11 +51,21 @@ def _strip_project_prefix(qualified_name: str) -> str:
     head, sep, rest = qualified_name.partition(".")
     if not sep:
         return qualified_name
-    # A slug: no spaces, and hyphenated (the backend joins path components with "-"). A genuine
-    # Python package name cannot contain a hyphen, so this cannot eat a real module.
-    if "-" in head and " " not in head:
-        return rest
-    return qualified_name
+    # "hyphen ⇒ project slug" was wrong: kebab-case FILENAMES are the dominant TS/JS convention,
+    # so `use-toast.ts` became `ts` and `1731900000000-CreateInitialTables.ts` became `ts` too —
+    # 985 names in one real repo, 811 in another. The `changed` op takes exactly this path,
+    # because its rows carry `name` and no `qualified_name`, so its symbols rendered as `ts`.
+    #
+    # A project slug is the head of a DOTTED PATH: there has to be a path after it, and the
+    # remainder has to look like one. A bare filename's remainder is a lone extension.
+    if "-" not in head or " " in head or "." not in rest:
+        return qualified_name
+    # `my-component.spec.ts` also has a dotted remainder, so "has dots" is not enough. What
+    # actually separates a filename from a qualified name is the LAST segment: a module path ends
+    # in a symbol, a filename ends in an extension.
+    if qualified_name.rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS:
+        return qualified_name
+    return rest
 
 
 # Files consulted when verifying dead-code candidates, and the extensions worth reading. Bounded
@@ -59,9 +78,17 @@ _VERIFY_SKIP_DIRS = frozenset({
     "node_modules", "__pycache__", "dist", "build", "out", "target", "vendor", "vendored",
     "third_party", "thirdparty", "venv", "env", "site-packages", "coverage", "generated",
 })
+# Extensions the reference scan reads. A name can be referenced from a file that is not itself a
+# "source" file in the graph's sense — SCSS `@include button-base`, a template, a config — and if
+# the scan cannot open it, the symbol reads as dead while the note claims verification succeeded.
+# That is worse than not verifying at all, so this list is generous: a false reference only hides
+# a candidate, while a missed one names live code.
 _VERIFY_EXTS = frozenset({
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
-    ".c", ".h", ".cpp", ".cc", ".hpp",
+    ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java", ".kt",
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".cs", ".rb", ".php", ".swift", ".scala",
+    ".css", ".scss", ".sass", ".less", ".html", ".htm", ".vue", ".svelte", ".astro",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml", ".graphql", ".proto",
+    ".sql", ".sh", ".bash", ".zsh", ".rst", ".md", ".mdx", ".txt", ".tpl", ".j2", ".hbs", ".ejs",
 })
 
 
@@ -196,6 +223,20 @@ def _collapse_repeats(label: str) -> str:
             continue
         out.append(seg)
     return ".".join(out)
+
+
+def _same_dir(a: str, b: str) -> bool:
+    """Whether two paths name the same directory.
+
+    `os.path.realpath` resolves symlinks but does not canonicalise CASE, and macOS APFS is
+    case-insensitive: `/Users/x/Project/repo` and `/Users/x/project/repo` are one directory that
+    compared as two, so a correctly-indexed repo was reported unindexed. `os.path.samefile` asks
+    the filesystem, which is the only authority on this; fall back to a realpath compare when
+    either path does not exist."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.realpath(a).rstrip(os.sep) == os.path.realpath(b).rstrip(os.sep)
 
 
 def _label_of(row: dict) -> str:
@@ -430,7 +471,7 @@ class GraphProvider:
         # from a graph spanning every repo on the machine — the top two refactor hotspots for one
         # project came from another project's build output. Ready, but not for what was asked.
         matched_root = self._project_root_of(raw, project)
-        if matched_root and os.path.realpath(matched_root) != os.path.realpath(project_root):
+        if matched_root and not _same_dir(matched_root, project_root):
             return {
                 "installed": True, "runnable": True, "repo_indexed": True, "project": project,
                 "detail": (f"this repo is NOT indexed on its own — answers would come from "
@@ -449,10 +490,14 @@ class GraphProvider:
         entries = raw.get("projects", []) if isinstance(raw, dict) else raw
         if not isinstance(entries, list) or not name:
             return None
-        for entry in entries:
-            if isinstance(entry, dict) and entry.get("name") == name:
-                return str(entry.get("root_path") or "") or None
-        return None
+        # Among entries sharing a name, take the one `_match_project` would have chosen — the most
+        # complete. Returning the first produced a false "not indexed on its own" warning on a
+        # correctly-indexed repo whenever a stale duplicate registration existed.
+        matches = [e for e in entries
+                   if isinstance(e, dict) and e.get("name") == name and e.get("root_path")]
+        if not matches:
+            return None
+        return str(max(matches, key=lambda e: _int_or_zero(e.get("nodes"))).get("root_path"))
 
     # ------------------------------------------------------------------ helpers
 
