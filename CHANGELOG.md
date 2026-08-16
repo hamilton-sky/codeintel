@@ -8,6 +8,19 @@ All notable changes to codeintel are documented here. The format is based on
 
 Found by pointing the tool at two more unfamiliar repositories.
 
+### Changed
+- **The lexical half of the hybrid ranking is now IDF-weighted.** Reciprocal Rank Fusion already
+  combined a semantic rank with a lexical one, but the lexical score was flat token coverage — in
+  "the auth middleware", the word "the" carried a third of the score while appearing in nearly
+  every chunk of the corpus. Document frequency is measured across the retrieved candidates, so
+  there is no schema change and no extra reads: the texts are already in hand for the snippet.
+  On the motivating case the gap between a real match and a stopword-only match widens from 3.0x
+  to 4.3x.
+
+> **Upgrading:** the corpus fixes below only affect what is written at index time, so an
+> already-indexed repository keeps its archived and generated chunks until you re-run
+> `codeintel index <repo>`.
+
 ### Fixed
 - **Answers could come from a different repository, reported as ready.** Project resolution falls
   back to the nearest indexed *ancestor* — correct for a subdirectory of an indexed repo, wrong

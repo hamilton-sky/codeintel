@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 import os
 import re
 import struct
@@ -50,6 +51,24 @@ def _tokenize(text: str) -> set[str]:
         for sub in _SUBTOKEN_RE.findall(ident):
             toks.add(sub.lower())
     return toks
+
+
+def _idf_weights(query_tokens: set[str], texts: list[str]) -> dict[str, float]:
+    """Inverse document frequency for each query token across *texts*.
+
+    `log(1 + N/(1+df))`: a token in every candidate lands near log(1) and stops counting, one in a
+    single candidate keeps most of its weight. Smoothed so a token absent from every candidate
+    (common — the query word may live in a part of the chunk the reader never sees) cannot divide
+    by zero or blow up the score."""
+    n = len(texts)
+    if not n or not query_tokens:
+        return {}
+    token_sets = [_tokenize(t) for t in texts]
+    weights: dict[str, float] = {}
+    for token in query_tokens:
+        df = sum(1 for ts in token_sets if token in ts)
+        weights[token] = math.log(1.0 + n / (1.0 + df))
+    return weights
 
 
 class Searcher:
@@ -138,11 +157,26 @@ class Searcher:
             return []
 
     @staticmethod
-    def _lexical_score(query_tokens: set[str], chunk_text: str) -> float:
-        """Token overlap in [0, 1]: the fraction of query (sub)tokens present in the chunk."""
+    def _lexical_score(
+        query_tokens: set[str], chunk_text: str, weights: dict[str, float] | None = None
+    ) -> float:
+        """Weighted term overlap in [0, 1]: the share of the query's *informative* weight present.
+
+        Unweighted coverage treated every query token alike, so "the auth middleware" gave "the"
+        the same pull as "middleware" — and in a query of three tokens that is a third of the
+        score spent on a word in every chunk of the corpus. *weights* supplies a per-token IDF, so
+        a term common across the candidates counts for little and a rare one dominates. With no
+        weights (or all-equal ones) this is exactly the previous fraction, which is why the
+        existing rerank tests still describe it correctly."""
         if not query_tokens:
             return 0.0
-        return len(query_tokens & _tokenize(chunk_text)) / len(query_tokens)
+        present = query_tokens & _tokenize(chunk_text)
+        if weights is None:
+            return len(present) / len(query_tokens)
+        total = sum(weights.get(t, 1.0) for t in query_tokens)
+        if total <= 0:
+            return 0.0
+        return sum(weights.get(t, 1.0) for t in present) / total
 
     @staticmethod
     def _symbol_boost(query: str, chunk_text: str) -> float:
@@ -181,6 +215,11 @@ class Searcher:
         for path in {c["path"] for c in candidates}:
             starts_by_file[path] = self._chunk_starts(project_root_real, path)
 
+        # Two passes over the candidates: gather their texts, derive IDF from them, then score.
+        # The document frequency is measured over the CANDIDATES rather than the whole corpus —
+        # no index change, no extra reads, and it is the right population anyway, since the job
+        # here is to separate these results from each other rather than from the repo at large.
+        texts: list[str] = []
         lex = [0.0] * n
         boost = [0.0] * n
         for i, c in enumerate(candidates):
@@ -194,8 +233,12 @@ class Searcher:
                 c["snippet"] = "".join(lines[:_SNIPPET_LINES]).rstrip()
                 nxt = next((s for s in starts_by_file.get(c["path"], ()) if s > c["line"]), None)
                 text = "".join(lines if nxt is None else lines[: max(1, nxt - c["line"])])
-            lex[i] = self._lexical_score(query_tokens, text)
+            texts.append(text)
             boost[i] = self._symbol_boost(query, text)
+
+        weights = _idf_weights(query_tokens, texts)
+        for i, text in enumerate(texts):
+            lex[i] = self._lexical_score(query_tokens, text, weights)
 
         # lexical rank: highest lexical score first, ties broken by the semantic rank (index i)
         order_by_lex = sorted(range(n), key=lambda i: (-lex[i], i))

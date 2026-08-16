@@ -254,3 +254,50 @@ def test_rerank_default_is_on(tmp_path):
         default = Searcher(db).search("parse_config", str(tmp_path))          # no rerank kwarg
         explicit = Searcher(db).search("parse_config", str(tmp_path), rerank="on")
     assert [r["line"] for r in default] == [r["line"] for r in explicit] == [0, 3]
+
+
+def test_idf_discounts_a_term_that_appears_in_every_candidate():
+    """Unweighted coverage treated every query token alike, so in "the auth middleware" the word
+    "the" carried a third of the score while appearing in nearly every chunk of the corpus."""
+    from codeintel.searcher import _idf_weights
+
+    texts = ["the request handler", "the auth middleware", "the user list"]
+    w = _idf_weights({"the", "auth", "middleware"}, texts)
+
+    assert w["the"] < w["auth"], "a term in every candidate must weigh less than a rare one"
+    assert w["auth"] == w["middleware"], "equally rare terms weigh the same"
+
+
+def test_idf_widens_the_gap_between_a_real_match_and_a_stopword_match():
+    from codeintel.searcher import Searcher, _idf_weights
+
+    q = {"the", "auth", "middleware"}
+    texts = ["the request handler for the page", "the auth middleware validates", "the user list"]
+    w = _idf_weights(q, texts)
+
+    noise_flat = Searcher._lexical_score(q, texts[0])
+    noise_idf = Searcher._lexical_score(q, texts[0], w)
+    hit_idf = Searcher._lexical_score(q, texts[1], w)
+
+    assert noise_idf < noise_flat, "a stopword-only match must score lower than before"
+    assert hit_idf == 1.0, "a full match still scores 1.0"
+
+
+def test_lexical_score_without_weights_is_unchanged():
+    """The weights argument is optional so the previous behaviour — and every test describing
+    it — remains exactly correct."""
+    from codeintel.searcher import Searcher
+
+    q = {"parse", "config"}
+    assert Searcher._lexical_score(q, "def parse_config(): pass") == 1.0
+    assert Searcher._lexical_score(q, "def unrelated(): pass") == 0.0
+
+
+def test_idf_is_safe_when_no_candidate_contains_the_term():
+    """A query word may live in a part of the chunk the reader never sees; df of 0 must not divide
+    by zero or blow the score up."""
+    from codeintel.searcher import Searcher, _idf_weights
+
+    w = _idf_weights({"absent"}, ["nothing here", "nor here"])
+    assert w["absent"] > 0
+    assert Searcher._lexical_score({"absent"}, "nothing here", w) == 0.0
