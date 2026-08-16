@@ -380,7 +380,19 @@ docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \
 git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
-pytest tests/ -q            # ~410 tests, ~35s (live graph/LSP backend tests skip when absent)
+
+pytest tests/ -q            # ~494 tests, ~35s; fails under 83% coverage
+ruff check src tests        # lint
+mypy                        # types (src/ only)
+```
+
+**Your local run is not CI's run.** A dev machine usually has `codebase-memory-mcp` and `uvx`
+installed; CI has neither, so the live graph/LSP tests skip there *and* the never-raise envelopes
+take different `reason`/`hint` paths. A bug reachable only on the no-backend path passes at your
+desk and fails in CI. To see CI's shape before you push:
+
+```bash
+env PATH="$(dirname "$(which python)"):/usr/bin:/bin" pytest -q
 ```
 
 **Release gate.** The unit suite runs against the source tree, so it cannot see a packaging break, a

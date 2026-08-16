@@ -4,7 +4,12 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] — 2026-08-16
+
+This release is about **enforcement**: the project's quality claims now have something checking
+them on every push, rather than resting on care and review. Two things change for you — `codeintel
+install` no longer tracebacks, and the wheel finally carries the marker that lets a type checker
+see the annotations it has always shipped. Every command's behavior is otherwise identical.
 
 ### Fixed
 - **Host-config handshake tests now launch the build under test.** They read a command out of an
