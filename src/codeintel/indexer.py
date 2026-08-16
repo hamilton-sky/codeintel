@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # Generous enough that no hand-written function is affected.
 _MAX_CHUNK_CHARS = 200_000
 
+# Bytes examined when deciding whether a file is binary. A NUL in the first block is the classic
+# signal and is what `git` itself uses.
+_BINARY_SNIFF_BYTES = 8192
+
 _INDEXED_EXTS = frozenset({
     ".py", ".md",
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",       # TS/JS variants
@@ -106,6 +110,15 @@ def _ts_decl_is_function(node) -> bool:
                 gc.type in _TS_FUNC_VALUE_TYPES for gc in child.children):
             return True
     return False
+
+
+def _looks_binary(path) -> bool:
+    """Whether *path* is binary, by the same rule git uses: a NUL byte in the opening block."""
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(_BINARY_SNIFF_BYTES)
+    except OSError:
+        return True                        # unreadable → treat as unindexable rather than crash
 
 
 class Indexer:
@@ -210,6 +223,10 @@ class Indexer:
         except Exception as exc:
             logger.warning("Cleanup pass failed: %s", exc)
 
+    @staticmethod
+    def _binary_check(path) -> bool:
+        return _looks_binary(path)
+
     def _walk_files(self, root: Path):
         """Indexable files inside *root* — and strictly inside it.
 
@@ -258,6 +275,13 @@ class Indexer:
                 if links > 1:
                     logger.warning("skipping %s — %d hard links, so its content may also live "
                                    "outside the indexed root", candidate, links)
+                    continue
+                # A source extension is not a promise of source. A compiled artifact or blob named
+                # `.py` was read with errors="replace" and embedded as replacement-character
+                # garbage — 196KB of /dev/urandom produced 162 chunks — which then competed for
+                # rank against real code in every search.
+                if _looks_binary(candidate):
+                    logger.warning("skipping %s — looks binary despite its extension", candidate)
                     continue
                 yield candidate
 

@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from codeintel.commands._common import never_raise, resolve_root
+from codeintel.commands._common import never_raise, require_dir, resolve_root
 
 
 # code=1: this command's job is to WRITE A FILE. Exiting 0 after failing to write it
@@ -12,7 +12,12 @@ from codeintel.commands._common import never_raise, resolve_root
 def run(args: Any) -> int:
     from codeintel import grapher
 
-    payload = grapher.build_graph_payload(resolve_root(args), limit=args.limit)
+    project_root = resolve_root(args)
+    problem = require_dir(project_root, "graph")
+    if problem:
+        print(problem)
+        return 1
+    payload = grapher.build_graph_payload(project_root, limit=args.limit)
     nodes, edges = len(payload.get("nodes", [])), len(payload.get("edges", []))
 
     if not args.html:

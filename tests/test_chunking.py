@@ -363,3 +363,39 @@ def test_switching_strategy_reconciles_stale_line_chunks(tmp_path):
 
     # 25-line def > max_chunk_lines(40)? no — 25 <= 40, so it becomes ONE def chunk at line 0.
     assert syntax_starts == {0}
+
+
+def test_a_binary_file_with_a_source_extension_is_not_indexed(tmp_path):
+    """A source extension is not a promise of source. A compiled artifact named `.py` was read
+    with errors="replace" and embedded as replacement-character garbage — 196KB of random bytes
+    produced 162 chunks — which then competed for rank against real code in every search."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    (tmp_path / "real.py").write_text("def hello():\n    return 1\n")
+    (tmp_path / "blob.py").write_bytes(b"\x7fELF\x00\x00\x00" + os.urandom(4096))
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        names = sorted(f.name for f in Indexer(db)._walk_files(tmp_path))
+    finally:
+        db.close()
+
+    assert names == ["real.py"], f"a binary file was queued for embedding: {names}"
+
+
+def test_utf8_source_with_unusual_characters_is_still_indexed(tmp_path):
+    """Guard the guard: the NUL sniff must not reject legitimate non-ASCII source."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    (tmp_path / "unicode.py").write_text("# ünïcödé ✓ 日本語\ndef f():\n    return '→'\n",
+                                         encoding="utf-8")
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        names = sorted(f.name for f in Indexer(db)._walk_files(tmp_path))
+    finally:
+        db.close()
+    assert names == ["unicode.py"]

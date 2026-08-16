@@ -149,7 +149,11 @@ class SemanticDb:
             if self.dimension is not None:
                 logger.warning(
                     "embedding dimension %d != cache dimension %d — skipping write; run "
-                    "`codeintel reset` to rebuild the semantic index for the new model",
+                    # `reset` alone cannot fix this: the vec0 table's dimension is fixed at
+                    # creation and the table is SHARED across every project in this cache file,
+                    # so a project-scoped reset (which only DELETEs that project's rows) leaves
+                    # it in place and the warning repeats forever. `--all` drops the file.
+                    "`codeintel reset --all` to rebuild the semantic index for the new model",
                     dim, self.dimension,
                 )
                 return None

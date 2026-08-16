@@ -4,7 +4,7 @@ import datetime
 import os
 from typing import Any
 
-from codeintel.commands._common import never_raise, resolve_root
+from codeintel.commands._common import never_raise, require_dir, resolve_root
 
 # "available" alone was the misleading word: it meant "a binary is on PATH", which is not the same
 # as runnable, and not the same as usable on THIS repo. Say which.
@@ -16,6 +16,10 @@ def run(args: Any) -> int:
     from codeintel import server
 
     project_root = resolve_root(args)
+    problem = require_dir(project_root, "status")
+    if problem:
+        print(problem)
+        return 1
     status = server.code_status_handler({"project_root": project_root})
 
     readiness = status.get("readiness") or {}

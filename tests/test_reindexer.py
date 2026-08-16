@@ -260,3 +260,23 @@ def test_repeated_failures_keep_advancing_rather_than_pinning_at_zero(monkeypatc
     for _ in range(3):
         r._do_reindex("/repo")
     assert r.generation("/repo") == 3
+
+
+def test_a_reindex_already_running_is_not_submitted_again(monkeypatch):
+    """The debounce timestamp is set when a pass is SUBMITTED, not when it finishes, so on a repo
+    whose reindex outlasts the window every later query stacked another concurrent pass —
+    overlapping writers against one SQLite file and one graph subprocess, for no benefit."""
+    r = Reindexer(debounce_seconds=0)
+    submitted = []
+    monkeypatch.setattr(r._executor, "submit", lambda fn, root: submitted.append(root))
+
+    r.maybe_reindex("/repo")
+    assert submitted == ["/repo"]
+
+    r.maybe_reindex("/repo")          # still in flight (nothing cleared it)
+    r.maybe_reindex("/repo")
+    assert submitted == ["/repo"], "a second pass was stacked on a running one"
+
+    r._in_flight.discard("/repo")     # the running pass completes
+    r.maybe_reindex("/repo")
+    assert submitted == ["/repo", "/repo"]

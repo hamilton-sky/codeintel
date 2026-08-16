@@ -81,6 +81,12 @@ class Reindexer:
 
         now = time.monotonic()
         with self._lock:
+            # Already running: skip. The debounce timestamp is set when a pass is SUBMITTED, not
+            # when it finishes, so on a repo whose reindex outlasts the window every later query
+            # stacked another concurrent pass — overlapping writers against one SQLite file and
+            # one graph subprocess, for no benefit.
+            if project_root in self._in_flight:
+                return
             last = self._last_fired.get(project_root, 0.0)
             if now - last < self._debounce_seconds:
                 return

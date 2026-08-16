@@ -18,6 +18,17 @@ def resolve_root(args: Any) -> str:
     return getattr(args, "project_root", None) or os.getcwd()
 
 
+def require_dir(project_root: str, command: str) -> str | None:
+    """An error line when *project_root* is not a directory, else None.
+
+    A mistyped path used to produce confident, well-formed output about a directory that does not
+    exist — `setup /typo` rendered a full three-engine health table for it — which is the worst
+    possible response to a typo in a script, because it is indistinguishable from success."""
+    if os.path.isdir(project_root):
+        return None
+    return f"{command} failed: not a directory: {project_root}"
+
+
 def emit(report: dict, *, as_json: bool, render: Callable[[dict], str]) -> None:
     """Print a report as structured JSON (--json) or as its human-facing text rendering."""
     if as_json:

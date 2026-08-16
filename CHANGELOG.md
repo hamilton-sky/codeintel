@@ -4,6 +4,32 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] — 2026-08-16
+
+Clears the remaining known limitations from 0.14.0's list.
+
+### Fixed
+- **Binary files with a source extension are no longer indexed.** A compiled artifact named `.py`
+  was read with `errors="replace"` and embedded as replacement-character garbage — 196KB of random
+  bytes produced 162 chunks — which then competed for rank against real code in every search.
+  Files are now sniffed for a NUL byte in the opening block, the same rule `git` uses.
+- **`setup`, `status`, `map` and `graph` now reject a project root that does not exist.** They
+  produced confident, well-formed output about a directory that isn't there — `setup /typo`
+  rendered a full three-engine health table for it — which in a script is indistinguishable from
+  success. All four now exit 1 with a clear message, matching `index`.
+- **The vector-dimension warning named a command that cannot fix it.** It advised `codeintel
+  reset`, but the vec0 table's dimension is fixed at creation and the table is *shared* across
+  every project in a cache file, so a project-scoped reset only deletes that project's rows and
+  the warning repeats forever. It now names `codeintel reset --all`, which does resolve it.
+- **Overlapping background reindexes.** The debounce timestamp was set when a pass was
+  *submitted*, not when it finished, so on a repo whose reindex outlasts the window every later
+  query stacked another concurrent pass — overlapping writers against one SQLite file and one
+  graph subprocess, for no benefit. A root already being reindexed is now skipped.
+
+### Docs
+- README gains a **Reporting a problem** section pointing at `codeintel doctor --json`, so a bug
+  report arrives actionable rather than needing a round trip.
+
 ## [0.14.1] — 2026-08-16
 
 Quality-of-life for the thing this tool actually serves: an agent reading its output.

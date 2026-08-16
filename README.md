@@ -402,6 +402,23 @@ docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \
   -e CODEINTEL_HTTP_TOKEN="$(openssl rand -hex 32)" codeintel
 ```
 
+## Reporting a problem
+
+`codeintel doctor --json` prints a complete, machine-readable picture of what's installed, what's
+runnable, and whether this repo is indexed — per engine, with the remediation for each gap. Paste
+it into an issue and the report is actionable immediately instead of needing a round trip:
+
+```bash
+codeintel doctor --json
+```
+
+It reports only local engine and index state. Over the HTTP transport the `registrations` field —
+which names agent config files on the machine running the server — is deliberately omitted.
+
+If a *result* looks wrong rather than a command failing, include the exact `code.query` call and
+its full envelope. `reason`, `hint`, `engine`, `cached`, and `reindexing` between them explain
+which engine answered and how current its index was, which is usually the whole diagnosis.
+
 ## Development
 
 ```bash

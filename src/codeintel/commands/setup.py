@@ -2,16 +2,21 @@
 
 from typing import Any
 
-from codeintel.commands._common import emit, never_raise, resolve_root
+from codeintel.commands._common import emit, never_raise, require_dir, resolve_root
 
 
 @never_raise("setup unavailable: {exc}")
 def run(args: Any) -> int:
     from codeintel import onboarding
 
+    project_root = resolve_root(args)
+    problem = require_dir(project_root, "setup")
+    if problem:
+        print(problem)
+        return 1
     all_steps = getattr(args, "all_steps", False)  # --all implies every automatable step
     report = onboarding.run_setup(
-        resolve_root(args),
+        project_root,
         install_uv=args.install_uv or all_steps,
         install_deps=args.install_deps or all_steps,
         do_index=args.index or all_steps,

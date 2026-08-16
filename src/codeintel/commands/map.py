@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from codeintel.commands._common import never_raise, resolve_root
+from codeintel.commands._common import never_raise, require_dir, resolve_root
 
 
 # Never-raise parity with the MCP code.map handler — degrade, don't crash.
@@ -15,6 +15,10 @@ def run(args: Any) -> int:
     from codeintel.providers.graph import GraphProvider
 
     project_root = resolve_root(args)
+    problem = require_dir(project_root, "map")
+    if problem:
+        print(problem)
+        return 1
     try:
         provider = GraphProvider()
     except Exception:

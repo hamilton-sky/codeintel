@@ -792,3 +792,21 @@ def test_index_reports_an_unrecoverable_indexer_failure(monkeypatch, tmp_path, c
     assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
     out = capsys.readouterr().out
     assert "index failed" in out and "Nothing new to index" not in out
+
+
+# --------------------------------------------------------------------------- root validation
+
+@pytest.mark.parametrize("command,args_", [
+    ("setup", {"project_root": None, "all_steps": False, "install_uv": False,
+               "install_deps": False, "index": False, "warm": False, "json": False}),
+    ("status", {"project_root": None}),
+    ("map", {"project_root": None, "inject": False, "budget": 32768}),
+    ("graph", {"project_root": None, "html": False, "out": None, "limit": 220}),
+])
+def test_a_nonexistent_project_root_fails_loudly(command, args_, tmp_path, capsys):
+    """A mistyped path produced confident, well-formed output about a directory that does not
+    exist — `setup /typo` rendered a full three-engine health table for it. In a script that is
+    indistinguishable from success, which is the worst possible response to a typo."""
+    args_ = {**args_, "project_root": str(tmp_path / "does-not-exist")}
+    assert import_module(f"codeintel.commands.{command}").run(_args(args_)) == 1
+    assert "not a directory" in capsys.readouterr().out
