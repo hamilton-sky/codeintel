@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -46,6 +47,88 @@ def _strip_project_prefix(qualified_name: str) -> str:
     if "-" in head and " " not in head:
         return rest
     return qualified_name
+
+
+# Files consulted when verifying dead-code candidates, and the extensions worth reading. Bounded
+# so `deadcode` on a very large monorepo stays a query rather than a second index pass.
+_VERIFY_FILE_CAP = 6000
+_VERIFY_EXTS = frozenset({
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
+    ".c", ".h", ".cpp", ".cc", ".hpp",
+})
+
+
+def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], bool]:
+    """Remove candidates whose name actually appears somewhere else in the source.
+
+    `deadcode` asks the graph for functions with **in-degree 0**, and a function that is passed as
+    a REFERENCE rather than called has in-degree 0 — every React event handler, every
+    `addEventListener('keydown', onKeyDown)`, every callback handed to a framework. On a real
+    TypeScript repo that made 181 of 181 sampled candidates false, and an agent acting on the
+    answer would delete live code. A wrong answer here is worse than no answer.
+
+    The graph cannot see those edges, so verify against the source: one pass over the repo,
+    counting word-boundary occurrences of each candidate name. A name appearing anywhere beyond
+    its own definition is referenced and drops out. Returns (kept, verified) — `verified` is False
+    when the repo exceeded the file cap, so the caller can say the check was partial rather than
+    imply a confidence it does not have.
+    """
+    if not rows or not root or not os.path.isdir(root):
+        return rows, False
+
+    names = {str(r.get("name") or "") for r in rows}
+    names.discard("")
+    if not names:
+        return rows, False
+    pattern = re.compile(r"\b(" + "|".join(re.escape(n) for n in sorted(names)) + r")\b")
+
+    seen: dict[str, int] = {}
+    scanned = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d not in ("node_modules", "__pycache__")]
+        for fname in filenames:
+            if os.path.splitext(fname)[1].lower() not in _VERIFY_EXTS:
+                continue
+            scanned += 1
+            if scanned > _VERIFY_FILE_CAP:
+                return rows, False              # too big to verify — report unfiltered, and say so
+            try:
+                with open(os.path.join(dirpath, fname), encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            for match in pattern.findall(text):
+                seen[match] = seen.get(match, 0) + 1
+
+    # One occurrence is the definition itself; anything more is a use the graph could not see.
+    kept = [r for r in rows if seen.get(str(r.get("name") or ""), 0) <= 1]
+    return kept, True
+
+
+def _is_archived_path(file_path: str) -> bool:
+    """Whether *file_path* lives under a dot-directory that isn't source.
+
+    A repo-scan op ranks by complexity and fan-in, and archived code scores well on both — an
+    8MB `.archive/` tree put a retired 507-line component third in this repo's refactor hotspots,
+    a near-duplicate of the live one. Pointing an agent at dead code as the thing most worth
+    refactoring is worse than returning nothing. `.github` is kept: its workflows are live.
+    """
+    parts = file_path.replace("\\", "/").split("/")
+    return any(p.startswith(".") and p not in (".", "..", ".github") for p in parts[:-1])
+
+
+def _collapse_repeats(label: str) -> str:
+    """`A.EditorHeader.EditorHeader.EditorHeader` -> `A.EditorHeader`.
+
+    The backend emits a segment per nesting level, so a component in a file of the same name in a
+    directory of the same name repeats three times — and the file path is printed right beside it
+    anyway. Across 200 rows that is real token cost for the agent this output exists to serve."""
+    out: list[str] = []
+    for seg in label.split("."):
+        if not out or out[-1] != seg:
+            out.append(seg)
+    return ".".join(out)
 
 
 def _repo_display_name(root: str) -> str:
@@ -341,7 +424,9 @@ class GraphProvider:
         """Rows a code-quality scan should hide: builtins/generated nodes and test code (the backend's
         own ``is_test`` is unreliable — see ``_looks_like_test``). Shared by deadcode + hotspots."""
         fp = str(r.get("file_path") or "")
-        return cls._is_synthetic(fp) or cls._looks_like_test(fp, str(r.get("name") or ""))
+        return (cls._is_synthetic(fp)
+                or cls._looks_like_test(fp, str(r.get("name") or ""))
+                or _is_archived_path(fp))
 
     def _render_scan(self, kept: list[dict], title: str, cap: int, meta_fn) -> str:
         """Render a repo-scan op's markdown from filtered+sorted rows: ``## title (count)`` + one
@@ -350,7 +435,8 @@ class GraphProvider:
         the row format and truncation note (the drift-prone parts) and differ only in their metrics."""
         lines = []
         for r in kept[:cap]:
-            label = _strip_project_prefix(str(r.get("qualified_name") or r.get("name") or "?"))
+            label = _collapse_repeats(
+                _strip_project_prefix(str(r.get("qualified_name") or r.get("name") or "?")))
             fp = str(r.get("file_path") or "")
             meta = meta_fn(r)
             badge = f"  [{', '.join(meta)}]" if meta else ""
@@ -581,7 +667,7 @@ class GraphProvider:
         except Exception:
             return None
 
-    def _op_deadcode(self, project: str, timeout_ms: int) -> str | None:
+    def _op_deadcode(self, project: str, timeout_ms: int, root: str = "") -> str | None:
         """Unreferenced non-test symbols (dead-code candidates): in-degree 0 Functions, entry points
         excluded server-side, tests/builtins filtered client-side, biggest first."""
         try:
@@ -595,6 +681,7 @@ class GraphProvider:
             # exclude_entry_points flag: it's an external-backend flag we don't independently verify,
             # and main() shown as "dead" would be a visible embarrassment — one cheap client check.
             kept = [r for r in rows if not self._is_noise(r) and not r.get("is_entry_point")]
+            kept, verified = _drop_referenced_symbols(kept, root)
             if not kept:
                 return "## Dead-code candidates\n(none found)"
             kept.sort(key=lambda r: r.get("lines") or 0, reverse=True)
@@ -607,7 +694,14 @@ class GraphProvider:
                     m.append(f"{r.get('lines')} lines")
                 return m
 
-            return self._render_scan(kept, "Dead-code candidates", 30, _meta)
+            rendered = self._render_scan(kept, "Dead-code candidates", 30, _meta)
+            if not verified:
+                # Never imply a confidence the check did not earn: without the source pass these
+                # are raw in-degree-0 rows, which on any callback-heavy codebase are mostly wrong.
+                rendered += ("\n\n_Unverified: the repo exceeded the source-scan cap, so these "
+                             "are raw call-graph results — a function used only as a callback "
+                             "reference will appear here. Confirm before deleting._")
+            return rendered
         except Exception:
             return None
 
@@ -711,7 +805,7 @@ class GraphProvider:
         if op == "changed" or op == "changes":
             return self._op_changed(project, timeout_ms)
         if op == "deadcode":
-            return self._op_deadcode(project, timeout_ms)
+            return self._op_deadcode(project, timeout_ms, root)
         if op == "hotspots":
             return self._op_hotspots(project, timeout_ms)
         return None

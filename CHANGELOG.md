@@ -4,6 +4,38 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-08-16
+
+Everything here came from pointing 0.14.2 at two repositories it had never seen. Three adversarial
+review rounds had not found any of it.
+
+### Added
+- **`codeintel query --json` emits the full result envelope.** 0.14.2's new "Reporting a problem"
+  section asked users to include `engine`, `cached` and `reindexing` when a result looks wrong —
+  fields the CLI had no way to display, printing only the rendered result or the reason. The
+  documentation described a workflow the tool did not support. It does now, and those are exactly
+  the fields that explain *why* an answer looks off.
+
+### Fixed
+- **`deadcode` was systematically wrong on callback-heavy code, and confident about it.** The op
+  asks the graph for functions with **in-degree 0**, and a function passed as a *reference* rather
+  than called has in-degree 0 — every React event handler, every
+  `addEventListener('keydown', onKeyDown)`, every framework callback. On a real TypeScript repo it
+  returned 181 candidates and every one sampled was live code; an agent acting on that answer
+  would delete working code. Candidates are now verified against the source with a bounded
+  word-boundary scan, and a name appearing anywhere beyond its own definition drops out. The same
+  repo now returns **3**, each confirmed to have exactly one occurrence. When a repo exceeds the
+  scan cap the result says so rather than implying a confidence the check did not earn.
+- **Repo scans ranked archived code as the thing most worth refactoring.** Nothing excluded
+  dot-directories, so an 8MB `.archive/` tree put a retired 507-line component *third* in a
+  repo's hotspots — a near-duplicate of the live one. `.github` is kept, since its workflows are
+  live.
+- **`hotspots`/`deadcode` kept the backend's project id on every row.** 0.14.1 stripped it in
+  `_display` (callers/callees) and missed `_render_scan`, so the longest results in the tool —
+  200 rows — carried the author's full home path on each line.
+- **Labels repeated themselves**: `MarkdownEditor.EditorHeader.EditorHeader.EditorHeader`, with
+  the file path printed right beside it. Consecutive duplicate segments are collapsed.
+
 ## [0.14.2] — 2026-08-16
 
 Clears the remaining known limitations from 0.14.0's list.

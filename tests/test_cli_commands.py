@@ -302,7 +302,8 @@ class _Gateway:
 
 
 def _query_args(**kw):
-    return _args({"op": "callers", "target": "main", "engine": "auto", "project_root": None}, **kw)
+    return _args({"op": "callers", "target": "main", "engine": "auto", "project_root": None,
+                  "json": False}, **kw)
 
 
 def test_query_prints_the_result(monkeypatch, capsys):
@@ -810,3 +811,32 @@ def test_a_nonexistent_project_root_fails_loudly(command, args_, tmp_path, capsy
     args_ = {**args_, "project_root": str(tmp_path / "does-not-exist")}
     assert import_module(f"codeintel.commands.{command}").run(_args(args_)) == 1
     assert "not a directory" in capsys.readouterr().out
+
+
+def test_query_json_emits_the_whole_envelope(monkeypatch, capsys):
+    """The README asks a bug reporter to include `engine`, `cached` and `reindexing` when a result
+    looks wrong. The CLI printed only the rendered result or the bare reason, so those fields were
+    unreachable — documentation describing a workflow the tool did not support."""
+    import json as _json
+
+    monkeypatch.setattr("codeintel.server._build_gateway", lambda: _Gateway([{
+        "ok": True, "op": "callers", "target": "f", "result": "## Callers",
+        "engine": "graph", "cached": True, "reindexing": True}]))
+
+    assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 0
+    payload = _json.loads(capsys.readouterr().out)
+
+    assert payload["engine"] == "graph"
+    assert payload["cached"] is True
+    assert payload["reindexing"] is True
+
+
+def test_query_without_json_still_prints_only_the_answer(monkeypatch, capsys):
+    """The default stays human-facing — an agent host reads the envelope over MCP, not the CLI."""
+    monkeypatch.setattr("codeintel.server._build_gateway",
+                        lambda: _Gateway([{"result": "## Callers", "engine": "graph"}]))
+
+    import_module("codeintel.commands.query").run(_query_args(json=False))
+    out = capsys.readouterr().out
+    assert out.strip() == "## Callers"
+    assert "engine" not in out

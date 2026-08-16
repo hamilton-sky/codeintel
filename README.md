@@ -288,7 +288,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |
 | `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote] [--token TOKEN]` | Start the HTTP transport (loopback-only unless `--allow-remote`; `--token` requires a bearer token on every request) |
-| `codeintel query --op OP --target TARGET [--engine auto] [--project-root DIR]` | Run a single query and print the result |
+| `codeintel query --op OP --target TARGET [--engine auto] [--project-root DIR] [--json]` | Run a single query and print the result |
 | `codeintel status [project_root]` | Show engine availability and index age |
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
 | `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
@@ -415,9 +415,16 @@ codeintel doctor --json
 It reports only local engine and index state. Over the HTTP transport the `registrations` field —
 which names agent config files on the machine running the server — is deliberately omitted.
 
-If a *result* looks wrong rather than a command failing, include the exact `code.query` call and
-its full envelope. `reason`, `hint`, `engine`, `cached`, and `reindexing` between them explain
-which engine answered and how current its index was, which is usually the whole diagnosis.
+If a *result* looks wrong rather than a command failing, send the envelope rather than the
+rendered text:
+
+```bash
+codeintel query --op callers --target yourSymbol --json
+```
+
+`engine` says which engine answered, `cached` whether it came from the cache, `reindexing` whether
+the index was mid-rebuild, and `reason`/`hint` why an empty answer was empty. Those five fields are
+usually the whole diagnosis.
 
 ## Development
 

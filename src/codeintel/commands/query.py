@@ -1,5 +1,6 @@
 """`codeintel query` — one question against the gateway: search, callers, callees, impact, chain."""
 
+import json
 import sys
 import time
 from typing import Any
@@ -43,6 +44,14 @@ def run(args: Any) -> int:
             result = _run_query()
             if result.get("result") is not None or result.get("reason") != "warming":
                 break
+
+    if getattr(args, "json", False):
+        # The whole envelope, exactly as an agent host receives it. Without this the CLI showed
+        # only `result` (or the reason), so `engine`, `cached` and `reindexing` were unreachable —
+        # and those are precisely the fields that explain WHY an answer looks wrong, which is what
+        # a bug report about a wrong answer needs. The README asked for them before this existed.
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
 
     value = result.get("result")
     if value is not None:

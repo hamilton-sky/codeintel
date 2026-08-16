@@ -348,3 +348,64 @@ def test_every_renderer_strips_the_project_prefix_not_just_one():
             if re.search(r"qualified_name|qn_key", line) and "=" in line and "def " not in line:
                 assert "_strip_project_prefix" in line, (
                     f"{fn.__name__} renders a raw qualified name: {line.strip()}")
+
+
+# --------------------------------------------------------------------------- scan accuracy
+
+def test_deadcode_drops_candidates_that_are_referenced_in_source(tmp_path):
+    """`deadcode` asks the graph for functions with IN-DEGREE 0, and a function passed as a
+    REFERENCE rather than called has in-degree 0 — every React handler, every
+    `addEventListener('keydown', onKeyDown)`, every framework callback. On a real TypeScript repo
+    that made 181 of 181 sampled candidates false, and an agent acting on it would delete live
+    code. The graph cannot see those edges, so verify against the source.
+    """
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / "hook.ts").write_text(
+        "function onKeyDown(e) { return e }\n"
+        "document.addEventListener('keydown', onKeyDown)\n"          # referenced, not called
+    )
+    (tmp_path / "orphan.ts").write_text("function reallyUnused() { return 1 }\n")
+
+    rows = [{"name": "onKeyDown"}, {"name": "reallyUnused"}]
+    kept, verified = _drop_referenced_symbols(rows, str(tmp_path))
+
+    assert verified is True
+    assert [r["name"] for r in kept] == ["reallyUnused"]
+
+
+def test_deadcode_verification_reports_when_it_could_not_run(tmp_path, monkeypatch):
+    """Without the source pass these are raw in-degree-0 rows. Returning them unlabelled would
+    imply a confidence the check never earned."""
+    import codeintel.providers.graph as g
+
+    monkeypatch.setattr(g, "_VERIFY_FILE_CAP", 0)
+    (tmp_path / "a.py").write_text("def f(): pass\n")
+
+    kept, verified = g._drop_referenced_symbols([{"name": "f"}], str(tmp_path))
+    assert verified is False
+    assert len(kept) == 1, "an unverifiable repo must return rows unfiltered, not empty"
+
+
+def test_deadcode_verification_is_word_boundary_accurate(tmp_path):
+    """A substring match would hide a genuinely dead `run` behind any `runtime` in the repo."""
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / "a.ts").write_text("function run() {}\nconst runtime = 1\nconst rerun = 2\n")
+    kept, verified = _drop_referenced_symbols([{"name": "run"}], str(tmp_path))
+
+    assert verified is True
+    assert [r["name"] for r in kept] == ["run"], "substring hits must not count as references"
+
+
+def test_scan_ops_hide_archived_code(tmp_path):
+    """A repo-scan ranks by complexity and fan-in, and archived code scores well on both: an 8MB
+    `.archive/` tree put a retired 507-line component THIRD in a repo's refactor hotspots, a
+    near-duplicate of the live one. Pointing an agent at dead code as the thing most worth
+    refactoring is worse than returning nothing."""
+    from codeintel.providers.graph import GraphProvider
+
+    assert GraphProvider._is_noise({"file_path": "pathly/features/.archive/x/Old.tsx"}) is True
+    assert GraphProvider._is_noise({"file_path": "studio/src/components/Editor/index.tsx"}) is False
+    # .github holds live workflows, not archives.
+    assert GraphProvider._is_noise({"file_path": ".github/workflows/ci.yml"}) is False

@@ -147,6 +147,12 @@ def main() -> None:
         default=None,
         help="Project root directory (default: cwd)",
     )
+    query_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the full result envelope (engine, cached, reason, hint, reindexing) — what a "
+             "bug report needs, and what an agent host sees",
+    )
 
     # status subcommand
     status_parser = subparsers.add_parser("status", help="Show code intelligence engine status")
