@@ -81,40 +81,66 @@ def code_query_handler(args: dict) -> dict:
         return safe_null_result("", "", reason="handler-error")
 
 
-def code_status_handler(args: dict) -> dict:
-    try:
-        graph_available = False
-        lsp_available = False
-        semantic_available = False
-        try:
-            gp = GraphProvider()
-            graph_available = bool(gp.available)
-        except Exception:
-            pass
-        try:
-            lp = LspProvider()
-            lsp_available = bool(lp.available)
-        except Exception:
-            pass
-        try:
-            sp = SemanticProvider()
-            semantic_available = bool(sp.available)
-        except Exception:
-            pass
-        engines: list[str] = []
-        if graph_available:
-            engines.append("graph")
-        if lsp_available:
-            engines.append("lsp")
-        if semantic_available:
-            engines.append("semantic")
-        if not engines:
-            engines.append("none")
+_STATUS_FALLBACK: dict = {
+    "ok": True,
+    "engines": ["none"],
+    "graph": False,
+    "lsp": False,
+    "semantic": False,
+    "indexed": False,
+    "model": None,
+    "healthy": False,
+    "readiness": {},
+}
 
-        # Report real freshness/model instead of hardcoded nulls (SPEC §7). When a project_root is
-        # supplied, `indexed` is scoped to THAT repo (does it have indexed chunks?) rather than the
-        # misleading "any semantic db file exists on this machine".
+
+def code_status_handler(args: dict) -> dict:
+    """Engine readiness for an agent.
+
+    Reports the SAME tri-state doctor computes — installed / runnable / repo_indexed — against
+    the SAME live providers a real query hits (the singleton gateway's, including the warmed
+    LSP session). It previously constructed throwaway providers and reported a single flat
+    boolean per engine, so `lsp: true` could mean "uvx is on PATH" for an engine that in fact
+    never boots — an agent reading that would reason from a readiness claim nothing verified.
+
+    The flat `graph`/`lsp`/`semantic`/`indexed`/`model` keys keep their original meaning for
+    existing callers; `readiness` and `healthy` carry the full picture."""
+    try:
+        from codeintel import doctor as _doctor
+
         project_root = str(args.get("project_root", "") or "")
+        gw = _get_gateway()
+        report = _doctor.run_doctor(
+            project_root, deep=False, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic
+        )
+        probes = report.get("engines", {}) if isinstance(report, dict) else {}
+
+        def _probe(name: str) -> dict:
+            p = probes.get(name)
+            return p if isinstance(p, dict) else {}
+
+        readiness = {
+            name: {
+                "installed": _probe(name).get("installed"),
+                "runnable": _probe(name).get("runnable"),
+                "repo_indexed": _probe(name).get("repo_indexed"),
+                "status": _probe(name).get("status", "fail"),
+                "detail": _probe(name).get("detail", ""),
+                "remediation": _probe(name).get("remediation"),
+            }
+            for name in ("graph", "lsp", "semantic")
+        }
+
+        graph_available = readiness["graph"]["installed"] is True
+        lsp_available = readiness["lsp"]["installed"] is True
+        semantic_available = readiness["semantic"]["installed"] is True
+
+        engines = [n for n in ("graph", "lsp", "semantic") if readiness[n]["installed"] is True]
+        if not engines:
+            engines = ["none"]
+
+        # `indexed` stays semantic-scoped and back-compatible: for a given repo it means "this
+        # repo has chunks"; with no project_root it falls back to "any index exists on this box".
         indexed = False
         model = None
         try:
@@ -127,7 +153,7 @@ def code_status_handler(args: dict) -> dict:
                         model = str(load_config(project_root).get("model") or DEFAULT_MODEL)
                     except Exception:
                         pass
-                    indexed = bool(SemanticProvider().probe(project_root).get("repo_indexed"))
+                    indexed = readiness["semantic"]["repo_indexed"] is True
                 else:
                     import glob
                     import os
@@ -137,6 +163,7 @@ def code_status_handler(args: dict) -> dict:
         except Exception:
             pass
 
+        summary = report.get("summary", {}) if isinstance(report, dict) else {}
         return {
             "ok": True,
             "engines": engines,
@@ -145,17 +172,12 @@ def code_status_handler(args: dict) -> dict:
             "semantic": semantic_available,
             "indexed": indexed,
             "model": model,
+            "healthy": bool(summary.get("healthy")),
+            "readiness": readiness,
+            "versions": report.get("versions", {}) if isinstance(report, dict) else {},
         }
     except Exception:
-        return {
-            "ok": True,
-            "engines": ["none"],
-            "graph": False,
-            "lsp": False,
-            "semantic": False,
-            "indexed": False,
-            "model": None,
-        }
+        return dict(_STATUS_FALLBACK)
 
 
 def code_doctor_handler(args: dict) -> dict:

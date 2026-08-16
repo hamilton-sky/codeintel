@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import enum
 import json
+import os
 import re
 import shutil
+import sys
 import threading
 import time
 from typing import Any, Optional
@@ -22,6 +24,19 @@ _DEFAULT_TIMEOUT_S = 5.0
 # against the installed serena and the machine's own serena MCP config — pulls it straight from
 # the upstream repo and starts the stdio MCP server, binding the project via `--project`.
 _SERENA_GIT = "git+https://github.com/oraios/serena"
+
+
+def _open_errlog():
+    """Where serena's own stderr goes. Serena logs ~30 lines of INFO on every boot; inherited,
+    that noise lands on top of `codeintel doctor --deep`'s report and any CLI query that warms
+    the LSP — making the diagnostic command the least readable output in the tool. Discard it by
+    default; set ``CODEINTEL_DEBUG=1`` to pass it through when debugging a boot failure."""
+    if os.environ.get("CODEINTEL_DEBUG", "").strip().lower() in ("1", "true", "on", "yes"):
+        return sys.stderr
+    try:
+        return open(os.devnull, "w", encoding="utf-8")
+    except Exception:
+        return sys.stderr
 
 
 def _serena_launch_args(cmd: str, project_root: str) -> list[str]:
@@ -76,17 +91,26 @@ class _LspSession:
         from mcp import StdioServerParameters
 
         launch_args = _serena_launch_args(cmd, project_root)
-        async with stdio_client(
-            StdioServerParameters(command=launch_args[0], args=launch_args[1:])
-        ) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                with self._lock:
-                    self._mcp_session = session
-                    self.state = _State.READY
-                # Keep the loop (and the subprocess/session it owns) alive so _call_tool can
-                # schedule coroutines onto it. Resolves only when the thread/loop is torn down.
-                await asyncio.get_running_loop().create_future()
+        errlog = _open_errlog()
+        try:
+            async with stdio_client(
+                StdioServerParameters(command=launch_args[0], args=launch_args[1:]),
+                errlog=errlog,
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    with self._lock:
+                        self._mcp_session = session
+                        self.state = _State.READY
+                    # Keep the loop (and the subprocess/session it owns) alive so _call_tool can
+                    # schedule coroutines onto it. Resolves only when the thread/loop is torn down.
+                    await asyncio.get_running_loop().create_future()
+        finally:
+            if errlog is not sys.stderr:
+                try:
+                    errlog.close()
+                except Exception:
+                    pass
 
 
 class LspProvider:

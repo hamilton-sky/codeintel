@@ -123,11 +123,11 @@ After installing the package, explicitly register it with Codex:
 codeintel install --agent codex
 ```
 
-This safely adds a `[mcp_servers.codeintel]` entry to `~/.codex/config.toml` without changing your
-other Codex settings. Registration is deliberately opt-in: installing a Python package should not
-silently modify an agent's configuration. Start a new Codex task (or restart Codex) after
-registration; the refreshed task will have native `code.query`, `code.status`, `code.doctor`, and
-`code.map` MCP tools available.
+This safely adds a `[mcp_servers.codeintel]` entry to `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`
+when that is set) without changing your other Codex settings. Registration is deliberately opt-in:
+installing a Python package should not silently modify an agent's configuration. Start a new Codex
+task (or restart Codex) after registration; the refreshed task will have native `code.query`,
+`code.status`, `code.doctor`, and `code.map` MCP tools available.
 
 For a fully prepared local setup, run:
 
@@ -143,15 +143,37 @@ After installing the package, explicitly register it with Claude Code:
 codeintel install --agent claude
 ```
 
-This adds the `codeintel` MCP server to `~/.claude/settings.json` while preserving your existing
-settings. Start a new Claude Code session after registration so it can load the native
-`code.query`, `code.status`, `code.doctor`, and `code.map` MCP tools.
+This adds the `codeintel` MCP server to `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`)
+while preserving your existing configuration — that is the file Claude Code reads for user-scope
+MCP servers, and you can confirm the entry with `claude mcp list`. Start a new Claude Code session
+after registration so it can load the native `code.query`, `code.status`, `code.doctor`, and
+`code.map` MCP tools.
+
+> **Upgrading from ≤ 0.11.1?** Earlier versions wrote this block to `~/.claude/settings.json`,
+> which Claude Code ignores for MCP registration — so codeintel never actually loaded. Re-run
+> `codeintel install --agent claude`; it registers in the right place and points out the stale
+> entry so you can delete it.
 
 For a fully prepared local setup, run:
 
 ```bash
 codeintel setup --all /path/to/your/project && codeintel install --agent claude
 ```
+
+### Registration is verified, not assumed
+
+`codeintel install` does not stop at writing a config file. It then launches the exact command it
+registered and drives a real MCP handshake — `initialize` → `tools/list` — and reports what came
+back:
+
+```text
+v claude: registered at /Users/you/.claude.json
+
+v verified: codeintel 0.11.2 — 4 tools (code.query, code.status, code.doctor, code.map)
+```
+
+If the command is not on `PATH`, or the server fails to start, install says so and exits non-zero
+instead of reporting a success your agent cannot use. Pass `--no-verify` to skip the handshake.
 
 ## How it works
 
@@ -208,7 +230,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 
 | Command | Purpose |
 |---|---|
-| `codeintel install [--agent claude\|codex\|gemini\|zed\|all]` | Register codeintel with AI agent(s) |
+| `codeintel install [--agent claude\|codex\|gemini\|zed\|all] [--no-verify]` | Register codeintel with AI agent(s), then prove it by completing a real MCP handshake against the registered command |
 | `codeintel setup [project_root] [--all] [--index] [--warm] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |

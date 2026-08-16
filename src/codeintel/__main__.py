@@ -61,6 +61,11 @@ def main() -> None:
         default="all",
         help="Agent to register with (default: all)",
     )
+    install_parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip the post-registration MCP handshake (verification is on by default)",
+    )
 
     # map subcommand
     map_parser = subparsers.add_parser("map", help="Generate CODE_INTEL.md orientation file")
@@ -275,11 +280,18 @@ def main() -> None:
             project_root = args.project_root or os.getcwd()
             status = server.code_status_handler({"project_root": project_root})
 
+            # "available" alone was the misleading word: it meant "a binary is on PATH", which is
+            # not the same as runnable, and not the same as usable on THIS repo. Say which.
+            _READY = {"ok": "ready", "warn": "installed (not verified)", "fail": "unavailable"}
+            readiness = status.get("readiness") or {}
             print("Engine status:")
             for engine in ["graph", "lsp", "semantic"]:
-                available = status.get(engine, False)
-                state = "available" if available else "unavailable"
-                print(f"  {engine:<10} {state}")
+                entry = readiness.get(engine) or {}
+                state = _READY.get(entry.get("status"), "unavailable")
+                detail = entry.get("detail") or ""
+                print(f"  {engine:<10} {state:<26} {detail}")
+            if status.get("healthy") is False:
+                print("\n  run `codeintel doctor` for the fix for each gap")
 
             from codeintel.config import load_config
             from codeintel.semantic_db import default_db_path
@@ -382,16 +394,17 @@ def main() -> None:
         from codeintel.installer import Installer
 
         installer = Installer()
+        do_verify = not args.no_verify
         if args.agent == "all":
-            results = installer.register_all()
+            results = installer.register_all(verify=do_verify)
         else:
-            results = [installer.register(args.agent)]
+            results = [installer.register(args.agent, verify=do_verify)]
 
         any_ok = False
+        legacy_paths: list[str] = []
+        verdict = None
         for r in results:
-            agent = r["agent"]
-            path = r["path"]
-            action = r["action"]
+            agent, path, action = r["agent"], r["path"], r["action"]
             if action == "registered":
                 print(f"v {agent}: registered at {path}")
                 any_ok = True
@@ -400,6 +413,24 @@ def main() -> None:
                 any_ok = True
             else:
                 print(f"x {agent}: failed — {r['reason']}")
+            if r.get("legacy"):
+                legacy_paths.append(r["legacy"])
+            verdict = r.get("verified") or verdict
+
+        # A written config file proves nothing about whether the host can launch the server —
+        # so say what the handshake actually found, and fail loudly when it did not happen.
+        if verdict is not None:
+            if verdict.get("ok"):
+                print(f"\nv verified: {verdict.get('detail', '')}")
+            else:
+                print(f"\nx NOT verified: {verdict.get('detail', '')}")
+                print("  The config was written, but your agent will not be able to use it "
+                      "until this is resolved.")
+                any_ok = False
+
+        for legacy in dict.fromkeys(legacy_paths):
+            print(f"\n! stale entry: {legacy} has an `mcpServers.codeintel` block that this host "
+                  f"does NOT read (an older codeintel wrote it). Safe to delete by hand.")
 
         sys.exit(0 if any_ok else 1)
 

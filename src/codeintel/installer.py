@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+from typing import Optional
 
 _AGENTS = ["claude", "codex", "gemini", "zed"]
+
+_SERVER_NAME = "codeintel"
+_LAUNCH = {"command": "codeintel", "args": ["serve"]}
 
 
 def _atomic_write_text(path: pathlib.Path, text: str) -> None:
@@ -16,35 +20,65 @@ def _atomic_write_text(path: pathlib.Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-# Per-agent registration recipe. Most agents take a Claude-style JSON block; Codex is different —
-# its CLI reads MCP servers from ``~/.codex/config.toml`` as ``[mcp_servers.<name>]`` TOML tables,
-# NOT a JSON ``mcpServers`` map in config.json (writing the latter registers nothing).
+# Per-agent registration recipe.
+#
+# `home` is the agent's config ROOT and is resolved through the agent's own documented env var
+# first (CODEX_HOME, CLAUDE_CONFIG_DIR, XDG_CONFIG_HOME) so managed/enterprise/CI setups that
+# relocate it are registered correctly instead of writing to a `~` nobody reads. `file` is the
+# path under it.
+#
+# Two host quirks the file layout has to respect, both of which previously shipped broken:
+#   * Codex reads MCP servers from `config.toml` as `[mcp_servers.<name>]` TOML tables — NOT a
+#     JSON `mcpServers` map in config.json.
+#   * Claude Code reads user-scope MCP servers from `~/.claude.json` — NOT `~/.claude/settings.json`
+#     (that file is for hooks/theme/permissions; an `mcpServers` block there is silently ignored,
+#     which `claude mcp list` confirms).
 _CONFIG: dict[str, dict] = {
     "claude": {
         "format": "json",
-        "path": "~/.claude/settings.json",
-        "key": ["mcpServers", "codeintel"],
-        "value": {"command": "codeintel", "args": ["serve"]},
+        "env": "CLAUDE_CONFIG_DIR",
+        "home": "~",
+        "file": ".claude.json",
+        "key": ["mcpServers", _SERVER_NAME],
+        "value": dict(_LAUNCH),
+        # Where a pre-0.11.2 codeintel wrote — inert, reported so the user can delete it.
+        "legacy": {"file": ".claude/settings.json", "key": ["mcpServers", _SERVER_NAME]},
     },
     "codex": {
         "format": "toml-mcp",
-        "path": "~/.codex/config.toml",
-        "table": "[mcp_servers.codeintel]",
-        "block": '[mcp_servers.codeintel]\ncommand = "codeintel"\nargs = ["serve"]\n',
+        "env": "CODEX_HOME",
+        "home": "~/.codex",
+        "file": "config.toml",
+        "table": f"[mcp_servers.{_SERVER_NAME}]",
+        "block": f'[mcp_servers.{_SERVER_NAME}]\ncommand = "codeintel"\nargs = ["serve"]\n',
     },
     "gemini": {
         "format": "json",
-        "path": "~/.gemini/settings.json",
-        "key": ["mcpServers", "codeintel"],
-        "value": {"command": "codeintel", "args": ["serve"]},
+        "env": "GEMINI_CONFIG_DIR",
+        "home": "~/.gemini",
+        "file": "settings.json",
+        "key": ["mcpServers", _SERVER_NAME],
+        "value": dict(_LAUNCH),
     },
     "zed": {
         "format": "json",
-        "path": "~/.config/zed/settings.json",
-        "key": ["context_servers", "codeintel"],
+        "env": "XDG_CONFIG_HOME",
+        "home": "~/.config",
+        "file": "zed/settings.json",
+        "key": ["context_servers", _SERVER_NAME],
         "value": {"command": {"path": "codeintel", "args": ["serve"]}},
     },
 }
+
+
+def resolve_config_path(spec: dict) -> pathlib.Path:
+    """Agent config path, honoring the agent's own home env var when it is set and non-empty.
+
+    Resolved at call time (not import time) so tests and shells that export CODEX_HOME /
+    CLAUDE_CONFIG_DIR / XDG_CONFIG_HOME after import still get the right file."""
+    raw = os.environ.get(spec.get("env") or "", "").strip()
+    home = pathlib.Path(raw).expanduser() if raw else pathlib.Path(spec["home"]).expanduser()
+    return home / spec["file"]
 
 
 def _get_nested(data: dict, keys: list[str]):
@@ -66,17 +100,60 @@ def _set_nested(data: dict, keys: list[str], value) -> None:
 
 
 class Installer:
-    def register(self, agent: str) -> dict:
+    def register(self, agent: str, *, verify: bool = False, timeout_s: float = 45.0) -> dict:
+        """Register codeintel with *agent*.
+
+        With ``verify=True`` the registered command is then launched exactly as the host would
+        and driven through a real MCP handshake — so a "registered" result means the agent can
+        actually use it, not merely that a file was written."""
         spec = _CONFIG.get(agent)
         if spec is None:
             return self._result(agent, "", False, "failed", f"unknown agent '{agent}'")
-        config_path = pathlib.Path(spec["path"]).expanduser()
+        config_path = resolve_config_path(spec)
         try:
             if spec.get("format") == "toml-mcp":
-                return self._register_toml(agent, config_path, spec)
-            return self._register_json(agent, config_path, spec)
+                res = self._register_toml(agent, config_path, spec)
+            else:
+                res = self._register_json(agent, config_path, spec)
         except Exception as exc:
             return self._result(agent, str(config_path), False, "failed", str(exc))
+
+        res["legacy"] = self._legacy_note(spec)
+        if verify and res.get("ok"):
+            res["verified"] = self.verify(timeout_s=timeout_s)
+        return res
+
+    @staticmethod
+    def verify(*, timeout_s: float = 45.0) -> dict:
+        """Launch the registered command and complete an MCP handshake. Never raises."""
+        try:
+            from codeintel.verify import verify_stdio_server
+            return verify_stdio_server(
+                _LAUNCH["command"], list(_LAUNCH["args"]), timeout_s=timeout_s
+            )
+        except Exception as exc:
+            return {"ok": False, "tools": [], "server": None,
+                    "detail": f"verification unavailable ({type(exc).__name__})"}
+
+    @staticmethod
+    def _legacy_note(spec: dict) -> Optional[str]:
+        """Path to a stale registration an older codeintel wrote into a file the host ignores.
+        Read-only — never deleted automatically, since it lives in a user-owned config."""
+        legacy = spec.get("legacy")
+        if not legacy:
+            return None
+        try:
+            raw = os.environ.get(spec.get("env") or "", "").strip()
+            home = pathlib.Path(raw).expanduser() if raw else pathlib.Path(spec["home"]).expanduser()
+            path = home / legacy["file"]
+            if not path.exists():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and _get_nested(data, legacy["key"]) is not None:
+                return str(path)
+        except Exception:
+            return None
+        return None
 
     def _register_json(self, agent: str, config_path: pathlib.Path, spec: dict) -> dict:
         if config_path.exists():
@@ -116,5 +193,13 @@ class Installer:
     def _result(agent: str, path: str, ok: bool, action: str, reason: str = "") -> dict:
         return {"agent": agent, "path": path, "ok": ok, "action": action, "reason": reason}
 
-    def register_all(self) -> list[dict]:
-        return [self.register(agent) for agent in _AGENTS]
+    def register_all(self, *, verify: bool = False, timeout_s: float = 45.0) -> list[dict]:
+        """Register every supported agent. Verification is a property of the *command*, not of a
+        given agent's config file, so it runs ONCE and its verdict is shared across the results."""
+        results = [self.register(agent) for agent in _AGENTS]
+        if verify:
+            verdict = self.verify(timeout_s=timeout_s)
+            for r in results:
+                if r.get("ok"):
+                    r["verified"] = verdict
+        return results
