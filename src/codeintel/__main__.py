@@ -1,8 +1,100 @@
 import argparse
+import difflib
 import os
 import sys
 
 from codeintel import __version__
+
+# Commands grouped by what you are trying to DO. argparse lists them in declaration order with no
+# grouping, which turns "what can this thing do?" into reading twelve lines to find the one verb you
+# wanted. Each entry is (command, one-line description).
+_COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Understand your code", [
+        ("query", "Ask one question — search, callers, callees, impact, chain, symbol, hotspots"),
+        ("map", "Write CODE_INTEL.md — a committable architecture overview"),
+        ("graph", "Interactive call-graph viewer (--html), or the graph as JSON"),
+    ]),
+    ("Set up", [
+        ("setup", "Prepare backends + index this repo (--all does everything automatable)"),
+        ("index", "Index a project for semantic search"),
+        ("install", "Register codeintel with the AI agents installed on this machine"),
+    ]),
+    ("Check health", [
+        ("doctor", "Per-engine health + index status, with the fix for each gap"),
+        ("status", "Engine readiness and index age at a glance"),
+        ("reset", "Clear the semantic index (recover from a corrupt or stale DB)"),
+    ]),
+    ("Run as a server", [
+        ("serve", "Start the MCP server over stdio — what an agent host launches"),
+        ("serve-http", "Start the HTTP transport (loopback only unless --allow-remote)"),
+        ("gen-token", "Print a secure random bearer token for serve-http / RBAC"),
+    ]),
+]
+
+_COMMANDS = [name for _group, items in _COMMAND_GROUPS for name, _desc in items]
+
+_EXAMPLES = [
+    ("codeintel setup --all .", "prepare backends and index this repo"),
+    ("codeintel install", "register with the agents you have"),
+    ("codeintel query --op callers --target my_function", "who calls it?"),
+    ("codeintel doctor", "why is a query coming back empty?"),
+]
+
+
+def render_help() -> str:
+    """The `codeintel` / `codeintel help` screen: grouped, colored, with real examples.
+
+    Color comes from codeintel.term, so it auto-degrades on a pipe, under NO_COLOR, and on a dumb
+    terminal — same as every other human-facing command."""
+    from codeintel.term import c
+
+    width = max(len(name) for name in _COMMANDS)
+    out = [
+        c.bold("codeintel") + c.dim(f" {__version__}")
+        + c.dim("  —  code intelligence for AI agents: graph + LSP + semantic search"),
+        "",
+        c.dim("usage: ") + "codeintel <command> [options]",
+    ]
+    for group, items in _COMMAND_GROUPS:
+        out.append("")
+        out.append("  " + c.bold(group))
+        for name, desc in items:
+            out.append("    " + c.cyan(name.ljust(width)) + "  " + desc)
+
+    out.append("")
+    out.append("  " + c.bold("Examples"))
+    # Width from the content, not a guess — a hardcoded column silently loses its gutter the moment
+    # one example grows past it, and ljust() will not pad below the string's own length.
+    cmd_width = max(len(cmd) for cmd, _why in _EXAMPLES) + 2
+    for cmd, why in _EXAMPLES:
+        out.append("    " + cmd.ljust(cmd_width) + c.dim("# " + why))
+
+    out.append("")
+    out.append("  " + c.dim("codeintel <command> --help") + "   full options for one command")
+    out.append("  " + c.dim("docs: https://github.com/hamilton-sky/codeintel"))
+    return "\n".join(out)
+
+
+def _suggest(unknown: str) -> list[str]:
+    """Commands a typo probably meant. Close matches first, then prefix matches — `gragh` should
+    land on `graph`, and a bare `serv` on both `serve` and `serve-http`."""
+    close = difflib.get_close_matches(unknown, _COMMANDS, n=3, cutoff=0.5)
+    prefix = [cmd for cmd in _COMMANDS if cmd.startswith(unknown) and cmd not in close]
+    return (close + prefix)[:3]
+
+
+def _unknown_command(name: str) -> int:
+    """Report an unrecognized command with a way forward. argparse's own error dumps the full list
+    of choices and stops there, which is a dead end for a one-character typo."""
+    from codeintel.term import c_err as e
+
+    print(e.red(f"unknown command: {name!r}"), file=sys.stderr)
+    matches = _suggest(name)
+    if matches:
+        joined = " or ".join(e.cyan(m) for m in matches)
+        print(f"\n  did you mean {joined}?", file=sys.stderr)
+    print("\n  " + e.dim("run `codeintel help` to see every command"), file=sys.stderr)
+    return 2
 
 
 def main() -> None:
@@ -113,6 +205,19 @@ def main() -> None:
     reset_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
     subparsers.add_parser("gen-token", help="Print a secure random bearer token (for serve-http / RBAC auth.toml)")
+    subparsers.add_parser("help", help="Show every command, grouped, with examples")
+
+    # Intercept an unrecognized command BEFORE argparse, whose error prints the full choice list and
+    # stops — a dead end for a one-character typo. Only a bare word is claimed here; anything
+    # starting with `-` (--version, --help) still goes to argparse.
+    argv = sys.argv[1:]
+    if argv and not argv[0].startswith("-") and argv[0] not in _COMMANDS + ["help"]:
+        sys.exit(_unknown_command(argv[0]))
+    if not argv or argv[0] == "help":
+        from codeintel import term
+        term.configure(no_color=False, ascii_mode=None)
+        print(render_help())
+        sys.exit(0)
 
     args = parser.parse_args()
 
@@ -464,7 +569,7 @@ def main() -> None:
         sys.exit(0)
 
     else:
-        parser.print_help()
+        print(render_help())
         sys.exit(0)
 
 

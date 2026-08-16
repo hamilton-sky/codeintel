@@ -4,6 +4,19 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`codeintel help` — every command, grouped by what you're trying to do, with descriptions,
+  examples, and color.** argparse listed twelve commands in declaration order with no grouping, so
+  "what can this thing do?" meant reading every line to find the one verb you wanted. Color comes
+  from `codeintel.term`, so it degrades on a pipe, under `NO_COLOR`, and on a dumb terminal like
+  every other human-facing command.
+- **A mistyped command now suggests what you meant.** `codeintel gragh` → *did you mean `graph`?*;
+  `codeintel dector` → *did you mean `doctor`?*. argparse's own error prints the full list of
+  choices and stops, which is a dead end for a one-character typo — the way it actually gets hit.
+  A prefix matches everything it could be (`serve` → `serve`, `serve-http`). Exits 2.
+
 ## [0.12.0] — 2026-08-16
 
 This release is about **installation truth**: every change here closes a gap where a green signal

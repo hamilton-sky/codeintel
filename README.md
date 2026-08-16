@@ -254,6 +254,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 
 | Command | Purpose |
 |---|---|
+| `codeintel help` | Every command grouped by task, with descriptions and examples (also the bare `codeintel`). A mistyped command suggests what you meant. |
 | `codeintel install [--agent auto\|claude\|codex\|gemini\|zed\|all] [--no-verify] [--relative-command]` | Register codeintel with the agents installed on this machine (`auto`, the default), then prove it by completing a real MCP handshake against the registered command |
 | `codeintel setup [project_root] [--all] [--index] [--warm] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
 | `codeintel index [project_root]` | Index a project for semantic search |
