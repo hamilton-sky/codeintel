@@ -4,6 +4,23 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`codeintel install` degrades with a message instead of a traceback.** It was the last
+  subcommand where an unexpected failure — an unresolvable home directory, an unreadable agent
+  config — reached the user as a stack trace rather than a line explaining what broke. It now
+  reports `install failed: <reason>` and exits 1, matching every other command.
+
+### Internal
+- **The CLI moved out of one 470-line `main()` into `codeintel/commands/`, one module per
+  subcommand.** Each is `run(args) -> int` — it returns its exit code instead of calling
+  `sys.exit`, so the bodies are directly callable from a test. That closed the project's largest
+  coverage gap: install's verification/legacy/skipped reporting, reset's confirmation guard, and
+  query's LSP warming poll were previously reachable only by driving argv through a subprocess.
+  Dispatch imports the command module lazily, so `codeintel serve` still does not pay for the
+  semantic engine's imports — an invariant now enforced by a test.
+
 ## [0.12.1] — 2026-08-16
 
 ### Added

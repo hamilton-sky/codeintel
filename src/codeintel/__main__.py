@@ -1,7 +1,7 @@
 import argparse
 import difflib
-import os
 import sys
+from importlib import import_module
 
 from codeintel import __version__
 
@@ -32,6 +32,25 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
 ]
 
 _COMMANDS = [name for _group, items in _COMMAND_GROUPS for name, _desc in items]
+
+# Each command's body lives in codeintel.commands.<module> as `run(args) -> int`. The mapping is
+# spelled out rather than derived from the command name so the target of any command is greppable,
+# and the import happens at dispatch time so `codeintel serve` never pays for the semantic
+# engine's imports (nor serve-http for the graph's).
+_MODULES = {
+    "query": "query",
+    "map": "map",
+    "graph": "graph",
+    "setup": "setup",
+    "index": "index",
+    "install": "install",
+    "doctor": "doctor",
+    "status": "status",
+    "reset": "reset",
+    "serve": "serve",
+    "serve-http": "serve_http",
+    "gen-token": "gen_token",
+}
 
 _EXAMPLES = [
     ("codeintel setup --all .", "prepare backends and index this repo"),
@@ -227,350 +246,11 @@ def main() -> None:
         ascii_mode=(True if getattr(args, "ascii", False) else None),
     )
 
-    if args.command == "serve":
-        from codeintel.server import run
-        run()
-
-    elif args.command == "index":
-        from codeintel.config import load_config
-        from codeintel.indexer import Indexer
-        from codeintel.semantic_db import SemanticDb, default_db_path
-
-        project_root = args.project_root or os.getcwd()
-        # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
-        # Path.home() raising) degrades with a message, like every other subcommand, not a traceback.
-        try:
-            cfg = load_config(project_root)
-            db_path = default_db_path(str(cfg.get("model") or ""))
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            db = SemanticDb(db_path)
-            try:
-                db.init()
-                count = Indexer(
-                    db,
-                    model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
-                    window=int(cfg.get("window", 20)),
-                    stride=int(cfg.get("stride", 10)),
-                    max_chunks=int(cfg.get("max_chunks", 500)),
-                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
-                    chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-                ).index(project_root)
-                if count > 0:
-                    print(f"Indexed {count} chunks")
-                else:
-                    print("Nothing new to index")
-            finally:
-                db.close()
-        except Exception as exc:
-            print(f"index failed: {exc}")
-
-        # best-effort graph reindex
-        import shutil
-        if shutil.which("codebase-memory-mcp"):
-            try:
-                from codeintel.reindexer import Reindexer
-                Reindexer()._graph_reindex(project_root)
-            except Exception:
-                pass
-
-        # best-effort map refresh after index
-        try:
-            from codeintel.providers.graph import GraphProvider
-            from codeintel.mapper import MapGenerator
-            _provider = GraphProvider()
-            _gen = MapGenerator(_provider)
-            _content = _gen.generate(project_root)
-            _gen.write(project_root, _content)
-        except Exception:
-            pass
-
-    elif args.command == "map":
-        from codeintel.providers.graph import GraphProvider
-        from codeintel.mapper import MapGenerator
-        from codeintel.injector import Injector
-
-        project_root = args.project_root or os.getcwd()
-        try:
-            provider = GraphProvider()
-        except Exception:
-            provider = None
-        gen = MapGenerator(provider)
-        try:
-            content = gen.generate(project_root, budget_bytes=args.budget)
-            path, wrote = gen.write(project_root, content)
-            if wrote:
-                print(f"Wrote {path} ({len(content.encode())} bytes)")
-            else:
-                print(f"Kept existing {path} — new map was a stub (graph empty/unindexed; "
-                      f"run `codeintel index` first)")
-            if args.inject:
-                inj_path, inj_action = Injector().inject(project_root)
-                if inj_path:
-                    print(f"Inject: {inj_action} block in {inj_path}")
-                else:
-                    print(f"Inject: {inj_action}")
-        except Exception as exc:
-            # Never-raise parity with the MCP code.map handler — degrade, don't crash.
-            print(f"map failed: {exc}")
-        sys.exit(0)
-
-    elif args.command == "graph":
-        from codeintel import grapher
-        project_root = args.project_root or os.getcwd()
-        try:
-            payload = grapher.build_graph_payload(project_root, limit=args.limit)
-            n, e = len(payload.get("nodes", [])), len(payload.get("edges", []))
-            if args.html:
-                out = args.out or "codeintel-graph.html"
-                with open(out, "w", encoding="utf-8") as f:
-                    f.write(grapher.render_html(payload))
-                print(f"Wrote {out}  ({n} nodes, {e} edges) — open it in any browser")
-                if not n:
-                    reason = payload.get("reason")
-                    if reason:
-                        print(f"  (graph empty: {reason} — run `codeintel doctor` to check the "
-                              f"graph backend + index)")
-                    else:
-                        print("  (no internal call edges found for this repo)")
-            else:
-                import json as _json
-                print(_json.dumps(payload, indent=2))
-        except Exception as exc:
-            print(f"graph failed: {exc}")
-        sys.exit(0)
-
-    elif args.command == "query":
-        try:
-            import time
-
-            from codeintel import server
-            project_root = args.project_root or os.getcwd()
-            engine = args.engine if args.engine != "auto" else None
-            gw = server._build_gateway()
-
-            def _run_query():
-                return gw.query(
-                    op=args.op,
-                    target=args.target,
-                    engine=engine,
-                    role="",
-                    project_root=project_root,
-                )
-
-            result = _run_query()
-
-            # The LSP engine warms a serena session in a background thread and returns
-            # reason:warming on the first call. A one-shot CLI process would otherwise always
-            # exit on 'warming' (the subprocess dies with it). Wait — bounded, never-raise —
-            # for the session to boot, re-querying the same gateway (session is cached per root).
-            if result.get("result") is None and result.get("reason") == "warming":
-                print("(lsp warming up — waiting for the language server...)", file=sys.stderr)
-                deadline = time.monotonic() + 45.0
-                while time.monotonic() < deadline:
-                    time.sleep(0.5)
-                    result = _run_query()
-                    if result.get("result") is not None or result.get("reason") != "warming":
-                        break
-
-            value = result.get("result")
-            if value is not None:
-                print(value)
-            else:
-                reason = result.get("reason", "unknown")
-                hint = result.get("hint")
-                print(f"No result (reason: {reason})")
-                if hint:
-                    print(f"  hint: {hint}", file=sys.stderr)
-        except Exception as exc:
-            print(f"No result (reason: {exc})")
-        sys.exit(0)
-
-    elif args.command == "status":
-        try:
-            from codeintel import server
-
-            project_root = args.project_root or os.getcwd()
-            status = server.code_status_handler({"project_root": project_root})
-
-            # "available" alone was the misleading word: it meant "a binary is on PATH", which is
-            # not the same as runnable, and not the same as usable on THIS repo. Say which.
-            _READY = {"ok": "ready", "warn": "installed (not verified)", "fail": "unavailable"}
-            readiness = status.get("readiness") or {}
-            print("Engine status:")
-            for engine in ["graph", "lsp", "semantic"]:
-                entry = readiness.get(engine) or {}
-                state = _READY.get(entry.get("status"), "unavailable")
-                detail = entry.get("detail") or ""
-                print(f"  {engine:<10} {state:<26} {detail}")
-            if status.get("healthy") is False:
-                print("\n  run `codeintel doctor` for the fix for each gap")
-
-            from codeintel.config import load_config
-            from codeintel.semantic_db import default_db_path
-            db_path = default_db_path(str(load_config(project_root).get("model") or ""))
-            if os.path.exists(db_path):
-                import datetime
-                mtime = os.path.getmtime(db_path)
-                age = datetime.datetime.now() - datetime.datetime.fromtimestamp(mtime)
-                hours = int(age.total_seconds() // 3600)
-                minutes = int((age.total_seconds() % 3600) // 60)
-                print(f"\nIndex age: {hours}h {minutes}m  ({db_path})")
-            else:
-                print(f"\nIndex: not found  ({db_path})")
-        except Exception as exc:
-            print(f"Status unavailable: {exc}")
-        sys.exit(0)
-
-    elif args.command == "doctor":
-        try:
-            from codeintel import doctor as _doctor
-
-            project_root = args.project_root or os.getcwd()
-            report = _doctor.run_doctor(project_root, deep=args.deep)
-            if args.json:
-                import json as _json
-                print(_json.dumps(report, indent=2))
-            else:
-                print(_doctor.render_doctor_text(report))
-            # Exit non-zero when a repo-critical engine is unhealthy, so scripts/CI can gate on it.
-            sys.exit(0 if report.get("summary", {}).get("healthy") else 1)
-        except Exception as exc:
-            print(f"doctor unavailable: {exc}")
-            sys.exit(0)
-
-    elif args.command == "setup":
-        try:
-            from codeintel import onboarding
-
-            project_root = args.project_root or os.getcwd()
-            all_steps = getattr(args, "all_steps", False)  # --all implies every automatable step
-            report = onboarding.run_setup(
-                project_root,
-                install_uv=args.install_uv or all_steps,
-                install_deps=args.install_deps or all_steps,
-                do_index=args.index or all_steps,
-                warm_lsp=args.warm or all_steps,
-            )
-            if args.json:
-                import json as _json
-                print(_json.dumps(report, indent=2))
-            else:
-                print(onboarding.render_setup_text(report))
-            healthy = report.get("doctor", {}).get("summary", {}).get("healthy")
-            sys.exit(0 if healthy else 1)
-        except Exception as exc:
-            print(f"setup unavailable: {exc}")
-            sys.exit(0)
-
-    elif args.command == "reset":
-        try:
-            from codeintel import reset as _reset
-
-            project_root = args.project_root or os.getcwd()
-            preview = _reset.run_reset(project_root, all_projects=args.all, apply=False)
-            if not args.yes:
-                if not sys.stdin.isatty():
-                    print("refusing to reset without --yes in a non-interactive shell")
-                    sys.exit(1)
-                target = "ALL projects" if args.all else project_root
-                count = preview.get("count", 0)
-                ans = input(f"Reset semantic index for {target} ({count} entries)? [y/N] ").strip().lower()
-                if ans not in ("y", "yes"):
-                    print("aborted")
-                    sys.exit(0)
-            report = _reset.run_reset(project_root, all_projects=args.all, apply=True)
-            if args.json:
-                import json as _json
-                print(_json.dumps(report, indent=2))
-            else:
-                print(report.get("detail", "reset complete"))
-            sys.exit(0)
-        except Exception as exc:
-            print(f"reset unavailable: {exc}")
-            sys.exit(0)
-
-    elif args.command == "serve-http":
-        try:
-            from codeintel.http_server import run
-            token = args.token or os.environ.get("CODEINTEL_HTTP_TOKEN")
-            run(host=args.host, port=args.port, allow_remote=args.allow_remote, token=token)
-        except KeyboardInterrupt:
-            pass
-        except Exception as exc:
-            # A startup failure (e.g. port in use) should print a friendly line, not a traceback.
-            # SystemExit from the non-loopback guard is BaseException — it passes through here.
-            print(f"serve-http failed: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.command == "install":
-        from codeintel.installer import Installer
-
-        installer = Installer()
-        do_verify = not args.no_verify
-        absolute = not args.relative_command
-        skipped: list[str] = []
-        if args.agent == "auto":
-            results, skipped = installer.register_detected(verify=do_verify, absolute=absolute)
-            if not results:
-                print("No supported agent found on this machine "
-                      f"(looked for: {', '.join(skipped)}).")
-                print("  Install one, or force registration with "
-                      "`codeintel install --agent <name>`.")
-                sys.exit(1)
-        elif args.agent == "all":
-            results = installer.register_all(verify=do_verify, absolute=absolute)
-        else:
-            results = installer.register_many([args.agent], verify=do_verify, absolute=absolute)
-
-        any_ok = False
-        legacy_paths: list[str] = []
-        verdict = None
-        for r in results:
-            agent, path, action = r["agent"], r["path"], r["action"]
-            if action == "registered":
-                print(f"v {agent}: registered at {path}")
-                any_ok = True
-            elif action == "already":
-                print(f"~ {agent}: already registered at {path}")
-                any_ok = True
-            else:
-                print(f"x {agent}: failed — {r['reason']}")
-            if r.get("legacy"):
-                legacy_paths.append(r["legacy"])
-            verdict = r.get("verified") or verdict
-
-        # A written config file proves nothing about whether the host can launch the server —
-        # so say what the handshake actually found, and fail loudly when it did not happen.
-        if verdict is not None:
-            if verdict.get("ok"):
-                print(f"\nv verified: {verdict.get('detail', '')}")
-            else:
-                print(f"\nx NOT verified: {verdict.get('detail', '')}")
-                print("  The config was written, but your agent will not be able to use it "
-                      "until this is resolved.")
-                any_ok = False
-
-        for legacy in dict.fromkeys(legacy_paths):
-            print(f"\n! stale entry: {legacy} has an `mcpServers.codeintel` block that this host "
-                  f"does NOT read (an older codeintel wrote it). Safe to delete by hand.")
-
-        # Name what was skipped: silence about an untouched host reads as "unsupported" rather
-        # than "you don't have it installed".
-        if skipped:
-            print(f"\n- skipped (not installed here): {', '.join(skipped)}"
-                  f"\n  register anyway with `codeintel install --agent <name>`")
-
-        print("\n  Start a new agent session to pick up the tools.")
-        sys.exit(0 if any_ok else 1)
-
-    elif args.command == "gen-token":
-        import secrets
-        print(secrets.token_urlsafe(32))
-        sys.exit(0)
-
-    else:
+    module = _MODULES.get(args.command)
+    if module is None:          # unreachable via argparse; a bare `codeintel` is handled above
         print(render_help())
         sys.exit(0)
+    sys.exit(import_module(f"codeintel.commands.{module}").run(args))
 
 
 if __name__ == "__main__":
