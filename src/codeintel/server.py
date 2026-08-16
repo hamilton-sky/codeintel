@@ -324,10 +324,14 @@ def run() -> None:
         project_root: str = "",
         engine: str = "",
         role: str = "",
-    ) -> Result:
-        return code_query_handler(
+    ) -> dict:
+        # MUST stay `dict`, not `Result`. FastMCP derives this tool's output schema from the return
+        # annotation, and it validates a TypedDict's NotRequired keys (`reason`, `hint`) as
+        # REQUIRED — so every successful query, which carries neither, comes back to the agent as
+        # `isError: true`. Guarded by test_mcp_server.py::test_no_tool_advertises_the_optional_*.
+        return dict(code_query_handler(
             {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
-        )
+        ))
 
     async def _code_status(project_root: str = "") -> dict:
         return code_status_handler({"project_root": project_root})
