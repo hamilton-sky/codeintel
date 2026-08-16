@@ -40,9 +40,16 @@ def _probe_engine(
     provider: Any,
     build: Callable[[], Any],
     call: Callable[[Any], dict],
+    on_provider: Optional[Callable[[str, Any], Any]] = None,
 ) -> dict:
     """Run one engine's probe, never raising. Uses the passed-in (live) provider when given,
-    else builds an ephemeral one."""
+    else builds an ephemeral one.
+
+    ``on_provider(engine, provider)`` is invoked with the instance actually probed, but only once
+    that probe reported ``installed``. It exists so a caller holding a long-lived gateway can
+    ADOPT an engine this function just proved is present — otherwise the report says "graph: ok"
+    (from a fresh ephemeral provider) while the caller's own gateway still has no graph engine at
+    all. Never raises, and never affects the report."""
     try:
         p = provider if provider is not None else build()
     except Exception as exc:
@@ -54,6 +61,11 @@ def _probe_engine(
     except Exception as exc:
         r = {"installed": None, "runnable": False, "repo_indexed": None,
              "detail": f"probe raised ({type(exc).__name__})", "remediation": None}
+    if on_provider is not None and r.get("installed") is True:
+        try:
+            on_provider(engine, p)
+        except Exception:
+            pass
     r["engine"] = engine
     r["status"] = _status_for(r)
     return r
@@ -151,11 +163,15 @@ def run_doctor(
     lsp: Any = None,
     semantic: Any = None,
     lsp_deep_timeout_s: float = 20.0,
+    on_provider: Optional[Callable[[str, Any], Any]] = None,
 ) -> dict:
     """Diagnose all three engines for ``project_root``. Never raises; bounded (~3s shallow).
 
     Pass live providers (e.g. the singleton gateway's) to reflect real warmed state; omit them
-    for a hermetic check that builds fresh providers."""
+    for a hermetic check that builds fresh providers. When a slot is omitted this builds an
+    ephemeral provider, so pass ``on_provider`` (e.g. ``gateway.adopt_provider``) to hand that
+    instance back — without it, a caller's gateway keeps reporting an engine as present in the
+    report while its own queries still cannot route to it."""
     try:
         root = os.path.abspath(str(project_root)) if project_root else os.getcwd()
     except Exception:
@@ -165,7 +181,7 @@ def run_doctor(
     try:
         from codeintel.providers.graph import GraphProvider
         engines["graph"] = _probe_engine(
-            "graph", graph, GraphProvider, lambda p: p.probe(root)
+            "graph", graph, GraphProvider, lambda p: p.probe(root), on_provider
         )
     except Exception:
         engines["graph"] = {"engine": "graph", "status": "fail", "installed": False,
@@ -174,7 +190,8 @@ def run_doctor(
     try:
         from codeintel.providers.lsp import LspProvider
         engines["lsp"] = _probe_engine(
-            "lsp", lsp, LspProvider, lambda p: p.probe(root, deep=deep, timeout_s=lsp_deep_timeout_s)
+            "lsp", lsp, LspProvider,
+            lambda p: p.probe(root, deep=deep, timeout_s=lsp_deep_timeout_s), on_provider
         )
     except Exception:
         engines["lsp"] = {"engine": "lsp", "status": "fail", "installed": False,
@@ -183,7 +200,7 @@ def run_doctor(
     try:
         from codeintel.providers.semantic import SemanticProvider
         engines["semantic"] = _probe_engine(
-            "semantic", semantic, SemanticProvider, lambda p: p.probe(root)
+            "semantic", semantic, SemanticProvider, lambda p: p.probe(root), on_provider
         )
     except Exception:
         engines["semantic"] = {"engine": "semantic", "status": "fail", "installed": False,

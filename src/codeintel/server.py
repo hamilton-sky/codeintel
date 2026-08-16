@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import anyio
 from mcp.server.mcpserver.server import MCPServer
@@ -63,9 +64,46 @@ def _get_gateway() -> Gateway:
 
 def _reset_gateway() -> None:
     """Test hook: drop the cached gateway so the next call rebuilds it."""
-    global _GATEWAY
+    global _GATEWAY, _LAST_ENGINE_REFRESH
     with _GATEWAY_LOCK:
         _GATEWAY = None
+    with _REFRESH_LOCK:
+        _LAST_ENGINE_REFRESH = 0.0
+
+
+# An engine missing at boot is re-probed at most this often on the query path.
+_ENGINE_REFRESH_INTERVAL_S = 30.0
+_LAST_ENGINE_REFRESH: float = 0.0
+_REFRESH_LOCK = threading.Lock()
+
+
+def _refresh_missing_engines(gw: Gateway) -> None:
+    """Attach any engine whose backend was installed AFTER this process started.
+
+    The gateway is built once per process, so without this an engine absent at boot stays absent
+    for the entire agent session — including after the user follows doctor's remediation and
+    installs the backend. Constructing a provider is a `shutil.which` and nothing more (the serena
+    session and the graph project cache are built lazily, per call), so this costs one PATH scan
+    per still-missing engine, throttled to once per 30s and skipped entirely once all three are
+    present. Only fills empty slots, so nothing warmed is ever discarded. Never raises."""
+    global _LAST_ENGINE_REFRESH
+    try:
+        missing = [n for n in ("graph", "lsp", "semantic") if getattr(gw, n, None) is None]
+        if not missing:
+            return
+        now = time.monotonic()
+        with _REFRESH_LOCK:
+            if now - _LAST_ENGINE_REFRESH < _ENGINE_REFRESH_INTERVAL_S:
+                return
+            _LAST_ENGINE_REFRESH = now
+        builders = {"graph": GraphProvider, "lsp": LspProvider, "semantic": SemanticProvider}
+        for name in missing:
+            try:
+                gw.adopt_provider(name, builders[name]())
+            except Exception:
+                continue
+    except Exception:
+        pass
 
 
 def code_query_handler(args: dict) -> dict:
@@ -76,6 +114,7 @@ def code_query_handler(args: dict) -> dict:
         engine = args.get("engine", None)
         role = args.get("role", "")
         gw = _get_gateway()
+        _refresh_missing_engines(gw)
         return gw.query(op=op, target=target, engine=engine, role=role, project_root=project_root)
     except Exception:
         return safe_null_result("", "", reason="handler-error")
@@ -104,14 +143,20 @@ def code_status_handler(args: dict) -> dict:
     never boots — an agent reading that would reason from a readiness claim nothing verified.
 
     The flat `graph`/`lsp`/`semantic`/`indexed`/`model` keys keep their original meaning for
-    existing callers; `readiness` and `healthy` carry the full picture."""
+    existing callers; `readiness` and `healthy` carry the full picture.
+
+    `on_provider` closes the last gap between what this reports and what a query can do: for an
+    engine the gateway lacks, doctor builds an ephemeral provider to probe — and any engine it
+    finds installed is adopted onto the gateway, so a readiness claim made here is one the very
+    next `code.query` can actually honor."""
     try:
         from codeintel import doctor as _doctor
 
         project_root = str(args.get("project_root", "") or "")
         gw = _get_gateway()
         report = _doctor.run_doctor(
-            project_root, deep=False, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic
+            project_root, deep=False, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,
+            on_provider=gw.adopt_provider,
         )
         probes = report.get("engines", {}) if isinstance(report, dict) else {}
 
@@ -188,7 +233,10 @@ def code_doctor_handler(args: dict) -> dict:
         deep = bool(args.get("deep", False))
         role = str(args.get("role", "") or "")
         # Reuse the singleton gateway's providers so the report reflects the LIVE warmed LSP
-        # session state an agent's real queries hit (and the graph project cache).
+        # session state an agent's real queries hit (and the graph project cache). Engines the
+        # gateway lacks are probed on a fresh provider and, when installed, adopted onto it — so
+        # following this report's own remediation ("install X") converges on the next call rather
+        # than needing the MCP host restarted.
         gw = _get_gateway()
         # RBAC: doctor is a privileged op (engine state + a deep LSP boot on an arbitrary path), so
         # it's gated behind the "doctor" scope — a restricted role must list it (or use "*").
@@ -199,7 +247,8 @@ def code_doctor_handler(args: dict) -> dict:
                 "engines": {}, "reason": "op-not-allowed-for-role",
             }
         return _doctor.run_doctor(
-            project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic
+            project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,
+            on_provider=gw.adopt_provider,
         )
     except Exception:
         return {

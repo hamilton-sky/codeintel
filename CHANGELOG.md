@@ -4,6 +4,34 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] — 2026-08-16
+
+### Fixed
+- **`code.status` no longer claims an engine `code.query` cannot reach.** The gateway is built once
+  per process, but status/doctor probe a *fresh* provider for any engine the gateway lacks — so a
+  backend installed mid-session was reported `installed/runnable/ok` while queries kept routing
+  around it for the life of the MCP host. Doctor's own remediation ("install it, then re-check")
+  could never converge: the re-check passed and the answers stayed degraded. An engine a probe
+  proves present is now **adopted** onto the live gateway, and the query path picks up a
+  newly-installed backend on its own (throttled; skipped once all engines are present). A live
+  provider is never replaced, so the warmed serena session and graph project cache the singleton
+  exists to preserve survive untouched.
+- **A cached fallback answer no longer outlives the engine's absence.** `overview` auto-falls back
+  to LSP when the graph engine is missing and caches that under the *graph* key, which neither the
+  content hash nor the freshness token can invalidate. Adopting an engine now clears the cache.
+
+### Added
+- **Release canary (`scripts/release_canary.py`) — CI gates on the built artifact, not the source
+  tree.** Every result is a safe envelope with `ok: true` and the CLI never throws, so an exit-code
+  smoke test passes against a build that boots cleanly and answers nothing. The canary installs the
+  wheel into a clean env, registers Codex + Claude Code into a throwaway `HOME`, launches the command
+  those configs name, and asserts on the **answer text** of a real `code.query` against a fixture
+  repo. Wired into CI and, critically, into `publish.yml` — `twine check` validates metadata and
+  never launches the thing. Verified to go red on both a config written where the host does not read
+  it and a server returning `ok: true` with an empty body.
+- **`verify.verify_stdio_call`** — handshake *and* invoke a tool, returning its response body, so a
+  check can assert on the answer rather than on the envelope.
+
 ## [0.11.1] — 2026-08-14
 
 ### Added

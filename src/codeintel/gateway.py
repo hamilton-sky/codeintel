@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -35,6 +36,9 @@ _AUTO_ENGINE: dict[str, str] = {
 # index and stay cached (correctly keyed by the freshness generation).
 _UNCACHED_OPS: frozenset[str] = frozenset({"changed", "changes"})
 
+# Engines whose slot can be filled after construction (see `Gateway.adopt_provider`).
+_ADOPTABLE_ENGINES: frozenset[str] = frozenset({"graph", "lsp", "semantic"})
+
 
 class Gateway:
     def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None, reindexer: Reindexer | None = None):
@@ -53,6 +57,42 @@ class Gateway:
         self._cache = ContentHashCache()
         self._policy = policy
         self._reindexer = reindexer or Reindexer()
+        self._adopt_lock = threading.Lock()
+
+    def adopt_provider(self, engine: str, provider: Any) -> bool:
+        """Fill an EMPTY engine slot with a provider that has just been proven installed.
+
+        The server builds ONE gateway per process, so an engine whose backend was missing at boot
+        stayed missing for the whole agent session — while `code.status`/`code.doctor`, which probe
+        FRESH providers when the gateway's slot is None, reported that same engine healthy. Status
+        therefore claimed an engine that `code.query` could never reach, and doctor's own
+        remediation loop ("install codebase-memory-mcp, then re-check") never converged short of
+        restarting the MCP host.
+
+        Only ever fills a `None` slot — a live provider is never replaced, so the warmed serena
+        session and the graph project cache that the singleton exists to preserve are untouched.
+        Never raises. Returns True when a slot was actually filled.
+        """
+        try:
+            if engine not in _ADOPTABLE_ENGINES or self._legacy_providers is not None:
+                return False
+            with self._adopt_lock:
+                if getattr(self, engine, None) is not None:
+                    return False  # live provider — keep its warmed state
+                if provider is None or getattr(provider, "available", False) is not True:
+                    return False
+                setattr(self, engine, provider)
+            # A newly reachable engine can change the answer to a query already cached under an
+            # engine that could not serve it — e.g. `overview` auto-falls back to lsp when graph is
+            # absent and caches that answer under the *graph* key. Neither the content hash nor the
+            # freshness token can see this, so drop the cache. Cheap: adoption happens <=3x/process.
+            try:
+                self._cache.clear()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
 
     def _provider_for(self, engine_str: str):
         if engine_str == "graph":

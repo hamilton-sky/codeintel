@@ -77,3 +77,10 @@ class ContentHashCache:
             self._store.move_to_end(key)  # most-recently-used
             while len(self._store) > self._max_entries:
                 self._store.popitem(last=False)  # evict least-recently-used
+
+    def clear(self) -> None:
+        """Drop every entry. For events that change what an engine *can* answer rather than what
+        the content says — the freshness token and the content hash can't see those. Currently:
+        a new engine being attached to the gateway mid-process (see ``Gateway.adopt_provider``)."""
+        with self._lock:
+            self._store.clear()

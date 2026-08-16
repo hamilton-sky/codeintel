@@ -46,12 +46,29 @@ jobs:
       - name: Validate distribution metadata
         run: python -m twine check dist/*
 
-      - name: Install the wheel in a clean env and smoke-test the CLI
+      - name: Install the wheel in a clean env
         run: |
           python -m venv /tmp/verify
           /tmp/verify/bin/python -m pip install dist/*.whl
-          /tmp/verify/bin/codeintel --version
-          /tmp/verify/bin/codeintel status
+
+      # fastembed downloads the embedding model on first use. Cached so the canary costs one
+      # network fetch per model change rather than one per run; a miss only makes it slower.
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: /tmp/fastembed-cache
+          key: fastembed-bge-small-en-v1.5
+
+      # The real release gate. `codeintel status`/`query` are never-raise and always exit 0, and
+      # every MCP result is a safe envelope with ok:true — so an exit-code smoke test passes
+      # against a completely inert build. The canary installs into a throwaway HOME, registers
+      # Codex + Claude Code, launches the command those configs name, and asserts on the ANSWER
+      # text of a real code.query against a fixture repo. Verified to go red on both a config
+      # written where the host does not read it and a server that answers ok:true with nothing.
+      - name: Release canary against the built artifact
+        env:
+          FASTEMBED_CACHE_PATH: /tmp/fastembed-cache
+        run: /tmp/verify/bin/python scripts/release_canary.py
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v7

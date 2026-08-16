@@ -37,5 +37,26 @@ jobs:
       - name: Validate distribution metadata
         run: python -m twine check dist/*
 
+      - name: Install the wheel in a clean env
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/python -m pip install dist/*.whl
+
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: /tmp/fastembed-cache
+          key: fastembed-bge-small-en-v1.5
+
+      # Last gate before an irreversible publish. `twine check` validates METADATA — it never
+      # launches the thing. The canary registers the wheel with Codex + Claude Code in a throwaway
+      # HOME, starts the command those configs name, and asserts on the answer text of a real
+      # code.query. A release that installs into a file no host reads, or boots and answers
+      # nothing, fails HERE rather than on a user's machine.
+      - name: Release canary against the built artifact
+        env:
+          FASTEMBED_CACHE_PATH: /tmp/fastembed-cache
+        run: /tmp/verify/bin/python scripts/release_canary.py
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

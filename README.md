@@ -76,7 +76,7 @@ The agent hands `result` straight to the model. If the graph backend isn't insta
 - **Degrades instead of breaking.** No graph backend installed? That engine returns `null` and the agent falls back to grep. The semantic engine needs nothing external, so codeintel is useful the moment it's installed and only gets sharper as you add backends.
 - **Fast on repeat, never stale.** A content-hash cache returns instantly for unchanged code and self-invalidates when a background reindex advances the index — answers stay both quick *and* fresh. The cache is bounded (LRU), so a long-running server holds steady memory.
 - **Concurrency-safe.** The HTTP transport handles requests on threads, so one slow query (an LSP session warming, a first-time index) can't block every other agent.
-- **Honest about its own health.** `codeintel doctor` reports exactly which engines are ready for a repo and the single command to fix each gap — no guessing why a query came back empty.
+- **Honest about its own health.** `codeintel doctor` answers three separate questions per engine — *installed?* *runnable?* *is this repo indexed?* — with the single command to fix each gap, so "installed" is never mistaken for "working". And a readiness claim is one a query can actually honor: install a missing backend mid-session and the running server picks it up on the next call, rather than reporting the engine healthy while quietly routing around it until you restart the host.
 
 ## Quickstart
 
@@ -174,6 +174,14 @@ v verified: codeintel 0.11.2 — 4 tools (code.query, code.status, code.doctor, 
 
 If the command is not on `PATH`, or the server fails to start, install says so and exits non-zero
 instead of reporting a success your agent cannot use. Pass `--no-verify` to skip the handshake.
+
+The same principle gates releases. Because every result is a safe envelope with `ok: true` and the
+CLI never throws, an exit-code smoke test passes against a build that boots cleanly and answers
+nothing — so **[`scripts/release_canary.py`](scripts/release_canary.py)** runs before every publish
+against the built wheel in a clean environment: it registers Codex and Claude Code into a throwaway
+`HOME`, launches the command those config files name, and asserts on the **answer text** of a real
+`code.query` over a fixture repo. A release that writes a config no host reads, or that returns
+`ok: true` with nothing in it, fails there instead of on your machine.
 
 ## How it works
 
@@ -298,7 +306,7 @@ Register codeintel as an MCP server (`codeintel install`) and the agent gets fou
 | MCP tool | HTTP equivalent | Purpose |
 |---|---|---|
 | `code.query` | `POST /code/query` | The main call — search, trace, understand (the `op` table above) |
-| `code.status` | `GET /code/status` | Which engines are live + whether an index exists |
+| `code.status` | `GET /code/status` | Per-engine `installed` / `runnable` / `repo_indexed`, probed against the live engines a query actually hits |
 | `code.doctor` | `POST /code/doctor` | Per-engine health + repo index status, with a fix for each gap |
 | `code.map` | — | Generate/refresh `CODE_INTEL.md`, a static orientation file for hosts without MCP |
 
@@ -355,5 +363,16 @@ docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \
 git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
-pytest tests/ -q            # full suite (~15s — includes live graph/LSP backend tests)
+pytest tests/ -q            # ~390 tests, ~35s (live graph/LSP backend tests skip when absent)
 ```
+
+**Release gate.** The unit suite runs against the source tree, so it cannot see a packaging break, a
+missing entry point, a host config written where nobody reads it, or a server that boots and answers
+nothing. Run the canary against the built wheel in a clean environment — the same check CI runs
+before publishing:
+
+```bash
+python -m build && python -m venv /tmp/canary && /tmp/canary/bin/python -m pip install dist/*.whl && /tmp/canary/bin/python scripts/release_canary.py
+```
+
+It exits non-zero on the first failed check and cleans up the temporary `HOME` it installs into.
