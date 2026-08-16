@@ -12,13 +12,11 @@ an unlaunchable command, or a server that answers nothing, fails here.
 from __future__ import annotations
 
 import json
-import shutil
+import os
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
-
-import pytest
 
 from codeintel.installer import Installer
 from codeintel.verify import verify_stdio_server
@@ -139,14 +137,21 @@ def test_doctor_over_mcp_never_raises(tmp_path):
 # These read the command back OUT of each host's own config file, so a wrong file location or a
 # wrong config shape cannot pass.
 
-_needs_console_script = pytest.mark.skipif(
-    shutil.which("codeintel") is None,
-    reason="the `codeintel` console script is not on PATH in this environment",
-)
+# The `console_script` fixture (tests/conftest.py) pins `codeintel` to THIS checkout's build and
+# skips when there is none — without it these tests happily handshake with a stale global install
+# and pass, which is how a broken code.query schema once got past a green local suite.
 
 
-@_needs_console_script
-def test_codex_registered_command_launches_and_handshakes(tmp_path, monkeypatch):
+def _assert_launches_this_build(entry: dict, console_script: str) -> dict:
+    """Launch the command the host's own config names, and prove it is the build under test."""
+    assert os.path.realpath(entry["command"]) == os.path.realpath(console_script), (
+        f"config names {entry['command']}, but the build under test is {console_script}")
+    res = verify_stdio_server(entry["command"], list(entry.get("args") or []), timeout_s=_TIMEOUT_S)
+    assert res["ok"] is True, res["detail"]
+    return res
+
+
+def test_codex_registered_command_launches_and_handshakes(tmp_path, monkeypatch, console_script):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
 
@@ -155,13 +160,10 @@ def test_codex_registered_command_launches_and_handshakes(tmp_path, monkeypatch)
     config = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text())
     entry = config["mcp_servers"]["codeintel"]          # the table Codex actually reads
 
-    res = verify_stdio_server(entry["command"], list(entry.get("args") or []), timeout_s=_TIMEOUT_S)
-    assert res["ok"] is True, res["detail"]
-    assert set(res["tools"]) == _EXPECTED_TOOLS
+    assert set(_assert_launches_this_build(entry, console_script)["tools"]) == _EXPECTED_TOOLS
 
 
-@_needs_console_script
-def test_claude_registered_command_launches_and_handshakes(tmp_path, monkeypatch):
+def test_claude_registered_command_launches_and_handshakes(tmp_path, monkeypatch, console_script):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
@@ -171,13 +173,10 @@ def test_claude_registered_command_launches_and_handshakes(tmp_path, monkeypatch
     config = json.loads((tmp_path / ".claude.json").read_text())
     entry = config["mcpServers"]["codeintel"]
 
-    res = verify_stdio_server(entry["command"], list(entry.get("args") or []), timeout_s=_TIMEOUT_S)
-    assert res["ok"] is True, res["detail"]
-    assert set(res["tools"]) == _EXPECTED_TOOLS
+    assert set(_assert_launches_this_build(entry, console_script)["tools"]) == _EXPECTED_TOOLS
 
 
-@_needs_console_script
-def test_zed_registered_command_launches_and_handshakes(tmp_path, monkeypatch):
+def test_zed_registered_command_launches_and_handshakes(tmp_path, monkeypatch, console_script):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
@@ -189,12 +188,10 @@ def test_zed_registered_command_launches_and_handshakes(tmp_path, monkeypatch):
     # which Zed does not read; this test asserted that shape and so confirmed the bug.
     entry = config["context_servers"]["codeintel"]
 
-    res = verify_stdio_server(entry["command"], list(entry.get("args") or []), timeout_s=_TIMEOUT_S)
-    assert res["ok"] is True, res["detail"]
+    _assert_launches_this_build(entry, console_script)
 
 
-@_needs_console_script
-def test_install_verify_flag_reports_a_live_handshake(tmp_path, monkeypatch):
+def test_install_verify_flag_reports_a_live_handshake(tmp_path, monkeypatch, console_script):
     """The user-visible promise of `codeintel install`: registered AND proven usable."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))

@@ -7,6 +7,12 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **Host-config handshake tests now launch the build under test.** They read a command out of an
+  agent's own config and run it, but resolved it through `shutil.which`, which on a developer
+  machine finds a previously-installed global `codeintel` ahead of the editable one — so they
+  registered, launched, and handshook with a different build and passed. A `console_script`
+  fixture pins PATH to the running interpreter's scripts directory and skips (rather than passes)
+  when this checkout has no console script installed at all.
 - **The wheel now ships `py.typed`.** The package has advertised the `Typing :: Typed` classifier
   since it was first published, but without the PEP 561 marker a type checker ignores an installed
   package's annotations entirely — so every downstream user got `Any` from a fully annotated
