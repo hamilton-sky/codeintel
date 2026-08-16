@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import re
 import subprocess
 
@@ -334,22 +335,24 @@ def test_stripping_never_eats_a_real_module_path():
         assert _strip_project_prefix(qn) == qn
 
 
-def test_every_renderer_strips_the_project_prefix_not_just_one():
-    """The first fix touched `_display` (callers/callees) and missed `_render_scan`, which renders
-    hotspots/deadcode — so the noisiest, longest results kept the full home path on every row.
-    Found by pointing the tool at a repo neither the author nor the reviewers had seen."""
-    import inspect
+def test_no_renderer_anywhere_emits_a_raw_qualified_name():
+    """Fixing these one at a time did not work. `_display` was fixed first; `_render_scan` was
+    missed and shipped; a test was then added asserting "both renderers strip the prefix", and
+    `chain` and `pattern` turned out to be a third and fourth — found only by running the tool on
+    a real repo. So enumerate the MODULE, not a list of functions someone remembered."""
     import re
 
-    from codeintel.providers.graph import GraphProvider
-
-    for fn in (GraphProvider._display, GraphProvider._render_scan):
-        source = inspect.getsource(fn)
-        # Any qualified_name read must pass through the stripper before becoming a label.
-        for line in source.splitlines():
-            if re.search(r"qualified_name|qn_key", line) and "=" in line and "def " not in line:
-                assert "_strip_project_prefix" in line, (
-                    f"{fn.__name__} renders a raw qualified name: {line.strip()}")
+    source = pathlib.Path("src/codeintel/providers/graph.py").read_text()
+    # Every site that READS the field off a backend row. `_display` is a sanctioned renderer that
+    # strips internally, so passing it the key name is fine; anything else must strip on the spot.
+    offenders = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(source.splitlines(), 1)
+        if re.search(r'\.get\(\s*["\']qualified_name', line)
+        and "_strip_project_prefix" not in line
+        and "_label_of" not in line
+    ]
+    assert not offenders, "raw qualified name reaches output:\n" + "\n".join(offenders)
 
 
 # --------------------------------------------------------------------------- scan accuracy

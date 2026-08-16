@@ -5,78 +5,79 @@
 ## Architecture Overview
 
 ## Architecture: codeintel
-2651 nodes, 8532 edges
+2795 nodes, 9423 edges
 ### Node types
-- Section: 953
-- Function: 680
-- Method: 233
-- Variable: 232
+- Section: 968
+- Function: 782
+- Variable: 243
+- Method: 242
 - File: 202
 - Module: 201
-- Class: 75
+- Class: 78
 - Folder: 45
-- Route: 19
+- Route: 24
 - Decorator: 7
-- EnvVar: 2
 - Branch: 1
+- EnvVar: 1
 - Project: 1
 ### Edge types
-- DEFINES: 3334
-- CALLS: 1951
-- USAGE: 971
-- TESTS: 711
-- SEMANTICALLY_RELATED: 523
-- DEFINES_METHOD: 228
-- WRITES: 220
+- DEFINES: 3474
+- CALLS: 2261
+- USAGE: 1149
+- TESTS: 941
+- SEMANTICALLY_RELATED: 491
+- DEFINES_METHOD: 237
+- WRITES: 233
 - CONTAINS_FILE: 202
-- IMPORTS: 157
-- HTTP_CALLS: 70
-- FILE_CHANGES_WITH: 57
-- DECORATES: 44
+- IMPORTS: 164
+- HTTP_CALLS: 85
+- FILE_CHANGES_WITH: 65
+- DECORATES: 58
 - CONTAINS_FOLDER: 31
 - SIMILAR_TO: 29
-- CONFIGURES: 2
+- CONFIGURES: 1
 - HAS_BRANCH: 1
 - INHERITS: 1
 ### Languages
 - language: Python, file_count: 83
 - language: YAML, file_count: 2
-- language: HTML, file_count: 1
 - language: TOML, file_count: 1
+- language: HTML, file_count: 1
 
 ## Ranked Symbols (by caller count)
 
 | Symbol | File | Callers |
 |--------|------|---------|
-| `get` | src/codeintel/cache.py | 115 |
-| `run` | src/codeintel/server.py | 47 |
-| `query` | src/codeintel/gateway.py | 41 |
+| `get` | src/codeintel/cache.py | 125 |
+| `Indexer` | src/codeintel/indexer.py | 61 |
+| `query` | src/codeintel/gateway.py | 56 |
+| `run` | src/codeintel/server.py | 53 |
+| `build_result` | src/codeintel/provider.py | 52 |
+| `SemanticDb` | src/codeintel/semantic_db.py | 47 |
+| `Reindexer` | src/codeintel/reindexer.py | 38 |
+| `register` | src/codeintel/installer.py | 36 |
 | `conn` | src/codeintel/semantic_db.py | 35 |
-| `build_result` | src/codeintel/provider.py | 35 |
-| `c` | src/codeintel/term.py | 33 |
+| `GraphProvider` | src/codeintel/providers/graph.py | 34 |
+| `c` | src/codeintel/term.py | 34 |
+| `_args` | tests/test_cli_commands.py | 34 |
 | `server` | tests/test_http_server.py | 33 |
-| `Reindexer` | src/codeintel/reindexer.py | 32 |
-| `SemanticDb` | src/codeintel/semantic_db.py | 32 |
-| `GraphProvider` | src/codeintel/providers/graph.py | 32 |
-| `_args` | tests/test_cli_commands.py | 31 |
-| `register` | src/codeintel/installer.py | 31 |
+| `close` | src/codeintel/semantic_db.py | 32 |
 | `never_raise` | src/codeintel/commands/_common.py | 30 |
-| `available` | src/codeintel/providers/semantic.py | 27 |
-| `Result` | src/codeintel/provider.py | 26 |
+| `available` | src/codeintel/providers/semantic.py | 29 |
+| `Result` | src/codeintel/provider.py | 28 |
 | `_provider` | tests/test_graph_real.py | 26 |
-| `close` | src/codeintel/semantic_db.py | 26 |
-| `index` | src/codeintel/indexer.py | 25 |
-| `build_result` | src/codeintel/providers/semantic.py | 22 |
+| `index` | src/codeintel/indexer.py | 26 |
+| `Gateway` | src/codeintel/gateway.py | 24 |
+| `init` | src/codeintel/semantic_db.py | 23 |
+| `Searcher` | src/codeintel/searcher.py | 23 |
 | `write` | src/codeintel/mapper.py | 20 |
-| `Indexer` | src/codeintel/indexer.py | 19 |
+| `search` | src/codeintel/searcher.py | 20 |
+| `SemanticProvider` | src/codeintel/providers/semantic.py | 20 |
 | `build_result` | src/codeintel/providers/lsp.py | 19 |
+| `TieringPolicy` | src/codeintel/policy.py | 18 |
 | `default_db_path` | src/codeintel/semantic_db.py | 18 |
-| `load_config` | src/codeintel/config.py | 17 |
-| `search` | src/codeintel/searcher.py | 17 |
-| `init` | src/codeintel/semantic_db.py | 17 |
-| `_mem_db` | tests/test_chunking.py | 17 |
 
 ## Entry Points
 
-- `main` (scripts/release_canary.py)
 - `main` (src/codeintel/__main__.py)
+- `main` (scripts/release_canary.py)

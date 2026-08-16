@@ -198,6 +198,17 @@ def _collapse_repeats(label: str) -> str:
     return ".".join(out)
 
 
+def _label_of(row: dict) -> str:
+    """A row's display label: its qualified name with the backend's project id removed.
+
+    Every place that renders a qualified name must go through here or `_display`. Fixing them one
+    at a time did not work — `_display` was fixed first, `_render_scan` was missed and shipped,
+    and after a test was added asserting "both renderers strip the prefix", `chain` and `pattern`
+    turned out to be a third and fourth. The test now enumerates the module rather than a list of
+    functions someone remembered to write down."""
+    return _strip_project_prefix(str(row.get("qualified_name") or row.get("name") or "?"))
+
+
 def _repo_display_name(root: str) -> str:
     """The repo's own directory name, for headings a human will read.
 
@@ -588,7 +599,7 @@ class GraphProvider:
             return None
         if raw.get("status") == "ambiguous":
             sugg = raw.get("suggestions") or []
-            names = [str(s.get("qualified_name") or s.get("name") or "?") for s in sugg if isinstance(s, dict)]
+            names = [_label_of(s) for s in sugg if isinstance(s, dict)]
             if not names:
                 return None
             body = "\n".join(f"- {n}" for n in names)
@@ -601,7 +612,7 @@ class GraphProvider:
                     if not isinstance(it, dict):
                         continue
                     nm = str(it.get("name") or "?")
-                    qn = str(it.get("qualified_name") or "")
+                    qn = _strip_project_prefix(str(it.get("qualified_name") or ""))
                     hop = it.get("hop")
                     risk = it.get("risk")
                     label = qn or nm
@@ -631,7 +642,7 @@ class GraphProvider:
             for r in results:
                 if not isinstance(r, dict):
                     continue
-                node = str(r.get("node") or r.get("qualified_name") or "?")
+                node = _strip_project_prefix(str(r.get("node") or r.get("qualified_name") or "?"))
                 label = str(r.get("label") or "")
                 file = str(r.get("file") or "")
                 start = r.get("start_line")
@@ -730,7 +741,7 @@ class GraphProvider:
             for s in syms_raw if isinstance(syms_raw, list) else []:
                 if not isinstance(s, dict):
                     continue
-                label = str(s.get("qualified_name") or s.get("name") or "").strip()
+                label = _label_of(s).strip()
                 fp = str(s.get("file_path") or s.get("file") or "")
                 if not label or label == fp:
                     continue
