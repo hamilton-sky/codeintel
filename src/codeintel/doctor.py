@@ -8,6 +8,7 @@ effects). The same report drives the CLI `doctor` command, the `code.doctor` MCP
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Any, Callable, Optional
 
 _ENGINES = ("graph", "lsp", "semantic")
@@ -147,6 +148,44 @@ def collect_versions(engines: dict) -> dict:
     return versions
 
 
+def collect_registrations() -> list[dict]:
+    """Which agents codeintel is registered with, and whether their launch line still works.
+
+    Registering an ABSOLUTE path makes a GUI-launched host able to find the server, at the cost of
+    one new failure mode: an upgrade or a rebuilt venv moves the binary and the config silently
+    points at nothing. That failure is invisible from inside the agent — the host just reports a
+    server that won't start — so doctor has to name it, with the one command that repairs it.
+
+    Read-only and never-raise: stats a path, never launches anything."""
+    out: list[dict] = []
+    try:
+        from codeintel.installer import _AGENTS, _CONFIG, registered_command
+    except Exception:
+        return out
+    for agent in _AGENTS:
+        try:
+            spec = _CONFIG.get(agent) or {}
+            path, command = registered_command(spec)
+            if command is None:
+                continue  # not registered with this agent — nothing to report
+            runnable = bool(command) and os.path.isfile(command) and os.access(command, os.X_OK)
+            if not os.path.isabs(command):
+                # A bare name is resolved by the host's PATH, which we cannot see from here.
+                runnable = shutil.which(command) is not None
+            out.append({
+                "agent": agent,
+                "config": path,
+                "command": command,
+                "runnable": runnable,
+                "remediation": None if runnable else (
+                    f"`{command}` no longer exists — re-run `codeintel install --agent {agent}`"
+                ),
+            })
+        except Exception:
+            continue
+    return out
+
+
 # Which version keys belong to which engine, for the per-engine `versions` rollup.
 _ENGINE_BACKENDS = {
     "graph": ("codebase-memory-mcp",),
@@ -238,6 +277,7 @@ def run_doctor(
         "versions": versions,
         "summary": {"ready": ready, "total": len(engines), "healthy": healthy},
         "engines": engines,
+        "registrations": collect_registrations(),
     }
 
 
@@ -308,4 +348,14 @@ def render_doctor_text(report: dict) -> str:
             "def-aligned chunking: OFF for non-Python — tree-sitter-language-pack not importable, "
             "so TS/JS/Go/Rust/… fall back to line windows. fix: pip install tree-sitter-language-pack"
         ))
+
+    # Agent registrations. Only BROKEN ones are printed: a working launch line is not news, but a
+    # config pointing at a binary that no longer exists is invisible from inside the agent — the
+    # host just reports a server that will not start, with no hint that codeintel moved.
+    broken = [r for r in (report.get("registrations") or []) if r.get("runnable") is False]
+    for reg in broken:
+        out.append("")
+        out.append("  " + c.dim("└─") + " " + c.cyan(f"{reg['agent']} registration")
+                   + f": stale launch command in {reg['config']}")
+        out.append("     " + c.bold(c.cyan("fix:")) + " " + (reg.get("remediation") or ""))
     return "\n".join(out)

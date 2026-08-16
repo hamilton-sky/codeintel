@@ -57,14 +57,21 @@ def main() -> None:
     install_parser = subparsers.add_parser("install", help="Register codeintel with AI agents")
     install_parser.add_argument(
         "--agent",
-        choices=["claude", "codex", "gemini", "zed", "all"],
-        default="all",
-        help="Agent to register with (default: all)",
+        choices=["auto", "claude", "codex", "gemini", "zed", "all"],
+        default="auto",
+        help="Agent to register with (default: auto — only agents installed on this machine; "
+             "`all` forces every supported agent)",
     )
     install_parser.add_argument(
         "--no-verify",
         action="store_true",
         help="Skip the post-registration MCP handshake (verification is on by default)",
+    )
+    install_parser.add_argument(
+        "--relative-command",
+        action="store_true",
+        help="Register the bare `codeintel` name instead of its absolute path (the absolute path "
+             "is the default because a GUI-launched agent does not inherit your shell's PATH)",
     )
 
     # map subcommand
@@ -395,10 +402,20 @@ def main() -> None:
 
         installer = Installer()
         do_verify = not args.no_verify
-        if args.agent == "all":
-            results = installer.register_all(verify=do_verify)
+        absolute = not args.relative_command
+        skipped: list[str] = []
+        if args.agent == "auto":
+            results, skipped = installer.register_detected(verify=do_verify, absolute=absolute)
+            if not results:
+                print("No supported agent found on this machine "
+                      f"(looked for: {', '.join(skipped)}).")
+                print("  Install one, or force registration with "
+                      "`codeintel install --agent <name>`.")
+                sys.exit(1)
+        elif args.agent == "all":
+            results = installer.register_all(verify=do_verify, absolute=absolute)
         else:
-            results = [installer.register(args.agent, verify=do_verify)]
+            results = installer.register_many([args.agent], verify=do_verify, absolute=absolute)
 
         any_ok = False
         legacy_paths: list[str] = []
@@ -432,6 +449,13 @@ def main() -> None:
             print(f"\n! stale entry: {legacy} has an `mcpServers.codeintel` block that this host "
                   f"does NOT read (an older codeintel wrote it). Safe to delete by hand.")
 
+        # Name what was skipped: silence about an untouched host reads as "unsupported" rather
+        # than "you don't have it installed".
+        if skipped:
+            print(f"\n- skipped (not installed here): {', '.join(skipped)}"
+                  f"\n  register anyway with `codeintel install --agent <name>`")
+
+        print("\n  Start a new agent session to pick up the tools.")
         sys.exit(0 if any_ok else 1)
 
     elif args.command == "gen-token":

@@ -110,7 +110,7 @@ pip install -e .
 Register with your AI agent(s), then query:
 
 ```bash
-codeintel install            # registers with Claude, Codex, Gemini, Zed
+codeintel install            # registers with the agents you actually have installed
 codeintel query --op search --target "authentication middleware"
 ```
 
@@ -162,9 +162,21 @@ codeintel setup --all /path/to/your/project && codeintel install --agent claude
 
 ### Registration is verified, not assumed
 
-`codeintel install` does not stop at writing a config file. It then launches the exact command it
-registered and drives a real MCP handshake — `initialize` → `tools/list` — and reports what came
-back:
+**It only touches agents you have.** `codeintel install` defaults to `--agent auto`: it registers
+the hosts whose config root already exists on this machine and *names the ones it skipped*.
+Installing a Python package should not create `~/.gemini/` and `~/.config/zed/` for someone who has
+neither. Force a specific host with `--agent claude|codex|gemini|zed`, or every supported host with
+`--agent all`.
+
+**It registers an absolute path.** The bare name `codeintel` is resolved by the *host*, not by the
+shell you ran `install` in — and a GUI-launched desktop agent does not source your shell profile, so
+a command your terminal finds is routinely invisible to the app. That is the one failure a handshake
+run in your terminal cannot catch, because it inherits the PATH that works. Pass
+`--relative-command` for the bare name. If a later upgrade moves the binary, re-running
+`codeintel install` repairs the stale path in place, leaving the rest of your config untouched.
+
+Then it launches the exact command it registered and drives a real MCP handshake —
+`initialize` → `tools/list` — and reports what came back:
 
 ```text
 v claude: registered at /Users/you/.claude.json
@@ -238,7 +250,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 
 | Command | Purpose |
 |---|---|
-| `codeintel install [--agent claude\|codex\|gemini\|zed\|all] [--no-verify]` | Register codeintel with AI agent(s), then prove it by completing a real MCP handshake against the registered command |
+| `codeintel install [--agent auto\|claude\|codex\|gemini\|zed\|all] [--no-verify] [--relative-command]` | Register codeintel with the agents installed on this machine (`auto`, the default), then prove it by completing a real MCP handshake against the registered command |
 | `codeintel setup [project_root] [--all] [--index] [--warm] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |

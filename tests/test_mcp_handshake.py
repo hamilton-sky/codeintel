@@ -184,9 +184,12 @@ def test_zed_registered_command_launches_and_handshakes(tmp_path, monkeypatch):
     assert Installer().register("zed")["ok"]
 
     config = json.loads((tmp_path / "xdg" / "zed" / "settings.json").read_text())
-    entry = config["context_servers"]["codeintel"]["command"]   # zed nests command differently
+    # Zed's context_servers entry is FLAT — `command` is a string with `args` beside it, same as
+    # every other host. codeintel previously wrote a nested {"command": {"path", "args"}} object,
+    # which Zed does not read; this test asserted that shape and so confirmed the bug.
+    entry = config["context_servers"]["codeintel"]
 
-    res = verify_stdio_server(entry["path"], list(entry.get("args") or []), timeout_s=_TIMEOUT_S)
+    res = verify_stdio_server(entry["command"], list(entry.get("args") or []), timeout_s=_TIMEOUT_S)
     assert res["ok"] is True, res["detail"]
 
 

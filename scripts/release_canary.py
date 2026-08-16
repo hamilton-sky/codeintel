@@ -84,6 +84,22 @@ def run(argv: list, **kw) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=600, **kw)
 
 
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _entry(path: Path, container: str) -> dict:
+    """codeintel's launch block out of a host config, or `{}` if it isn't there."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))[container]["codeintel"]
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
 def first_json(text: str):
     """The first JSON object in `text` — MCP bodies arrive as a text block, a structuredContent
     dump, or both joined."""
@@ -148,35 +164,61 @@ def _canary(cli: str, home: Path, repo: Path) -> int:
           res.returncode == 0 and "codeintel" in res.stdout,
           (res.stdout + res.stderr).strip())
 
-    # ---- 2. registration: the file, the right file, and a real handshake ----------------------
+    # ---- 2. `--agent auto` must not touch hosts this machine does not have --------------------
+    empty = run([cli, "install"])
+    stray = sorted(p.name for p in home.iterdir() if p.name != "fixture-repo")
+    check("`codeintel install` with no agent installed writes nothing and exits non-zero",
+          empty.returncode != 0 and not stray,
+          f"exit={empty.returncode}  created={stray}\n{(empty.stdout + empty.stderr).strip()}")
+
+    # ---- 3. registration: the right file, the right SHAPE, and a real handshake ---------------
     # `install` verifies by launching the registered command and completing an MCP handshake, and
     # exits non-zero when that fails — so this gates on the host being able to START the server,
-    # not merely on a config file existing.
-    codex = run([cli, "install", "--agent", "codex"])
-    check("`codeintel install --agent codex` succeeds and verifies",
-          codex.returncode == 0 and "NOT verified" not in codex.stdout,
-          (codex.stdout + codex.stderr).strip())
+    # not merely on a config file existing. Each host's config root is created first so `auto`
+    # treats it as installed.
+    for rel in (".claude", ".codex", ".gemini", ".config/zed"):
+        (home / rel).mkdir(parents=True, exist_ok=True)
 
-    codex_cfg = home / ".codex" / "config.toml"
-    codex_text = codex_cfg.read_text(encoding="utf-8") if codex_cfg.exists() else ""
+    install = run([cli, "install"])
+    check("`codeintel install` registers every detected agent and verifies the handshake",
+          install.returncode == 0 and "NOT verified" not in install.stdout,
+          (install.stdout + install.stderr).strip())
+
+    # Codex — a TOML table in config.toml, NOT a JSON mcpServers map (shipped broken once).
+    codex_text = _read(home / ".codex" / "config.toml")
     check("Codex config holds an [mcp_servers.codeintel] TOML table",
           "[mcp_servers.codeintel]" in codex_text,
-          f"{codex_cfg}\n{codex_text.strip() or '<missing>'}")
+          codex_text.strip() or "<missing>")
 
-    claude = run([cli, "install", "--agent", "claude"])
-    check("`codeintel install --agent claude` succeeds and verifies",
-          claude.returncode == 0 and "NOT verified" not in claude.stdout,
-          (claude.stdout + claude.stderr).strip())
-
-    claude_cfg = home / ".claude.json"
-    launch = {}
-    try:
-        launch = json.loads(claude_cfg.read_text(encoding="utf-8"))["mcpServers"]["codeintel"]
-    except Exception:
-        pass
+    # Claude Code — ~/.claude.json, NOT ~/.claude/settings.json (shipped broken once).
+    launch = _entry(home / ".claude.json", "mcpServers")
     check("Claude Code config holds mcpServers.codeintel in ~/.claude.json",
-          bool(launch.get("command")),
-          f"{claude_cfg}\n{json.dumps(launch) if launch else '<missing>'}")
+          bool(launch.get("command")), json.dumps(launch) or "<missing>")
+    check("nothing was written to ~/.claude/settings.json (the file Claude Code ignores)",
+          not (home / ".claude" / "settings.json").exists())
+
+    # Gemini CLI — mcpServers in ~/.gemini/settings.json, flat command + args.
+    gem = _entry(home / ".gemini" / "settings.json", "mcpServers")
+    check("Gemini CLI config holds a flat mcpServers.codeintel entry",
+          isinstance(gem.get("command"), str) and gem.get("args") == ["serve"],
+          json.dumps(gem) or "<missing>")
+
+    # Zed — context_servers, and `command` is a STRING. codeintel shipped a nested
+    # {"command": {"path", "args"}} object here, which Zed does not read.
+    zed = _entry(home / ".config" / "zed" / "settings.json", "context_servers")
+    check("Zed config holds context_servers.codeintel with a flat string command",
+          isinstance(zed.get("command"), str) and zed.get("args") == ["serve"],
+          json.dumps(zed) or "<missing>")
+
+    # Absolute path: a GUI-launched agent does not inherit the shell PATH that verification used.
+    check("the registered command is an absolute path",
+          os.path.isabs(launch.get("command", "")) and launch["command"] == cli,
+          f"registered: {launch.get('command')}\nexpected:   {cli}")
+
+    check("every host was registered with the same launch line",
+          {launch.get("command"), gem.get("command"), zed.get("command")} == {cli}
+          and f'command = "{cli}"' in codex_text,
+          f"claude={launch.get('command')} gemini={gem.get('command')} zed={zed.get('command')}")
 
     # A user's next session launches EXACTLY this argv. Everything below drives that, rather than
     # a command this script picked — so the thing verified is the thing the host will run.

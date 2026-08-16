@@ -4,9 +4,35 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.2] — 2026-08-16
+## [0.12.0] — 2026-08-16
+
+This release is about **installation truth**: every change here closes a gap where a green signal
+did not mean a working tool.
+
+### Changed
+- **`codeintel install` now defaults to `--agent auto`** — it registers only the agents whose config
+  root exists on this machine, and names the ones it skipped. The old default (`all`) created
+  `~/.gemini/settings.json` and `~/.config/zed/settings.json` for people who had neither, reaching
+  into another app's namespace uninvited and claiming coverage of hosts nobody had verified. With no
+  agent detected it writes nothing and exits non-zero. `--agent all` still forces every host.
+- **Registrations now use the absolute path to `codeintel`.** The bare name is resolved by the
+  *host*, not by the shell that ran `install` — and a GUI-launched desktop agent does not source
+  your shell profile, so a command your terminal finds can be invisible to the app. This was the one
+  failure the handshake verifier was structurally blind to, since it inherits the PATH that works.
+  `--relative-command` restores the bare name; re-running `install` repairs a stale absolute path in
+  place, leaving neighbouring config untouched.
 
 ### Fixed
+- **Zed registration wrote a shape Zed does not read.** The `context_servers` entry was written as a
+  nested `{"command": {"path", "args"}}` object; Zed's schema is flat — a `command` string with
+  `args` beside it. The third instance of writing a config file the host ignores, after the Codex
+  TOML and Claude Code `~/.claude.json` bugs, and again with green tests, because the test asserted
+  the bytes we wrote. The canary now checks all four hosts' shapes.
+- **CI was red on an environment-dependent installer test.** `test_every_agent_path_is_resolved_at_call_time`
+  assumed `HOME` redirects every agent path, but `resolve_config_path` deliberately prefers each
+  agent's own home var — and GitHub runners export `XDG_CONFIG_HOME`, so Zed correctly resolved
+  outside the tmp dir. The test now clears those vars, and a companion test pins the override
+  behavior it was accidentally asserting against.
 - **`code.status` no longer claims an engine `code.query` cannot reach.** The gateway is built once
   per process, but status/doctor probe a *fresh* provider for any engine the gateway lacks — so a
   backend installed mid-session was reported `installed/runnable/ok` while queries kept routing
