@@ -39,6 +39,45 @@ change** — see Breaking below.
   the file does. This contradicted the guarantee in docs/architecture.md that "an edit changes the
   content hash and forces a refresh".
 
+### Security (second adversarial pass — the first fix was incomplete)
+- **A symlink planted inside an allowed root defeated project scoping entirely.** `os.walk`
+  defaults to `followlinks=False`, which stops recursion into symlinked *directories* but leaves
+  symlinked *files* in the listing — and the later `open()` follows them. Any tenant able to write
+  inside their own root could link to any file the server process could read and have it indexed,
+  embedded, and returned as a snippet. Reproduced, then fixed: `Indexer._walk_files` now resolves
+  every candidate and requires it to land back under the resolved root.
+- **`GET /code/status` had no authorization at all** — authenticated, but never checked op or
+  root — so any valid token could ask "is *that* directory indexed?" about any path. It now
+  carries the server-authoritative role through and applies the same root scoping as `query`.
+- **`POST /code/doctor` was op-gated but not root-gated**, so a role scoped to one project could
+  run doctor against another, and `deep: true` would boot a live LSP session rooted at the
+  attacker's path. Now root-checked after the op check.
+- **A blank `project_root` resolved to the server's working directory** rather than being denied.
+  `os.path.realpath("")` returns the cwd, so the `if not target` guard never fired and containment
+  was evaluated against wherever the server was launched. Rejected before resolution now.
+
+### Fixed (second adversarial pass)
+- **An `overview` auto-fallback answer could be served to an explicit `engine=graph` request.**
+  `auto` and an explicit `graph` both resolved to the string `"graph"` and shared one cache key,
+  but they are different questions: `auto` accepts the LSP fallback, explicit `graph` does not. A
+  single `auto` miss parked an LSP answer under the graph key, and the next explicit request got
+  it back with `cached: true` and an `engine: "lsp"` field contradicting its own request —
+  reachable on any cold start, since "graph not indexed yet" is the normal first-query state.
+  Cache keys now distinguish what was asked from what auto resolved to.
+
+### Known limitations (not fixed here, deliberately)
+- **Non-file targets can be stale for up to the reindex debounce (~30s).** For symbol-name and
+  free-text targets the content hash is constant, so the freshness generation is the only
+  invalidation, and it only advances when a debounced background reindex completes. An edit
+  followed immediately by the same query can return the pre-edit answer. This is inherent to the
+  current design rather than a regression; the README's freshness section now says so plainly.
+- **A `codeintel index` run in another terminal does not immediately invalidate a running
+  server's cache.** The CLI builds a throwaway `Reindexer`, so its generation bump is invisible to
+  the long-lived server, which self-heals on its own next reindex.
+- **Background reindexes have no in-flight guard.** The debounce timestamp is set when a reindex
+  is *submitted*, not when it completes, so on a repo whose reindex outlasts the debounce window
+  overlapping passes can stack.
+
 ### Breaking
 - **RBAC deployments must add a `[roots]` table.** A role with no entry may now target nothing.
   This fails closed on purpose: a root allowlist defaulting to "everywhere" would be the

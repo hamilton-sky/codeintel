@@ -206,7 +206,21 @@ class Indexer:
             logger.warning("Cleanup pass failed: %s", exc)
 
     def _walk_files(self, root: Path):
+        """Indexable files inside *root* — and strictly inside it.
+
+        ``os.walk`` defaults to ``followlinks=False``, which stops recursion into symlinked
+        DIRECTORIES but says nothing about symlinked FILES: those still appear in ``filenames``,
+        and the later ``open()`` follows them transparently. That made a planted symlink a
+        complete bypass of RBAC project scoping — a tenant able to write inside their own allowed
+        root could link to any file the server process can read and have it indexed, embedded, and
+        returned as a search snippet. Demonstrated before this guard existed.
+
+        So every candidate is resolved and required to land back under the resolved root."""
         ignores = set(_SKIP_DIRS) | set(_DEFAULT_IGNORES) | self._load_gitignore(root)
+        try:
+            real_root = os.path.realpath(root)
+        except Exception:
+            real_root = str(root)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [
                 d for d in dirnames
@@ -215,8 +229,17 @@ class Indexer:
             for fname in filenames:
                 if fname in ignores:
                     continue
-                if Path(fname).suffix.lower() in _INDEXED_EXTS:
-                    yield Path(dirpath) / fname
+                if Path(fname).suffix.lower() not in _INDEXED_EXTS:
+                    continue
+                candidate = Path(dirpath) / fname
+                try:
+                    real = os.path.realpath(candidate)
+                except Exception:
+                    continue
+                if real != real_root and not real.startswith(real_root + os.sep):
+                    logger.warning("skipping %s — it resolves outside the indexed root", candidate)
+                    continue
+                yield candidate
 
     # ---- chunk-span computation ------------------------------------------------------------
     # A file is turned into a list of 0-based, half-open ``(start, end)`` line spans; every

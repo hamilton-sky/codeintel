@@ -154,6 +154,12 @@ def code_status_handler(args: dict) -> dict:
 
         project_root = str(args.get("project_root", "") or "")
         gw = _get_gateway()
+        # Same root scoping `query` enforces. Without it this endpoint answered "is THAT directory
+        # indexed?" for any path, to any authenticated token, regardless of the role's [roots] —
+        # cross-tenant disclosure through the door next to the one that got closed.
+        role = str(args.get("role", "") or "")
+        if not gw.allows_root(role, project_root):
+            return dict(_STATUS_FALLBACK)
         report = _doctor.run_doctor(
             project_root, deep=False, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,
             on_provider=gw.adopt_provider,
@@ -245,6 +251,14 @@ def code_doctor_handler(args: dict) -> dict:
                 "ok": True, "project_root": project_root, "deep": deep,
                 "summary": {"ready": 0, "total": 3, "healthy": False},
                 "engines": {}, "reason": "op-not-allowed-for-role",
+            }
+        # An op gate alone leaves the TARGET unbounded: a role scoped to /srv/team-a could still
+        # run doctor against /srv/team-b, and `deep: true` boots a live LSP session rooted there.
+        if not gw.allows_root(role, project_root):
+            return {
+                "ok": True, "project_root": project_root, "deep": deep,
+                "summary": {"ready": 0, "total": 3, "healthy": False},
+                "engines": {}, "reason": "root-not-allowed-for-role",
             }
         return _doctor.run_doctor(
             project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,

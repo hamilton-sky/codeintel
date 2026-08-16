@@ -61,9 +61,14 @@ class TieringPolicy:
     def is_root_allowed(self, role: str, project_root: str) -> bool:
         """May *role* target *project_root*? Fails closed when RBAC is on.
 
-        Containment is computed on realpaths of both sides, so `..` segments and symlinks cannot
-        walk out of an allowed root. An empty/blank project_root is denied under RBAC rather than
-        silently meaning "the server's cwd"."""
+        Containment is computed on realpaths of both sides, so `..` segments and a symlinked
+        project_root cannot walk out of an allowed root. A blank project_root is rejected before
+        resolution, because realpath("") is the server's cwd rather than an error.
+
+        NOTE the boundary this does and does not draw: it bounds which root a caller may NAME. It
+        does not bound what the indexer reads once inside — that containment lives in
+        ``Indexer._walk_files``, which must skip symlinks escaping the tree, or a tenant who can
+        write into their own root defeats this by planting one."""
         if not self._enabled:
             return True
         allowed = self._roots.get(role)
@@ -71,6 +76,11 @@ class TieringPolicy:
             return False
         if _ALL in allowed:
             return True
+        # Reject blank BEFORE resolving. `os.path.realpath("")` returns the process's cwd, so a
+        # missing project_root silently became "wherever the server was launched" — and passed
+        # whenever that happened to sit under an allowed root. The docstring claimed otherwise.
+        if not project_root or not project_root.strip():
+            return False
         target = _normalize_root(project_root)
         if not target:
             return False

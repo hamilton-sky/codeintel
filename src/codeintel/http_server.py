@@ -168,8 +168,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         # Everything else is auth-gated when auth is configured (metrics can reveal usage patterns;
-        # status reveals engine/index state). Any valid token/role may read these operational views.
-        ok, _ = self._resolve_role()
+        # status reveals engine/index state). The role is kept, not discarded: /code/status takes a
+        # project_root, and answering it for any path regardless of the role's [roots] was the same
+        # cross-tenant disclosure that scoping /code/query was meant to close.
+        ok, role = self._resolve_role()
         if not ok:
             self._send_json(401, {"error": "unauthorized"})
             return
@@ -185,7 +187,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/code/status":
             project_root = (parse_qs(parsed.query).get("project_root") or [""])[0]
-            self._send_json(200, code_status_handler({"project_root": project_root}))
+            # role is server-authoritative, exactly as on the POST path — never read from input.
+            self._send_json(200, code_status_handler(
+                {"project_root": project_root, "role": role}))
             return
         self._send_json(404, {"error": "not-found"})
 

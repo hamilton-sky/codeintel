@@ -191,6 +191,15 @@ class Gateway:
         except Exception:
             return True
 
+    def allows_root(self, role: str, project_root: str) -> bool:
+        """Whether *role* may target *project_root*. The companion to ``allows`` — an op gate alone
+        leaves the TARGET unbounded, which is how `doctor` and `status` could still be pointed at
+        any readable directory after `query` had been scoped."""
+        try:
+            return self._policy is None or self._policy.is_root_allowed(role, project_root)
+        except Exception:
+            return True
+
     def query(
         self,
         op=None,
@@ -247,6 +256,15 @@ class Gateway:
             if engine_str == "auto":
                 engine_str = _AUTO_ENGINE.get(op_str, "graph")
 
+            # Cache under what was ASKED, not what auto resolved to. `auto` and an explicit
+            # `graph` both resolved to "graph" and so shared one key — but they are different
+            # questions: `auto` accepts the overview LSP fallback below, an explicit `graph`
+            # does not. One `auto` miss therefore parked an LSP answer under the graph key, and
+            # the next explicit `engine=graph` request got it back with `cached: true` and an
+            # `engine: "lsp"` field contradicting its own request. Reachable on any cold start,
+            # since "graph not indexed yet" is the normal first-query state.
+            cache_engine = "auto" if was_auto else engine_str
+
             root_str = project_root or ""
 
             # Freshness token — bumps when a background reindex completes, so a cached
@@ -266,7 +284,7 @@ class Gateway:
             if engine_str in _FANOUT_ENGINES:
                 cached_result = (
                     None if uncacheable
-                    else self._cache.get(op_str, target_str, engine_str, root_str, freshness)
+                    else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
                 )
                 if cached_result is not None:
                     return {**cached_result, "cached": True}
@@ -275,13 +293,13 @@ class Gateway:
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
                 if not uncacheable:
-                    self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
+                    self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
                 return result
 
             # Single-engine dispatch (`uncacheable`, computed above, also guards this path).
             cached_result = (
                 None if uncacheable
-                else self._cache.get(op_str, target_str, engine_str, root_str, freshness)
+                else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
             )
             if cached_result is not None:
                 return {**cached_result, "cached": True}
@@ -305,7 +323,7 @@ class Gateway:
                     result = lsp_result
 
             if not uncacheable:
-                self._cache.put(op_str, target_str, engine_str, root_str, result, freshness)
+                self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
             return result
 
         except Exception as exc:

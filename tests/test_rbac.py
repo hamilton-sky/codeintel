@@ -59,6 +59,9 @@ def test_build_policy_restricts_and_omits_wildcard():
 def rbac_server(tmp_path, monkeypatch):
     (tmp_path / "auth.toml").write_text(
         '[roles]\nadmin = ["*"]\nreader = ["search", "context"]\n'
+        # [roots] is required as of 0.14.0 — these tests are about OP scoping, so both roles are
+        # root-unrestricted here and the dedicated scoping tests below cover the roots dimension.
+        '[roots]\nadmin = ["*"]\nreader = ["*"]\n'
         '[tokens]\n"admintok" = "admin"\n"readertok" = "reader"\n'
     )
     monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(tmp_path / "auth.toml"))
@@ -327,3 +330,47 @@ def test_an_all_wildcard_ops_config_still_enforces_roots(tmp_path, monkeypatch):
 
     assert policy.is_allowed("admin", "anything") is True         # ops still unrestricted
     assert policy.is_root_allowed("admin", "/srv/elsewhere") is False
+
+
+def test_a_planted_symlink_cannot_smuggle_a_file_out_of_an_indexed_root(tmp_path):
+    """The scoping check bounds which root a caller may NAME; it says nothing about what the
+    indexer reads once inside. `os.walk` defaults to followlinks=False, which stops recursion into
+    symlinked DIRECTORIES but leaves symlinked FILES in the listing — and the later open() follows
+    them. A tenant able to write inside their own allowed root could therefore link to any file the
+    server can read and have it indexed, embedded, and returned as a snippet: a complete bypass one
+    directory level down. Demonstrated before this guard existed.
+    """
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
+    allowed.mkdir(); outside.mkdir()
+    (outside / "secret.py").write_text("def stolen():\n    return 'CANARY'\n")
+    (allowed / "fine.py").write_text("def ok(): pass\n")
+    (allowed / "planted.py").symlink_to(outside / "secret.py")
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        Indexer(db).index(str(allowed))
+        from codeintel.searcher import Searcher
+        hits = {h.get("path") for h in Searcher(db).search("stolen secret", str(allowed))}
+    finally:
+        db.close()
+
+    assert "planted.py" not in hits, "a symlink escaped the indexed root"
+    assert "fine.py" in hits, "the guard must not also drop legitimate in-root files"
+
+
+def test_a_blank_project_root_is_denied_rather_than_meaning_the_server_cwd(tmp_path, monkeypatch):
+    """`os.path.realpath("")` is the process's cwd, not an error — so a missing project_root
+    silently resolved to wherever the server was launched, and passed whenever that happened to
+    sit under an allowed root."""
+    from codeintel.policy import TieringPolicy
+
+    monkeypatch.chdir(tmp_path)
+    policy = TieringPolicy(enabled=True, roots={"reader": [str(tmp_path)]})
+
+    assert policy.is_root_allowed("reader", str(tmp_path)) is True
+    for blank in ("", "   ", None):
+        assert policy.is_root_allowed("reader", blank or "") is False, repr(blank)

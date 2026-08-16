@@ -309,3 +309,103 @@ def test_reindexer_failure_does_not_affect_query_result():
     gw = Gateway(graph=graph, reindexer=reindexer)
     r = gw.query(op="search", target="foo", project_root="/tmp/proj")
     assert r["ok"] is True
+
+
+# --------------------------------------------------------------------------- engine cache keying
+
+class _NotIndexedGraph:
+    available = True
+
+    def build_result(self, op, target, files, budget, project_root):
+        from codeintel.provider import safe_null_result
+        return safe_null_result(op, target, engine="graph", reason="project-not-indexed")
+
+
+class _AnsweringLsp:
+    available = True
+
+    def build_result(self, op, target, files, budget, project_root):
+        return {"ok": True, "op": op, "target": target, "result": "LSP ANSWER",
+                "engine": "lsp", "cached": False}
+
+
+def _overview_gateway():
+    from codeintel.gateway import Gateway
+    from codeintel.reindexer import Reindexer
+    rx = Reindexer()
+    rx.maybe_reindex = lambda root: None          # hold freshness steady across the calls
+    return Gateway(graph=_NotIndexedGraph(), lsp=_AnsweringLsp(), semantic=None, reindexer=rx)
+
+
+def test_an_auto_fallback_answer_is_not_served_to_an_explicit_engine_request():
+    """`auto` and an explicit `graph` both resolved to the string "graph" and so shared one cache
+    key — but they are different questions: `auto` accepts the overview LSP fallback, an explicit
+    `graph` does not. One `auto` miss parked an LSP answer under the graph key, and the next
+    `engine=graph` request got it back with `cached: true` and an `engine: "lsp"` field
+    contradicting its own request. Reachable on any cold start, since "graph not indexed yet" is
+    the normal first-query state.
+    """
+    gw = _overview_gateway()
+
+    auto = gw.query(op="overview", target="sym", engine="auto", role="", project_root="/tmp/x")
+    assert auto["engine"] == "lsp" and auto["result"] == "LSP ANSWER"
+
+    explicit = gw.query(op="overview", target="sym", engine="graph", role="",
+                        project_root="/tmp/x")
+    assert explicit["engine"] == "graph", "an explicit engine request got another engine's answer"
+    assert explicit["result"] is None
+    assert explicit["reason"] == "project-not-indexed"
+
+
+def test_auto_and_explicit_requests_keep_their_own_cache_entries():
+    gw = _overview_gateway()
+    gw.query(op="overview", target="sym", engine="graph", role="", project_root="/tmp/x")
+
+    # The explicit miss must not poison `auto`, which can still fall back to LSP.
+    auto = gw.query(op="overview", target="sym", engine="auto", role="", project_root="/tmp/x")
+    assert auto["result"] == "LSP ANSWER"
+
+
+def test_a_repeated_query_is_still_served_from_cache():
+    """Guard the guard: splitting the key must not disable caching."""
+    from codeintel.gateway import Gateway
+    from codeintel.reindexer import Reindexer
+
+    calls = {"n": 0}
+
+    class _Counting(_AnsweringLsp):
+        def build_result(self, op, target, files, budget, project_root):
+            calls["n"] += 1
+            return super().build_result(op, target, files, budget, project_root)
+
+    rx = Reindexer()
+    rx.maybe_reindex = lambda root: None
+    gw = Gateway(graph=None, lsp=_Counting(), semantic=None, reindexer=rx)
+
+    first = gw.query(op="symbol", target="sym", engine="lsp", role="", project_root="/tmp/x")
+    second = gw.query(op="symbol", target="sym", engine="lsp", role="", project_root="/tmp/x")
+
+    assert first["cached"] is False and second["cached"] is True
+    assert calls["n"] == 1
+
+
+def test_cache_get_and_put_always_use_the_same_key():
+    """A `get`/`put` that disagree on the engine component silently disable the cache — every
+    lookup misses, every dispatch re-runs, and nothing fails. It happened while fixing the
+    auto/explicit collision above and was caught only because an unrelated test asserted a hit.
+    Pin the agreement directly rather than relying on that coincidence."""
+    import inspect
+    import re
+
+    from codeintel.gateway import Gateway
+
+    source = inspect.getsource(Gateway.query)
+    gets = re.findall(r"_cache\.get\(\s*([^)]*)\)", source)
+    puts = re.findall(r"_cache\.put\(\s*([^)]*)\)", source)
+    assert gets and puts, "cache call sites not found — did query() get restructured?"
+
+    def engine_arg(call: str) -> str:
+        return [a.strip() for a in call.split(",")][2]
+
+    keys = {engine_arg(c) for c in gets} | {engine_arg(c) for c in puts}
+    assert keys == {"cache_engine"}, f"cache key components disagree: {keys}"

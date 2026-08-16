@@ -259,6 +259,12 @@ codeintel index /path/to/repo
 The reply names the fix when it can: a missing symbol now returns a `hint` with the exact command
 rather than a bare reason.
 
+One more honest caveat. For targets that are **symbol names or free text** (most of them —
+`callers`, `impact`, `hotspots`, `search`), there is no file whose content hash could change, so a
+cached answer is invalidated only when a background reindex completes, and those are debounced
+(~30s). An edit followed immediately by the same query can therefore return the pre-edit answer.
+Targets that are real file paths are content-hashed and refresh as soon as the bytes change.
+
 Pass `--engine auto` (the default) and codeintel chooses the best engine per operation. Pass `--engine both` or `--engine all` to fan out to multiple engines and merge results.
 
 ## Documentation
