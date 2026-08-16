@@ -24,8 +24,14 @@ review rounds had not found any of it.
   returned 181 candidates and every one sampled was live code; an agent acting on that answer
   would delete working code. Candidates are now verified against the source with a bounded
   word-boundary scan, and a name appearing anywhere beyond its own definition drops out. The same
-  repo now returns **3**, each confirmed to have exactly one occurrence. When a repo exceeds the
-  scan cap the result says so rather than implying a confidence the check did not earn.
+  repo now returns **4**, three of them confirmed genuinely dead and the fourth a framework-called
+  object-literal property — precision from roughly zero to roughly three-quarters, with the
+  residue named in the output rather than implied away. The result states which verification
+  actually ran: a full source check, a missing `project_root`, or a repo past the scan cap.
+
+  The verification is a name-frequency heuristic, and the notes say so. It deliberately errs
+  toward hiding real dead code rather than reporting live code as dead: an agent that deletes a
+  working function has done damage a shorter list never could.
 - **Repo scans ranked archived code as the thing most worth refactoring.** Nothing excluded
   dot-directories, so an 8MB `.archive/` tree put a retired 507-line component *third* in a
   repo's hotspots — a near-duplicate of the live one. `.github` is kept, since its workflows are

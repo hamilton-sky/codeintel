@@ -52,13 +52,20 @@ def _strip_project_prefix(qualified_name: str) -> str:
 # Files consulted when verifying dead-code candidates, and the extensions worth reading. Bounded
 # so `deadcode` on a very large monorepo stays a query rather than a second index pass.
 _VERIFY_FILE_CAP = 6000
+# Not hand-written source: vendored trees and build output. Only `.venv` was excluded before (as
+# a dot-directory), so a plain `venv/`, `vendor/` or `third_party/` both blew the file cap and
+# fed generated code into the occurrence counts.
+_VERIFY_SKIP_DIRS = frozenset({
+    "node_modules", "__pycache__", "dist", "build", "out", "target", "vendor", "vendored",
+    "third_party", "thirdparty", "venv", "env", "site-packages", "coverage", "generated",
+})
 _VERIFY_EXTS = frozenset({
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
     ".c", ".h", ".cpp", ".cc", ".hpp",
 })
 
 
-def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], bool]:
+def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], str]:
     """Remove candidates whose name actually appears somewhere else in the source.
 
     `deadcode` asks the graph for functions with **in-degree 0**, and a function that is passed as
@@ -73,26 +80,44 @@ def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], b
     when the repo exceeded the file cap, so the caller can say the check was partial rather than
     imply a confidence it does not have.
     """
-    if not rows or not root or not os.path.isdir(root):
-        return rows, False
+    if not rows:
+        return rows, "ok"
+    if not root or not os.path.isdir(root):
+        # Distinct from the cap: the MCP tool defaults project_root to "", so this is the DEFAULT
+        # call path, and blaming the file cap told the user their repo was too big when the real
+        # cause was a missing argument.
+        return rows, "no-root"
 
     names = {str(r.get("name") or "") for r in rows}
     names.discard("")
     if not names:
-        return rows, False
+        return rows, "ok"
+
+    # How many candidates share each name. Compared against a GLOBAL occurrence count, a fixed
+    # allowance of 1 meant two dead functions with the same name each counted as the other's
+    # "use" and both vanished.
+    definitions: dict[str, int] = {}
+    for r in rows:
+        key = str(r.get("name") or "")
+        definitions[key] = definitions.get(key, 0) + 1
     pattern = re.compile(r"\b(" + "|".join(re.escape(n) for n in sorted(names)) + r")\b")
 
     seen: dict[str, int] = {}
     scanned = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if not d.startswith(".") and d not in ("node_modules", "__pycache__")]
+        # Skip what is NOT hand-written source. Generated bundles were the worst offender: a
+        # 6.7MB minified `out/` bundle supplied 46 occurrences of a `toJSON` that appears zero
+        # times in real source, hiding it. Dot-directories use the archive list, so `.github`
+        # scripts and `.claude/hooks` are scanned — they were being skipped here while
+        # `_is_archived_path` counted them as live, so a live CI helper still read as dead.
+        dirnames[:] = [d for d in dirnames if d.lower() not in _VERIFY_SKIP_DIRS
+                       and d.lower() not in _ARCHIVE_DIRS]
         for fname in filenames:
             if os.path.splitext(fname)[1].lower() not in _VERIFY_EXTS:
                 continue
             scanned += 1
             if scanned > _VERIFY_FILE_CAP:
-                return rows, False              # too big to verify — report unfiltered, and say so
+                return rows, "capped"           # too big to verify — report unfiltered, and say so
             try:
                 with open(os.path.join(dirpath, fname), encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
@@ -101,21 +126,53 @@ def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], b
             for match in pattern.findall(text):
                 seen[match] = seen.get(match, 0) + 1
 
-    # One occurrence is the definition itself; anything more is a use the graph could not see.
-    kept = [r for r in rows if seen.get(str(r.get("name") or ""), 0) <= 1]
-    return kept, True
+    # A name's own definitions account for that many occurrences; anything beyond them is a use
+    # the graph could not see.
+    kept = [r for r in rows
+            if seen.get(str(r.get("name") or ""), 0) <= definitions.get(str(r.get("name") or ""), 1)]
+    return kept, "ok"
+
+
+# Directories whose contents are retired or generated, named explicitly. The first version of
+# this excluded EVERY dot-directory, which swept up a great deal of live code: `.claude/hooks`,
+# `.storybook`, `.husky`, `.server`, `src/.internal`. Naming what is actually an archive is a
+# smaller claim and a safer one — an unknown dot-directory is now assumed to be source.
+_ARCHIVE_DIRS = frozenset({
+    ".archive", ".archived", ".backup", ".backups", ".bak", ".old", ".deprecated", ".trash",
+    ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".gradle", ".terraform",
+})
 
 
 def _is_archived_path(file_path: str) -> bool:
-    """Whether *file_path* lives under a dot-directory that isn't source.
+    """Whether *file_path* lives under a retired or generated directory.
 
     A repo-scan op ranks by complexity and fan-in, and archived code scores well on both — an
-    8MB `.archive/` tree put a retired 507-line component third in this repo's refactor hotspots,
-    a near-duplicate of the live one. Pointing an agent at dead code as the thing most worth
-    refactoring is worse than returning nothing. `.github` is kept: its workflows are live.
+    8MB `.archive/` tree put a retired 507-line component third in a repo's refactor hotspots, a
+    near-duplicate of the live one. Pointing an agent at dead code as the thing most worth
+    refactoring is worse than returning nothing.
     """
     parts = file_path.replace("\\", "/").split("/")
-    return any(p.startswith(".") and p not in (".", "..", ".github") for p in parts[:-1])
+    return any(p.lower() in _ARCHIVE_DIRS for p in parts[:-1])
+
+
+# What the source-verification pass can and cannot claim, stated per outcome. The single old note
+# blamed the file cap unconditionally, so the DEFAULT MCP call path — which omits project_root —
+# told users their repo was too big when the real cause was a missing argument.
+_RAW_CAVEAT = (" — these are raw call-graph results, so a function used only as a callback "
+               "reference (a React handler, an `addEventListener` argument) will appear here. "
+               "Confirm before deleting.")
+_VERIFY_NOTES = {
+    "ok": ("\n\n_Verified against the source: a candidate whose name appears anywhere beyond its "
+           "own definition was dropped. A name scan still cannot see a symbol reached only "
+           "through a framework — an object-literal property a library calls, a decorator "
+           "registry, `getattr` dispatch, or a name in a template, YAML or TOML. Treat these as "
+           "candidates and confirm before deleting._"),
+    "no-root": ("\n\n_Unverified: no `project_root` was given, so the source could not be checked"
+                + _RAW_CAVEAT + "_"),
+    "capped": ("\n\n_Unverified: the repo exceeded the source-scan cap" + _RAW_CAVEAT + "_"),
+}
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _collapse_repeats(label: str) -> str:
@@ -126,8 +183,12 @@ def _collapse_repeats(label: str) -> str:
     anyway. Across 200 rows that is real token cost for the agent this output exists to serve."""
     out: list[str] = []
     for seg in label.split("."):
-        if not out or out[-1] != seg:
-            out.append(seg)
+        # Only collapse identifiers. Splitting on "." also splits version numbers and dotted
+        # quads, where consecutive equal parts are meaningful: `CHANGELOG.1.1.0` became
+        # `CHANGELOG.1.0` (a different real release) and `127.0.0.1` became `127.0.1`.
+        if out and out[-1] == seg and _IDENTIFIER_RE.match(seg):
+            continue
+        out.append(seg)
     return ".".join(out)
 
 
@@ -681,7 +742,7 @@ class GraphProvider:
             # exclude_entry_points flag: it's an external-backend flag we don't independently verify,
             # and main() shown as "dead" would be a visible embarrassment — one cheap client check.
             kept = [r for r in rows if not self._is_noise(r) and not r.get("is_entry_point")]
-            kept, verified = _drop_referenced_symbols(kept, root)
+            kept, verify_state = _drop_referenced_symbols(kept, root)
             if not kept:
                 return "## Dead-code candidates\n(none found)"
             kept.sort(key=lambda r: r.get("lines") or 0, reverse=True)
@@ -695,13 +756,7 @@ class GraphProvider:
                 return m
 
             rendered = self._render_scan(kept, "Dead-code candidates", 30, _meta)
-            if not verified:
-                # Never imply a confidence the check did not earn: without the source pass these
-                # are raw in-degree-0 rows, which on any callback-heavy codebase are mostly wrong.
-                rendered += ("\n\n_Unverified: the repo exceeded the source-scan cap, so these "
-                             "are raw call-graph results — a function used only as a callback "
-                             "reference will appear here. Confirm before deleting._")
-            return rendered
+            return rendered + _VERIFY_NOTES.get(verify_state, "")
         except Exception:
             return None
 

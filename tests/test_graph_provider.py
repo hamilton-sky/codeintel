@@ -5,6 +5,8 @@ import os
 import re
 import subprocess
 
+import pytest
+
 from codeintel.providers.graph import GraphProvider
 from codeintel.server import code_status_handler
 
@@ -368,9 +370,9 @@ def test_deadcode_drops_candidates_that_are_referenced_in_source(tmp_path):
     (tmp_path / "orphan.ts").write_text("function reallyUnused() { return 1 }\n")
 
     rows = [{"name": "onKeyDown"}, {"name": "reallyUnused"}]
-    kept, verified = _drop_referenced_symbols(rows, str(tmp_path))
+    kept, state = _drop_referenced_symbols(rows, str(tmp_path))
 
-    assert verified is True
+    assert state == "ok"
     assert [r["name"] for r in kept] == ["reallyUnused"]
 
 
@@ -382,8 +384,8 @@ def test_deadcode_verification_reports_when_it_could_not_run(tmp_path, monkeypat
     monkeypatch.setattr(g, "_VERIFY_FILE_CAP", 0)
     (tmp_path / "a.py").write_text("def f(): pass\n")
 
-    kept, verified = g._drop_referenced_symbols([{"name": "f"}], str(tmp_path))
-    assert verified is False
+    kept, state = g._drop_referenced_symbols([{"name": "f"}], str(tmp_path))
+    assert state == "capped"
     assert len(kept) == 1, "an unverifiable repo must return rows unfiltered, not empty"
 
 
@@ -392,9 +394,9 @@ def test_deadcode_verification_is_word_boundary_accurate(tmp_path):
     from codeintel.providers.graph import _drop_referenced_symbols
 
     (tmp_path / "a.ts").write_text("function run() {}\nconst runtime = 1\nconst rerun = 2\n")
-    kept, verified = _drop_referenced_symbols([{"name": "run"}], str(tmp_path))
+    kept, state = _drop_referenced_symbols([{"name": "run"}], str(tmp_path))
 
-    assert verified is True
+    assert state == "ok"
     assert [r["name"] for r in kept] == ["run"], "substring hits must not count as references"
 
 
@@ -409,3 +411,109 @@ def test_scan_ops_hide_archived_code(tmp_path):
     assert GraphProvider._is_noise({"file_path": "studio/src/components/Editor/index.tsx"}) is False
     # .github holds live workflows, not archives.
     assert GraphProvider._is_noise({"file_path": ".github/workflows/ci.yml"}) is False
+
+
+# --------------------------------------------------------------------------- verification limits
+
+def test_two_dead_functions_sharing_a_name_do_not_hide_each_other(tmp_path):
+    """A GLOBAL occurrence count against a fixed allowance of 1 meant each definition counted as
+    the other's "use" and both vanished. The allowance must be the number of definitions."""
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "mod.py").write_text("def helper(): pass\n")
+    (tmp_path / "b" / "mod.py").write_text("def helper(): pass\n")
+
+    rows = [{"name": "helper", "file_path": "a/mod.py"}, {"name": "helper", "file_path": "b/mod.py"}]
+    kept, state = _drop_referenced_symbols(rows, str(tmp_path))
+
+    assert state == "ok"
+    assert len(kept) == 2, "same-named dead functions cancelled each other out"
+
+
+def test_generated_bundles_do_not_count_as_references(tmp_path):
+    """A 6.7MB minified `out/` bundle supplied 46 occurrences of a `toJSON` that appears zero
+    times in hand-written source — enough to hide a genuinely dead function."""
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / "out").mkdir(); (tmp_path / "node_modules").mkdir()
+    (tmp_path / "out" / "bundle.js").write_text("toJSON toJSON toJSON\n")
+    (tmp_path / "node_modules" / "dep.js").write_text("toJSON\n")
+    (tmp_path / "live.py").write_text("def toJSON(): pass\n")
+
+    kept, state = _drop_referenced_symbols([{"name": "toJSON"}], str(tmp_path))
+    assert state == "ok"
+    assert [r["name"] for r in kept] == ["toJSON"]
+
+
+def test_the_verifier_scans_live_dot_directories(tmp_path):
+    """The walk skipped every dot-directory while `_is_archived_path` counted `.github` as live —
+    so a CI helper referenced only from `.github/scripts` still read as dead."""
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / ".github" / "scripts").mkdir(parents=True)
+    (tmp_path / ".github" / "scripts" / "gen.py").write_text(
+        "def build_matrix(): pass\nbuild_matrix()\n")
+
+    kept, state = _drop_referenced_symbols([{"name": "build_matrix"}], str(tmp_path))
+    assert state == "ok"
+    assert kept == [], "a reference inside a live dot-directory was not seen"
+
+
+def test_an_archived_directory_is_not_scanned_for_references(tmp_path):
+    """Symmetry with `_is_archived_path`: retired code must not vouch for a symbol's liveness."""
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    (tmp_path / ".archive").mkdir()
+    (tmp_path / ".archive" / "old.py").write_text("dead_thing()\ndead_thing()\n")
+    (tmp_path / "live.py").write_text("def dead_thing(): pass\n")
+
+    kept, _ = _drop_referenced_symbols([{"name": "dead_thing"}], str(tmp_path))
+    assert [r["name"] for r in kept] == ["dead_thing"]
+
+
+@pytest.mark.parametrize("root,expected", [("", "no-root"), ("/no/such/dir/anywhere", "no-root")])
+def test_a_missing_project_root_is_reported_as_such_not_as_a_size_limit(root, expected):
+    """The MCP tool defaults `project_root` to "", so this is the DEFAULT call path — and the one
+    note blamed the file cap unconditionally, telling users their repo was too big when the real
+    cause was a missing argument."""
+    from codeintel.providers.graph import _drop_referenced_symbols
+
+    assert _drop_referenced_symbols([{"name": "x"}], root)[1] == expected
+
+
+def test_each_verification_outcome_has_its_own_note():
+    from codeintel.providers.graph import _VERIFY_NOTES
+
+    assert set(_VERIFY_NOTES) == {"ok", "no-root", "capped"}
+    assert "cap" in _VERIFY_NOTES["capped"] and "cap" not in _VERIFY_NOTES["no-root"]
+    assert "project_root" in _VERIFY_NOTES["no-root"]
+    # The verified note must still disclose what a name scan cannot see.
+    assert "getattr" in _VERIFY_NOTES["ok"] or "registr" in _VERIFY_NOTES["ok"]
+
+
+@pytest.mark.parametrize("path,archived", [
+    ("x/.archive/Old.tsx", True), ("app/.next/page.js", True), ("x/.backup/a.py", True),
+    (".claude/hooks/on_stop.py", False), (".storybook/preview.ts", False),
+    (".husky/lint.js", False), ("src/.internal/util.ts", False),
+    (".github/workflows/ci.yml", False), (".eslintrc.js", False),
+])
+def test_only_named_archive_directories_are_hidden(path, archived):
+    """Excluding EVERY dot-directory swept up live automation — `.claude/hooks`, `.storybook`,
+    `.husky`, `.server`, `src/.internal`. An unknown dot-directory is source until proven retired."""
+    from codeintel.providers.graph import _is_archived_path
+
+    assert _is_archived_path(path) is archived
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("A.EditorHeader.EditorHeader.EditorHeader", "A.EditorHeader"),
+    ("CHANGELOG.1.1.0-—-2026-05-11", "CHANGELOG.1.1.0-—-2026-05-11"),
+    ('__route__ANY__f"http://127.0.0.1:{}/x"', '__route__ANY__f"http://127.0.0.1:{}/x"'),
+])
+def test_collapsing_repeats_never_rewrites_a_number(label, expected):
+    """Splitting on "." also splits version numbers and dotted quads, where consecutive equal
+    parts are meaningful: `CHANGELOG.1.1.0` became `CHANGELOG.1.0` — a different real release."""
+    from codeintel.providers.graph import _collapse_repeats
+
+    assert _collapse_repeats(label) == expected

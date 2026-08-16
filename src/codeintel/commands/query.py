@@ -6,15 +6,51 @@ import time
 from typing import Any
 
 from codeintel.commands._common import never_raise, resolve_root
-from codeintel.provider import Result
+from codeintel.provider import Result, safe_null_result
 
 # How long a one-shot CLI process will wait for the LSP session to finish booting before giving up
 # and reporting whatever the gateway last said.
 _WARMING_TIMEOUT_S = 45.0
 
 
-@never_raise("No result (reason: {exc})")
 def run(args: Any) -> int:
+    """`--json` promises parseable stdout, so its failures must be JSON too.
+
+    `never_raise` prints a plain-text line on stdout, which under `--json` hands a `| jq` consumer
+    a parse error alongside exit 0 — the worst combination, since the pipeline reports success.
+    Route the two output modes to their own never-raise handlers instead of sharing one."""
+    if getattr(args, "json", False):
+        return _run_json(args)
+    return _run_text(args)
+
+
+def _run_json(args: Any) -> int:
+    try:
+        result = _query(args)
+    except Exception as exc:
+        # A safe-null envelope, the same shape every other failure produces — stdout stays valid
+        # JSON whatever went wrong.
+        result = safe_null_result(str(getattr(args, "op", "") or ""),
+                                  str(getattr(args, "target", "") or ""), reason=str(exc))
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+@never_raise("No result (reason: {exc})")
+def _run_text(args: Any) -> int:
+    result = _query(args)
+    value = result.get("result")
+    if value is not None:
+        print(value)
+    else:
+        print(f"No result (reason: {result.get('reason', 'unknown')})")
+        hint = result.get("hint")
+        if hint:
+            print(f"  hint: {hint}", file=sys.stderr)
+    return 0
+
+
+def _query(args: Any) -> Result:
     from codeintel import server
 
     project_root = resolve_root(args)
@@ -45,20 +81,4 @@ def run(args: Any) -> int:
             if result.get("result") is not None or result.get("reason") != "warming":
                 break
 
-    if getattr(args, "json", False):
-        # The whole envelope, exactly as an agent host receives it. Without this the CLI showed
-        # only `result` (or the reason), so `engine`, `cached` and `reindexing` were unreachable —
-        # and those are precisely the fields that explain WHY an answer looks wrong, which is what
-        # a bug report about a wrong answer needs. The README asked for them before this existed.
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-
-    value = result.get("result")
-    if value is not None:
-        print(value)
-    else:
-        print(f"No result (reason: {result.get('reason', 'unknown')})")
-        hint = result.get("hint")
-        if hint:
-            print(f"  hint: {hint}", file=sys.stderr)
-    return 0
+    return result

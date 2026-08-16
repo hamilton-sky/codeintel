@@ -840,3 +840,18 @@ def test_query_without_json_still_prints_only_the_answer(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.strip() == "## Callers"
     assert "engine" not in out
+
+
+def test_query_json_stays_parseable_when_the_query_itself_fails(monkeypatch, capsys):
+    """`--json` promises parseable stdout. The shared never-raise handler printed a plain-text
+    line there, handing a `| jq` consumer a parse error alongside exit 0 — the worst combination,
+    because the pipeline reports success."""
+    import json as _json
+
+    monkeypatch.setattr("codeintel.server._build_gateway",
+                        lambda: (_ for _ in ()).throw(RuntimeError("backend exploded")))
+
+    assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 0
+    payload = _json.loads(capsys.readouterr().out)      # must not raise
+    assert payload["result"] is None
+    assert "backend exploded" in payload["reason"]
