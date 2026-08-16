@@ -399,3 +399,36 @@ def test_utf8_source_with_unusual_characters_is_still_indexed(tmp_path):
     finally:
         db.close()
     assert names == ["unicode.py"]
+
+
+@pytest.mark.parametrize("text,indexed", [
+    ("---\n", False), ("#\n", False), ("   \n", False), ("}\n===\n", False),
+    ("x = 1\n", True), ("def f(): return 1\n", True), ("# TODO fix\n", True),
+])
+def test_only_chunks_with_word_content_are_embedded(text, indexed):
+    """A chunk of separators or punctuation embeds to a vector that matches everything weakly and
+    so surfaces for any query — a `---` front-matter fence was the top hit for a real search. The
+    test is deliberately the weakest possible one: anything stricter rejects real one-line code."""
+    from codeintel.indexer import _has_substance
+
+    assert _has_substance(text) is indexed
+
+
+@pytest.mark.parametrize("directory", ["out", "vendor", "third_party", ".archive", "_archive"])
+def test_generated_and_retired_trees_are_not_indexed(directory, tmp_path):
+    """Graph scans excluded these; the semantic indexer did not, so archived docs and build output
+    competed with live code for every search hit."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    (tmp_path / directory).mkdir()
+    (tmp_path / directory / "old.py").write_text("def retired(): pass\n")
+    (tmp_path / "live.py").write_text("def current(): pass\n")
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        names = sorted(f.name for f in Indexer(db)._walk_files(tmp_path))
+    finally:
+        db.close()
+    assert names == ["live.py"]

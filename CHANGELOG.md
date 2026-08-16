@@ -4,6 +4,33 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] — 2026-08-16
+
+Found by pointing the tool at two more unfamiliar repositories.
+
+### Fixed
+- **Answers could come from a different repository, reported as ready.** Project resolution falls
+  back to the nearest indexed *ancestor* — correct for a subdirectory of an indexed repo, wrong
+  for a repo that merely sits inside one. Asking about `~/projects/my-app` when only `~/projects`
+  was indexed said "3/3 engines ready" and then answered from a graph spanning every repo on the
+  machine. `doctor` now states plainly that the repo is not indexed on its own, names the project
+  the answers would come from, and gives the command to index it properly.
+- **Generated output ranked as the top thing to refactor.** A checked-in minified bundle took the
+  first *two* hotspot slots on a real repo (cx:586, cog:1145) — a webpack chunk is by far the most
+  "complex" function in any tree containing one. Only dot-directories were excluded, so a plain
+  `out/`, `dist/` or `vendor/` sailed through. Graph scans and the source verifier now share one
+  definition of "not hand-written source".
+- **Semantic search ranked archived prose above live code.** The indexer excluded neither retired
+  trees nor build output, so a search for "websocket reconnect logic" returned an archived
+  markdown file's blank line first and the actual implementation second.
+- **Chunks made only of punctuation were embedded**, and such a vector matches everything weakly,
+  so it surfaces for anything: a `---` front-matter fence was the top hit for a real query. A
+  chunk now needs at least one letter. The test is deliberately the weakest possible one —
+  anything stricter starts rejecting real one-line code.
+- **Result previews showed the chunk's first line whatever it was**, rendering hits as
+  `path:line | ---`, which the reader cannot judge without opening the file. The preview now picks
+  the first line that says something.
+
 ## [0.15.0] — 2026-08-16
 
 Everything here came from pointing 0.14.2 at two repositories it had never seen. Three adversarial

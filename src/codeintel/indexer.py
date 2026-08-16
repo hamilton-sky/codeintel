@@ -33,6 +33,13 @@ _SKIP_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
 _DEFAULT_IGNORES = frozenset({
     ".venv", "venv", "env", "dist", "build", "target",
     ".mypy_cache", ".pytest_cache", ".tox", ".idea", ".vscode", ".cache",
+    # Generated output and retired trees. Without these a search for "websocket reconnect logic"
+    # on a real repo returned an ARCHIVED markdown file's blank line as the top hit and the actual
+    # implementation second: the corpus, not the ranking, was the problem.
+    "out", "vendor", "vendored", "third_party", "thirdparty", "site-packages", "coverage",
+    "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
+    ".archive", ".archived", "_archive", "_archived", ".backup", ".backups", ".old",
+    ".deprecated", ".trash",
 })
 
 
@@ -110,6 +117,17 @@ def _ts_decl_is_function(node) -> bool:
                 gc.type in _TS_FUNC_VALUE_TYPES for gc in child.children):
             return True
     return False
+
+
+def _has_substance(text: str) -> bool:
+    """Whether *text* carries any word content at all.
+
+    Deliberately the weakest possible test — a single letter passes. The target is chunks made
+    only of separators and punctuation (`---`, `===`, a bare `#`, a lone brace), which embed to a
+    vector that matches everything weakly and so surface for any query; a `---` front-matter fence
+    was the top hit for a real search. Anything stricter starts rejecting real one-line code:
+    `x = 1` has two word characters and belongs in the index."""
+    return any(ch.isalpha() for ch in text)
 
 
 def _looks_binary(path) -> bool:
@@ -518,6 +536,14 @@ class Indexer:
             if not chunk_lines:
                 continue
             chunk_text = "".join(chunk_lines)
+            if not _has_substance(chunk_text):
+                # A chunk of separators, punctuation or a lone `#` embeds to a vector that matches
+                # everything weakly and therefore surfaces for anything. `---` from a markdown
+                # front-matter fence was the top hit for a real query. Whitespace was already
+                # rejected below; this rejects content that is technically non-empty but carries
+                # no retrievable meaning.
+                chunk_count += 1
+                continue
             # Cap chunk BYTES, not just lines. `_maybe_split` splits on line boundaries, so a
             # minified bundle or a generated one-liner is a single unsplittable chunk however
             # large: a 20MB one-line .py peaked at 3.4GB RSS through the embedder, and a 40MB

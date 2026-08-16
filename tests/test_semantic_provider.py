@@ -5,6 +5,7 @@ import hashlib
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from codeintel.indexer import Indexer
 from codeintel.providers.semantic import SemanticProvider
@@ -197,3 +198,18 @@ def test_provider_never_raises(tmp_path, monkeypatch):
 
     assert isinstance(result, dict)
     assert result.get("ok") is True
+
+
+@pytest.mark.parametrize("snippet,expected", [
+    ("---\n\nconnect(wsUrl, token)\n", "connect(wsUrl, token)"),
+    ("\n\n  def handler():\n", "def handler():"),
+    ("#\n===\nreal content here\n", "real content here"),
+    ("first line wins\nsecond\n", "first line wins"),
+])
+def test_a_result_preview_shows_a_line_worth_reading(snippet, expected):
+    """The preview used line one unconditionally, so a hit whose chunk opened with a blank line or
+    a `---` fence rendered as `path:line | ---` — a result the reader cannot judge without opening
+    the file, which is the one thing this output exists to avoid."""
+    from codeintel.providers.semantic import _first_meaningful_line
+
+    assert _first_meaningful_line(snippet) == expected

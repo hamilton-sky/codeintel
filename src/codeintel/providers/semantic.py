@@ -13,6 +13,19 @@ except ImportError:
     _DEPS_OK = False
 
 
+def _first_meaningful_line(snippet: str) -> str:
+    """The first line of *snippet* that says something.
+
+    The preview used line one unconditionally, so a hit whose chunk opened with a blank line, a
+    `---` fence or a bare `#` rendered as `path:line | ---` — a result the reader cannot judge
+    without opening the file, which is the one thing this output exists to avoid."""
+    for line in snippet.splitlines():
+        stripped = line.strip()
+        if stripped and any(ch.isalnum() for ch in stripped):
+            return stripped
+    return snippet.strip().splitlines()[0] if snippet.strip() else ""
+
+
 class SemanticProvider:
     """Real semantic search provider backed by SemanticDb and Searcher."""
 
@@ -142,11 +155,8 @@ class SemanticProvider:
             if not matches:
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")
 
-            lines = [
-                f"{m['path']}:{m['line']} | "
-                f"{m['snippet'].splitlines()[0] if m['snippet'].splitlines() else m['snippet']}"
-                for m in matches
-            ]
+            lines = [f"{m['path']}:{m['line']} | {_first_meaningful_line(m['snippet'])}"
+                     for m in matches]
             result: Result = {
                 "ok": True,
                 "op": op,

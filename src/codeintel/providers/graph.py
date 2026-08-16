@@ -144,15 +144,21 @@ _ARCHIVE_DIRS = frozenset({
 
 
 def _is_archived_path(file_path: str) -> bool:
-    """Whether *file_path* lives under a retired or generated directory.
+    """Whether *file_path* lives under a retired, vendored or generated directory.
 
     A repo-scan op ranks by complexity and fan-in, and archived code scores well on both — an
     8MB `.archive/` tree put a retired 507-line component third in a repo's refactor hotspots, a
     near-duplicate of the live one. Pointing an agent at dead code as the thing most worth
     refactoring is worse than returning nothing.
+
+    Generated output is the same problem and worse: a checked-in minified bundle took the top TWO
+    hotspot slots on a real repo with cx:586 / cog:1145, because a webpack chunk is by far the
+    most "complex" function in any tree that contains one. The first version excluded only
+    dot-directories, so a plain `out/`, `dist/` or `vendor/` sailed through. Shares the skip list
+    with the source verifier — the definition of "not hand-written source" is one thing, not two.
     """
-    parts = file_path.replace("\\", "/").split("/")
-    return any(p.lower() in _ARCHIVE_DIRS for p in parts[:-1])
+    parts = [p.lower() for p in file_path.replace("\\", "/").split("/")[:-1]]
+    return any(p in _ARCHIVE_DIRS or p in _VERIFY_SKIP_DIRS for p in parts)
 
 
 # What the source-verification pass can and cannot claim, stated per outcome. The single old note
@@ -407,11 +413,35 @@ class GraphProvider:
                 "detail": "backend OK but this repo is not indexed in the graph",
                 "remediation": f"codeintel index {project_root}",
             }
+        # Resolution falls back to the nearest indexed ANCESTOR, which is right for a subdirectory
+        # of an indexed repo and badly wrong for a repo that merely sits inside one. Asking about
+        # `~/projects/my-app` when only `~/projects` is indexed reported "ready" and then answered
+        # from a graph spanning every repo on the machine — the top two refactor hotspots for one
+        # project came from another project's build output. Ready, but not for what was asked.
+        matched_root = self._project_root_of(raw, project)
+        if matched_root and os.path.realpath(matched_root) != os.path.realpath(project_root):
+            return {
+                "installed": True, "runnable": True, "repo_indexed": True, "project": project,
+                "detail": (f"this repo is NOT indexed on its own — answers would come from "
+                           f"'{project}' ({matched_root}), which contains it"),
+                "remediation": f"codeintel index {project_root}",
+            }
         return {
             "installed": True, "runnable": True, "repo_indexed": True, "project": project,
             "detail": f"resolved project '{project}' in codebase-memory-mcp",
             "remediation": None,
         }
+
+    @staticmethod
+    def _project_root_of(raw: Any, name: str | None) -> str | None:
+        """The ``root_path`` a list_projects response records for *name*."""
+        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
+        if not isinstance(entries, list) or not name:
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                return str(entry.get("root_path") or "") or None
+        return None
 
     # ------------------------------------------------------------------ helpers
 

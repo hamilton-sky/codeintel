@@ -517,3 +517,55 @@ def test_collapsing_repeats_never_rewrites_a_number(label, expected):
     from codeintel.providers.graph import _collapse_repeats
 
     assert _collapse_repeats(label) == expected
+
+
+@pytest.mark.parametrize("path,excluded", [
+    ("studio/out/renderer/assets/index-D4C.js", True),
+    ("app/dist/bundle.js", True),
+    ("vendor/lib/x.go", True),
+    ("third_party/dep/mod.py", True),
+    ("src/output/handler.py", False),      # "output" is not "out"
+    ("src/components/Editor/index.tsx", False),
+])
+def test_generated_output_is_not_a_refactor_target(path, excluded):
+    """A checked-in minified bundle took the top TWO hotspot slots on a real repo (cx:586,
+    cog:1145) — a webpack chunk is by far the most "complex" function in any tree containing one.
+    The first version excluded only dot-directories, so a plain `out/` or `dist/` sailed through."""
+    from codeintel.providers.graph import _is_archived_path
+
+    assert _is_archived_path(path) is excluded
+
+
+def test_probe_discloses_when_the_index_belongs_to_a_containing_project(monkeypatch, tmp_path):
+    """Resolution falls back to the nearest indexed ANCESTOR — right for a subdirectory of an
+    indexed repo, badly wrong for a repo that merely sits inside one. Asking about
+    `~/projects/my-app` when only `~/projects` is indexed reported "ready", then answered from a
+    graph spanning every repo on the machine."""
+    from codeintel.providers.graph import GraphProvider
+
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                        # type: ignore[attr-defined]
+    inner = tmp_path / "my-app"
+    inner.mkdir()
+    monkeypatch.setattr(gp, "_run", lambda *a, **k: {"projects": [
+        {"name": "umbrella", "root_path": str(tmp_path), "nodes": 50000}]})
+
+    probe = gp.probe(str(inner))
+
+    assert probe["repo_indexed"] is True                        # an index exists...
+    assert "NOT indexed on its own" in probe["detail"]          # ...but not for what was asked
+    assert probe["remediation"] == f"codeintel index {inner}"
+
+
+def test_probe_stays_quiet_when_the_project_root_matches(monkeypatch, tmp_path):
+    """The disclosure must be rare enough to mean something — a normal indexed repo says nothing."""
+    from codeintel.providers.graph import GraphProvider
+
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                        # type: ignore[attr-defined]
+    monkeypatch.setattr(gp, "_run", lambda *a, **k: {"projects": [
+        {"name": "my-app", "root_path": str(tmp_path), "nodes": 100}]})
+
+    probe = gp.probe(str(tmp_path))
+    assert "NOT indexed" not in probe["detail"]
+    assert probe["remediation"] is None
