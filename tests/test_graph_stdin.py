@@ -7,6 +7,7 @@ silently drift, plus a live test against the real backend.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -93,7 +94,7 @@ def test_reindexer_graph_reindex_routes_through_stdin(monkeypatch):
     # reports uncommitted drift and never refreshes the graph — so it locked in a reindex that
     # reindexed nothing.
     assert argv[:3] == ["/fake/codebase-memory-mcp", "cli", "index_repository"]
-    assert inp == b'{"project_root": "/some/repo"}'   # stdin, not a positional raw-JSON arg
+    assert inp == b'{"repo_path": "/some/repo"}'      # stdin, not a positional raw-JSON arg
 
 
 @pytest.mark.skipif(
@@ -105,3 +106,30 @@ def test_live_stdin_list_projects():
     p = GraphProvider()
     raw = p._run_stdin("list_projects", "{}", 3000)
     assert isinstance(raw, dict) and "projects" in raw
+
+
+@pytest.mark.skipif(
+    shutil.which("codebase-memory-mcp") is None, reason="codebase-memory-mcp backend not installed"
+)
+def test_live_reindex_argument_name_is_the_one_the_backend_accepts(tmp_path):
+    """The test the mocked one above cannot be: does the REAL backend accept our payload?
+
+    Every unit test here asserts we send what we *intended* to send, which is worthless when the
+    intent is wrong — and it was, twice. `detect_changes`/`project_root` silently errored for
+    months; the replacement `index_repository`/`project_root` shipped in 0.13.1 and still failed,
+    because the parameter is `repo_path`. The backend answers a wrong name with "Indexing worker
+    crashed on a file", so the error text actively points away from the cause.
+
+    This asks the backend directly, against a one-file repo so it stays fast.
+    """
+    (tmp_path / "sample.py").write_text("def f():\n    return 1\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+
+    from codeintel.reindexer import Reindexer
+    Reindexer()._graph_reindex(str(tmp_path))
+
+    # The reindex must have registered the repo — proof the payload was accepted, not just sent.
+    raw = GraphProvider()._run_stdin("list_projects", "{}", 5000)
+    roots = {p.get("root_path") for p in raw.get("projects", []) if isinstance(p, dict)}
+    assert str(tmp_path.resolve()) in {os.path.realpath(r) for r in roots if r}, (
+        "the backend did not register the repo — the reindex payload was rejected")

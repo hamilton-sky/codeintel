@@ -159,7 +159,9 @@ def test_graph_reindex_calls_the_tool_that_actually_reindexes(monkeypatch):
     Reindexer()._graph_reindex("/repo")
 
     assert [c[0] for c in fake.calls] == ["index_repository"]
-    assert fake.calls[0][1] == {"project_root": "/repo"}
+    # `repo_path` is the backend's actual parameter name. A mock cannot tell you that — this
+    # assertion is only as good as the live check in test_graph_stdin.py that pins it.
+    assert fake.calls[0][1] == {"repo_path": "/repo"}
     assert fake.calls[0][2] >= 120_000          # indexing a real repo outlasts a query budget
 
 

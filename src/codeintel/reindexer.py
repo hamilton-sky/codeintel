@@ -137,7 +137,12 @@ class Reindexer:
             gp = GraphProvider()
             if not gp.available:
                 return
-            result = gp._run("index_repository", {"project_root": project_root}, 300_000)
+            # `repo_path`, NOT `project_root`. The backend answers a wrong argument name with
+            # "Indexing worker crashed on a file", which reads like a parser bug in some source
+            # file and sent an earlier fix looking in the wrong place entirely; only the worker
+            # log says `repo_path is required`. Verified against the real backend, not a mock —
+            # a stub will happily confirm whichever name you assumed.
+            result = gp._run("index_repository", {"repo_path": project_root}, 300_000)
             # Surface a backend-reported failure. Swallowing it is what let a broken reindex look
             # exactly like a working one for as long as nobody compared the graph to the source.
             if isinstance(result, dict) and result.get("status") == "error":

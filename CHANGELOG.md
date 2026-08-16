@@ -4,6 +4,23 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] — 2026-08-16
+
+**0.13.1's reindex fix was itself wrong.** Upgrade over it.
+
+### Fixed
+- **The background graph reindex passed `project_root` where the backend wants `repo_path`**, so
+  it still refreshed nothing. 0.13.1 correctly swapped `detect_changes` (which only reports
+  uncommitted drift) for `index_repository`, but kept the argument name from the old call. The
+  backend answers a wrong parameter name with `Indexing worker crashed on a file` — which reads
+  like a parser bug in some source file and points away from the cause; only the worker log says
+  `repo_path is required`.
+- The unit tests could not catch either mistake, because they assert what codeintel *intends* to
+  send, which is worthless when the intent is wrong. Added a live test that runs a real reindex
+  against the real backend and asserts the repo actually got registered — verified to fail on the
+  0.13.1 payload and pass on this one. It skips when the backend is absent, as the other live
+  graph tests do.
+
 ## [0.13.1] — 2026-08-16
 
 A patch release for one class of bug, found by pointing codeintel at its own source and not
