@@ -350,7 +350,7 @@ class GraphProvider:
         the row format and truncation note (the drift-prone parts) and differ only in their metrics."""
         lines = []
         for r in kept[:cap]:
-            label = str(r.get("qualified_name") or r.get("name") or "?")
+            label = _strip_project_prefix(str(r.get("qualified_name") or r.get("name") or "?"))
             fp = str(r.get("file_path") or "")
             meta = meta_fn(r)
             badge = f"  [{', '.join(meta)}]" if meta else ""

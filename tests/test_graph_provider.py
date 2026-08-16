@@ -330,3 +330,21 @@ def test_stripping_never_eats_a_real_module_path():
 
     for qn in ("src.codeintel.gateway.query", "codeintel.server.run", "main", "", "pkg.mod"):
         assert _strip_project_prefix(qn) == qn
+
+
+def test_every_renderer_strips_the_project_prefix_not_just_one():
+    """The first fix touched `_display` (callers/callees) and missed `_render_scan`, which renders
+    hotspots/deadcode — so the noisiest, longest results kept the full home path on every row.
+    Found by pointing the tool at a repo neither the author nor the reviewers had seen."""
+    import inspect
+    import re
+
+    from codeintel.providers.graph import GraphProvider
+
+    for fn in (GraphProvider._display, GraphProvider._render_scan):
+        source = inspect.getsource(fn)
+        # Any qualified_name read must pass through the stripper before becoming a label.
+        for line in source.splitlines():
+            if re.search(r"qualified_name|qn_key", line) and "=" in line and "def " not in line:
+                assert "_strip_project_prefix" in line, (
+                    f"{fn.__name__} renders a raw qualified name: {line.strip()}")
