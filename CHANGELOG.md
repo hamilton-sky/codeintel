@@ -4,7 +4,13 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.1] — 2026-08-16
+
+A patch release for one class of bug, found by pointing codeintel at its own source and not
+believing the answer: **the graph engine reported code as it had been hours earlier, with nothing
+to indicate the reading was old.** Three separate defects had to line up for that, and each on its
+own was survivable — together they made staleness invisible. If you use `callers`, `impact`,
+`hotspots` or `map`, upgrade; those are the answers that were wrong.
 
 ### Fixed
 - **The graph engine could answer from a stale index while a complete one sat beside it.** The
