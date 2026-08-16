@@ -5,6 +5,29 @@ on:
   pull_request:
 
 jobs:
+  # Fast static gate. Split from `test` so a lint or typing regression is one obvious red check
+  # rather than a failure buried in a matrix leg, and so it reports in seconds.
+  lint:
+    name: Lint + types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      - name: ruff
+        run: ruff check src tests
+
+      # Checks src/ only: the config is deliberately not --strict, because the provider seams
+      # cross into untyped backends where demanding annotations buys noise rather than safety.
+      - name: mypy
+        run: mypy
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -25,6 +48,7 @@ jobs:
 
       # The live graph/LSP tests skip when their backends (codebase-memory-mcp, uvx/serena) are
       # absent, so CI stays green without them; everything else runs against real seams/fixtures.
+      # The coverage floor lives in pyproject's addopts, so it applies identically here and locally.
       - name: Run tests
         run: pytest tests/ -q
 

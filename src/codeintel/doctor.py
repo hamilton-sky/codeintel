@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 _ENGINES = ("graph", "lsp", "semantic")
 _VERSION_TIMEOUT_S = 2.0
@@ -41,7 +42,7 @@ def _probe_engine(
     provider: Any,
     build: Callable[[], Any],
     call: Callable[[Any], dict],
-    on_provider: Optional[Callable[[str, Any], Any]] = None,
+    on_provider: Callable[[str, Any], Any] | None = None,
 ) -> dict:
     """Run one engine's probe, never raising. Uses the passed-in (live) provider when given,
     else builds an ephemeral one.
@@ -72,7 +73,7 @@ def _probe_engine(
     return r
 
 
-def _cmd_version(argv: list) -> Optional[str]:
+def _cmd_version(argv: list) -> str | None:
     """Version number from ``<cmd> --version``. Never raises; hard-bounded; None if absent.
 
     Extracts just the numeric token — these tools each print their own banner
@@ -96,7 +97,7 @@ def _cmd_version(argv: list) -> Optional[str]:
     return None
 
 
-def _dist_version(name: str) -> Optional[str]:
+def _dist_version(name: str) -> str | None:
     """Installed distribution version — metadata only, never imports the package."""
     try:
         import importlib.metadata as md
@@ -112,7 +113,7 @@ def collect_versions(engines: dict) -> dict:
     shells out to third-party binaries — "works on my machine" is unanswerable without knowing
     which serena or which graph backend the user has. Probed CONCURRENTLY and only for engines
     that reported installed, so the shallow doctor stays ~1 subprocess-round deep."""
-    versions: dict[str, Optional[str]] = {}
+    versions: dict[str, str | None] = {}
     try:
         from codeintel import __version__
         versions["codeintel"] = __version__
@@ -123,7 +124,7 @@ def collect_versions(engines: dict) -> dict:
         e = engines.get(name)
         return isinstance(e, dict) and e.get("installed") is True
 
-    jobs: dict[str, Callable[[], Optional[str]]] = {}
+    jobs: dict[str, Callable[[], str | None]] = {}
     if _installed("graph"):
         jobs["codebase-memory-mcp"] = lambda: _cmd_version(["codebase-memory-mcp", "--version"])
     if _installed("lsp"):
@@ -202,7 +203,7 @@ def run_doctor(
     lsp: Any = None,
     semantic: Any = None,
     lsp_deep_timeout_s: float = 20.0,
-    on_provider: Optional[Callable[[str, Any], Any]] = None,
+    on_provider: Callable[[str, Any], Any] | None = None,
 ) -> dict:
     """Diagnose all three engines for ``project_root``. Never raises; bounded (~3s shallow).
 

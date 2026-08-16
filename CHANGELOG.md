@@ -6,6 +6,12 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **The wheel now ships `py.typed`.** The package has advertised the `Typing :: Typed` classifier
+  since it was first published, but without the PEP 561 marker a type checker ignores an installed
+  package's annotations entirely — so every downstream user got `Any` from a fully annotated
+  library. Verified against the built wheel, not just the source tree.
+
 ### Changed
 - **`codeintel install` degrades with a message instead of a traceback.** It was the last
   subcommand where an unexpected failure — an unresolvable home directory, an unreadable agent
@@ -20,6 +26,17 @@ All notable changes to codeintel are documented here. The format is based on
   query's LSP warming poll were previously reachable only by driving argv through a subprocess.
   Dispatch imports the command module lazily, so `codeintel serve` still does not pay for the
   semantic engine's imports — an invariant now enforced by a test.
+- **ruff, mypy, and a coverage floor gate CI.** The toolchain had no linter and no type checker at
+  all. Both now run as their own fast CI job, and the suite fails under 83% coverage. The rulesets
+  are configured to respect the never-raise architecture rather than fight it: `S110`, `S112`, and
+  `SIM105` are off, because the ~190 blanket-except and best-effort-`pass` blocks they flag are the
+  design, and each carries its reason as a comment that `contextlib.suppress` has nowhere to keep.
+  mypy is deliberately not `--strict` for the same reason — the provider seams cross into untyped
+  backends.
+- **Type and lint fixes surfaced by adopting them**, including two stale `type: ignore` codes,
+  four unguarded `None` dereferences (`Popen.stdin`, two `dict.items()` on possibly-absent auth
+  config sections, one `body_location`), and two paths that would have passed `None` into a
+  `subprocess` argv when the graph backend was off PATH.
 
 ## [0.12.1] — 2026-08-16
 

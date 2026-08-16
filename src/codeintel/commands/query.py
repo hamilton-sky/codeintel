@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from codeintel.commands._common import never_raise, resolve_root
+from codeintel.provider import Result
 
 # How long a one-shot CLI process will wait for the LSP session to finish booting before giving up
 # and reporting whatever the gateway last said.
@@ -19,7 +20,7 @@ def run(args: Any) -> int:
     engine = args.engine if args.engine != "auto" else None
     gw = server._build_gateway()
 
-    def _run_query() -> dict:
+    def _run_query() -> Result:
         return gw.query(
             op=args.op,
             target=args.target,

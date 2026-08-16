@@ -4,7 +4,6 @@ import json
 import os
 import pathlib
 import shutil
-from typing import Optional
 
 _AGENTS = ["claude", "codex", "gemini", "zed"]
 
@@ -114,7 +113,7 @@ def launch_block_toml(command: str) -> str:
             f"args = {json.dumps(_ARGS)}\n")
 
 
-def registered_command(spec: dict) -> tuple[str, Optional[str]]:
+def registered_command(spec: dict) -> tuple[str, str | None]:
     """The launch command currently in an agent's config, or ``(path, None)`` if not registered.
 
     Read-only — this is what `codeintel doctor` uses to notice that a registered absolute path has
@@ -178,7 +177,7 @@ def resolve_config_path(spec: dict) -> pathlib.Path:
     return _resolve_home(spec) / spec["file"]
 
 
-def _replace_toml_table(text: str, header: str, block: str) -> Optional[str]:
+def _replace_toml_table(text: str, header: str, block: str) -> str | None:
     """Swap ONLY the ``header`` table for ``block``, leaving every other byte of the file alone.
 
     Needed because a stale absolute command (an upgrade moved the binary) must be repairable by
@@ -254,7 +253,7 @@ class Installer:
         return res
 
     @staticmethod
-    def verify(*, timeout_s: float = 45.0, command: Optional[str] = None) -> dict:
+    def verify(*, timeout_s: float = 45.0, command: str | None = None) -> dict:
         """Launch the registered command and complete an MCP handshake. Never raises.
 
         Takes the command actually written to the config so verification proves THAT argv, not a
@@ -269,7 +268,7 @@ class Installer:
                     "detail": f"verification unavailable ({type(exc).__name__})"}
 
     @staticmethod
-    def _legacy_note(spec: dict) -> Optional[str]:
+    def _legacy_note(spec: dict) -> str | None:
         """Path to a stale registration an older codeintel wrote into a file the host ignores.
         Read-only — never deleted automatically, since it lives in a user-owned config."""
         legacy = spec.get("legacy")

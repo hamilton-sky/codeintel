@@ -25,7 +25,6 @@ import logging
 import os
 import pathlib
 import tomllib  # stdlib on Python 3.11+ (the project's minimum)
-from typing import Dict, List, Optional
 
 from codeintel.policy import TieringPolicy
 
@@ -39,7 +38,7 @@ class TokenAuth:
     """Resolves a bearer token to a role and builds the matching op policy. Tokens are held as
     sha256 hashes; a presented token is hashed and looked up in O(1). Immutable; thread-safe."""
 
-    def __init__(self, token_hash_to_role: Dict[str, str], role_ops: Dict[str, List[str]]) -> None:
+    def __init__(self, token_hash_to_role: dict[str, str], role_ops: dict[str, list[str]]) -> None:
         self._tokens = token_hash_to_role
         self._role_ops = role_ops
 
@@ -47,7 +46,7 @@ class TokenAuth:
     def enabled(self) -> bool:
         return bool(self._tokens)
 
-    def role_for(self, presented_token: str) -> Optional[str]:
+    def role_for(self, presented_token: str) -> str | None:
         """The role for a presented token, or None if it isn't a known token."""
         if not presented_token:
             return None
@@ -58,7 +57,7 @@ class TokenAuth:
         """A role with ops ``["*"]`` (or none) is unrestricted → omit it from the rules, since
         TieringPolicy treats a role absent from its rules as full-access. Every other role maps to
         its explicit op allowlist (an empty list = deny all ops, a fail-safe default)."""
-        rules: Dict[str, List[str]] = {}
+        rules: dict[str, list[str]] = {}
         for role, ops in self._role_ops.items():
             if _ALL in ops:
                 continue  # unrestricted
@@ -66,7 +65,7 @@ class TokenAuth:
         return TieringPolicy(enabled=bool(rules), rules=rules)
 
 
-def _auth_config_path() -> Optional[pathlib.Path]:
+def _auth_config_path() -> pathlib.Path | None:
     env = os.environ.get("CODEINTEL_AUTH_CONFIG", "").strip()
     if env:
         p = pathlib.Path(env)
@@ -88,8 +87,9 @@ def load_auth() -> TokenAuth:
         logger.warning("auth: %s could not be parsed (%s) — RBAC is OFF", path, type(exc).__name__)
         return TokenAuth({}, {})
 
-    raw_roles = data.get("roles") if isinstance(data.get("roles"), dict) else {}
-    role_ops: Dict[str, List[str]] = {}
+    roles_section = data.get("roles")
+    raw_roles: dict = roles_section if isinstance(roles_section, dict) else {}
+    role_ops: dict[str, list[str]] = {}
     for role, ops in raw_roles.items():
         if isinstance(ops, list):
             role_ops[str(role)] = [str(o) for o in ops]
@@ -99,8 +99,9 @@ def load_auth() -> TokenAuth:
             logger.warning("auth: role %r ops must be a list (got %r) — denying all ops for it", role, ops)
             role_ops[str(role)] = []
 
-    raw_tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
-    token_hash_to_role: Dict[str, str] = {}
+    tokens_section = data.get("tokens")
+    raw_tokens: dict = tokens_section if isinstance(tokens_section, dict) else {}
+    token_hash_to_role: dict[str, str] = {}
     for tok, role in raw_tokens.items():
         role = str(role)
         # A token mapped to an undefined role fails safe: define it as deny-all (empty op list).

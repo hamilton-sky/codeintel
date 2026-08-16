@@ -35,7 +35,7 @@ def _pos_int(val: object, default: int) -> int:
     """A usable positive int or the default — guards the public Searcher.search against a caller
     passing a non-int/zero/negative k or rerank_candidates (mirrors indexer._pos_int)."""
     try:
-        n = int(val)  # type: ignore[arg-type]
+        n = int(val)  # type: ignore[call-overload]
     except (TypeError, ValueError, OverflowError):
         return default
     return n if n > 0 else default

@@ -48,7 +48,7 @@ Changelog = "https://github.com/hamilton-sky/codeintel/blob/main/CHANGELOG.md"
 codeintel = "codeintel.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "numpy>=1.24"]
+dev = ["pytest>=8", "pytest-cov>=5", "numpy>=1.24", "ruff>=0.16", "mypy>=1.11"]
 
 # Single source of truth for the version: read from codeintel.__version__ (AST-parsed, no import).
 [tool.setuptools.dynamic]
@@ -57,6 +57,83 @@ version = { attr = "codeintel.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Ship the self-contained interactive graph viewer template with the wheel.
+# Ship the self-contained interactive graph viewer template with the wheel, and the PEP 561 marker
+# without which the `Typing :: Typed` classifier is a promise the installed package cannot keep —
+# type checkers ignore an installed package's annotations entirely unless py.typed is present.
 [tool.setuptools.package-data]
 "codeintel.viewer" = ["*.html"]
+"codeintel" = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "UP",       # pyupgrade — this is a >=3.11 package, so modern syntax is always available
+    "B",        # bugbear
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "PIE", "PERF", "RUF",
+    "S",        # bandit — the HTTP transport is a real network surface
+]
+ignore = [
+    # The never-raise contract IS the architecture: providers and handlers degrade to a `reason`
+    # string rather than propagate, and the best-effort refresh paths (graph reindex, map rewrite)
+    # are deliberately allowed to fail silently. These three rules flag that design at ~190 sites,
+    # so enforcing them would mean 190 `noqa`s asserting the same thing the module docstrings say.
+    "S110",     # try-except-pass
+    "S112",     # try-except-continue
+    "SIM105",   # "use contextlib.suppress" — see below
+    "S603",     # subprocess call — every one is an explicit argv list, never a shell string
+]
+# On SIM105 specifically: the suppressed blocks carry their reason on the `pass` line itself
+# (`pass  # code_embeddings is created lazily at first embed — may not exist yet`), and
+# contextlib.suppress has nowhere to put that. Losing 13 such explanations to gain a context
+# manager is a bad trade in code whose whole contract is degrading quietly.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests stand up fake servers on loopback, assert on hardcoded fixture tokens, and shell out to
+# the CLI under test. Flagging that as a security finding is noise.
+"tests/*" = [
+    "S101", "S104", "S105", "S106", "S108", "S404", "S607",
+    "S310",     # urlopen against the loopback test server this same test just started
+    "E402",     # a few modules import after a skip guard, so a missing backend skips, not errors
+    "E501",     # fixture payloads (graph JSON, serena responses) are copied verbatim; rewrapping
+                # them would make them stop matching what the real backend returns
+    "E702",     # `a = 1; b = 2` setup one-liners
+    "SIM115",   # ad-hoc open() in assertions, inside tmp_path — nothing to leak
+    "UP031",    # %-format is the readable choice for templating source into a fake server
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/codeintel"]
+# Deliberately not --strict: the provider seams cross into untyped third-party backends (mcp,
+# fastembed, sqlite-vec, tree-sitter), where demanding annotations buys noise rather than safety.
+# These flags catch the errors that actually bite — unreachable branches, bad returns, silent Any
+# propagation out of our own typed code.
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+warn_no_return = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Don't type-check the backends themselves, and don't follow into them: `python_version = "3.11"`
+# makes mypy parse their stubs under 3.11 syntax rules, and numpy's (reached transitively through
+# fastembed) use 3.12 `type` statements — an error in a dependency's own stubs, not in our code.
+module = ["mcp.*", "fastembed.*", "sqlite_vec.*", "tree_sitter_language_pack.*", "numpy.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+# The floor sits below the current number (85.3% with every backend present) on purpose: the live
+# graph/LSP tests skip when codebase-memory-mcp and uvx/serena are absent, which is exactly the
+# case in CI, and that costs ~0.4 points. A floor pinned to today's measurement would go red on a
+# runner's toolchain rather than on a real coverage regression. Ratchet it up deliberately.
+addopts = "--cov=codeintel --cov-report=term-missing:skip-covered --cov-fail-under=83"

@@ -17,11 +17,11 @@ import json
 from pathlib import Path
 
 from codeintel.installer import (
+    _CONFIG,
     Installer,
     detect_agents,
     resolve_command,
     resolve_config_path,
-    _CONFIG,
 )
 
 

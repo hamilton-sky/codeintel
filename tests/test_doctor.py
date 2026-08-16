@@ -10,13 +10,11 @@ from __future__ import annotations
 import os
 import time
 
-import pytest
-
 from codeintel import doctor
+from codeintel.provider import safe_null_result
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider, _State
 from codeintel.providers.semantic import SemanticProvider
-from codeintel.provider import safe_null_result
 
 CAP_LIST_PROJECTS = {
     "projects": [

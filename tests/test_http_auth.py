@@ -7,6 +7,8 @@ import threading
 import urllib.error
 import urllib.request
 
+import pytest
+
 from codeintel.http_server import _MAX_CONCURRENT_REQUESTS, CodeIntelHTTPServer, _Handler
 
 
@@ -80,7 +82,7 @@ def test_auth_also_guards_status_get():
         req = urllib.request.Request(f"http://127.0.0.1:{port}/code/status")
         try:
             urllib.request.urlopen(req)
-            assert False, "expected 401"
+            pytest.fail("expected 401")
         except urllib.error.HTTPError as e:
             assert e.code == 401
     finally:

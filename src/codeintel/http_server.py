@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from codeintel import __version__
+from codeintel.auth import TokenAuth
 from codeintel.logconfig import configure_logging
 from codeintel.metrics import Metrics
 from codeintel.provider import log_swallowed
@@ -139,7 +140,10 @@ class _Handler(BaseHTTPRequestHandler):
             if isinstance(result, dict):
                 result.pop("registrations", None)
         else:
-            result = code_query_handler(parsed)
+            # `result` is widened to a plain dict above (the doctor branch mutates it), and a
+            # TypedDict is not assignable to dict[Any, Any] — the cast is the annotation catching
+            # up with a union that has always been fine at runtime.
+            result = dict(code_query_handler(parsed))
         # An RBAC denial (query OR doctor) comes back as a safe-null with this reason — 403 it.
         status = 403 if result.get("reason") == "op-not-allowed-for-role" else 200
         self._send_json(status, result)
@@ -193,7 +197,7 @@ class CodeIntelHTTPServer(ThreadingHTTPServer):
     # engine is thread-confined with WAL, so concurrent requests are safe.
     daemon_threads = True
     auth_token: str | None = None  # set by run() when a single shared token is provided
-    token_auth = None              # set by run(): a TokenAuth for RBAC (token->role), if configured
+    token_auth: TokenAuth | None = None   # set by run(): a TokenAuth for RBAC, if configured
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

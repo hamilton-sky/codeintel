@@ -12,6 +12,7 @@ commands, or a command dispatches to nothing.
 from __future__ import annotations
 
 import argparse
+import string
 import subprocess
 import sys
 from importlib import import_module
@@ -622,3 +623,151 @@ def test_status_degrades_instead_of_tracebacking(monkeypatch, capsys):
                         lambda args: (_ for _ in ()).throw(RuntimeError("boom")))
     assert import_module("codeintel.commands.status").run(_args(project_root=None)) == 0
     assert "Status unavailable: boom" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- index
+
+class _FakeDb:
+    def __init__(self, path):
+        self.path = path
+        self.closed = False
+
+    def init(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _stub_index(monkeypatch, tmp_path, *, count=3, indexer_exc=None, has_graph_backend=False):
+    """Stand in for the whole semantic pass. Returns the recorder the assertions read."""
+    seen: dict = {"db": None, "reindexed": False, "mapped": False}
+
+    def _make_db(path):
+        seen["db"] = _FakeDb(path)
+        return seen["db"]
+
+    class _FakeIndexer:
+        def __init__(self, db, **kwargs):
+            seen["kwargs"] = kwargs
+
+        def index(self, root):
+            if indexer_exc:
+                raise indexer_exc
+            return count
+
+    class _FakeReindexer:
+        def _graph_reindex(self, root):
+            seen["reindexed"] = True
+
+    class _FakeGen:
+        def __init__(self, provider):
+            pass
+
+        def generate(self, root, budget_bytes=None):
+            return "# map"
+
+        def write(self, root, content):
+            seen["mapped"] = True
+            return ("/p/CODE_INTEL.md", True)
+
+    monkeypatch.setattr("codeintel.config.load_config", lambda root: {"model": "m", "window": 20})
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path",
+                        lambda model: str(tmp_path / "db" / "semantic.db"))
+    monkeypatch.setattr("codeintel.semantic_db.SemanticDb", _make_db)
+    monkeypatch.setattr("codeintel.indexer.Indexer", _FakeIndexer)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/x" if has_graph_backend else None)
+    monkeypatch.setattr("codeintel.reindexer.Reindexer", _FakeReindexer)
+    monkeypatch.setattr("codeintel.mapper.MapGenerator", _FakeGen)
+    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: object())
+    return seen
+
+
+def test_index_reports_the_chunk_count(monkeypatch, tmp_path, capsys):
+    _stub_index(monkeypatch, tmp_path, count=42)
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert "Indexed 42 chunks" in capsys.readouterr().out
+
+
+def test_index_says_so_when_nothing_changed(monkeypatch, tmp_path, capsys):
+    """Incremental runs are the common case; "Indexed 0 chunks" reads like a failure."""
+    _stub_index(monkeypatch, tmp_path, count=0)
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    assert "Nothing new to index" in capsys.readouterr().out
+
+
+def test_index_closes_the_db_even_when_indexing_raises(monkeypatch, tmp_path, capsys):
+    """A leaked sqlite handle on the failure path is how the next run inherits a locked DB."""
+    seen = _stub_index(monkeypatch, tmp_path, indexer_exc=RuntimeError("model download failed"))
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert seen["db"].closed is True
+    assert "index failed: model download failed" in capsys.readouterr().out
+
+
+def test_index_still_refreshes_the_map_after_a_semantic_failure(monkeypatch, tmp_path):
+    """The graph and map passes are independent of the semantic one — a missing embedding model
+    must not also cost you an up-to-date CODE_INTEL.md."""
+    seen = _stub_index(monkeypatch, tmp_path, indexer_exc=RuntimeError("boom"))
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    assert seen["mapped"] is True
+
+
+def test_index_skips_the_graph_reindex_when_the_backend_is_absent(monkeypatch, tmp_path):
+    seen = _stub_index(monkeypatch, tmp_path, has_graph_backend=False)
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    assert seen["reindexed"] is False
+
+
+def test_index_reindexes_the_graph_when_the_backend_is_present(monkeypatch, tmp_path):
+    seen = _stub_index(monkeypatch, tmp_path, has_graph_backend=True)
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    assert seen["reindexed"] is True
+
+
+def test_index_survives_a_failing_graph_reindex_and_map_refresh(monkeypatch, tmp_path, capsys):
+    """Both are best-effort: they run after the index is already committed, so their failure must
+    not turn a successful index into a non-zero exit."""
+    _stub_index(monkeypatch, tmp_path, has_graph_backend=True)
+    monkeypatch.setattr("codeintel.reindexer.Reindexer",
+                        lambda: (_ for _ in ()).throw(RuntimeError("graph down")))
+    monkeypatch.setattr("codeintel.mapper.MapGenerator",
+                        lambda provider: (_ for _ in ()).throw(RuntimeError("map down")))
+
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    out = capsys.readouterr().out
+    assert "Indexed 3 chunks" in out
+    assert "graph down" not in out and "map down" not in out
+
+
+def test_index_passes_the_configured_chunking_knobs_through(monkeypatch, tmp_path):
+    """`index` is the only caller that builds an Indexer from config; a dropped key here silently
+    reverts a user's tuning to the defaults."""
+    seen = _stub_index(monkeypatch, tmp_path)
+    monkeypatch.setattr("codeintel.config.load_config", lambda root: {
+        "model": "custom/model", "window": 5, "stride": 2, "max_chunks": 9,
+        "max_total_chunks": 99, "chunk_strategy": "line"})
+
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    assert seen["kwargs"] == {"model_name": "custom/model", "window": 5, "stride": 2,
+                              "max_chunks": 9, "max_total_chunks": 99, "chunk_strategy": "line"}
+
+
+# --------------------------------------------------------------------------- serve / gen-token
+
+def test_serve_starts_the_stdio_server(monkeypatch):
+    started = []
+    monkeypatch.setattr("codeintel.server.run", lambda: started.append(True))
+    assert import_module("codeintel.commands.serve").run(_args()) == 0
+    assert started == [True]
+
+
+def test_gen_token_prints_a_fresh_urlsafe_token(capsys):
+    """Reused output would mean two deployments sharing a bearer token."""
+    gen_token = import_module("codeintel.commands.gen_token")
+    assert gen_token.run(_args()) == 0
+    assert gen_token.run(_args()) == 0
+    first, second = capsys.readouterr().out.split()
+
+    assert first != second
+    assert len(first) >= 40                                  # 32 random bytes, base64url-encoded
+    assert set(first) <= set(string.ascii_letters + string.digits + "-_")

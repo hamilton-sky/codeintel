@@ -9,7 +9,7 @@ import shutil
 import sys
 import threading
 import time
-from typing import Any, Optional
+from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
@@ -66,7 +66,7 @@ class _LspSession:
         self.cooldown_until: float = 0.0
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
-        self._mcp_session: Optional[ClientSession] = None
+        self._mcp_session: ClientSession | None = None
         self._thread = threading.Thread(
             target=self._run,
             args=(project_root, cmd),
@@ -96,15 +96,14 @@ class _LspSession:
             async with stdio_client(
                 StdioServerParameters(command=launch_args[0], args=launch_args[1:]),
                 errlog=errlog,
-            ) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    with self._lock:
-                        self._mcp_session = session
-                        self.state = _State.READY
-                    # Keep the loop (and the subprocess/session it owns) alive so _call_tool can
-                    # schedule coroutines onto it. Resolves only when the thread/loop is torn down.
-                    await asyncio.get_running_loop().create_future()
+            ) as (read, write), ClientSession(read, write) as session:
+                await session.initialize()
+                with self._lock:
+                    self._mcp_session = session
+                    self.state = _State.READY
+                # Keep the loop (and the subprocess/session it owns) alive so _call_tool can
+                # schedule coroutines onto it. Resolves only when the thread/loop is torn down.
+                await asyncio.get_running_loop().create_future()
         finally:
             if errlog is not sys.stderr:
                 try:
@@ -135,7 +134,7 @@ class LspProvider:
         # Prefer a directly-installed serena; otherwise drive it through uvx.
         if shutil.which("serena"):
             self.available = True
-            self._cmd: Optional[str] = "serena"
+            self._cmd: str | None = "serena"
         elif shutil.which("uvx"):
             self.available = True
             self._cmd = "uvx"
@@ -205,7 +204,8 @@ class LspProvider:
             if st == _State.FAILED:
                 return {"installed": True, "runnable": False, "repo_indexed": None,
                         "detail": "serena failed to boot",
-                        "remediation": "check uvx + network: `uvx --from git+https://github.com/oraios/serena serena start-mcp-server`"}
+                        "remediation": "check uvx + network: `uvx --from "
+                                       "git+https://github.com/oraios/serena serena start-mcp-server`"}
             time.sleep(0.5)
         return {"installed": True, "runnable": None, "repo_indexed": None,
                 "detail": f"serena did not reach READY within {int(timeout_s)}s (still warming)",
@@ -268,7 +268,7 @@ class LspProvider:
         target: str,
         root: str,
         timeout_s: float,
-    ) -> Optional[str]:
+    ) -> str | None:
         if op == "symbol" or op == "context":
             # `context` (fan-out op) → the LSP's richest single-symbol view: definition + refs.
             return self._op_symbol(session, target, root, timeout_s)
@@ -282,7 +282,7 @@ class LspProvider:
         tool: str,
         args: dict,
         timeout_s: float,
-    ) -> Optional[Any]:
+    ) -> Any | None:
         try:
             mcp_session = session._mcp_session
             if mcp_session is None:
@@ -293,23 +293,20 @@ class LspProvider:
         except Exception:
             return None
 
-    def _extract_text(self, raw: Any) -> Optional[str]:
+    def _extract_text(self, raw: Any) -> str | None:
         if raw is None:
             return None
         if isinstance(raw, str):
             return raw
         # mcp CallToolResult has a .content list of TextContent
         try:
-            parts = []
-            for item in raw.content:
-                if hasattr(item, "text"):
-                    parts.append(item.text)
+            parts = [item.text for item in raw.content if hasattr(item, "text")]
             return "\n".join(parts) if parts else None
         except Exception:
             return None
 
     @staticmethod
-    def _loads(text: Optional[str]) -> Any:
+    def _loads(text: str | None) -> Any:
         if not text:
             return None
         try:
@@ -318,7 +315,7 @@ class LspProvider:
             return None
 
     @staticmethod
-    def _ref_line(content: Any) -> Optional[str]:
+    def _ref_line(content: Any) -> str | None:
         """Pull the referenced line number out of serena's `content_around_reference` blob,
         which marks the reference line with a leading `>` (e.g. `  >   7:from ...`)."""
         if not isinstance(content, str):
@@ -326,9 +323,9 @@ class LspProvider:
         m = re.search(r">\s*(\d+):", content)
         return m.group(1) if m else None
 
-    def _format_matches(self, target: str, matches: list) -> tuple[str, Optional[dict]]:
+    def _format_matches(self, target: str, matches: list) -> tuple[str, dict | None]:
         parts = [f"## Symbol: {target}"]
-        first: Optional[dict] = None
+        first: dict | None = None
         for m in matches:
             if not isinstance(m, dict):
                 continue
@@ -336,7 +333,8 @@ class LspProvider:
                 first = m
             kind = m.get("kind") or "symbol"
             rel = m.get("relative_path") or "?"
-            loc = m.get("body_location") if isinstance(m.get("body_location"), dict) else {}
+            raw_loc = m.get("body_location")
+            loc = raw_loc if isinstance(raw_loc, dict) else {}
             s, e = loc.get("start_line"), loc.get("end_line")
             span = f":{s}-{e}" if s is not None else ""
             parts.append(f"**{kind}** — {rel}{span}")
@@ -352,7 +350,7 @@ class LspProvider:
         for file, kinds in data.items():
             if not isinstance(kinds, dict):
                 continue
-            for _kind, entries in kinds.items():
+            for entries in kinds.values():
                 if not isinstance(entries, list):
                     continue
                 for ent in entries:
@@ -369,7 +367,7 @@ class LspProvider:
 
     def _op_symbol(
         self, session: _LspSession, target: str, root: str, timeout_s: float
-    ) -> Optional[str]:
+    ) -> str | None:
         try:
             def_raw = self._call_tool(
                 session,
@@ -380,7 +378,7 @@ class LspProvider:
             def_text = self._extract_text(def_raw)
             matches = self._loads(def_text)
 
-            first: Optional[dict] = None
+            first: dict | None = None
             if isinstance(matches, list) and matches:
                 def_section, first = self._format_matches(target, matches)
             else:
@@ -409,7 +407,7 @@ class LspProvider:
 
     def _op_overview(
         self, session: _LspSession, target: str, root: str, timeout_s: float
-    ) -> Optional[str]:
+    ) -> str | None:
         try:
             raw = self._call_tool(
                 session,

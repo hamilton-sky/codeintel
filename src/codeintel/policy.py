@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
-
 
 class TieringPolicy:
     """Role/op access policy — disabled by default (all ops allowed).
@@ -14,10 +12,10 @@ class TieringPolicy:
     def __init__(
         self,
         enabled: bool = False,
-        rules: Optional[Dict[str, List[str]]] = None,
+        rules: dict[str, list[str]] | None = None,
     ) -> None:
         self._enabled = enabled
-        self._rules: Dict[str, List[str]] = (
+        self._rules: dict[str, list[str]] = (
             {role: list(ops) for role, ops in rules.items()} if rules else {}
         )
 

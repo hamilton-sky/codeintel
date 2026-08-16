@@ -99,8 +99,8 @@ class Reindexer:
         import pathlib
 
         from codeintel.config import load_config
-        from codeintel.semantic_db import SemanticDb, default_db_path
         from codeintel.indexer import Indexer
+        from codeintel.semantic_db import SemanticDb, default_db_path
 
         # Same per-model cache file the SemanticProvider reads — index and search must never diverge
         # onto different files. Honor the project's config so the background pass indexes exactly

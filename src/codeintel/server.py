@@ -8,7 +8,7 @@ from mcp.server.mcpserver.server import MCPServer
 
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
-from codeintel.provider import safe_null_result
+from codeintel.provider import Result, safe_null_result
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider
 from codeintel.providers.semantic import SemanticProvider
@@ -106,12 +106,12 @@ def _refresh_missing_engines(gw: Gateway) -> None:
         pass
 
 
-def code_query_handler(args: dict) -> dict:
+def code_query_handler(args: dict) -> Result:
     try:
         op = args.get("op", "")
         target = args.get("target", "")
         project_root = args.get("project_root", "")
-        engine = args.get("engine", None)
+        engine = args.get("engine")
         role = args.get("role", "")
         gw = _get_gateway()
         _refresh_missing_engines(gw)
@@ -260,8 +260,8 @@ def code_doctor_handler(args: dict) -> dict:
 
 def code_map_handler(args: dict) -> dict:
     try:
-        from codeintel.mapper import MapGenerator
         from codeintel.injector import Injector
+        from codeintel.mapper import MapGenerator
 
         project_root = str(args.get("project_root", "") or "")
         budget = int(args.get("budget", 32768) or 32768)
@@ -324,7 +324,7 @@ def run() -> None:
         project_root: str = "",
         engine: str = "",
         role: str = "",
-    ) -> dict:
+    ) -> Result:
         return code_query_handler(
             {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
         )

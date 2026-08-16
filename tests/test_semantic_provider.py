@@ -2,17 +2,13 @@
 from __future__ import annotations
 
 import hashlib
-import struct
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
-import pytest
 
+from codeintel.indexer import Indexer
 from codeintel.providers.semantic import SemanticProvider
 from codeintel.semantic_db import SemanticDb
-from codeintel.indexer import Indexer
-from codeintel.searcher import Searcher
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -96,7 +92,6 @@ def test_available_when_deps_present(monkeypatch):
 
 def test_search_returns_matches(tmp_path, monkeypatch):
     (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
-    db_path = tmp_path / "semantic.db"
     monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
@@ -134,7 +129,6 @@ def test_unchanged_repo_skips_embed(tmp_path):
 def test_empty_index_safe_null(tmp_path, monkeypatch):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
-    db_path = tmp_path / "semantic.db"
     monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
@@ -154,7 +148,6 @@ def test_empty_index_safe_null(tmp_path, monkeypatch):
 
 def test_below_floor_returns_none(tmp_path, monkeypatch):
     (tmp_path / "code.py").write_text("x = 1\n")
-    db_path = tmp_path / "semantic.db"
     monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 
@@ -194,7 +187,6 @@ def test_context_op_is_accepted(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_provider_never_raises(tmp_path, monkeypatch):
-    db_path = tmp_path / "semantic.db"
     monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
 

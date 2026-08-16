@@ -22,7 +22,7 @@ def run(args: Any) -> int:
     print("Engine status:")
     for engine in ["graph", "lsp", "semantic"]:
         entry = readiness.get(engine) or {}
-        state = _READY.get(entry.get("status"), "unavailable")
+        state = _READY.get(str(entry.get("status") or ""), "unavailable")
         detail = entry.get("detail") or ""
         print(f"  {engine:<10} {state:<26} {detail}")
     if status.get("healthy") is False:

@@ -38,7 +38,7 @@ def _pos_int(val: object, default: int) -> int:
     ``Indexer(...)`` caller (which bypasses config validation) can't set a zero/negative/non-int
     ``stride`` (would raise inside ``range()``) or ``window`` (would silently drop every region)."""
     try:
-        n = int(val)  # type: ignore[arg-type]
+        n = int(val)  # type: ignore[call-overload]
     except (TypeError, ValueError, OverflowError):
         return default
     return n if n > 0 else default
@@ -97,9 +97,9 @@ _TS_FUNC_VALUE_TYPES = frozenset({"arrow_function", "function_expression", "func
 def _ts_decl_is_function(node) -> bool:
     """True if a lexical/variable declaration binds a function (arrow or function expression)."""
     for child in node.children:
-        if child.type == "variable_declarator":
-            if any(gc.type in _TS_FUNC_VALUE_TYPES for gc in child.children):
-                return True
+        if child.type == "variable_declarator" and any(
+                gc.type in _TS_FUNC_VALUE_TYPES for gc in child.children):
+            return True
     return False
 
 
@@ -164,7 +164,7 @@ class Indexer:
             if gi.is_file():
                 for line in gi.read_text(encoding="utf-8", errors="replace").splitlines():
                     line = line.strip()
-                    if not line or line.startswith("#") or line.startswith("!"):
+                    if not line or line.startswith(("#", "!")):
                         continue
                     name = line.rstrip("/").lstrip("/")
                     if name and "*" not in name and "/" not in name:
@@ -230,8 +230,7 @@ class Indexer:
         spans: list[tuple[int, int]] = []
         if end <= start:
             return spans
-        for s in range(start, end, self.stride):
-            spans.append((s, min(s + self.window, end)))
+        spans.extend((s, min(s + self.window, end)) for s in range(start, end, self.stride))
         return spans
 
     def _maybe_split(self, start: int, end: int) -> list[tuple[int, int]]:

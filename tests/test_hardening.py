@@ -16,7 +16,6 @@ import codeintel.providers.semantic as sem
 from codeintel.gateway import Gateway
 from codeintel.provider import log_swallowed
 
-
 # --------------------------------------------------------------------------- semantic cold/warm
 
 def _patch_semantic(monkeypatch, tmp_path, has_index_value):

@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from codeintel.providers.lsp import LspProvider, _State, _serena_launch_args
+from codeintel.providers.lsp import LspProvider, _serena_launch_args, _State
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -83,7 +83,7 @@ def test_launch_argv_uvx_matches_real_serena_invocation():
     ]
     # The old broken form must be gone.
     assert "--project_root" not in args
-    assert not (args[1] == "serena")  # `uvx serena ...` (no --from) never worked
+    assert args[1] != "serena"  # `uvx serena ...` (no --from) never worked
 
 
 def test_launch_argv_direct_binary():

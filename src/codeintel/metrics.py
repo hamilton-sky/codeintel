@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-from typing import Dict, Tuple
 
 # Path labels are restricted to known routes so a caller cannot explode Prometheus label
 # cardinality (a memory-exhaustion vector) by hammering random URLs — everything else folds
@@ -19,9 +18,9 @@ class Metrics:
     def __init__(self, version: str = "") -> None:
         self._lock = threading.Lock()
         self._version = version
-        self._count: Dict[Tuple[str, str, int], int] = {}  # (method, path, status) -> n
-        self._lat_sum: Dict[str, float] = {}               # path -> total seconds
-        self._lat_count: Dict[str, int] = {}               # path -> n
+        self._count: dict[tuple[str, str, int], int] = {}  # (method, path, status) -> n
+        self._lat_sum: dict[str, float] = {}               # path -> total seconds
+        self._lat_count: dict[str, int] = {}               # path -> n
         self._in_flight = 0
         self._overload = 0                                 # requests refused at the concurrency cap
 

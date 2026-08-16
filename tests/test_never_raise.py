@@ -1,12 +1,9 @@
 """Fault-injection tests proving the never-raise invariant for codeintel F1."""
 from __future__ import annotations
 
-import pytest
-
-from codeintel.providers.none import NoneProvider
 from codeintel.gateway import Gateway
+from codeintel.providers.none import NoneProvider
 from codeintel.server import code_query_handler
-
 
 # ---------------------------------------------------------------------------
 # Group 1: NoneProvider — None args
@@ -105,17 +102,16 @@ def test_code_query_handler_wrong_types():
 # Groups 9-13: expanded never-raise invariant suite
 # ===========================================================================
 
+import json as _json
 import shutil as _shutil
 import threading
-import json as _json
 import urllib.request as _urllib_request
 
+import codeintel.providers.semantic as _sem_mod
+from codeintel.http_server import CodeIntelHTTPServer, _Handler
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider
 from codeintel.providers.semantic import SemanticProvider
-import codeintel.providers.semantic as _sem_mod
-from codeintel.http_server import CodeIntelHTTPServer, _Handler
-
 
 # ---------------------------------------------------------------------------
 # Group 9: GraphProvider — never-raise (None args, wrong types)

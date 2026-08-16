@@ -5,7 +5,6 @@ from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
 from codeintel.provider import Result
 
-
 # ---------------------------------------------------------------------------
 # Stub providers — no mocking library
 # ---------------------------------------------------------------------------

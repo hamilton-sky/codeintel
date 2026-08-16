@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Optional
+from typing import Any
 
 from codeintel.provider import Result, log_swallowed, safe_null_result
 
@@ -43,7 +43,7 @@ class GraphProvider:
     """
 
     def __init__(self) -> None:
-        self._project_cache: dict[str, Optional[str]] = {}          # resolved names (stable, kept)
+        self._project_cache: dict[str, str | None] = {}          # resolved names (stable, kept)
         self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
         self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
         self._detect_backend()
@@ -52,7 +52,7 @@ class GraphProvider:
         path = shutil.which("codebase-memory-mcp")
         if path:
             self.available = True
-            self._cmd: Optional[str] = path
+            self._cmd: str | None = path
         else:
             self.available = False
             self._cmd = None
@@ -61,7 +61,7 @@ class GraphProvider:
     # null". Overloading None for both would make a legit null result wrongly trigger the fallback.
     _FAIL = object()
 
-    def _run(self, method: str, payload: dict, timeout_ms: int) -> Optional[Any]:
+    def _run(self, method: str, payload: dict, timeout_ms: int) -> Any | None:
         # Prefer PIPED STDIN — the stable, non-deprecated form the backend documents
         # (`echo '<json>' | codebase-memory-mcp cli <method>`; no deprecation warning). Fall back
         # to the deprecated raw-JSON positional arg for one release so an older backend still
@@ -79,6 +79,8 @@ class GraphProvider:
         return None if out is self._FAIL else out
 
     def _run_stdin(self, method: str, body: str, timeout_ms: int) -> Any:
+        if self._cmd is None:                  # backend not on PATH — nothing to exec
+            return self._FAIL
         try:
             result = subprocess.run(
                 [self._cmd, "cli", method],
@@ -93,6 +95,8 @@ class GraphProvider:
             return self._FAIL
 
     def _run_rawjson(self, method: str, body: str, timeout_ms: int) -> Any:
+        if self._cmd is None:
+            return self._FAIL
         # Deprecated-but-working bridge for older backends; remove once the live stdin test
         # (tests/test_graph_stdin.py::test_live_stdin_list_projects) is green in CI.
         try:
@@ -108,7 +112,7 @@ class GraphProvider:
             return self._FAIL
 
     @staticmethod
-    def _match_project(raw: Any, project_root: str) -> Optional[str]:
+    def _match_project(raw: Any, project_root: str) -> str | None:
         """Resolve a list_projects response to the project name for ``project_root``.
 
         The real codebase-memory-mcp returns ``{"projects": [...]}``; a bare list is the
@@ -125,9 +129,9 @@ class GraphProvider:
         entries = raw.get("projects", []) if isinstance(raw, dict) else raw
         if not isinstance(entries, list):
             return None
-        exact: Optional[str] = None
+        exact: str | None = None
         best_prefix_len = -1
-        best_prefix_name: Optional[str] = None
+        best_prefix_name: str | None = None
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -142,7 +146,7 @@ class GraphProvider:
                 best_prefix_name = entry.get("name")
         return exact if exact is not None else best_prefix_name
 
-    def _resolve_project(self, project_root: str) -> Optional[str]:
+    def _resolve_project(self, project_root: str) -> str | None:
         with self._project_cache_lock:
             if project_root in self._project_cache:
                 return self._project_cache[project_root]  # positive: a repo's name is stable
@@ -233,7 +237,7 @@ class GraphProvider:
         badge = f" [{edge}]" if edge else ""
         return f"- {label}{badge}{tail}"
 
-    def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> Optional[list[dict]]:
+    def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> list[dict] | None:
         """``search_graph`` → parsed result dicts. ``None`` = backend failed/malformed (→ safe-null
         upstream); ``[]`` = backend answered but nothing matched (→ an informative empty render).
         Preserving that distinction is why the repo-scan ops return a string on empty-success but
@@ -290,7 +294,7 @@ class GraphProvider:
 
     # ------------------------------------------------------------------ ops
 
-    def _op_callers(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_callers(self, target: str, project: str, timeout_ms: int) -> str | None:
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.name="{_cypher_literal(target)}" '
             "RETURN a.name, a.qualified_name, a.file_path, type(c) LIMIT 50"
@@ -301,7 +305,7 @@ class GraphProvider:
         lines = [self._display(r, "a.name", "a.qualified_name", "a.file_path") for r in rows]
         return f"## Callers of {target} ({len(lines)})\n" + "\n".join(lines)
 
-    def _op_callees(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_callees(self, target: str, project: str, timeout_ms: int) -> str | None:
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(target)}" '
             "RETURN b.name, b.qualified_name, b.file_path, type(c) LIMIT 50"
@@ -312,7 +316,7 @@ class GraphProvider:
         lines = [self._display(r, "b.name", "b.qualified_name", "b.file_path") for r in rows]
         return f"## Callees of {target} ({len(lines)})\n" + "\n".join(lines)
 
-    def _op_impact(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_impact(self, target: str, project: str, timeout_ms: int) -> str | None:
         callers = self._op_callers(target, project, timeout_ms)
         callees = self._op_callees(target, project, timeout_ms)
         if callers is None and callees is None:
@@ -324,7 +328,7 @@ class GraphProvider:
         parts.append(callees or f"## Callees of {target} (0)\n(none found)")
         return "\n".join(parts)
 
-    def _op_chain(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_chain(self, target: str, project: str, timeout_ms: int) -> str | None:
         # Accept an "A->B" form (trace from the source symbol) or a bare symbol.
         src = target.split("->")[0].strip() if "->" in target else target.strip()
         if not src:
@@ -371,7 +375,7 @@ class GraphProvider:
         parts.extend(callers or ["(none)"])
         return "\n".join(parts)
 
-    def _op_pattern(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_pattern(self, target: str, project: str, timeout_ms: int) -> str | None:
         try:
             raw = self._run("search_code", {"project": project, "pattern": target}, timeout_ms)
             results = raw.get("results") if isinstance(raw, dict) else raw
@@ -396,7 +400,7 @@ class GraphProvider:
         except Exception:
             return None
 
-    def _op_overview(self, target: str, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_overview(self, target: str, project: str, timeout_ms: int) -> str | None:
         try:
             raw = self._run("get_architecture", {"project": project}, timeout_ms)
             if not isinstance(raw, dict):
@@ -408,12 +412,10 @@ class GraphProvider:
                 parts.append(f"{tn or 0} nodes, {te or 0} edges")
 
             def _counts(items: Any, key: str, ckey: str = "count") -> list[str]:
-                out = []
-                if isinstance(items, list):
-                    for it in items:
-                        if isinstance(it, dict) and it.get(key) is not None:
-                            out.append(f"- {it.get(key)}: {it.get(ckey)}")
-                return out
+                if not isinstance(items, list):
+                    return []
+                return [f"- {it.get(key)}: {it.get(ckey)}" for it in items
+                        if isinstance(it, dict) and it.get(key) is not None]
 
             node_labels = _counts(raw.get("node_labels"), "label")
             edge_types = _counts(raw.get("edge_types"), "type")
@@ -447,7 +449,7 @@ class GraphProvider:
     # scan is a TRUE answer ("nothing changed", "no dead code"), not a lookup miss, so they return an
     # informative string; only a backend failure returns None (→ safe-null upstream).
 
-    def _op_changed(self, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_changed(self, project: str, timeout_ms: int) -> str | None:
         """Impact of the working tree's UNCOMMITTED changes: changed files → impacted symbols. The
         flagship pre-edit op. detect_changes drives a backend-side reindex of the changed files, so
         it gets a higher timeout floor than a plain read."""
@@ -505,7 +507,7 @@ class GraphProvider:
         except Exception:
             return None
 
-    def _op_deadcode(self, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_deadcode(self, project: str, timeout_ms: int) -> str | None:
         """Unreferenced non-test symbols (dead-code candidates): in-degree 0 Functions, entry points
         excluded server-side, tests/builtins filtered client-side, biggest first."""
         try:
@@ -535,7 +537,7 @@ class GraphProvider:
         except Exception:
             return None
 
-    def _op_hotspots(self, project: str, timeout_ms: int) -> Optional[str]:
+    def _op_hotspots(self, project: str, timeout_ms: int) -> str | None:
         """Highest complexity / fan-in symbols (refactor-risk hotspots). search_graph returns rows
         UNSORTED (name order) and caps at ``limit``, so we over-request then sort CLIENT-SIDE by
         (complexity, in_degree). Tests/builtins filtered out."""
@@ -608,7 +610,7 @@ class GraphProvider:
 
     def _dispatch(
         self, op: str, target: str, project: str, timeout_ms: int
-    ) -> Optional[str]:
+    ) -> str | None:
         if op == "impact" or op == "context":
             # `context` (fan-out op) → the graph's richest single-symbol view: callers + callees.
             return self._op_impact(target, project, timeout_ms)

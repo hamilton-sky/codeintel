@@ -6,7 +6,6 @@ subprocess, and must give an actionable reason for each distinct way a host laun
 """
 from __future__ import annotations
 
-import json
 import sys
 import textwrap
 import time

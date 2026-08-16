@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from codeintel.indexer import Indexer, _INDEXED_EXTS, _TS_LANG_BY_EXT
+from codeintel.indexer import _INDEXED_EXTS, _TS_LANG_BY_EXT, Indexer
 from codeintel.semantic_db import SemanticDb
 
 # A normal dependency — but skip cleanly rather than error if a platform lacks a wheel.

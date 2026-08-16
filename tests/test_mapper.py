@@ -4,10 +4,8 @@ import os
 import tempfile
 from unittest.mock import MagicMock
 
-import pytest
-
-from codeintel.mapper import MapGenerator, _minimal_map, _is_populated_map
 from codeintel.injector import Injector
+from codeintel.mapper import MapGenerator, _is_populated_map, _minimal_map
 
 _POPULATED = (
     "# CODE_INTEL.md — repo\n\n"
@@ -70,7 +68,7 @@ def test_generate_byte_budget_enforced():
     gen = MapGenerator(provider)
     budget = 500
     result = gen.generate("/tmp/repo", budget_bytes=budget)
-    assert len(result.encode("utf-8")) <= budget + len("> Content truncated to fit".encode())
+    assert len(result.encode("utf-8")) <= budget + len(b"> Content truncated to fit")
     assert "truncated" in result.lower()
 
 

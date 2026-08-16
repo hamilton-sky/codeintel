@@ -24,3 +24,10 @@ pathly/**/EVENTS.jsonl
 
 # macOS
 .DS_Store
+
+# Tooling caches and coverage data
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/

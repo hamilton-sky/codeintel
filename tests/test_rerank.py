@@ -14,7 +14,7 @@ from unittest.mock import patch
 import numpy as np
 
 from codeintel.indexer import Indexer
-from codeintel.searcher import Searcher, _SYMBOL_BOOST, _tokenize
+from codeintel.searcher import _SYMBOL_BOOST, Searcher, _tokenize
 from codeintel.semantic_db import SemanticDb
 
 
@@ -72,8 +72,8 @@ def test_exact_symbol_ranks_literal_match_above_semantic(tmp_path):
         off = s.search("parse_config", str(tmp_path), rerank="off")
 
     # pure cosine puts the nearer (semantic) chunk first; rerank pulls the literal symbol up
-    assert [r["line"] for r in off][0] == 3, "cosine order should lead with the semantic chunk"
-    assert [r["line"] for r in on][0] == 0, "rerank should lead with the literal parse_config"
+    assert next(r["line"] for r in off) == 3, "cosine order should lead with the semantic chunk"
+    assert next(r["line"] for r in on) == 0, "rerank should lead with the literal parse_config"
     assert {r["line"] for r in on} == {0, 3}, "rerank reorders, it does not drop candidates"
 
 
@@ -137,7 +137,7 @@ def test_rerank_does_not_bleed_boost_into_neighbouring_def(tmp_path):
         db = _mem_db()
         Indexer(db).index(str(tmp_path))
         res = Searcher(db).search("parse_config", str(tmp_path), rerank="on")
-    assert [r["line"] for r in res][0] == 3, "the chunk that actually defines the symbol must win"
+    assert next(r["line"] for r in res) == 3, "the chunk that actually defines the symbol must win"
 
 
 def test_search_survives_bad_param_types(tmp_path):

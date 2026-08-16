@@ -161,8 +161,12 @@ def main() -> None:
     http_parser = subparsers.add_parser("serve-http", help="Start the HTTP transport server")
     http_parser.add_argument("--port", type=int, default=8766, help="Port to listen on (default: 8766)")
     http_parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-    http_parser.add_argument("--allow-remote", action="store_true", help="Permit binding a non-loopback host (use with --token, or the endpoint is UNAUTHENTICATED)")
-    http_parser.add_argument("--token", default=None, help="Require this bearer token on every request (or set CODEINTEL_HTTP_TOKEN). Strongly recommended with --allow-remote.")
+    http_parser.add_argument("--allow-remote", action="store_true",
+                             help="Permit binding a non-loopback host (use with --token, or the "
+                                  "endpoint is UNAUTHENTICATED)")
+    http_parser.add_argument("--token", default=None,
+                             help="Require this bearer token on every request (or set "
+                                  "CODEINTEL_HTTP_TOKEN). Strongly recommended with --allow-remote.")
 
     # install subcommand
     install_parser = subparsers.add_parser("install", help="Register codeintel with AI agents")
@@ -192,34 +196,46 @@ def main() -> None:
     map_parser.add_argument("--budget", type=int, default=32768, help="Byte budget for CODE_INTEL.md (default: 32768)")
 
     # graph subcommand — interactive call-graph view (HTML) or the raw {nodes,edges} JSON
-    graph_parser = subparsers.add_parser("graph", help="Build an interactive call-graph view (--html) or emit the graph as JSON — works on any indexed repo")
+    graph_parser = subparsers.add_parser(
+        "graph", help="Build an interactive call-graph view (--html) or emit the graph as JSON — "
+                      "works on any indexed repo")
     graph_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
-    graph_parser.add_argument("--html", action="store_true", help="Write a self-contained interactive HTML viewer (default: print JSON)")
+    graph_parser.add_argument("--html", action="store_true",
+                              help="Write a self-contained interactive HTML viewer (default: print JSON)")
     graph_parser.add_argument("--out", default=None, help="Output path for --html (default: codeintel-graph.html)")
     graph_parser.add_argument("--limit", type=int, default=220, help="Max call edges to include (default: 220)")
 
     # doctor subcommand
-    doctor_parser = subparsers.add_parser("doctor", parents=[color_parent], help="Diagnose engine health + index status for a repo")
+    doctor_parser = subparsers.add_parser("doctor", parents=[color_parent],
+                                          help="Diagnose engine health + index status for a repo")
     doctor_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
-    doctor_parser.add_argument("--deep", action="store_true", help="Also boot-check serena (slower; first boot pulls it via uvx)")
-    doctor_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report instead of the table")
+    doctor_parser.add_argument("--deep", action="store_true",
+                               help="Also boot-check serena (slower; first boot pulls it via uvx)")
+    doctor_parser.add_argument("--json", action="store_true",
+                               help="Emit the structured JSON report instead of the table")
 
     # setup subcommand
-    setup_parser = subparsers.add_parser("setup", parents=[color_parent], help="Prepare backends and optionally index this repo")
+    setup_parser = subparsers.add_parser("setup", parents=[color_parent],
+                                         help="Prepare backends and optionally index this repo")
     setup_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     setup_parser.add_argument("--all", action="store_true", dest="all_steps",
                               help="One-command setup: do everything automatable (uv + deps + index + "
                                    "warm serena). Idempotent — skips what's already installed.")
-    setup_parser.add_argument("--install-uv", action="store_true", help="Run `pip install uv` (provides uvx for the LSP engine)")
-    setup_parser.add_argument("--install-deps", action="store_true", help="Run `pip install -e .` (semantic engine deps)")
-    setup_parser.add_argument("--index", action="store_true", help="Index this repo now (first run downloads the ~50MB model)")
+    setup_parser.add_argument("--install-uv", action="store_true",
+                              help="Run `pip install uv` (provides uvx for the LSP engine)")
+    setup_parser.add_argument("--install-deps", action="store_true",
+                              help="Run `pip install -e .` (semantic engine deps)")
+    setup_parser.add_argument("--index", action="store_true",
+                              help="Index this repo now (first run downloads the ~50MB model)")
     setup_parser.add_argument("--warm", action="store_true", help="Boot serena now (first run pulls it via uvx; slow)")
     setup_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
     # reset subcommand
-    reset_parser = subparsers.add_parser("reset", parents=[color_parent], help="Clear the semantic index (recover from a corrupt/stale DB)")
+    reset_parser = subparsers.add_parser("reset", parents=[color_parent],
+                                         help="Clear the semantic index (recover from a corrupt/stale DB)")
     reset_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
-    reset_parser.add_argument("--all", action="store_true", help="Clear the ENTIRE index (all projects), not just this repo")
+    reset_parser.add_argument("--all", action="store_true",
+                              help="Clear the ENTIRE index (all projects), not just this repo")
     reset_parser.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
     reset_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
@@ -230,7 +246,7 @@ def main() -> None:
     # stops — a dead end for a one-character typo. Only a bare word is claimed here; anything
     # starting with `-` (--version, --help) still goes to argparse.
     argv = sys.argv[1:]
-    if argv and not argv[0].startswith("-") and argv[0] not in _COMMANDS + ["help"]:
+    if argv and not argv[0].startswith("-") and argv[0] not in [*_COMMANDS, "help"]:
         sys.exit(_unknown_command(argv[0]))
     if not argv or argv[0] == "help":
         from codeintel import term

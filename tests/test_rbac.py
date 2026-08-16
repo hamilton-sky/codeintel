@@ -12,7 +12,6 @@ import pytest
 from codeintel.auth import TokenAuth, load_auth
 from codeintel.http_server import CodeIntelHTTPServer, _Handler
 
-
 # --------------------------------------------------------------------------- auth config loading
 
 def test_load_auth_parses_roles_and_tokens(tmp_path, monkeypatch):

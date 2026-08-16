@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from codeintel.providers.graph import GraphProvider
@@ -68,13 +68,14 @@ def _rows_from(raw: object) -> list[dict]:
 class MapGenerator:
     """Generates a ranked, byte-bounded CODE_INTEL.md from the graph index."""
 
-    def __init__(self, provider: Optional[GraphProvider] = None) -> None:
+    def __init__(self, provider: GraphProvider | None = None) -> None:
         self._provider = provider
 
     def generate(self, project_root: str, budget_bytes: int = 32768) -> str:
         provider = self._provider
         if not provider or not getattr(provider, "available", False):
-            return _minimal_map(project_root, note="graph engine not available — install codebase-memory-mcp and run `codeintel index`")
+            return _minimal_map(project_root, note="graph engine not available — install "
+                                                   "codebase-memory-mcp and run `codeintel index`")
 
         # Top-level guard: the map is best-effort orientation — a malformed backend
         # response must degrade to a minimal map, never crash the caller (never-raise).
@@ -85,7 +86,7 @@ class MapGenerator:
 
             # Query 1: architecture overview
             arch_result = provider.build_result("overview", "", [], 5000, project_root)
-            arch_text: Optional[str] = None
+            arch_text: str | None = None
             if arch_result and arch_result.get("ok") and arch_result.get("result"):
                 arch_text = str(arch_result["result"])
 
@@ -162,7 +163,7 @@ def _query_entry_points(provider: GraphProvider, project: str) -> list[dict]:
 
 def _render(
     project_root: str,
-    arch_text: Optional[str],
+    arch_text: str | None,
     ranked_rows: list[dict],
     entry_rows: list[dict],
 ) -> str:
@@ -181,8 +182,8 @@ def _render(
         parts.append("## Ranked Symbols (by caller count)\n")
         parts.append("| Symbol | File | Callers |")
         parts.append("|--------|------|---------|")
-        for row in ranked_rows:
-            parts.append(f"| `{row['name']}` | {row['file_path']} | {row['in_degree']} |")
+        parts.extend(f"| `{row['name']}` | {row['file_path']} | {row['in_degree']} |"
+                     for row in ranked_rows)
         parts.append("")
     else:
         parts.append("## Ranked Symbols\n")
@@ -190,8 +191,7 @@ def _render(
 
     if entry_rows:
         parts.append("## Entry Points\n")
-        for row in entry_rows:
-            parts.append(f"- `{row['name']}` ({row['file_path']})")
+        parts.extend(f"- `{row['name']}` ({row['file_path']})" for row in entry_rows)
         parts.append("")
 
     return "\n".join(parts)
@@ -201,7 +201,7 @@ def _enforce_budget(
     content: str,
     budget_bytes: int,
     project_root: str,
-    arch_text: Optional[str],
+    arch_text: str | None,
     ranked_rows: list[dict],
     entry_rows: list[dict],
 ) -> str:

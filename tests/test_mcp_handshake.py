@@ -42,7 +42,7 @@ class _Client:
         )
         self._id = 0
 
-    def __enter__(self) -> "_Client":
+    def __enter__(self) -> _Client:
         self.request("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
             "clientInfo": {"name": "pytest", "version": "1"},

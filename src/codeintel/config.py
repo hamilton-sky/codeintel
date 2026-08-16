@@ -2,15 +2,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import sys
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    try:
-        import tomllib  # type: ignore[no-redef]
-    except ImportError:
-        import tomli as tomllib  # type: ignore[no-redef]
+import tomllib  # stdlib since 3.11, which is this package's floor
 
 logger = logging.getLogger("codeintel")
 
@@ -84,9 +76,7 @@ def _coerce(cfg: dict) -> dict:
             # docstring's never-raise promise holds even for the CLI paths that don't wrap this.
             logger.warning("config: %s=%r not usable — using default %r", key, val, default)
     # Keep any extra keys the user set (forward-compat) without validating them.
-    for k, v in cfg.items():
-        if k not in _DEFAULTS:
-            out[k] = v
+    out.update({k: v for k, v in cfg.items() if k not in _DEFAULTS})
     return out
 
 

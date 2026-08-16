@@ -8,6 +8,7 @@ embedder); the orphan test drives a full index pass with a deterministic fake em
 from __future__ import annotations
 
 import os
+from itertools import pairwise
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,7 +60,7 @@ def _assert_gapless_cover(spans: list[tuple[int, int]], n: int) -> None:
 
 def _assert_non_overlapping(spans: list[tuple[int, int]]) -> None:
     """Stronger tiling check — used only where the fixture is genuinely def-aligned end to end."""
-    for (a, b), (c, d) in zip(sorted(spans), sorted(spans)[1:]):
+    for (a, b), (c, d) in pairwise(sorted(spans)):
         assert b == c, f"overlap/gap between {(a, b)} and {(c, d)}"
 
 
@@ -159,7 +160,7 @@ def test_default_config_oversized_def_reuses_overlapping_windows():
     assert spans[0][0] == 0                            # first sub-chunk still starts at the def line
     for s, e in spans:
         assert e - s <= idx.window
-    assert any(c < b for (a, b), (c, d) in zip(spans, spans[1:])), \
+    assert any(c < b for (a, b), (c, d) in pairwise(spans)), \
         "default window>stride must produce overlapping windows (matches the legacy windower)"
 
 

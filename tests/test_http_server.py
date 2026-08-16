@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from codeintel.http_server import CodeIntelHTTPServer, _Handler, _MAX_BODY_BYTES, _is_loopback, run
+from codeintel.http_server import _MAX_BODY_BYTES, CodeIntelHTTPServer, _Handler, _is_loopback, run
 
 
 @pytest.fixture

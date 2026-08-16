@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Optional
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 
@@ -48,7 +47,7 @@ class Console:
         *,
         stream=None,
         no_color: bool = False,
-        ascii_mode: Optional[bool] = None,
+        ascii_mode: bool | None = None,
     ) -> None:
         self.stream = stream if stream is not None else sys.stdout
         self.enabled = self._detect_color(no_color, self.stream)
@@ -68,7 +67,7 @@ class Console:
             return False
 
     @staticmethod
-    def _detect_ascii(flag: Optional[bool], stream) -> bool:
+    def _detect_ascii(flag: bool | None, stream) -> bool:
         if flag is not None:
             return flag
         enc = getattr(stream, "encoding", None) or ""
@@ -123,7 +122,7 @@ c = Console(stream=sys.stdout)
 c_err = Console(stream=sys.stderr)
 
 
-def configure(*, no_color: bool = False, ascii_mode: Optional[bool] = None) -> None:
+def configure(*, no_color: bool = False, ascii_mode: bool | None = None) -> None:
     """Re-detect both consoles honoring CLI flags (called once from __main__)."""
     global c, c_err
     c = Console(stream=sys.stdout, no_color=no_color, ascii_mode=ascii_mode)

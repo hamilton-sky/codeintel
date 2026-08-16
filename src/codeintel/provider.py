@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import traceback
-from typing import Any, Optional, Protocol, runtime_checkable
-from typing_extensions import NotRequired, TypedDict
+from typing import Any, NotRequired, Protocol, runtime_checkable
+
+from typing_extensions import TypedDict
 
 _logger = logging.getLogger("codeintel")
 _DEBUG = os.environ.get("CODEINTEL_DEBUG", "").strip().lower() in ("1", "true", "on", "yes")
@@ -27,7 +28,7 @@ class Result(TypedDict):
     ok: bool
     op: str
     target: str
-    result: Optional[Any]
+    result: Any | None
     engine: str
     cached: bool
     reason: NotRequired[str]
@@ -53,7 +54,7 @@ def safe_null_result(
     target: Any,
     engine: str = "none",
     reason: str = "no-engine",
-    hint: Optional[str] = None,
+    hint: str | None = None,
 ) -> Result:
     r: Result = {
         "ok": True,

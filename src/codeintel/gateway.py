@@ -41,7 +41,8 @@ _ADOPTABLE_ENGINES: frozenset[str] = frozenset({"graph", "lsp", "semantic"})
 
 
 class Gateway:
-    def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None, reindexer: Reindexer | None = None):
+    def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None,
+                 reindexer: Reindexer | None = None):
         # Backward-compat: old tests pass a list as the first positional arg.
         if isinstance(graph, list):
             self._legacy_providers: list | None = graph
@@ -262,10 +263,8 @@ class Gateway:
                 )
                 if cached_result is not None:
                     return {**cached_result, "cached": True}
-                if engine_str == "both":
-                    engines = ["graph", "lsp"]
-                else:  # "all"
-                    engines = ["graph", "lsp", "semantic"]
+                # "both" is graph+lsp; "all" adds semantic.
+                engines = ["graph", "lsp"] if engine_str == "both" else ["graph", "lsp", "semantic"]
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
                 if not uncacheable:

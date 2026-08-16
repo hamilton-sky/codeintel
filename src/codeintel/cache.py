@@ -4,7 +4,6 @@ import hashlib
 import os
 import threading
 from collections import OrderedDict
-from typing import Optional
 
 from codeintel.provider import Result
 
@@ -13,10 +12,10 @@ def _compute_hash(target: str, project_root: str) -> str:
     try:
         root = os.path.realpath(project_root) if project_root else ""
         path = os.path.realpath(target)
-        if (root and path.startswith(root + os.sep)) or path == root:
-            if os.path.isfile(path):
-                with open(path, "rb") as fh:
-                    return hashlib.sha256(fh.read()).hexdigest()
+        inside_root = (root and path.startswith(root + os.sep)) or path == root
+        if inside_root and os.path.isfile(path):
+            with open(path, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
     except Exception:
         pass
     return hashlib.sha256(target.encode()).hexdigest()
@@ -31,7 +30,7 @@ class ContentHashCache:
         self._lock = threading.Lock()
         self._max_entries = max(1, int(max_entries))
         # key → (content_hash, Result); OrderedDict preserves insertion/access order for LRU.
-        self._store: "OrderedDict[tuple[str, str, str, str], tuple[str, Result]]" = OrderedDict()
+        self._store: OrderedDict[tuple[str, str, str, str], tuple[str, Result]] = OrderedDict()
 
     def get(
         self,
@@ -40,7 +39,7 @@ class ContentHashCache:
         engine: str,
         project_root: str,
         freshness: int = 0,
-    ) -> Optional[Result]:
+    ) -> Result | None:
         key = (op, target, engine, project_root)
         with self._lock:
             entry = self._store.get(key)
@@ -62,7 +61,7 @@ class ContentHashCache:
         target: str,
         engine: str,
         project_root: str,
-        result: Optional[Result],
+        result: Result | None,
         freshness: int = 0,
     ) -> None:
         if result is None or result.get("result") is None:

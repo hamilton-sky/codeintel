@@ -23,14 +23,14 @@ import queue
 import subprocess
 import threading
 import time
-from typing import Any, Optional
+from typing import Any
 
 # The stdio transport is newline-delimited JSON-RPC (no Content-Length framing).
 _PROTOCOL_VERSION = "2024-11-05"
 _CLIENT_INFO = {"name": "codeintel-verify", "version": "1"}
 
 
-def _pump(pipe: Any, sink: "queue.Queue[Optional[str]]") -> None:
+def _pump(pipe: Any, sink: queue.Queue[str | None]) -> None:
     """Drain a pipe into a queue on a daemon thread so reads can honor a deadline."""
     try:
         for line in pipe:
@@ -47,18 +47,21 @@ class _Conn:
     def __init__(self, proc: subprocess.Popen, deadline: float) -> None:
         self._proc = proc
         self._deadline = deadline
-        self._q: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._q: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=_pump, args=(proc.stdout, self._q), daemon=True).start()
 
     def send(self, payload: dict) -> bool:
+        stdin = self._proc.stdin
+        if stdin is None:                      # not spawned with stdin=PIPE — nothing to write to
+            return False
         try:
-            self._proc.stdin.write(json.dumps(payload) + "\n")
-            self._proc.stdin.flush()
+            stdin.write(json.dumps(payload) + "\n")
+            stdin.flush()
             return True
         except Exception:
             return False
 
-    def await_id(self, want_id: int) -> Optional[dict]:
+    def await_id(self, want_id: int) -> dict | None:
         """Read until the response with ``want_id`` arrives, skipping notifications and any
         interleaved traffic. Returns None on timeout, stream close, or unparseable output."""
         while True:
@@ -86,7 +89,7 @@ def _result(ok: bool, detail: str, **extra: Any) -> dict:
     return {"ok": ok, "tools": [], "server": None, "detail": detail, **extra}
 
 
-def _spawn(argv: list, env: Optional[dict], cwd: Optional[str]) -> tuple:
+def _spawn(argv: list, env: dict | None, cwd: str | None) -> tuple:
     """Start the server exactly as a host would. Returns ``(proc, None)`` or ``(None, failure)``."""
     try:
         proc = subprocess.Popen(
@@ -111,7 +114,7 @@ def _spawn(argv: list, env: Optional[dict], cwd: Optional[str]) -> tuple:
         return None, _result(False, f"could not launch `{argv[0]}` ({type(exc).__name__})")
 
 
-def _reap(proc: Optional[subprocess.Popen]) -> None:
+def _reap(proc: subprocess.Popen | None) -> None:
     """Terminate, then kill, then close the pipes. Never raises."""
     if proc is None:
         return
@@ -130,7 +133,7 @@ def _reap(proc: Optional[subprocess.Popen]) -> None:
             pass
 
 
-def _handshake(conn: "_Conn", proc: subprocess.Popen, timeout_s: float) -> tuple:
+def _handshake(conn: _Conn, proc: subprocess.Popen, timeout_s: float) -> tuple:
     """``initialize`` → ``notifications/initialized`` → ``tools/list``.
 
     Returns ``(server_info, tools, None)`` on success or ``(server_info, [], failure)``."""
@@ -179,11 +182,11 @@ def _handshake(conn: "_Conn", proc: subprocess.Popen, timeout_s: float) -> tuple
 
 def verify_stdio_server(
     command: str,
-    args: Optional[list[str]] = None,
+    args: list[str] | None = None,
     *,
     timeout_s: float = 45.0,
-    env: Optional[dict] = None,
-    cwd: Optional[str] = None,
+    env: dict | None = None,
+    cwd: str | None = None,
 ) -> dict:
     """Launch ``command args`` and complete an MCP handshake. Never raises.
 
@@ -191,7 +194,7 @@ def verify_stdio_server(
     answered ``initialize``, and returned a non-empty ``tools/list``."""
     argv = [command, *(args or [])]
     deadline = time.monotonic() + max(1.0, float(timeout_s))
-    proc: Optional[subprocess.Popen] = None
+    proc: subprocess.Popen | None = None
     try:
         proc, failure = _spawn(argv, env, cwd)
         if failure is not None:
@@ -225,9 +228,8 @@ def _extract_text(payload: Any) -> str:
     try:
         if isinstance(payload, dict):
             blocks = payload.get("content")
-            for block in blocks or []:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(str(block.get("text", "")))
+            parts.extend(str(block.get("text", "")) for block in blocks or []
+                         if isinstance(block, dict) and block.get("type") == "text")
             structured = payload.get("structuredContent")
             if structured is not None:
                 parts.append(json.dumps(structured))
@@ -246,13 +248,13 @@ def _extract_text(payload: Any) -> str:
 
 def verify_stdio_call(
     command: str,
-    args: Optional[list[str]] = None,
+    args: list[str] | None = None,
     *,
     tool: str,
-    arguments: Optional[dict] = None,
+    arguments: dict | None = None,
     timeout_s: float = 90.0,
-    env: Optional[dict] = None,
-    cwd: Optional[str] = None,
+    env: dict | None = None,
+    cwd: str | None = None,
 ) -> dict:
     """Handshake, then actually CALL ``tool`` and return its response text. Never raises.
 
@@ -265,7 +267,7 @@ def verify_stdio_call(
     """
     argv = [command, *(args or [])]
     deadline = time.monotonic() + max(1.0, float(timeout_s))
-    proc: Optional[subprocess.Popen] = None
+    proc: subprocess.Popen | None = None
     try:
         proc, failure = _spawn(argv, env, cwd)
         if failure is not None:

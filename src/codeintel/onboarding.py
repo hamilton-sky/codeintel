@@ -167,7 +167,7 @@ def run_setup(
         if do_index:
             print("  first index downloads the embedding model (~50MB, one-time); this may take a minute…", file=out)
             idx = _bounded_index(root, timeout_s=index_timeout_s, out=out)
-            idx_status = {"ok": "ok", "timeout": "warn"}.get(idx.get("status"), "fail")
+            idx_status = {"ok": "ok", "timeout": "warn"}.get(str(idx.get("status") or ""), "fail")
             _step("index: semantic", idx_status, idx.get("detail", ""))
             try:
                 from codeintel.reindexer import Reindexer
@@ -206,7 +206,10 @@ def _next_steps(doctor_report: dict, root: str) -> list[str]:
         out: list[str] = []
         engines = doctor_report.get("engines") if isinstance(doctor_report, dict) else None
         engines = engines if isinstance(engines, dict) else {}
-        _get = lambda name: engines.get(name) if isinstance(engines.get(name), dict) else {}
+        def _get(name: str) -> dict:
+            entry = engines.get(name)
+            return entry if isinstance(entry, dict) else {}
+
         sem, lsp, graph = _get("semantic"), _get("lsp"), _get("graph")
         if sem.get("installed") is not True:
             out.append("Semantic engine deps missing — pip install fastembed sqlite-vec")
@@ -253,8 +256,7 @@ def render_setup_text(report: dict) -> str:
         if nexts:
             lines.append("")
             lines.append(c.bold("Next:"))
-            for step in nexts:
-                lines.append("  " + c.cyan("→") + " " + step)
+            lines.extend("  " + c.cyan("→") + " " + step for step in nexts)
 
         lines.append("")
         lines.append(c.green("setup finished") if report.get("ok") else c.red("setup did not complete cleanly"))

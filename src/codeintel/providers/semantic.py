@@ -92,11 +92,9 @@ class SemanticProvider:
 
         try:
             from codeintel.config import load_config
-            from codeintel.semantic_db import SemanticDb
             from codeintel.indexer import Indexer
             from codeintel.searcher import Searcher
-
-            from codeintel.semantic_db import default_db_path
+            from codeintel.semantic_db import SemanticDb, default_db_path
 
             cfg = load_config(project_root)
             model = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
@@ -145,7 +143,8 @@ class SemanticProvider:
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")
 
             lines = [
-                f"{m['path']}:{m['line']} | {m['snippet'].splitlines()[0] if m['snippet'].splitlines() else m['snippet']}"
+                f"{m['path']}:{m['line']} | "
+                f"{m['snippet'].splitlines()[0] if m['snippet'].splitlines() else m['snippet']}"
                 for m in matches
             ]
             result: Result = {
