@@ -4,7 +4,7 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.1] — 2026-08-16
 
 ### Added
 - **`codeintel help` — every command, grouped by what you're trying to do, with descriptions,
@@ -16,6 +16,24 @@ All notable changes to codeintel are documented here. The format is based on
   `codeintel dector` → *did you mean `doctor`?*. argparse's own error prints the full list of
   choices and stops, which is a dead end for a one-character typo — the way it actually gets hit.
   A prefix matches everything it could be (`serve` → `serve`, `serve-http`). Exits 2.
+
+### Changed
+- **`/code/doctor` over HTTP no longer returns `registrations`.** That field names the agent config
+  files on the machine running the server — a local diagnostic. On a shared deployment the server
+  is not an agent host, so it says nothing actionable and only hands a client holding the doctor
+  scope the server user's home layout and which agent tools are installed there. The CLI and the
+  stdio MCP tool, both running as the user on their own machine, are unchanged.
+
+### Docs
+- **New [docs/install.md](docs/install.md)** — the registration reference: what file each of the
+  four agent hosts actually reads, with which key and entry shape; the three traps baked into that
+  table (Codex is TOML; Claude Code reads `~/.claude.json`; Zed's entry is flat); why the registered
+  command is absolute and what that costs; and the three levels of proof — file written, MCP
+  handshake, release canary — with what each catches that the level above cannot. Verified against
+  the shipped code: the config table is generated from `_CONFIG` and every troubleshooting string is
+  grepped out of the source.
+- README: corrected a stale test count, and linked the new doc from the registration section, the
+  documentation list, and the docs index.
 
 ## [0.12.0] — 2026-08-16
 
