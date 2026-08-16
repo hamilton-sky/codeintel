@@ -19,6 +19,12 @@ All notable changes to codeintel are documented here. The format is based on
   library. Verified against the built wheel, not just the source tree.
 
 ### Changed
+- **Classified `Development Status :: 5 - Production/Stable`** (was `4 - Beta`). The label now
+  rests on something checkable rather than on confidence: every push runs ruff, mypy, and the
+  suite under a coverage floor across Python 3.11–3.13, and the build job installs the wheel into
+  a clean environment and drives a real `code.query` through a registered MCP host before the
+  artifact is kept. What earned the change was watching that gate catch a live regression in the
+  primary tool rather than letting it ship.
 - **`codeintel install` degrades with a message instead of a traceback.** It was the last
   subcommand where an unexpected failure — an unresolvable home directory, an unreadable agent
   config — reached the user as a stack trace rather than a line explaining what broke. It now
