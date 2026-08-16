@@ -561,3 +561,38 @@ def test_install_refuses_to_overwrite_a_non_object_config(tmp_path, monkeypatch)
 
     assert result["ok"] is False
     assert cfg.read_text() == "[1, 2, 3]\n", "the user's file was overwritten"
+
+
+def test_zed_jsonc_config_is_not_rewritten_and_the_error_is_actionable(tmp_path, monkeypatch):
+    """Zed ships settings.json as JSONC — comments and trailing commas — so strict parsing failed
+    and every Zed user was blocked by an opaque "Expecting value". Parsing the JSONC and writing
+    back with json.dumps would be WORSE: it would silently delete the user's comments, which in
+    Zed's default config is most of the file. Fail, keep the file intact, and hand over the block.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    cfg = tmp_path / "xdg" / "zed" / "settings.json"
+    cfg.parent.mkdir(parents=True)
+    original = '{\n  // Font settings\n  "buffer_font_size": 14,\n  "theme": "One Dark",\n}\n'
+    cfg.write_text(original)
+
+    res = Installer().register("zed")
+
+    assert res["ok"] is False
+    assert cfg.read_text() == original, "the user's editor config was modified"
+    assert "JSONC" in res["reason"] and "context_servers" in res["reason"]
+    assert "codeintel" in res["reason"]                 # the block to paste is in the message
+
+
+def test_plain_invalid_json_still_reports_the_parse_error(tmp_path, monkeypatch):
+    """Only genuine JSONC gets the special path — a truly corrupt file must not be misdiagnosed."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    cfg = tmp_path / ".claude.json"
+    cfg.write_text("{ this is not json at all ")
+
+    res = Installer().register("claude")
+
+    assert res["ok"] is False
+    assert "JSONC" not in res["reason"]
+    assert cfg.read_text() == "{ this is not json at all "

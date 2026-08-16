@@ -33,6 +33,10 @@ class Result(TypedDict):
     cached: bool
     reason: NotRequired[str]
     hint: NotRequired[str]
+    # Set when the answer was served while a reindex for its project was still running, i.e. it
+    # reflects the last COMPLETED index rather than the current source. Optional, and the MCP
+    # tools deliberately return plain `dict` so this never becomes a required schema field.
+    reindexing: NotRequired[bool]
 
 
 @runtime_checkable

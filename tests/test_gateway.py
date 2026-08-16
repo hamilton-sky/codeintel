@@ -409,3 +409,96 @@ def test_cache_get_and_put_always_use_the_same_key():
 
     keys = {engine_arg(c) for c in gets} | {engine_arg(c) for c in puts}
     assert keys == {"cache_engine"}, f"cache key components disagree: {keys}"
+
+
+# --------------------------------------------------------------------------- staleness signalling
+
+class _Answering:
+    available = True
+
+    def build_result(self, op, target, files, budget, project_root):
+        return {"ok": True, "op": op, "target": target, "result": "ANSWER",
+                "engine": "graph", "cached": False}
+
+
+def test_an_answer_served_during_a_reindex_says_so():
+    """Structural answers hash a symbol NAME, not file bytes, so nothing else in the envelope can
+    reveal that the index is behind. An agent's loop is edit -> ask what I broke, which lands
+    exactly in that window. Invalidating the cache would not help: the index itself is stale, so
+    re-asking just refetches the same data more expensively. Saying so is the only honest fix."""
+    from codeintel.gateway import Gateway
+    from codeintel.reindexer import Reindexer
+
+    rx = Reindexer()
+    gw = Gateway(graph=_Answering(), lsp=None, semantic=None, reindexer=rx)
+    rx._in_flight.add("/repo")
+
+    res = gw.query(op="callers", target="f", role="", project_root="/repo")
+    assert res["result"] == "ANSWER"                 # still answers — this is a caveat, not a error
+    assert res["reindexing"] is True
+    assert "re-ask" in res["hint"]
+
+
+def test_a_settled_index_does_not_flag_an_answer():
+    """The signal must be rare enough to mean something — flagging every answer would train a
+    reader to ignore it. Steady state is: a reindex ran, the debounce window has not elapsed, so
+    no new pass fires and answers come back unqualified. (The FIRST query for a root does fire one
+    and is legitimately flagged while it runs — the index really is being rebuilt underneath.)"""
+    import time
+
+    from codeintel.gateway import Gateway
+    from codeintel.reindexer import Reindexer
+
+    rx = Reindexer()
+    rx._last_fired["/repo"] = time.monotonic()      # inside the debounce window: nothing re-fires
+    gw = Gateway(graph=_Answering(), lsp=None, semantic=None, reindexer=rx)
+
+    res = gw.query(op="callers", target="f", role="", project_root="/repo")
+    assert res["result"] == "ANSWER"
+    assert res.get("reindexing") is None
+
+
+def test_an_empty_result_is_not_flagged_as_reindexing():
+    """`reindexing` qualifies an answer. On a safe-null there is no answer to qualify, and the
+    `reason`/`hint` already carry the explanation."""
+    from codeintel.gateway import Gateway
+    from codeintel.provider import safe_null_result
+    from codeintel.reindexer import Reindexer
+
+    class _Empty(_Answering):
+        def build_result(self, op, target, files, budget, project_root):
+            return safe_null_result(op, target, engine="graph", reason="not-in-graph")
+
+    rx = Reindexer()
+    gw = Gateway(graph=_Empty(), lsp=None, semantic=None, reindexer=rx)
+    rx._in_flight.add("/repo")
+
+    res = gw.query(op="callers", target="f", role="", project_root="/repo")
+    assert res.get("reindexing") is None
+    assert res["reason"] == "not-in-graph"
+
+
+def test_reindex_pending_clears_once_the_pass_completes(monkeypatch):
+    from codeintel.reindexer import Reindexer
+
+    rx = Reindexer()
+    monkeypatch.setattr(rx, "_semantic_reindex", lambda root: None)
+    monkeypatch.setattr(rx, "_graph_reindex", lambda root: None)
+
+    rx._in_flight.add("/repo")
+    assert rx.reindex_pending("/repo") is True
+    rx._do_reindex("/repo")
+    assert rx.reindex_pending("/repo") is False, "a completed reindex must clear the flag"
+
+
+def test_reindex_pending_clears_even_when_both_passes_fail(monkeypatch):
+    """A stuck flag would mark every later answer stale and train the reader to ignore it."""
+    from codeintel.reindexer import Reindexer
+
+    rx = Reindexer()
+    for name in ("_semantic_reindex", "_graph_reindex"):
+        monkeypatch.setattr(rx, name, lambda root: (_ for _ in ()).throw(RuntimeError("down")))
+
+    rx._in_flight.add("/repo")
+    rx._do_reindex("/repo")
+    assert rx.reindex_pending("/repo") is False

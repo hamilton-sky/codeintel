@@ -4,6 +4,34 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] — 2026-08-16
+
+Quality-of-life for the thing this tool actually serves: an agent reading its output.
+
+### Added
+- **An answer served while a reindex is running now says so** (`reindexing: true`, with a hint to
+  re-ask). Structural answers hash a symbol *name*, not file bytes, so nothing else in the
+  envelope could reveal that the index was behind — and an agent's loop is *edit → ask what I
+  broke*, which lands exactly in that window. Note what this deliberately is NOT: invalidating the
+  cache faster would not help, because the **index** is what is stale, so re-asking would refetch
+  the same data more expensively. Saying so is the honest fix. Flagged only when there is an
+  answer to qualify, so a safe-null still explains itself through `reason`/`hint`.
+
+### Changed
+- **Result lines no longer carry the backend's project id.** Every row began
+  `Users-alice-Documents-project-myrepo.src.pkg.fn` — the author's home directory repeated on
+  every line of results that can run to a hundred rows. Noise for a human, wasted tokens for the
+  agent. Only a leading path-slug segment is stripped; a hyphen cannot appear in a Python package
+  name, so a genuine dotted module path passes through untouched.
+
+### Fixed
+- **`codeintel install --agent zed` failed for every real Zed user.** Zed ships `settings.json` as
+  JSONC, and the installer parsed strict JSON, so it stopped at an opaque `Expecting value`.
+  Parsing the JSONC and writing it back would be *worse* — `json.dumps` would silently delete the
+  user's comments, which in Zed's default config is most of the file. It now detects JSONC
+  specifically, leaves the file untouched, and prints the exact block to paste and where to put
+  it. A genuinely corrupt file still reports its parse error rather than being misdiagnosed.
+
 ## [0.14.0] — 2026-08-16
 
 Found by adversarial review, then reproduced against a live server before fixing and again after.

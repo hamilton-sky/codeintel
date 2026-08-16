@@ -26,6 +26,28 @@ _GRAPH_OPS = frozenset({
 })
 
 
+def _strip_project_prefix(qualified_name: str) -> str:
+    """Drop the backend's project id from the head of a qualified name.
+
+    The backend prefixes every qualified name with its own project id, which for a path-slug
+    registration is the flattened absolute path — so each result line began
+    `Users-alice-Documents-project-myrepo.src.pkg.fn`. That is the author's home directory
+    layout repeated on every row: noise for a human, wasted tokens for the agent this tool
+    exists to serve, on results that can run to a hundred lines.
+
+    Only a leading path-slug-looking segment is removed. A qualified name that starts with a
+    real module (`src.codeintel.gateway.query`) is left exactly as it is.
+    """
+    head, sep, rest = qualified_name.partition(".")
+    if not sep:
+        return qualified_name
+    # A slug: no spaces, and hyphenated (the backend joins path components with "-"). A genuine
+    # Python package name cannot contain a hyphen, so this cannot eat a real module.
+    if "-" in head and " " not in head:
+        return rest
+    return qualified_name
+
+
 def _repo_display_name(root: str) -> str:
     """The repo's own directory name, for headings a human will read.
 
@@ -276,7 +298,7 @@ class GraphProvider:
     @staticmethod
     def _display(row: dict, name_key: str, qn_key: str, file_key: str) -> str:
         name = str(row.get(name_key) or "?")
-        qn = str(row.get(qn_key) or "")
+        qn = _strip_project_prefix(str(row.get(qn_key) or ""))
         file = str(row.get(file_key) or "")
         edge = str(row.get("type(c)") or "").strip()
         label = qn or name

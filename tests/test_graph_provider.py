@@ -308,3 +308,25 @@ def test_overview_falls_back_to_the_backend_name_without_a_root(monkeypatch):
         "project": "backend-id", "total_nodes": 5, "total_edges": 4})
 
     assert gp._op_overview("", "backend-id", 1000, "").splitlines()[0] == "## Architecture: backend-id"
+
+
+def test_result_lines_do_not_carry_the_backends_project_id(tmp_path):
+    """The backend prefixes every qualified name with its project id — for a path-slug
+    registration, the flattened ABSOLUTE PATH. Every result line therefore began
+    `Users-alice-Documents-project-myrepo.src.pkg.fn`: the author's home directory repeated per
+    row, on results that run to a hundred lines. Noise for a human, wasted tokens for the agent
+    this tool exists to serve."""
+    from codeintel.providers.graph import _strip_project_prefix
+
+    assert _strip_project_prefix(
+        "Users-alice-Documents-project-myrepo.src.pkg.fn") == "src.pkg.fn"
+    assert _strip_project_prefix("my-repo.src.pkg.fn") == "src.pkg.fn"
+
+
+def test_stripping_never_eats_a_real_module_path():
+    """A hyphen cannot appear in a Python package name, which is what makes the slug detectable —
+    so a genuine dotted module path must pass through untouched."""
+    from codeintel.providers.graph import _strip_project_prefix
+
+    for qn in ("src.codeintel.gateway.query", "codeintel.server.run", "main", "", "pkg.mod"):
+        assert _strip_project_prefix(qn) == qn

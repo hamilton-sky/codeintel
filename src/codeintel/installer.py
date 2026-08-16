@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 
 _AGENTS = ["claude", "codex", "gemini", "zed"]
@@ -308,10 +309,41 @@ class Installer:
             return None
         return None
 
+    @staticmethod
+    def _looks_like_jsonc(text: str) -> bool:
+        """Whether *text* is JSON-with-comments — valid for Zed, invalid for `json.loads`."""
+        stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        stripped = re.sub(r"(?m)^\s*//.*$", "", stripped)
+        stripped = re.sub(r",(\s*[}\]])", r"\1", stripped)
+        try:
+            json.loads(stripped)
+        except Exception:
+            return False
+        return True
+
     def _register_json(self, agent: str, config_path: pathlib.Path, spec: dict,
                        command: str) -> dict:
         if config_path.exists():
-            data = json.loads(config_path.read_text(encoding="utf-8"))
+            raw = config_path.read_text(encoding="utf-8")
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                # Zed ships settings.json as JSONC — comments and trailing commas — so strict
+                # parsing fails and every Zed user was blocked with an opaque "Expecting value".
+                # Parsing the JSONC and writing back with json.dumps would be WORSE: it would
+                # silently delete the user's comments, which in Zed's default config is most of
+                # the file. Until this can insert textually (the way the Codex TOML path does),
+                # hand the user the exact block instead of damaging their editor config.
+                if self._looks_like_jsonc(raw):
+                    entry = json.dumps({spec["key"][-1] if spec.get("key") else "codeintel":
+                                        launch_value(command)}, indent=2)
+                    raise ValueError(
+                        f"{config_path} is JSONC (it has comments or trailing commas), which "
+                        f"codeintel will not rewrite because doing so would discard your "
+                        f"comments. Add this to \"{'.'.join(spec['key'][:-1]) or 'the root'}\" "
+                        f"by hand:\n{entry}"
+                    ) from None
+                raise
             if not isinstance(data, dict):
                 # Every other malformed-input path here fails safe (invalid JSON → failed, no
                 # write). Silently substituting {} made this the one branch that DESTROYED the

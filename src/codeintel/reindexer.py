@@ -52,11 +52,26 @@ class Reindexer:
         # folds it into the cache key so a structural answer is invalidated once the
         # index actually moves (a symbol/free-text target has no file content to hash).
         self._generation: dict[str, int] = {}
+        # Roots with a reindex submitted but not yet finished. The index is KNOWN to be behind
+        # while this holds, and no amount of cache invalidation fixes that — re-asking just
+        # refetches the same stale index, more expensively. The only honest response is to say so.
+        self._in_flight: set[str] = set()
         self._executor = _DaemonPool(max_workers=2)
 
     def generation(self, project_root: str) -> int:
         with self._lock:
             return self._generation.get(project_root, 0)
+
+    def reindex_pending(self, project_root: str) -> bool:
+        """Whether this root has a reindex running right now.
+
+        Lets a caller distinguish "this is the current structure" from "this is the structure as
+        of the last completed index, and a newer one is being built". An agent's loop is edit →
+        ask what I broke, which lands exactly in that window."""
+        if not project_root:
+            return False
+        with self._lock:
+            return project_root in self._in_flight
 
     def maybe_reindex(self, project_root: str) -> None:
         if not self._enabled:
@@ -77,6 +92,8 @@ class Reindexer:
         if self._reindex_disabled(project_root):
             return
 
+        with self._lock:
+            self._in_flight.add(project_root)
         self._executor.submit(self._do_reindex, project_root)
 
     def _reindex_disabled(self, project_root: str) -> bool:
@@ -113,6 +130,7 @@ class Reindexer:
         finally:
             with self._lock:
                 self._generation[project_root] = self._generation.get(project_root, 0) + 1
+                self._in_flight.discard(project_root)
 
     def _semantic_reindex(self, project_root: str) -> None:
         import pathlib

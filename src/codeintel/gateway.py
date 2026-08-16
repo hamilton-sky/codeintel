@@ -40,6 +40,15 @@ _UNCACHED_OPS: frozenset[str] = frozenset({"changed", "changes"})
 _ADOPTABLE_ENGINES: frozenset[str] = frozenset({"graph", "lsp", "semantic"})
 
 
+def _mark_reindexing(result: Result, reindexing: bool) -> Result:
+    """Flag an answer served while a reindex for its project is still running."""
+    if not reindexing or result.get("result") is None:
+        return result
+    return {**result, "reindexing": True,
+            "hint": "a reindex is in progress — this answer reflects the index as of the last "
+                    "completed pass; re-ask shortly if you have just changed this code"}
+
+
 class Gateway:
     def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None,
                  reindexer: Reindexer | None = None):
@@ -236,6 +245,16 @@ class Gateway:
             except Exception:
                 pass
 
+            # If a reindex is running, this answer comes from the PREVIOUS index. Structural
+            # answers (callers/impact/hotspots) hash a symbol name, not file bytes, so nothing
+            # else in the envelope can reveal that — and an agent that just edited and asked
+            # "what did I break?" lands precisely here. Busting the cache would not help: the
+            # index itself is behind, so re-asking refetches the same stale data.
+            try:
+                reindexing = self._reindexer.reindex_pending(str(project_root or ""))
+            except Exception:
+                reindexing = False
+
             # Legacy list-based path (backward compat with pre-Phase-2 tests)
             if self._legacy_providers is not None:
                 for p in self._legacy_providers:
@@ -324,7 +343,7 @@ class Gateway:
 
             if not uncacheable:
                 self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
-            return result
+            return _mark_reindexing(result, reindexing)
 
         except Exception as exc:
             log_swallowed("Gateway.query", exc)
