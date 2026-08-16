@@ -17,6 +17,36 @@ def _cypher_literal(s: Any) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
 
+# Every op _dispatch recognizes. Kept beside it so "unsupported op" and "op found nothing" stay
+# distinguishable — they were the same `None` before, and the resulting `unsupported-op` on a
+# perfectly supported `callers` was the most misleading string the never-raise envelope produced.
+_GRAPH_OPS = frozenset({
+    "impact", "context", "callers", "callees", "chain", "pattern",
+    "overview", "changed", "changes", "deadcode", "hotspots",
+})
+
+
+def _repo_display_name(root: str) -> str:
+    """The repo's own directory name, for headings a human will read.
+
+    Resolves first, because callers routinely pass "." (`codeintel map .`) — the basename of which
+    is "." and would title the committed map file with a dot."""
+    if not root:
+        return ""
+    try:
+        return os.path.basename(os.path.realpath(root).rstrip(os.sep))
+    except Exception:
+        return ""
+
+
+def _int_or_zero(value: Any) -> int:
+    """A node count from an untrusted backend payload, or 0 when it is missing/not a number."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 class GraphProvider:
     """Wraps the codebase-memory-mcp CLI. Never raises.
 
@@ -118,7 +148,14 @@ class GraphProvider:
         The real codebase-memory-mcp returns ``{"projects": [...]}``; a bare list is the
         older/mocked shape — accept both. Prefer an exact ``root_path`` match; otherwise the
         LONGEST prefix match (so ``.../project/codeintel`` resolves to codeintel, not its
-        parent ``.../project``). Pure + static so ``_resolve_project`` and ``probe`` share it."""
+        parent ``.../project``). Static so ``_resolve_project`` and ``probe`` share it.
+
+        The backend can hold MORE THAN ONE project for the same root — typically one registered
+        under a short name and one under a path slug — and the two drift apart independently.
+        Returning the first match meant a query could be answered from a months-stale index while
+        a complete one sat beside it: observed on this repo as 1475 nodes vs 2631 for the same
+        path, which is how `callers` reported a function's pre-refactor shape hours after the
+        refactor. Among exact matches, prefer the most complete index."""
         # Normalize the input to an absolute realpath: the backend stores absolute root_paths, so a
         # relative ``project_root`` (e.g. `codeintel map .` passing ".") would otherwise never match
         # — the bug where the map/query silently reported "not indexed" from inside the repo.
@@ -129,7 +166,7 @@ class GraphProvider:
         entries = raw.get("projects", []) if isinstance(raw, dict) else raw
         if not isinstance(entries, list):
             return None
-        exact: str | None = None
+        exact: list[dict] = []
         best_prefix_len = -1
         best_prefix_name: str | None = None
         for entry in entries:
@@ -139,12 +176,22 @@ class GraphProvider:
             if not rp:
                 continue
             if rp == project_root:
-                exact = entry.get("name")
-                break
+                exact.append(entry)
+                continue
             if project_root.startswith(rp.rstrip("/") + "/") and len(rp) > best_prefix_len:
                 best_prefix_len = len(rp)
                 best_prefix_name = entry.get("name")
-        return exact if exact is not None else best_prefix_name
+
+        if exact:
+            # Node count is the available completeness signal — list_projects carries no indexed-at
+            # timestamp, and head_sha is recorded per registration rather than per index pass, so
+            # duplicates routinely report the same SHA with wildly different graphs. `max` keeps
+            # the FIRST maximal entry, so with no completeness signal to go on (ties, or a backend
+            # that omits `nodes`) this falls back to the original first-listed rule rather than
+            # inventing an ordering.
+            best = max(exact, key=lambda e: _int_or_zero(e.get("nodes")))
+            return best.get("name")
+        return best_prefix_name
 
     def _resolve_project(self, project_root: str) -> str | None:
         with self._project_cache_lock:
@@ -400,12 +447,17 @@ class GraphProvider:
         except Exception:
             return None
 
-    def _op_overview(self, target: str, project: str, timeout_ms: int) -> str | None:
+    def _op_overview(self, target: str, project: str, timeout_ms: int, root: str = "") -> str | None:
         try:
             raw = self._run("get_architecture", {"project": project}, timeout_ms)
             if not isinstance(raw, dict):
                 return None
-            name = str(raw.get("project") or project)
+            # Title with the REPO's own name, not the backend's project id. That id is often a
+            # flattened absolute path (`Users-alice-Documents-project-myrepo`), and this heading
+            # lands in CODE_INTEL.md — a file that gets committed and pushed, so an internal
+            # identifier there leaks the author's home directory layout into the repository.
+            name = _repo_display_name(root)
+            name = name or str(raw.get("project") or project)
             parts = [f"## Architecture: {name}"]
             tn, te = raw.get("total_nodes"), raw.get("total_edges")
             if tn is not None or te is not None:
@@ -592,9 +644,19 @@ class GraphProvider:
                     hint=f"run: codeintel index {root_str}  (or: codeintel doctor)",
                 )
 
-            result_text = self._dispatch(op_str, target_str, project, timeout_ms)
-            if result_text is None:
+            if op_str not in _GRAPH_OPS:
                 return safe_null_result(op_str, target_str, engine="graph", reason="unsupported-op")
+
+            result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
+            if result_text is None:
+                # A supported op that matched nothing is NOT an unsupported op, and saying so sends
+                # the agent looking for a different tool when the real answer is almost always a
+                # stale index. Name the cause and the one command that fixes it.
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="not-in-graph",
+                    hint=f"`{target_str}` is not in the graph index for project {project!r} — if "
+                         f"you just added or renamed it, refresh with: codeintel index {root_str}",
+                )
 
             return {
                 "ok": True,
@@ -609,7 +671,7 @@ class GraphProvider:
             return safe_null_result(op, target, engine="graph", reason="error")
 
     def _dispatch(
-        self, op: str, target: str, project: str, timeout_ms: int
+        self, op: str, target: str, project: str, timeout_ms: int, root: str = ""
     ) -> str | None:
         if op == "impact" or op == "context":
             # `context` (fan-out op) → the graph's richest single-symbol view: callers + callees.
@@ -623,7 +685,7 @@ class GraphProvider:
         if op == "pattern":
             return self._op_pattern(target, project, timeout_ms)
         if op == "overview":
-            return self._op_overview(target, project, timeout_ms)
+            return self._op_overview(target, project, timeout_ms, root)
         if op == "changed" or op == "changes":
             return self._op_changed(project, timeout_ms)
         if op == "deadcode":

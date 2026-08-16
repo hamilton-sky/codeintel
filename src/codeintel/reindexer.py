@@ -126,11 +126,25 @@ class Reindexer:
     def _graph_reindex(self, project_root: str) -> None:
         # Route through the graph provider's single subprocess/JSON seam (piped stdin, with a
         # deprecated raw-JSON fallback) rather than duplicating the deprecated raw-JSON call here.
+        #
+        # This called `detect_changes` with a `project_root` argument, and was wrong twice over:
+        # the backend takes `project` (a name from list_projects), so every call returned an
+        # argument error that `_run` folded into None — and `detect_changes` only REPORTS
+        # uncommitted drift, it never reindexes. The graph therefore never refreshed, silently,
+        # and queries answered from whatever the index held when it was first built.
         try:
             from codeintel.providers.graph import GraphProvider
             gp = GraphProvider()
             if not gp.available:
                 return
-            gp._run("detect_changes", {"project_root": project_root}, 120_000)
+            result = gp._run("index_repository", {"project_root": project_root}, 300_000)
+            # Surface a backend-reported failure. Swallowing it is what let a broken reindex look
+            # exactly like a working one for as long as nobody compared the graph to the source.
+            if isinstance(result, dict) and result.get("status") == "error":
+                logger.warning("graph index_repository reported an error for %s: %s",
+                               project_root, result.get("hint") or result)
+            elif result is None:
+                logger.warning("graph index_repository returned nothing for %s "
+                               "(backend timed out, crashed, or rejected the call)", project_root)
         except Exception as exc:
-            logger.warning("graph detect_changes failed: %s", exc)
+            logger.warning("graph index_repository failed: %s", exc)

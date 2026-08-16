@@ -89,7 +89,10 @@ def test_reindexer_graph_reindex_routes_through_stdin(monkeypatch):
 
     assert calls, "no subprocess call made"
     argv, inp = calls[0]
-    assert argv[:3] == ["/fake/codebase-memory-mcp", "cli", "detect_changes"]
+    # `index_repository`, NOT `detect_changes`: this test used to pin the latter, which only
+    # reports uncommitted drift and never refreshes the graph — so it locked in a reindex that
+    # reindexed nothing.
+    assert argv[:3] == ["/fake/codebase-memory-mcp", "cli", "index_repository"]
     assert inp == b'{"project_root": "/some/repo"}'   # stdin, not a positional raw-JSON arg
 
 

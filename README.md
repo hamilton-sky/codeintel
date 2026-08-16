@@ -74,7 +74,7 @@ The agent hands `result` straight to the model. If the graph backend isn't insta
 - **It never throws.** Every call returns the same JSON envelope; a missing or broken backend degrades to `null` *with a reason*. No exceptions, no 500s, no malformed output for the agent to trip over — so you never wrap `code.query` in a `try`.
 - **One tool, not three.** Register a single MCP server and it auto-routes each question to graph, LSP, or semantic — instead of wiring up three backends with three response shapes and three failure modes.
 - **Degrades instead of breaking.** No graph backend installed? That engine returns `null` and the agent falls back to grep. The semantic engine needs nothing external, so codeintel is useful the moment it's installed and only gets sharper as you add backends.
-- **Fast on repeat, never stale.** A content-hash cache returns instantly for unchanged code and self-invalidates when a background reindex advances the index — answers stay both quick *and* fresh. The cache is bounded (LRU), so a long-running server holds steady memory.
+- **Fast on repeat, and the cache never lies.** A content-hash cache returns instantly for unchanged code and self-invalidates when a background reindex advances the index, so you never read a cached answer for code that moved on. The cache is bounded (LRU), so a long-running server holds steady memory. (The *cache* is always consistent with the index; how current the index itself is depends on the engine — see [Keeping answers fresh](#keeping-answers-fresh).)
 - **Concurrency-safe.** The HTTP transport handles requests on threads, so one slow query (an LSP session warming, a first-time index) can't block every other agent.
 - **Honest about its own health.** `codeintel doctor` answers three separate questions per engine — *installed?* *runnable?* *is this repo indexed?* — with the single command to fix each gap, so "installed" is never mistaken for "working". And a readiness claim is one a query can actually honor: install a missing backend mid-session and the running server picks it up on the next call, rather than reporting the engine healthy while quietly routing around it until you restart the host.
 
@@ -237,6 +237,28 @@ Every `Gateway.query()` call returns a dict with exactly these keys:
 
 Run `codeintel doctor` at any time to see which engines are actually ready for a repo and how to fix the ones that aren't.
 
+### Keeping answers fresh
+
+The three engines have genuinely different freshness models, and it's worth knowing which you're
+reading:
+
+| Engine | Freshness |
+|---|---|
+| `lsp` | **Live.** Reads your files at query time — always current, no refresh needed. |
+| `semantic` | **Incremental.** A background reindex re-embeds only what changed; `codeintel status` shows the index age. |
+| `graph` | **Snapshot.** Built by `codeintel index` and stale until the next one. |
+
+So a `callers`/`impact`/`hotspots` answer is only as current as your last index. If a result
+describes code you just changed — or a symbol you just added comes back
+`reason: "not-in-graph"` — that's the signal to re-run:
+
+```bash
+codeintel index /path/to/repo
+```
+
+The reply names the fix when it can: a missing symbol now returns a `hint` with the exact command
+rather than a bare reason.
+
 Pass `--engine auto` (the default) and codeintel chooses the best engine per operation. Pass `--engine both` or `--engine all` to fan out to multiple engines and merge results.
 
 ## Documentation
@@ -260,12 +282,12 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |
 | `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote] [--token TOKEN]` | Start the HTTP transport (loopback-only unless `--allow-remote`; `--token` requires a bearer token on every request) |
-| `codeintel query --op OP --target TARGET [--engine auto]` | Run a single query and print the result |
+| `codeintel query --op OP --target TARGET [--engine auto] [--project-root DIR]` | Run a single query and print the result |
 | `codeintel status [project_root]` | Show engine availability and index age |
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
 | `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
 | `codeintel graph [project_root] [--html] [--out FILE] [--limit N]` | Emit the call graph as `{nodes,edges}` JSON, or `--html` a self-contained interactive viewer — see [docs/graph-viewer.md](docs/graph-viewer.md) |
-| `codeintel reset [project_root] [--all] [--yes]` | Clear the semantic index (this repo, or `--all`) to recover from a corrupt/stale DB |
+| `codeintel reset [project_root] [--all] [--yes] [--json]` | Clear the semantic index (this repo, or `--all`) to recover from a corrupt/stale DB |
 | `codeintel gen-token` | Print a secure random bearer token (for `serve-http` / RBAC `auth.toml`) |
 
 Human-facing commands (`doctor`, `status`, `query`, `setup`, `reset`) honor `--no-color` / `NO_COLOR` and `--ascii`, and auto-degrade to plain text when piped.

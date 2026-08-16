@@ -16,7 +16,7 @@ backends and are not measured here.
 | RAM | 24 GB |
 | OS | macOS 26.5 (arm64) |
 | Embedding model | `BAAI/bge-small-en-v1.5` (384-dim), via `fastembed` on CPU |
-| codeintel | 0.10.0 |
+| codeintel | 0.10.0 (semantic engine unchanged since; re-measure if that changes) |
 
 ## Corpus
 

@@ -4,6 +4,40 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The graph engine could answer from a stale index while a complete one sat beside it.** The
+  backend can hold more than one project for the same root path — typically one under a short name
+  and one under a path slug — and they drift apart independently. Resolution took the *first*
+  exact `root_path` match, so on this repo it bound every query to a 1475-node snapshot while a
+  2631-node index for the identical path went unused. `callers`, `hotspots` and `map` therefore
+  described code as it had been hours earlier, with no indication anything was wrong. Among exact
+  matches codeintel now prefers the most complete index, falling back to the original
+  first-listed rule when there is no completeness signal to go on.
+- **The background graph reindex never reindexed anything.** It called `detect_changes` with a
+  `project_root` argument, and was wrong twice over: the backend takes `project` (a name from
+  `list_projects`), so every call returned an argument error that got folded into `None` — and
+  `detect_changes` only *reports* uncommitted drift, it never rebuilds the index. It now calls
+  `index_repository`, and logs a backend-reported failure instead of swallowing it, which is what
+  let a broken reindex look exactly like a working one.
+- **`reason: "unsupported-op"` for a supported op that simply found nothing.** `callers` on a
+  symbol missing from the index — overwhelmingly a stale index — reported the operation itself as
+  unsupported, and was the only failure path in the graph provider carrying no `hint`. That sends
+  an agent looking for a different tool when the fix is `codeintel index`. Now
+  `reason: "not-in-graph"` with the exact command.
+- **`CODE_INTEL.md` embedded the author's home directory.** The architecture heading used the
+  backend's internal project id, which is often a flattened absolute path
+  (`Users-alice-Documents-project-myrepo`) — published into a file designed to be committed and
+  pushed. It now uses the repository's own directory name.
+
+### Docs
+- **README: a "Keeping answers fresh" section**, because nothing told you the graph is a snapshot
+  while LSP is live and semantic is incremental — the gap that let all of the above go unnoticed.
+  The "never stale" claim beside the cache was overstated and now says what it actually means: the
+  *cache* never disagrees with the index; how current the index is depends on the engine.
+- CLI reference: added the `reset --json` and `query --project-root` flags it was missing.
+
 ## [0.13.0] — 2026-08-16
 
 This release is about **enforcement**: the project's quality claims now have something checking
