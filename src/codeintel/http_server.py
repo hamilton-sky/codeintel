@@ -131,6 +131,13 @@ class _Handler(BaseHTTPRequestHandler):
         parsed["role"] = role  # server-authoritative — overrides any client-supplied role (no escalation)
         if self.path == "/code/doctor":
             result = code_doctor_handler(parsed)
+            # `registrations` (which agent hosts this machine registered codeintel with, and where)
+            # is a LOCAL diagnostic: on a shared deployment the server is not an agent host, so the
+            # field says nothing useful and only hands a client the server user's home layout and
+            # which agent tools are installed there. Dropped on the network transport; the CLI and
+            # the stdio MCP tool — both running as the user, on their own machine — still get it.
+            if isinstance(result, dict):
+                result.pop("registrations", None)
         else:
             result = code_query_handler(parsed)
         # An RBAC denial (query OR doctor) comes back as a safe-null with this reason — 403 it.

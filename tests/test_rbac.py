@@ -141,6 +141,16 @@ def test_rbac_reader_denied_doctor_is_403(rbac_server):
     assert status == 403 and body["reason"] == "op-not-allowed-for-role"
 
 
+def test_doctor_over_http_omits_local_registrations(rbac_server):
+    """`registrations` names the agent config files on THIS machine. A shared HTTP deployment is
+    not an agent host, so the field says nothing useful there and only leaks the server user's home
+    layout and which agent tools are installed. It stays on the local CLI / stdio MCP surfaces."""
+    status, body = _doctor(rbac_server, "admintok")
+    assert status == 200
+    assert "registrations" not in body
+    assert "engines" in body                       # the rest of the report is untouched
+
+
 def test_rbac_admin_allowed_doctor(rbac_server):
     status, body = _doctor(rbac_server, "admintok")     # admin is ["*"]
     assert status == 200 and body.get("reason") != "op-not-allowed-for-role"
