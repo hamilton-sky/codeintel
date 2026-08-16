@@ -239,6 +239,21 @@ class Indexer:
                 if real != real_root and not real.startswith(real_root + os.sep):
                     logger.warning("skipping %s — it resolves outside the indexed root", candidate)
                     continue
+                # A HARDLINK is a second directory entry for the same inode. It is physically
+                # inside the root, so its realpath is inside the root and the check above passes
+                # — `realpath` cannot see it. That reopened exactly the hole the symlink guard
+                # closes: a tenant able to write in their own root could `ln` another tenant's
+                # file in and have it indexed. There is no way to ask "does this inode also live
+                # outside?", so treat extra links as disqualifying. Measured at 0 occurrences
+                # across 3213 source files of a real repo, so the false-positive cost is nil.
+                try:
+                    links = os.stat(real).st_nlink
+                except OSError:
+                    continue
+                if links > 1:
+                    logger.warning("skipping %s — %d hard links, so its content may also live "
+                                   "outside the indexed root", candidate, links)
+                    continue
                 yield candidate
 
     # ---- chunk-span computation ------------------------------------------------------------

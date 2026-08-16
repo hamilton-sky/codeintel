@@ -48,7 +48,13 @@ class TieringPolicy:
             if _ALL in paths:
                 self._roots[role] = [_ALL]
             else:
-                self._roots[role] = [r for r in (_normalize_root(p) for p in paths) if r]
+                # Drop blanks BEFORE normalizing. `_normalize_root("")` is the process cwd, not
+                # "", so a stray empty string or trailing-comma artifact in an operator's roots
+                # list silently added "wherever the server was launched" to the allowlist — the
+                # one fail-OPEN case in an otherwise fail-closed model.
+                self._roots[role] = [
+                    r for r in (_normalize_root(str(p)) for p in paths if str(p).strip()) if r
+                ]
 
     def is_allowed(self, role: str, op: str) -> bool:
         if not self._enabled:

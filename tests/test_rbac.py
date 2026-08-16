@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import threading
 
 import pytest
@@ -374,3 +375,64 @@ def test_a_blank_project_root_is_denied_rather_than_meaning_the_server_cwd(tmp_p
     assert policy.is_root_allowed("reader", str(tmp_path)) is True
     for blank in ("", "   ", None):
         assert policy.is_root_allowed("reader", blank or "") is False, repr(blank)
+
+
+def test_a_hardlink_cannot_smuggle_a_file_into_an_indexed_root(tmp_path):
+    """A hardlink is a second directory entry for the SAME inode. It sits physically inside the
+    root, so its realpath is inside the root and the symlink guard passes it — `realpath` cannot
+    see a hardlink at all. That reopened the exact hole the symlink guard closes: a tenant able to
+    write in their own root could `ln` another tenant's file in and have it indexed. There is no
+    way to ask "does this inode also live outside?", so extra links disqualify.
+    """
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    allowed, secret = tmp_path / "allowed", tmp_path / "secret"
+    allowed.mkdir(); secret.mkdir()
+    (secret / "creds.py").write_text("SECRET = 'sk-live-tenant-b'\n")
+    (allowed / "fine.py").write_text("def ok(): pass\n")
+    try:
+        os.link(secret / "creds.py", allowed / "pulled.py")
+    except OSError:                                     # cross-device or unsupported
+        pytest.skip("hard links unavailable on this filesystem")
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        names = sorted(f.name for f in Indexer(db)._walk_files(allowed))
+    finally:
+        db.close()
+
+    assert "pulled.py" not in names, "a hardlink smuggled an outside file into the index"
+    assert names == ["fine.py"], "the guard must not also drop ordinary in-root files"
+
+
+def test_ordinary_single_link_files_are_still_indexed(tmp_path):
+    """Guard the guard: the link-count check must not quietly exclude normal source files."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    for name in ("a.py", "b.py", "c.md"):
+        (tmp_path / name).write_text("x = 1\n")
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        names = sorted(f.name for f in Indexer(db)._walk_files(tmp_path))
+    finally:
+        db.close()
+    assert names == ["a.py", "b.py", "c.md"]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_a_blank_entry_in_a_roots_list_does_not_grant_the_server_cwd(blank, monkeypatch, tmp_path):
+    """The one fail-OPEN case in an otherwise fail-closed model: `_normalize_root("")` is the
+    process cwd, not "", so a stray empty string or trailing-comma artifact silently added
+    "wherever the server was launched" to the allowlist."""
+    from codeintel.policy import TieringPolicy
+
+    monkeypatch.chdir(tmp_path)
+    policy = TieringPolicy(enabled=True, roots={"reader": ["/srv/allowed", blank]})
+
+    assert policy.is_root_allowed("reader", str(tmp_path)) is False
+    assert policy.is_root_allowed("reader", "/srv/allowed") is True

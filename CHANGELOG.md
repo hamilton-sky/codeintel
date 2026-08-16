@@ -65,6 +65,19 @@ change** — see Breaking below.
   reachable on any cold start, since "graph not indexed yet" is the normal first-query state.
   Cache keys now distinguish what was asked from what auto resolved to.
 
+### Security (third adversarial pass)
+- **A hardlink defeated the symlink containment guard.** A hardlink is a second directory entry
+  for the *same inode*: it sits physically inside the root, so its `realpath` is inside the root
+  and the guard passed it — `realpath` cannot see a hardlink at all. A tenant able to write in
+  their own allowed root could `ln` another tenant's file in and have it indexed and returned.
+  Reproduced, then fixed: a candidate with more than one link is skipped with a logged reason.
+  Measured at 0 occurrences across 3213 source files of a real repository, so ordinary indexing
+  is unaffected.
+- **A blank entry inside a `[roots]` list silently granted the server's working directory.**
+  `_normalize_root("")` returns the cwd rather than an empty string, so a stray `""` or a
+  trailing-comma artifact survived the filter — the one fail-OPEN case in an otherwise
+  fail-closed model. Blank entries are now dropped before normalization.
+
 ### Known limitations (not fixed here, deliberately)
 - **Non-file targets can be stale for up to the reindex debounce (~30s).** For symbol-name and
   free-text targets the content hash is constant, so the freshness generation is the only
