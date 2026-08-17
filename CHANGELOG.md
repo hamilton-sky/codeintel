@@ -82,6 +82,30 @@ were still leaking the home path"* is that property announcing itself).
   badges, and a status note at the top.
 
 ### Changed
+- **"Not hand-written source" is now a shape, not a list of directory names.** Every entry in the
+  four separate skip-lists this replaces was added *after* a real repository produced a wrong
+  answer, and the tests were parametrized over those same lists — proving only that the list
+  contains what it contains. A tree named `bazel-bin/`, `_generated/`, `.output/` or `Pods/`
+  reproduced the minified-bundle-tops-the-hotspots bug exactly as `out/` and `dist/` did before
+  0.15.1. `codeintel.source_kind` answers the question three ways: path patterns (including
+  prefixes like `bazel-*`, whose full name is unknowable in advance, and generated FILENAMES such
+  as `*.min.js`, `*_pb2.py`, `*.g.dart` that sit beside real source where no directory rule can
+  reach them); content shape (a generator banner near the top, or line geometry no human writes —
+  which is the only signal that catches a bundle whose directory and filename both look ordinary);
+  and `.gitattributes` `linguist-generated`/`linguist-vendored`, the repository's own declaration
+  and the one authoritative signal available, which nothing consulted before.
+  > The new checks are deliberately **additive and conservative**. Ambiguous names stay with the
+  > callers that already judge them well: the indexer treats `out`, `build`, `vendor`, `generated`
+  > and `coverage` as output only at the repo root, because one level down they are somebody's
+  > package — matching them at any depth previously indexed 0 files of pypa/build and hid
+  > coverage.py's own collector. `packages/` is source in every monorepo, and `output/` is not
+  > `out/`. Thresholds err toward under-hiding, and a test asserts an ordinary repository comes
+  > through completely intact.
+- **`map`'s ranked-symbol table now applies the same noise filter as `hotspots`.** It had three
+  skip paths and nothing else — no archived, generated or test filtering — despite being the
+  sibling of the op that was specifically hardened after a minified bundle took its top two slots.
+  It is also the ranking that gets written to `CODE_INTEL.md` and committed, so a webpack chunk
+  listed as the repo's most load-bearing symbol became a wrong answer that survived in the tree.
 - **The PyPI classifier is now `4 - Beta`, not `5 - Production/Stable`.** The package is
   well-tested and its one-call surface has been stable since 0.8, but the project is days old,
   pre-1.0, and still finding real defects on first contact with unfamiliar repositories — as

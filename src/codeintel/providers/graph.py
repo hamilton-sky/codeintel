@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from codeintel.provider import Result, log_swallowed, safe_null_result
+from codeintel.source_kind import looks_generated_path, looks_generated_text
 
 
 def _cypher_literal(s: Any) -> str:
@@ -150,9 +151,12 @@ def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], s
         # scripts and `.claude/hooks` are scanned — they were being skipped here while
         # `_is_archived_path` counted them as live, so a live CI helper still read as dead.
         dirnames[:] = [d for d in dirnames if d.lower() not in _VERIFY_SKIP_DIRS
-                       and d.lower() not in _ARCHIVE_DIRS]
+                       and d.lower() not in _ARCHIVE_DIRS
+                       and not looks_generated_path(d + "/x")]
         for fname in filenames:
             if os.path.splitext(fname)[1].lower() not in _VERIFY_EXTS:
+                continue
+            if looks_generated_path(fname):     # `*.min.js`/`*_pb2.py` beside real source
                 continue
             scanned += 1
             if scanned > _VERIFY_FILE_CAP:
@@ -161,6 +165,12 @@ def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], s
                 with open(os.path.join(dirpath, fname), encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
             except OSError:
+                continue
+            # This loop already holds the file's text, so the content check is free here — and it
+            # is the only signal that catches a bundle whose directory and filename both look
+            # ordinary. A generated file must not VOUCH for a name: its occurrences are what hid a
+            # genuinely dead `toJSON` behind 46 matches from one minified chunk.
+            if looks_generated_text(text):
                 continue
             for match in pattern.findall(text):
                 seen[match] = seen.get(match, 0) + 1
@@ -195,9 +205,18 @@ def _is_archived_path(file_path: str) -> bool:
     most "complex" function in any tree that contains one. The first version excluded only
     dot-directories, so a plain `out/`, `dist/` or `vendor/` sailed through. Shares the skip list
     with the source verifier — the definition of "not hand-written source" is one thing, not two.
+
+    The name lists below are kept as a fast local pre-filter, but they are no longer the whole
+    answer: `looks_generated_path` also recognises Bazel's `bazel-*` trees, `_generated`, `.output`,
+    `Pods`, `bower_components` and generated FILENAMES that sit beside real source (`*.min.js`,
+    `*_pb2.py`, `*.g.dart`), none of which any name list here covered. Every entry in those lists
+    was added after a real repository produced a wrong answer; recognising the shape rather than
+    the specific name is what stops the next one from doing it again.
     """
     parts = [p.lower() for p in file_path.replace("\\", "/").split("/")[:-1]]
-    return any(p in _ARCHIVE_DIRS or p in _VERIFY_SKIP_DIRS for p in parts)
+    if any(p in _ARCHIVE_DIRS or p in _VERIFY_SKIP_DIRS for p in parts):
+        return True
+    return looks_generated_path(file_path)
 
 
 # What the source-verification pass can and cannot claim, stated per outcome. The single old note

@@ -160,6 +160,16 @@ def _query_ranked_symbols(provider: GraphProvider, project: str) -> list[dict]:
         deg = row.get("in_degree", 0)
         if path in _RANK_SKIP_PATHS:  # drop builtins / project node noise
             continue
+        # `hotspots` was specifically hardened against archived and generated content after a
+        # minified bundle took its top two slots; this ranking is its sibling and had none of that
+        # filtering — three skip paths and nothing else. It is also the one that gets WRITTEN to
+        # CODE_INTEL.md and committed, so a webpack chunk listed as the repo's most load-bearing
+        # symbol is a wrong answer that survives in the tree and gets reviewed as fact.
+        # Imported here rather than at module scope: `GraphProvider` is a TYPE_CHECKING-only import
+        # above, and the mapper is constructed with a provider instance rather than importing one.
+        from codeintel.providers.graph import GraphProvider as _GP
+        if _GP._is_noise({"file_path": path, "name": str(name)}):
+            continue
         rows.append({"name": name, "file_path": path, "in_degree": deg})
         if len(rows) >= 30:
             break

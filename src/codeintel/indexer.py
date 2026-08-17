@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from codeintel.containment import contained_path, real_root
+from codeintel.source_kind import (
+    load_gitattributes_globs,
+    looks_generated_file,
+    looks_generated_path,
+    matches_any_glob,
+)
 
 if TYPE_CHECKING:
     from codeintel.semantic_db import SemanticDb
@@ -288,6 +294,10 @@ class Indexer:
 
         So every candidate is resolved and required to land back under the resolved root."""
         ignores = set(_SKIP_DIRS) | set(_DEFAULT_IGNORES) | self._load_gitignore(root)
+        # The repository's own declaration of which files are not hand-written. This is the only
+        # authoritative signal available — every other check here is inference — and nothing
+        # consulted it before. Read once per walk, not per file.
+        gitattributes = load_gitattributes_globs(str(root))
         real_root_str = str(root)
         try:
             root_real = real_root(str(root))
@@ -315,12 +325,28 @@ class Indexer:
                     logger.warning("skipping %s — it does not resolve to a file inside the indexed "
                                    "root (symlink out, or extra hard links)", candidate)
                     continue
+                # Generated content is excluded from the CORPUS, not merely down-ranked: a search
+                # competes chunks against each other, so one checked-in bundle contributes hundreds
+                # of chunks that a real implementation then has to outrank. The directory lists
+                # above miss generated files that sit beside real source (`*.min.js`, `*_pb2.py`)
+                # and any build tree whose name nobody thought to list.
+                rel = os.path.relpath(str(candidate), str(root))
+                if looks_generated_path(rel) or matches_any_glob(rel, gitattributes):
+                    continue
                 # A source extension is not a promise of source. A compiled artifact or blob named
                 # `.py` was read with errors="replace" and embedded as replacement-character
                 # garbage — 196KB of /dev/urandom produced 162 chunks — which then competed for
                 # rank against real code in every search.
                 if _looks_binary(candidate):
                     logger.warning("skipping %s — looks binary despite its extension", candidate)
+                    continue
+                # Last resort, and the only check that catches a bundle whose directory and
+                # filename both look ordinary. One 6.7MB minified chunk contributes hundreds of
+                # chunks that real implementations then have to outrank — the corpus, not the
+                # ranking, was the problem. Bounded to an 8KB sample.
+                if looks_generated_file(candidate):
+                    logger.info("skipping %s — content looks generated (minified or banner)",
+                                candidate)
                     continue
                 yield candidate
 
