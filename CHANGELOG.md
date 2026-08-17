@@ -61,6 +61,22 @@ were still leaking the home path"* is that property announcing itself).
   marker was applied on one of four return paths — and the cache key's freshness generation only
   advances when a reindex *completes*, so the paths that could actually serve a stale answer were
   the three that stayed silent. It is now applied on every exit.
+- **`codeintel status` reported another repository's index age as this one's.** "Index age" was the
+  mtime of the shared per-model database file, which every project writes to — so indexing any
+  other repo made a months-stale index look freshly built, and the number was most convincing
+  exactly when someone was checking it because an answer looked wrong. A per-project `indexed_at`
+  is now recorded and reported; a project with no recorded pass says "unknown" rather than
+  inventing a number, because an authoritative-looking wrong number is worse than none.
+- **A deleted or moved repository stayed "indexed" forever.** The index pass returned `0` when the
+  root was missing — and `0` also means "nothing new" — so it never reached cleanup and `doctor`
+  went on reporting the repo as healthy and indexed. A missing root is now the moment its rows are
+  reconciled away, scoped to that project so no other repo's index is touched.
+- **A cleanup pass could silently do nothing.** `code_embeddings` is created lazily at the first
+  embed, so on a database that has recorded chunks but never embedded, the first `DELETE` against
+  it raised, the surrounding never-raise handler swallowed it, and every stale row survived —
+  including a row for a file swapped for a symlink, which is exactly what must not persist. Found
+  by a test written for the deleted-repo fix above; the same flaw was present in two sibling
+  cleanup paths and is fixed in all three.
 - **The `not-in-graph` hint no longer names the backend's project id.** For a path-slug
   registration that id *is* the flattened absolute path of the repository, so the hint disclosed
   the server's directory layout to any caller. The earlier home-path sweep grepped for

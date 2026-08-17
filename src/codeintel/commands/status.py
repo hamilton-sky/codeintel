@@ -36,11 +36,31 @@ def run(args: Any) -> int:
     from codeintel.semantic_db import default_db_path
 
     db_path = default_db_path(str(load_config(project_root).get("model") or ""))
-    if os.path.exists(db_path):
-        age = datetime.datetime.now() - datetime.datetime.fromtimestamp(os.path.getmtime(db_path))
+    if not os.path.exists(db_path):
+        print(f"\nIndex: not found  ({db_path})")
+        return 0
+
+    # The age of THIS project, not of the database file. Every project shares one per-model file,
+    # so its mtime advances whenever any OTHER repository is indexed — which made a months-stale
+    # index report as freshly built, and did so most convincingly when someone was checking it
+    # precisely because an answer looked wrong.
+    from codeintel.semantic_db import SemanticDb
+
+    indexed_at = None
+    db = SemanticDb(db_path)
+    try:
+        indexed_at = db.indexed_at(os.path.realpath(project_root))
+    finally:
+        db.close()
+
+    if indexed_at is None:
+        # Either never indexed, or indexed before this was recorded. "Unknown" is the honest
+        # answer; the previous number was worse than none because it looked authoritative.
+        print(f"\nIndex age: unknown for this repo — run `codeintel index {project_root}`"
+              f"  ({db_path})")
+    else:
+        age = datetime.datetime.now() - datetime.datetime.fromtimestamp(indexed_at)
         hours = int(age.total_seconds() // 3600)
         minutes = int((age.total_seconds() % 3600) // 60)
         print(f"\nIndex age: {hours}h {minutes}m  ({db_path})")
-    else:
-        print(f"\nIndex: not found  ({db_path})")
     return 0

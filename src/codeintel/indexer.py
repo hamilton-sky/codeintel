@@ -4,6 +4,7 @@ import ast
 import hashlib
 import logging
 import os
+import sqlite3
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -268,9 +269,16 @@ class Indexer:
                     ).fetchall()
                 ]
                 for cid in chunk_ids:
-                    conn.execute(
-                        "DELETE FROM code_embeddings WHERE chunk_id = ?", (cid,)
-                    )
+                    # `code_embeddings` is created lazily at the first embed, so it can be absent
+                    # here. Letting that raise aborts the whole cleanup pass through the handler
+                    # below, leaving every stale row — including one for a file swapped for a
+                    # symlink, which is precisely what must not survive.
+                    try:
+                        conn.execute(
+                            "DELETE FROM code_embeddings WHERE chunk_id = ?", (cid,)
+                        )
+                    except sqlite3.OperationalError:
+                        pass
                     conn.execute(
                         "DELETE FROM chunk_hashes WHERE chunk_id = ?", (cid,)
                     )
@@ -733,16 +741,31 @@ class Indexer:
             return 0
 
         root = Path(project_root)
+        project_root_real = os.path.realpath(project_root)
         if not root.exists():
+            # Returning 0 here meant "nothing new to do", which is indistinguishable from a
+            # successful no-op pass — so a repository that had been deleted or moved kept every row
+            # it ever had, and `doctor`/`status` went on reporting it as indexed and healthy
+            # forever. A missing root is not a quiet no-op; it is the one moment we know the
+            # project is gone, and the only chance to reconcile it away.
+            removed = self.db.forget_project(project_root_real)
+            if removed:
+                logger.warning("%s no longer exists — dropped %d stale indexed chunks",
+                               project_root, removed)
             return 0
 
-        project_root_real = os.path.realpath(project_root)
         project_key = _project_key(project_root_real)
 
         self._cleanup_deleted(root, project_root_real)
 
         new_chunks = self._collect_new_chunks(root, project_key, project_root_real)
         if not new_chunks:
+            # A pass that found nothing new still INDEXED this project — the tree was walked and
+            # every chunk confirmed current. Recording it is what lets `status` say "checked 2
+            # minutes ago" rather than reporting the age of whenever content last changed.
+            self.db.mark_indexed(project_root_real)
             return 0
 
-        return self._embed_and_write(new_chunks, project_root_real)
+        written = self._embed_and_write(new_chunks, project_root_real)
+        self.db.mark_indexed(project_root_real)
+        return written

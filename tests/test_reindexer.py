@@ -280,3 +280,95 @@ def test_a_reindex_already_running_is_not_submitted_again(monkeypatch):
     r._in_flight.discard("/repo")     # the running pass completes
     r.maybe_reindex("/repo")
     assert submitted == ["/repo", "/repo"]
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle truth: what `status` and `doctor` report about an index
+#
+# Both of these reported healthy while being wrong, which is the shape of nearly every bug this
+# project has shipped — the health layer answering from something other than the fact it claims.
+# --------------------------------------------------------------------------- #
+
+def test_index_age_is_per_project_not_the_shared_database_mtime(tmp_path):
+    """Every project writes into one per-model database file, so its mtime is the age of the most
+    recent index of ANY repository. Indexing an unrelated repo made a stale one look fresh."""
+    import time as _time
+
+    from codeintel.semantic_db import SemanticDb
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        old, new = "/repos/stale-app", "/repos/busy-app"
+        db.mark_indexed(old, when=_time.time() - 90 * 24 * 3600)   # 90 days ago
+        db.mark_indexed(new)                                        # now
+
+        stale_at, fresh_at = db.indexed_at(old), db.indexed_at(new)
+        assert stale_at is not None and fresh_at is not None
+        # The stale project must still read as stale after the busy one was indexed.
+        assert fresh_at - stale_at > 89 * 24 * 3600
+        # A project nobody indexed reports unknown, not "now".
+        assert db.indexed_at("/repos/never-touched") is None
+    finally:
+        db.close()
+
+
+def test_a_project_whose_root_is_gone_is_reconciled_away(tmp_path):
+    """`_index` returned 0 before reaching cleanup when the root was missing — and 0 also means
+    "nothing new", so a deleted or moved repository kept every row it ever had and went on being
+    reported as indexed and healthy."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        gone = tmp_path / "deleted-repo"
+        gone_real = os.path.realpath(str(gone))
+        conn = db.conn()
+        conn.execute(
+            "INSERT INTO chunk_hashes(chunk_id, project_root, file_path, chunk_start, content_hash)"
+            " VALUES (?, ?, ?, ?, ?)", ("c1", gone_real, "app.py", 0, "h"),
+        )
+        conn.commit()
+        db.mark_indexed(gone_real)
+        assert db.conn().execute(
+            "SELECT COUNT(*) FROM chunk_hashes WHERE project_root = ?", (gone_real,),
+        ).fetchone()[0] == 1
+
+        Indexer(db)._index(str(gone))        # the root does not exist
+
+        assert db.conn().execute(
+            "SELECT COUNT(*) FROM chunk_hashes WHERE project_root = ?", (gone_real,),
+        ).fetchone()[0] == 0, "a deleted repo's rows must not survive"
+        assert db.indexed_at(gone_real) is None
+    finally:
+        db.close()
+
+
+def test_reconciling_one_deleted_project_leaves_others_alone(tmp_path):
+    """The counterpart guard: cleanup is scoped by project_root, so removing one repo must never
+    touch another's index."""
+    from codeintel.indexer import Indexer
+    from codeintel.semantic_db import SemanticDb
+
+    db = SemanticDb(str(tmp_path / "db.sqlite"))
+    db.init()
+    try:
+        live = tmp_path / "live-repo"; live.mkdir()
+        live_real, gone_real = os.path.realpath(str(live)), os.path.realpath(str(tmp_path / "gone"))
+        conn = db.conn()
+        for cid, root in (("a", live_real), ("b", gone_real)):
+            conn.execute(
+                "INSERT INTO chunk_hashes(chunk_id, project_root, file_path, chunk_start,"
+                " content_hash) VALUES (?, ?, ?, ?, ?)", (cid, root, "app.py", 0, "h"),
+            )
+        conn.commit()
+
+        Indexer(db)._index(str(tmp_path / "gone"))
+
+        assert db.conn().execute(
+            "SELECT COUNT(*) FROM chunk_hashes WHERE project_root = ?", (live_real,),
+        ).fetchone()[0] == 1
+    finally:
+        db.close()

@@ -5,6 +5,7 @@ import logging
 import pathlib
 import re
 import sqlite3
+import time
 
 import sqlite_vec
 
@@ -113,6 +114,18 @@ class SemanticDb:
                 ON chunk_hashes(project_root, file_path);
 
             DROP INDEX IF EXISTS idx_chunk_project;
+
+            -- When each project was last indexed. A separate table rather than a column on
+            -- chunk_hashes, so adding it needs no migration and costs nothing per chunk.
+            --
+            -- `codeintel status` reported "Index age" from the mtime of the shared per-model
+            -- database FILE, which every project writes to: indexing any other repository made a
+            -- months-stale index look freshly built, and the number was most misleading exactly
+            -- when a user was checking it because an answer looked wrong.
+            CREATE TABLE IF NOT EXISTS project_index_meta (
+                project_root TEXT PRIMARY KEY,
+                indexed_at   REAL NOT NULL
+            );
         """)
         c.commit()
 
@@ -194,7 +207,13 @@ class SemanticDb:
             ).fetchall()
             orphans = [r[0] for r in rows if r[0] not in keep_ids]
             for cid in orphans:
-                conn.execute("DELETE FROM code_embeddings WHERE chunk_id = ?", (cid,))
+                # Tolerate the lazily-created embeddings table not existing yet: otherwise the
+                # first orphan raises, the handler below swallows it, and every stale row survives
+                # — a reconcile that silently does nothing is worse than one that reports failure.
+                try:
+                    conn.execute("DELETE FROM code_embeddings WHERE chunk_id = ?", (cid,))
+                except sqlite3.OperationalError:
+                    pass
                 conn.execute("DELETE FROM chunk_hashes WHERE chunk_id = ?", (cid,))
             if orphans:
                 conn.commit()
@@ -202,6 +221,64 @@ class SemanticDb:
         except Exception as exc:
             logger.warning("orphan reconcile failed for %s: %s", file_path, exc)
             return 0
+
+    def mark_indexed(self, project_root_real: str, when: float | None = None) -> None:
+        """Record that *project_root_real* finished an index pass. Never raises — a failure to
+        record the timestamp must not fail the index that just succeeded."""
+        try:
+            conn = self.conn()
+            conn.execute(
+                "INSERT OR REPLACE INTO project_index_meta(project_root, indexed_at) VALUES (?, ?)",
+                (project_root_real, time.time() if when is None else when),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("recording index time for %s failed: %s", project_root_real, exc)
+
+    def indexed_at(self, project_root_real: str) -> float | None:
+        """When this project was last indexed, or None if it never was (or the row predates this
+        table — an index built before the table existed has no timestamp, and saying "unknown" is
+        the honest answer rather than inventing one from a file mtime)."""
+        try:
+            row = self.conn().execute(
+                "SELECT indexed_at FROM project_index_meta WHERE project_root = ?",
+                (project_root_real,),
+            ).fetchone()
+            return float(row[0]) if row and row[0] is not None else None
+        except Exception:
+            return None
+
+    def forget_project(self, project_root_real: str) -> int:
+        """Drop every trace of a project — chunks, embeddings and its index timestamp.
+
+        Used when a repository's root no longer exists. Its rows previously survived forever,
+        because the index pass returned early when the root was missing and never reached the
+        cleanup, so `doctor` went on reporting a deleted repository as indexed and healthy."""
+        removed = 0
+        try:
+            conn = self.conn()
+            chunk_ids = [r[0] for r in conn.execute(
+                "SELECT chunk_id FROM chunk_hashes WHERE project_root = ?",
+                (project_root_real,),
+            ).fetchall()]
+            for cid in chunk_ids:
+                # `code_embeddings` is created LAZILY at the first write, sized to the model's
+                # vector length — so on a database that has recorded chunk hashes but never
+                # embedded (or one reset between passes) this table does not exist yet. Letting
+                # that abort the loop left every chunk_hashes row in place, which is the exact
+                # stale-row state this method exists to clear.
+                try:
+                    conn.execute("DELETE FROM code_embeddings WHERE chunk_id = ?", (cid,))
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute("DELETE FROM chunk_hashes WHERE chunk_id = ?", (cid,))
+                removed += 1
+            conn.execute("DELETE FROM project_index_meta WHERE project_root = ?",
+                         (project_root_real,))
+            conn.commit()
+        except Exception as exc:
+            logger.warning("forgetting project %s failed: %s", project_root_real, exc)
+        return removed
 
     def close(self) -> None:
         if self._conn is not None:
