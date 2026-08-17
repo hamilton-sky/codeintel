@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from codeintel.providers.graph import GraphProvider
+from codeintel.providers.graph import GraphProvider, ProjectResolution
 from codeintel.server import code_status_handler
 
 
@@ -19,9 +19,9 @@ def test_match_project_resolves_a_relative_path(tmp_path, monkeypatch):
     real = os.path.realpath(str(tmp_path))
     raw = {"projects": [{"name": "myrepo", "root_path": real}]}
     monkeypatch.chdir(tmp_path)
-    assert GraphProvider._match_project(raw, ".") == "myrepo"      # relative resolves now
-    assert GraphProvider._match_project(raw, real) == "myrepo"     # absolute still works
-    assert GraphProvider._match_project(raw, os.path.join(real, "src")) == "myrepo"  # subdir prefix
+    assert GraphProvider._match_project(raw, ".").name == "myrepo"      # relative resolves now
+    assert GraphProvider._match_project(raw, real).name == "myrepo"     # absolute still works
+    assert GraphProvider._match_project(raw, os.path.join(real, "src")).name == "myrepo"  # subdir prefix
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ def test_graph_provider_unknown_op(monkeypatch):
         lambda x: "/fake/codebase-memory-mcp",
     )
     p = GraphProvider()
-    p._project_cache[""] = "myproject"
+    p._project_cache[""] = ProjectResolution(name="myproject", matched_root="", scope="exact")
     r = p.build_result("nonexistent-op", "x", [], 0, "")
     assert r["ok"] is True
     assert r["result"] is None
@@ -191,11 +191,11 @@ def test_match_project_prefers_the_most_complete_of_duplicate_registrations(tmp_
         {"name": "stale-short-name", "root_path": root, "nodes": 1475, "edges": 2809},
         {"name": "fresh-path-slug", "root_path": root, "nodes": 2631, "edges": 8303},
     )
-    assert GraphProvider._match_project(raw, root) == "fresh-path-slug"
+    assert GraphProvider._match_project(raw, root).name == "fresh-path-slug"
 
     # ...and independently of the order the backend happens to list them in.
     reversed_raw = {"projects": list(reversed(raw["projects"]))}
-    assert GraphProvider._match_project(reversed_raw, root) == "fresh-path-slug"
+    assert GraphProvider._match_project(reversed_raw, root).name == "fresh-path-slug"
 
 
 def test_match_project_keeps_the_first_listed_when_there_is_nothing_to_choose_between(tmp_path):
@@ -206,8 +206,8 @@ def test_match_project_keeps_the_first_listed_when_there_is_nothing_to_choose_be
         {"name": "aaa", "root_path": root, "nodes": 10},
         {"name": "zzz", "root_path": root, "nodes": 10},
     )
-    assert GraphProvider._match_project(raw, root) == "aaa"
-    assert GraphProvider._match_project({"projects": list(reversed(raw["projects"]))}, root) == "zzz"
+    assert GraphProvider._match_project(raw, root).name == "aaa"
+    assert GraphProvider._match_project({"projects": list(reversed(raw["projects"]))}, root).name == "zzz"
 
 
 def test_match_project_survives_a_missing_or_junk_node_count(tmp_path):
@@ -219,7 +219,7 @@ def test_match_project_survives_a_missing_or_junk_node_count(tmp_path):
         {"name": "junk-count", "root_path": root, "nodes": "lots"},
         {"name": "real-count", "root_path": root, "nodes": 5},
     )
-    assert GraphProvider._match_project(raw, root) == "real-count"
+    assert GraphProvider._match_project(raw, root).name == "real-count"
 
 
 def test_match_project_still_prefers_exact_over_a_richer_parent(tmp_path):
@@ -231,7 +231,7 @@ def test_match_project_still_prefers_exact_over_a_richer_parent(tmp_path):
         {"name": "parent", "root_path": str(tmp_path), "nodes": 999_999},
         {"name": "repo", "root_path": str(repo), "nodes": 12},
     )
-    assert GraphProvider._match_project(raw, str(repo)) == "repo"
+    assert GraphProvider._match_project(raw, str(repo)).name == "repo"
 
 
 # --------------------------------------------------------------------------- failure reasons
@@ -253,7 +253,8 @@ def _provider_answering(dispatch_result):
     dispatching to a fixed result — so the reason-mapping is tested, not the subprocess."""
     gp = GraphProvider.__new__(GraphProvider)
     gp.available = True                                            # type: ignore[attr-defined]
-    gp._resolve_project = lambda root: "proj"                      # type: ignore[method-assign]
+    gp._resolve_project = lambda root: ProjectResolution(          # type: ignore[method-assign]
+        name="proj", matched_root="/repo", scope="exact")
     gp._dispatch = lambda *a, **k: dispatch_result                 # type: ignore[method-assign]
     return gp
 
@@ -645,3 +646,73 @@ def test_same_dir_is_case_insensitive_where_the_filesystem_is(tmp_path):
     assert _same_dir(str(tmp_path), str(tmp_path)) is True
     assert _same_dir(str(tmp_path), str(tmp_path) + "/") is True
     assert _same_dir(str(tmp_path), str(tmp_path / "..")) is False
+
+
+# --------------------------------------------------------------------------- #
+# Ancestor-project resolution: the answer path, not just the diagnostic
+#
+# 0.15.1 fixed this in `probe()` only. `doctor` warned that a repo was not indexed on its own
+# while `code.query` — the surface an agent actually calls — went on answering from the project
+# that contains it, silently. The two disagreed because they were two implementations of the same
+# question; they now share one `ProjectResolution`, and these tests pin the behaviour of the half
+# that was missing.
+# --------------------------------------------------------------------------- #
+
+def _provider_resolving(scope, dispatch_result="## Answer\nrow"):
+    """A provider whose resolution lands on `scope` ("exact" or "ancestor")."""
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                            # type: ignore[attr-defined]
+    gp._resolve_project = lambda root: ProjectResolution(          # type: ignore[method-assign]
+        name="parent-project", matched_root="/repos", scope=scope)
+    gp._dispatch = lambda *a, **k: dispatch_result                 # type: ignore[method-assign]
+    return gp
+
+
+@pytest.mark.parametrize("op", ["deadcode", "hotspots", "overview", "changed"])
+def test_repo_scan_ops_refuse_to_answer_from_a_containing_project(op):
+    """A repo-scan answer is DEFINED BY the repo boundary. "The monorepo's dead code" is not a
+    lower-confidence answer to "this repo's dead code", it is the answer to a different question —
+    and a symbol dead in one repo is routinely live in its sibling, so answering here is how
+    `deadcode` tells an agent to delete working code."""
+    res = _provider_resolving("ancestor").build_result(op, "", [], 5000, "/repos/my-app")
+    assert res["result"] is None
+    assert res["reason"] == "project-not-indexed-standalone"
+    assert "codeintel index /repos/my-app" in res["hint"]
+    # Distinguishable from "nothing is indexed at all", which has its own reason and remedy.
+    assert res["reason"] != "project-not-indexed"
+
+
+@pytest.mark.parametrize("op", ["callers", "callees", "impact", "chain"])
+def test_symbol_scoped_ops_still_answer_from_an_ancestor_but_say_so(op):
+    """For a genuine subdirectory of a monorepo the containing index is exactly where a symbol's
+    callers live, so refusing would break the common case. Answer — but disclose the scope in the
+    result text, the only channel that reaches the model."""
+    res = _provider_resolving("ancestor").build_result(op, "foo", [], 5000, "/repos/my-app")
+    assert res["result"] is not None
+    assert "## Answer" in res["result"]
+    assert "not indexed on its own" in res["result"]
+    assert "codeintel index /repos/my-app" in res["result"]
+
+
+@pytest.mark.parametrize("op", ["deadcode", "callers"])
+def test_an_exact_match_is_never_caveated_or_refused(op):
+    """The guard must not fire on a correctly-indexed repo — that would make every ordinary answer
+    carry a scope warning, which trains the reader to ignore it."""
+    res = _provider_resolving("exact").build_result(op, "foo", [], 5000, "/repos/my-app")
+    assert res["result"] is not None
+    assert "not indexed on its own" not in res["result"]
+
+
+def test_the_not_in_graph_hint_does_not_leak_the_backends_project_id():
+    """For a path-slug registration the project id IS the flattened absolute path of the repo, so
+    naming it in a hint discloses the server's directory layout. The renderer sweep that fixed the
+    home-path leaks grepped for `qualified_name` and never covered this channel."""
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                            # type: ignore[attr-defined]
+    gp._resolve_project = lambda root: ProjectResolution(          # type: ignore[method-assign]
+        name="Users-alice-Documents-work-secret-repo", matched_root="/x", scope="exact")
+    gp._dispatch = lambda *a, **k: None                            # type: ignore[method-assign]
+    res = gp.build_result("callers", "nope", [], 5000, "/x")
+    assert res["reason"] == "not-in-graph"
+    assert "Users-alice" not in res["hint"]
+    assert "secret-repo" not in res["hint"]

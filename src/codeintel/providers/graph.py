@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from codeintel.provider import Result, log_swallowed, safe_null_result
@@ -25,6 +26,17 @@ _GRAPH_OPS = frozenset({
     "impact", "context", "callers", "callees", "chain", "pattern",
     "overview", "changed", "changes", "deadcode", "hotspots",
 })
+
+
+# Ops whose answer is DEFINED BY the repository boundary rather than by a symbol inside it. When
+# resolution lands on a containing project instead of the repo that was asked about, these must
+# refuse rather than answer: "the monorepo's hotspots" is not a lower-confidence answer to "this
+# repo's hotspots", it is the answer to a different question. `deadcode` is the dangerous one — a
+# symbol that is dead within one repo is routinely live in its sibling, so an ancestor-scoped
+# answer tells an agent to delete working code. The symbol-scoped ops are not listed: for a genuine
+# subdirectory of a monorepo, an ancestor index is the CORRECT place to find a symbol's callers, so
+# those answer and carry a caveat instead.
+_ROOT_SCOPED_OPS = frozenset({"overview", "changed", "changes", "deadcode", "hotspots"})
 
 
 # Trailing segments that mean "this is a filename, not a dotted module path".
@@ -225,6 +237,40 @@ def _collapse_repeats(label: str) -> str:
     return ".".join(out)
 
 
+@dataclass(frozen=True)
+class ProjectResolution:
+    """How a project_root resolved to a backend project, INCLUDING whether the match was exact.
+
+    `_resolve_project` used to return the project name alone, discarding the one fact that decides
+    whether an answer is about the repository the caller asked about. `probe()` recovered it by
+    re-deriving the matched root a second time; `build_result` did not, so `doctor` warned about an
+    ancestor match while `code.query` answered from it silently — a human running the diagnostic
+    was told, and the agent actually consuming the answers was not. Both now consume this record,
+    so the two cannot drift apart again."""
+
+    name: str
+    matched_root: str | None
+    scope: str  # "exact" | "ancestor"
+
+    @property
+    def is_ancestor(self) -> bool:
+        return self.scope == "ancestor"
+
+
+def _has_own_git_dir(path: str) -> bool:
+    """Whether *path* is the root of its own git repository.
+
+    This is what separates the two cases an ancestor match conflates. A subdirectory of a monorepo
+    has no `.git` of its own, and answering it from the monorepo's index is correct. A repository
+    that merely happens to sit inside an indexed directory does have one, and answering it from the
+    parent is the bug. A worktree or submodule records `.git` as a FILE rather than a directory, so
+    test for existence, not `is_dir()`."""
+    try:
+        return os.path.exists(os.path.join(path, ".git"))
+    except OSError:
+        return False
+
+
 def _same_dir(a: str, b: str) -> bool:
     """Whether two paths name the same directory.
 
@@ -297,7 +343,7 @@ class GraphProvider:
     """
 
     def __init__(self) -> None:
-        self._project_cache: dict[str, str | None] = {}          # resolved names (stable, kept)
+        self._project_cache: dict[str, ProjectResolution] = {}   # resolved projects (stable, kept)
         self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
         self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
         self._detect_backend()
@@ -366,8 +412,8 @@ class GraphProvider:
             return self._FAIL
 
     @staticmethod
-    def _match_project(raw: Any, project_root: str) -> str | None:
-        """Resolve a list_projects response to the project name for ``project_root``.
+    def _match_project(raw: Any, project_root: str) -> ProjectResolution | None:
+        """Resolve a list_projects response to the project for ``project_root``.
 
         The real codebase-memory-mcp returns ``{"projects": [...]}``; a bare list is the
         older/mocked shape — accept both. Prefer an exact ``root_path`` match; otherwise the
@@ -392,7 +438,7 @@ class GraphProvider:
             return None
         exact: list[dict] = []
         best_prefix_len = -1
-        best_prefix_name: str | None = None
+        best_prefix: dict | None = None
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -404,7 +450,7 @@ class GraphProvider:
                 continue
             if project_root.startswith(rp.rstrip("/") + "/") and len(rp) > best_prefix_len:
                 best_prefix_len = len(rp)
-                best_prefix_name = entry.get("name")
+                best_prefix = entry
 
         if exact:
             # Node count is the available completeness signal — list_projects carries no indexed-at
@@ -414,10 +460,25 @@ class GraphProvider:
             # that omits `nodes`) this falls back to the original first-listed rule rather than
             # inventing an ordering.
             best = max(exact, key=lambda e: _int_or_zero(e.get("nodes")))
-            return best.get("name")
-        return best_prefix_name
+            name = best.get("name")
+            if not name:
+                return None
+            return ProjectResolution(
+                name=str(name), matched_root=str(best.get("root_path") or ""), scope="exact",
+            )
+        if best_prefix is not None:
+            name = best_prefix.get("name")
+            if name:
+                # A prefix hit is only "ancestor" if it is genuinely a DIFFERENT directory. An
+                # exact match that differed by case or a symlink lands here on the filesystems
+                # where realpath cannot canonicalise it, and calling that an ancestor would refuse
+                # scan ops on a correctly-indexed repo.
+                root_path = str(best_prefix.get("root_path") or "")
+                scope = "exact" if _same_dir(root_path, project_root) else "ancestor"
+                return ProjectResolution(name=str(name), matched_root=root_path, scope=scope)
+        return None
 
-    def _resolve_project(self, project_root: str) -> str | None:
+    def _resolve_project(self, project_root: str) -> ProjectResolution | None:
         with self._project_cache_lock:
             if project_root in self._project_cache:
                 return self._project_cache[project_root]  # positive: a repo's name is stable
@@ -427,16 +488,16 @@ class GraphProvider:
         # list_projects shells out — resolve it OUTSIDE the lock so a slow backend can't serialize
         # every concurrent request. A rare duplicate lookup on first contact is harmless.
         raw = self._run("list_projects", {}, 3000)
-        name = self._match_project(raw, project_root)
+        resolution = self._match_project(raw, project_root)
         with self._project_cache_lock:
-            if name is not None:
-                self._project_cache[project_root] = name
+            if resolution is not None:
+                self._project_cache[project_root] = resolution
                 self._negative_until.pop(project_root, None)
             else:
                 # Cache the MISS only briefly, so a repo indexed into the graph AFTER this failed
                 # lookup is picked up within the TTL rather than staying stuck until a restart.
                 self._negative_until[project_root] = time.monotonic() + 30.0
-        return name
+        return resolution
 
     def probe(self, project_root: str, timeout_ms: int = 3000) -> dict:
         """Cheap, never-raise, single-subprocess health check for the doctor.
@@ -458,8 +519,8 @@ class GraphProvider:
                 "detail": "codebase-memory-mcp is installed but list_projects failed/timed out",
                 "remediation": "check `codebase-memory-mcp cli list_projects '{}'` works",
             }
-        project = self._match_project(raw, project_root)
-        if project is None:
+        resolution = self._match_project(raw, project_root)
+        if resolution is None:
             return {
                 "installed": True, "runnable": True, "repo_indexed": False, "project": None,
                 "detail": "backend OK but this repo is not indexed in the graph",
@@ -470,17 +531,24 @@ class GraphProvider:
         # `~/projects/my-app` when only `~/projects` is indexed reported "ready" and then answered
         # from a graph spanning every repo on the machine — the top two refactor hotspots for one
         # project came from another project's build output. Ready, but not for what was asked.
-        matched_root = self._project_root_of(raw, project)
-        if matched_root and not _same_dir(matched_root, project_root):
+        # `build_result` now consults the SAME resolution record, so what the doctor reports and
+        # what a query actually does can no longer disagree.
+        if resolution.is_ancestor:
+            own_repo = _has_own_git_dir(project_root)
+            scoped = "the repo-wide ops (overview, changed, deadcode, hotspots) will refuse"
             return {
-                "installed": True, "runnable": True, "repo_indexed": True, "project": project,
+                "installed": True, "runnable": True, "repo_indexed": True,
+                "project": resolution.name,
                 "detail": (f"this repo is NOT indexed on its own — answers would come from "
-                           f"'{project}' ({matched_root}), which contains it"),
+                           f"'{resolution.name}' ({resolution.matched_root}), which contains it; "
+                           f"{scoped}"
+                           + (" (this directory is its own git repository, so it is a nested repo "
+                              "rather than a subdirectory of that project)" if own_repo else "")),
                 "remediation": f"codeintel index {project_root}",
             }
         return {
-            "installed": True, "runnable": True, "repo_indexed": True, "project": project,
-            "detail": f"resolved project '{project}' in codebase-memory-mcp",
+            "installed": True, "runnable": True, "repo_indexed": True, "project": resolution.name,
+            "detail": f"resolved project '{resolution.name}' in codebase-memory-mcp",
             "remediation": None,
         }
 
@@ -894,8 +962,8 @@ class GraphProvider:
                 budget_ms = 0
             timeout_ms = budget_ms if budget_ms > 0 else 5000
 
-            project = self._resolve_project(root_str)
-            if project is None:
+            resolution = self._resolve_project(root_str)
+            if resolution is None:
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="project-not-indexed",
                     hint=f"run: codeintel index {root_str}  (or: codeintel doctor)",
@@ -904,15 +972,48 @@ class GraphProvider:
             if op_str not in _GRAPH_OPS:
                 return safe_null_result(op_str, target_str, engine="graph", reason="unsupported-op")
 
+            # The repo asked about is not indexed on its own; this answer would come from a project
+            # that merely CONTAINS it. For a root-scoped op that is not a weaker answer to the
+            # question, it is a confident answer to a different one — `deadcode` over a parent
+            # directory reports symbols that are live in a sibling repo as dead. Refuse, and say
+            # which project the answer would have come from so the caller can tell this apart from
+            # "nothing indexed at all". Symbol-scoped ops fall through: for a real subdirectory of a
+            # monorepo the containing index is exactly where a symbol's callers live.
+            if resolution.is_ancestor and op_str in _ROOT_SCOPED_OPS:
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="project-not-indexed-standalone",
+                    hint=f"`{root_str}` is not indexed on its own — it resolves to the project "
+                         f"containing it, whose {op_str} would describe a different tree. "
+                         f"Index it standalone with: codeintel index {root_str}",
+                )
+
+            project = resolution.name
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
             if result_text is None:
                 # A supported op that matched nothing is NOT an unsupported op, and saying so sends
                 # the agent looking for a different tool when the real answer is almost always a
                 # stale index. Name the cause and the one command that fixes it.
+                # The project id is NOT interpolated here. For a path-slug registration it IS the
+                # flattened absolute path of the repo (`Users-alice-Documents-work-myrepo`), so
+                # naming it leaks the server's directory layout to any caller — the same home-path
+                # disclosure the renderers were swept for, through a channel that sweep did not
+                # cover because it greps for `qualified_name`.
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",
-                    hint=f"`{target_str}` is not in the graph index for project {project!r} — if "
+                    hint=f"`{target_str}` is not in the graph index for this project — if "
                          f"you just added or renamed it, refresh with: codeintel index {root_str}",
+                )
+
+            # A symbol-scoped answer served from a containing project is usually right (a real
+            # subdirectory of a monorepo) but the caller cannot tell that from the envelope, and an
+            # agent will not read past the answer. Say it in the result text itself, which is the
+            # only channel that reaches the model today.
+            if resolution.is_ancestor:
+                result_text = (
+                    f"{result_text}\n\n> Scope: `{root_str}` is not indexed on its own — this "
+                    f"answer comes from the indexed project that contains it, so it may include "
+                    f"callers or callees from outside this repository. Index it standalone with "
+                    f"`codeintel index {root_str}` for an answer scoped to it."
                 )
 
             return {

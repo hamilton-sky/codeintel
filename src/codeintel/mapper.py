@@ -80,9 +80,24 @@ class MapGenerator:
         # Top-level guard: the map is best-effort orientation — a malformed backend
         # response must degrade to a minimal map, never crash the caller (never-raise).
         try:
-            project = provider._resolve_project(project_root)
-            if project is None:
+            resolution = provider._resolve_project(project_root)
+            if resolution is None:
                 return _minimal_map(project_root, note="project not yet indexed — run `codeintel index` first")
+
+            # An ancestor match is refused here UNCONDITIONALLY, unlike the query path which still
+            # answers symbol-scoped ops with a caveat. Everything a map contains — node/edge counts,
+            # ranked symbols, entry points — is defined by the repo boundary, and this output gets
+            # WRITTEN to CODE_INTEL.md and committed. Describing a sibling repository's architecture
+            # in a file that lives in this one is the worst outcome in the codebase: it is wrong,
+            # persistent, reviewed by people who trust it, and pushed.
+            if resolution.is_ancestor:
+                return _minimal_map(
+                    project_root,
+                    note=(f"`{project_root}` is not indexed on its own — it resolves to the indexed "
+                          f"project that contains it, whose architecture is not this repo's. "
+                          f"Run `codeintel index {project_root}` and re-run `codeintel map`."),
+                )
+            project = resolution.name
 
             # Query 1: architecture overview
             arch_result = provider.build_result("overview", "", [], 5000, project_root)

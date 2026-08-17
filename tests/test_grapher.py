@@ -8,13 +8,14 @@ from __future__ import annotations
 import json
 
 from codeintel import grapher
-from codeintel.providers.graph import GraphProvider
+from codeintel.providers.graph import GraphProvider, ProjectResolution
 
 
 def _wire(monkeypatch, *, available=True, search=None, rows=None, project="proj"):
     monkeypatch.setattr("codeintel.providers.graph.shutil.which",
                         lambda x: "/fake/cm" if available else None)
-    monkeypatch.setattr(GraphProvider, "_resolve_project", lambda self, r: project if available else None)
+    resolution = ProjectResolution(name=project, matched_root=r"/repo", scope="exact") if project else None
+    monkeypatch.setattr(GraphProvider, "_resolve_project", lambda self, r: resolution if available else None)
     monkeypatch.setattr(GraphProvider, "_search_symbols", lambda self, extra, proj, t: search or [])
     monkeypatch.setattr(GraphProvider, "_query_rows", lambda self, cy, proj, t: rows or [])
 
@@ -143,7 +144,8 @@ def test_the_graph_payload_never_carries_the_backends_project_id(monkeypatch, tm
         available = True
 
         def _resolve_project(self, root):
-            return "Users-alice-Documents-project-app"
+            return ProjectResolution(name="Users-alice-Documents-project-app",
+                                     matched_root=root, scope="exact")
 
         def _search_symbols(self, *a, **k):
             return []

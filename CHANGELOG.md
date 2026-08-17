@@ -4,10 +4,67 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.2] — 2026-08-17
 
-Release-process and documentation work from a production-readiness review. No behavior changes —
-nothing in the engines, the query path, or the safe-null contract moves.
+A production-readiness review — four independent audit passes over correctness, security,
+first-run/lifecycle, and the test suite itself. The findings were not eight unrelated bugs but two
+structural properties producing bugs of a fixed shape: **the health layer is computed on a separate
+code path from the answer layer, so `doctor` could report a repo healthy while `code.query`
+answered from the wrong index**; and **cross-cutting properties are retrofitted per-site**, so each
+one lands at some call sites and misses others (the commit titled *"a third and fourth renderer
+were still leaking the home path"* is that property announcing itself).
+
+### Security
+- **A file swapped for a symlink AFTER indexing could be read back from outside the root.**
+  Containment was enforced in the indexing *walk* and nowhere else: `Searcher._read_snippet` and
+  `_read_chunk` re-opened the stored path at query time with no check, and the stale row was never
+  reconciled because `_cleanup_deleted` asked `.exists()`, which follows a symlink to an existing
+  target and answers `True`. An actor able to write inside their own allowed root could commit a
+  normal file, wait for indexing, then point it at anything the server process can read — another
+  role's repository, or `~/.codeintel/auth.toml`, which holds the tokens — and have ~40 lines per
+  planted chunk returned as result snippets. A standing hole, not a race. Containment now lives in
+  one module (`codeintel.containment`) that the indexer, the searcher and the cleanup pass all
+  call, so it is asserted on the data path rather than at one point in it. Every prior containment
+  test planted its link *before* indexing, which is why this shipped; the new tests plant it after.
+- **A denied project root now returns HTTP 403**, like a denied op. Data was already withheld, so
+  this was never a leak — but the docs promised 403, and a role probing for roots it does not own
+  produced a wall of 200s that no 4xx-based alerting could see.
+- **`docs/deploy.md` no longer presents multi-tenant RBAC without qualification.** The two-team
+  example config read as an isolation boundary; RBAC is sound for separating privilege levels among
+  callers you already trust, and that is now what it says.
+
+### Fixed
+- **`code.query` answered from the wrong repository while `doctor` warned about it.** 0.15.1 fixed
+  only the diagnostic: `probe()` detected that resolution had fallen back to a containing project,
+  but the query path resolved through a different code path that discarded that fact, so a human
+  running `doctor` was told and the agent consuming the answers was not. Both now share one
+  `ProjectResolution` record, and the handling is per-op rather than uniform:
+  - **Repo-scan ops (`overview`, `changed`, `deadcode`, `hotspots`) refuse**, with a distinct
+    `project-not-indexed-standalone` reason. These answers are *defined by* the repo boundary —
+    the monorepo's dead code is not a lower-confidence answer to this repo's dead code, and a
+    symbol dead in one repo is routinely live in its sibling, which is how `deadcode` came to tell
+    an agent to delete working code.
+  - **Symbol-scoped ops (`callers`, `callees`, `impact`, `chain`) still answer**, because for a
+    genuine subdirectory of a monorepo the containing index is exactly where a symbol's callers
+    live — but the result text now discloses the scope.
+  - **`map` and `graph` refuse outright.** Both write artifacts that get committed or shared, and
+    a committed `CODE_INTEL.md` describing a sibling repository is the worst version of this bug.
+- **`doctor` printed no note for an engine it had just flagged.** The renderer showed `detail` only
+  when the status was non-ok, and the ancestor-repo case is "ok" with three green cells — so the
+  one command a user runs when confused stayed silent about the most likely cause of the confusion.
+- **"No engine could be asked" is no longer reported as "nothing found".** `_merge` collapsed every
+  engine's reason into a flat `no-result`, the string agents are told to read as "does not exist /
+  not indexed yet". A fan-out with both backends missing therefore produced a confident denial.
+  Fan-out results now carry the per-engine causes and use `engines-unavailable` when nothing could
+  be reached. `context` fans out by default, so this was the common path.
+- **A cached answer served during a reindex no longer hides that it may be behind.** The staleness
+  marker was applied on one of four return paths — and the cache key's freshness generation only
+  advances when a reindex *completes*, so the paths that could actually serve a stale answer were
+  the three that stayed silent. It is now applied on every exit.
+- **The `not-in-graph` hint no longer names the backend's project id.** For a path-slug
+  registration that id *is* the flattened absolute path of the repository, so the hint disclosed
+  the server's directory layout to any caller. The earlier home-path sweep grepped for
+  `qualified_name` and never covered this channel.
 
 ### Added
 - **A CI check that a documented version was actually released.** Releases ship on a `vX.Y.Z` tag
@@ -59,6 +116,10 @@ Found by pointing the tool at two more unfamiliar repositories.
   was indexed said "3/3 engines ready" and then answered from a graph spanning every repo on the
   machine. `doctor` now states plainly that the repo is not indexed on its own, names the project
   the answers would come from, and gives the command to index it properly.
+  > **Scope:** this release fixed the *diagnostic* only. `probe()` detects the ancestor fallback,
+  > but the query path still resolved to the containing project without saying so, so an agent
+  > calling `code.query` — rather than a human running `doctor` — still got answers from the wrong
+  > repository. The answer path is fixed in 0.15.2, above. 0.15.1 was never published to PyPI.
 - **Generated output ranked as the top thing to refactor.** A checked-in minified bundle took the
   first *two* hotspot slots on a real repo (cx:586, cog:1145) — a webpack chunk is by far the most
   "complex" function in any tree containing one. Only dot-directories were excluded, so a plain

@@ -46,6 +46,11 @@ KNOWN_UNRELEASED = {
     "0.13.2",  # superseded by 0.14.0
     "0.14.1",  # superseded by 0.14.2
     "0.15.0",  # superseded by 0.15.1
+    # 0.15.1 was still untagged when the production-readiness review found that its headline fix —
+    # "answers could come from a different repository" — had only been applied to `doctor`, not to
+    # the query path. Publishing it would have shipped a changelog entry claiming a fix the product
+    # surface did not have, so the fix was completed and the result released as 0.15.2 instead.
+    "0.15.1",
 }
 
 

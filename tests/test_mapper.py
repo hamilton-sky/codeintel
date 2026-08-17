@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from codeintel.injector import Injector
 from codeintel.mapper import MapGenerator, _is_populated_map, _minimal_map
+from codeintel.providers.graph import ProjectResolution
 
 _POPULATED = (
     "# CODE_INTEL.md — repo\n\n"
@@ -18,7 +19,8 @@ def _make_provider(ranked=None, entry=None, arch=None):
     """Return a mocked GraphProvider with configurable return values."""
     provider = MagicMock()
     provider.available = True
-    provider._resolve_project.return_value = "test-project"
+    provider._resolve_project.return_value = ProjectResolution(
+        name="test-project", matched_root="/repo", scope="exact")
 
     # build_result for "overview"
     if arch is None:
@@ -102,7 +104,8 @@ def test_generate_reads_columns_rows_shape():
     entry = {"columns": ["fn.name", "fn.file_path"], "rows": [["main", "src/codeintel/__main__.py"]]}
     provider = MagicMock()
     provider.available = True
-    provider._resolve_project.return_value = "proj"
+    provider._resolve_project.return_value = ProjectResolution(
+        name="proj", matched_root="/repo", scope="exact")
     provider.build_result.return_value = {
         "ok": True, "op": "overview", "target": "", "result": "## Arch",
         "engine": "graph", "cached": False,

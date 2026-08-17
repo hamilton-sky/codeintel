@@ -436,3 +436,164 @@ def test_a_blank_entry_in_a_roots_list_does_not_grant_the_server_cwd(blank, monk
 
     assert policy.is_root_allowed("reader", str(tmp_path)) is False
     assert policy.is_root_allowed("reader", "/srv/allowed") is True
+
+
+# --------------------------------------------------------------------------- #
+# Containment at READ time, not just at index time
+#
+# Every existing containment test plants its symlink BEFORE indexing and asserts the walk skips
+# it. That shape cannot catch the real hole: containment was a property of the indexing walk, and
+# nothing re-checked when the snippet was read back. A file indexed normally and swapped for a
+# symlink afterwards stayed in the DB (`.exists()` follows the link, so cleanup kept the row) and
+# was re-opened at query time with no check at all.
+# --------------------------------------------------------------------------- #
+
+def test_a_symlink_planted_after_indexing_cannot_be_read_back(tmp_path):
+    """The post-index swap: index a real file, then point it outside the root."""
+    from codeintel.containment import ContainmentError, contained_path, real_root
+    from codeintel.searcher import Searcher
+
+    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
+    allowed.mkdir(); outside.mkdir()
+    (outside / "secret.py").write_text('SECRET = "sk-live-CANARY"\n')
+    bait = allowed / "bait.py"
+    bait.write_text("def ok():\n    return 1\n")
+
+    root_real = real_root(str(allowed))
+    # Indexed normally: containment says yes while it is a real file inside the root.
+    assert contained_path(root_real, bait) is not None
+
+    bait.unlink()
+    bait.symlink_to(outside / "secret.py")
+
+    # The predicate now refuses it...
+    assert contained_path(root_real, bait) is None
+    # ...the raw read raises rather than returning bytes...
+    with pytest.raises(ContainmentError):
+        from codeintel.containment import open_contained
+        open_contained(root_real, bait)
+    # ...and the searcher's snippet path returns a refusal, never the canary.
+    s = Searcher.__new__(Searcher)
+    snippet = s._read_snippet(root_real, bait, 0)
+    assert "CANARY" not in snippet
+    assert "outside the indexed root" in snippet
+    assert s._read_chunk(root_real, bait, 0) is None
+
+
+def test_a_hardlink_planted_after_indexing_cannot_be_read_back(tmp_path):
+    """The same swap using a hard link, whose realpath stays inside the root — so only the
+    link-count check can see it."""
+    from codeintel.containment import contained_path, real_root
+    from codeintel.searcher import Searcher
+
+    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
+    allowed.mkdir(); outside.mkdir()
+    (outside / "secret.py").write_text('SECRET = "sk-live-CANARY"\n')
+    bait = allowed / "bait.py"
+    bait.write_text("def ok():\n    return 1\n")
+    root_real = real_root(str(allowed))
+    assert contained_path(root_real, bait) is not None
+
+    bait.unlink()
+    os.link(outside / "secret.py", bait)          # realpath is INSIDE the root
+
+    assert contained_path(root_real, bait) is None
+    s = Searcher.__new__(Searcher)
+    assert "CANARY" not in s._read_snippet(root_real, bait, 0)
+
+
+def test_the_stale_row_of_a_swapped_file_is_reconciled_away(tmp_path):
+    """`_cleanup_deleted` used `.exists()`, which follows a symlink to an existing target — so the
+    row for a swapped file survived every reindex and kept the hole open indefinitely."""
+    from codeintel.containment import contained_path, real_root
+
+    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
+    allowed.mkdir(); outside.mkdir()
+    (outside / "secret.py").write_text("SECRET = 1\n")
+    bait = allowed / "bait.py"
+    bait.write_text("x = 1\n")
+    bait.unlink(); bait.symlink_to(outside / "secret.py")
+
+    # The old predicate says "still here" (this is the bug); the new one says "reconcile it away".
+    assert (allowed / "bait.py").exists() is True
+    assert contained_path(real_root(str(allowed)), allowed / "bait.py") is None
+
+
+def test_containment_does_not_reject_legitimate_files(tmp_path):
+    """The guard must not also drop ordinary in-root files, including through a symlinked ROOT —
+    a repo reached via /var -> /private/var on macOS, or any symlinked home directory."""
+    from codeintel.containment import contained_path, real_root
+
+    real_dir = tmp_path / "real"; real_dir.mkdir()
+    (real_dir / "fine.py").write_text("def ok(): pass\n")
+    nested = real_dir / "pkg"; nested.mkdir()
+    (nested / "deep.py").write_text("def deep(): pass\n")
+
+    link_root = tmp_path / "via-link"
+    link_root.symlink_to(real_dir)
+
+    for root in (real_dir, link_root):
+        rr = real_root(str(root))
+        assert contained_path(rr, root / "fine.py") is not None
+        assert contained_path(rr, root / "pkg" / "deep.py") is not None
+
+
+def test_a_sibling_directory_sharing_a_prefix_is_not_inside_the_root(tmp_path):
+    """`/srv/repo-secrets` must not count as inside `/srv/repo` — a plain string prefix compare
+    would say it is."""
+    from codeintel.containment import contained_path, real_root
+
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo-secrets").mkdir()
+    (tmp_path / "repo-secrets" / "creds.py").write_text("TOKEN = 1\n")
+    rr = real_root(str(tmp_path / "repo"))
+    assert contained_path(rr, tmp_path / "repo-secrets" / "creds.py") is None
+
+
+# --------------------------------------------------------------------------- #
+# Root denials deny like op denials
+#
+# The two dimensions of the policy returned different HTTP statuses: a disallowed OP was 403, a
+# disallowed ROOT was 200 with a null result. Data was withheld either way, so this was never a
+# leak — but the docs promised 403, and a role scanning for roots it does not own produced a wall
+# of 200s, so no 4xx-based alerting could see cross-tenant probing.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def root_scoped_server(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"; allowed.mkdir()
+    (tmp_path / "forbidden").mkdir()
+    (tmp_path / "auth.toml").write_text(
+        '[roles]\nreader = ["search", "context"]\n'
+        f'[roots]\nreader = ["{allowed}"]\n'
+        '[tokens]\n"readertok" = "reader"\n'
+    )
+    monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(tmp_path / "auth.toml"))
+    from codeintel import server as srv
+    srv._reset_gateway()
+    s = CodeIntelHTTPServer(("127.0.0.1", 0), _Handler)
+    s.token_auth = load_auth()
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield s.server_address[1], str(allowed), str(tmp_path / "forbidden")
+    s.shutdown()
+    srv._reset_gateway()
+
+
+def test_a_denied_root_returns_403_like_a_denied_op(root_scoped_server):
+    port, _allowed, forbidden = root_scoped_server
+    status, body = _query(
+        port, {"op": "search", "target": "x", "project_root": forbidden}, token="readertok",
+    )
+    assert status == 403
+    assert body["reason"] == "root-not-allowed-for-role"
+    assert body["result"] is None
+
+
+def test_an_allowed_root_is_not_denied(root_scoped_server):
+    """The status must distinguish the two — a blanket 403 would be just as uninformative."""
+    port, allowed, _forbidden = root_scoped_server
+    status, body = _query(
+        port, {"op": "search", "target": "x", "project_root": allowed}, token="readertok",
+    )
+    assert status == 200
+    assert body.get("reason") != "root-not-allowed-for-role"

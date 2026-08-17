@@ -18,6 +18,10 @@ from codeintel.metrics import Metrics
 from codeintel.provider import log_swallowed
 from codeintel.server import code_doctor_handler, code_query_handler, code_status_handler
 
+# Both dimensions of an RBAC denial — the op allowlist and the root allowlist. Kept together so a
+# new policy dimension cannot be added with only one of them mapped to 403.
+_RBAC_DENIED_REASONS = frozenset({"op-not-allowed-for-role", "root-not-allowed-for-role"})
+
 _MAX_BODY_BYTES = 1_048_576       # 1 MiB
 _REQUEST_TIMEOUT_S = 60           # per-request socket read timeout — drops an idle/half-open client
 _MAX_CONCURRENT_REQUESTS = 64     # cap live worker threads so a burst can't exhaust threads/FDs
@@ -144,8 +148,12 @@ class _Handler(BaseHTTPRequestHandler):
             # TypedDict is not assignable to dict[Any, Any] — the cast is the annotation catching
             # up with a union that has always been fine at runtime.
             result = dict(code_query_handler(parsed))
-        # An RBAC denial (query OR doctor) comes back as a safe-null with this reason — 403 it.
-        status = 403 if result.get("reason") == "op-not-allowed-for-role" else 200
+        # An RBAC denial (query OR doctor) comes back as a safe-null with one of these reasons.
+        # The ROOT denial used to fall through to 200: data was still withheld, so it was not a
+        # leak, but the docs promised 403 and — more usefully — a role scanning for roots it does
+        # not own produced a wall of 200s, so no 4xx-based alerting could ever see cross-tenant
+        # probing. Both dimensions of the policy now deny the same way.
+        status = 403 if result.get("reason") in _RBAC_DENIED_REASONS else 200
         self._send_json(status, result)
 
     def do_GET(self) -> None:

@@ -40,9 +40,15 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
         p = GraphProvider()
         if not getattr(p, "available", False):
             return {**_EMPTY, "reason": "engine-unavailable"}
-        project = p._resolve_project(str(project_root or ""))
-        if not project:
+        resolution = p._resolve_project(str(project_root or ""))
+        if resolution is None:
             return {**_EMPTY, "reason": "project-not-indexed"}
+        # A rendered graph is a whole-repo artifact, so an ancestor match would draw the containing
+        # project's call graph under this repo's name — and this one gets exported to HTML/SVG and
+        # shared. Refuse, like `map` and the repo-scan ops.
+        if resolution.is_ancestor:
+            return {**_EMPTY, "reason": "project-not-indexed-standalone"}
+        project = resolution.name
 
         # per-symbol metrics (same search_graph the `hotspots` op uses)
         metrics: dict[str, dict] = {}

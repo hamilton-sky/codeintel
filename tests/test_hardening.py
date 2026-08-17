@@ -171,8 +171,8 @@ def test_graph_negative_lookup_reprobes_after_ttl(monkeypatch):
 
 def test_graph_positive_lookup_is_cached(monkeypatch):
     p, calls = _bare_graph(monkeypatch, {"projects": [{"name": "proj", "root_path": "/repo/x"}]})
-    assert p._resolve_project("/repo/x") == "proj" and calls["n"] == 1
-    assert p._resolve_project("/repo/x") == "proj" and calls["n"] == 1  # positive cached, no re-probe
+    assert p._resolve_project("/repo/x").name == "proj" and calls["n"] == 1
+    assert p._resolve_project("/repo/x").name == "proj" and calls["n"] == 1  # positive cached, no re-probe
 
 
 # --------------------------------------------------------------------------- log_swallowed

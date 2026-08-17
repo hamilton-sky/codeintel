@@ -475,8 +475,24 @@ back to grep rather than crashing.
 |---|---|
 | `deadcode` | It suggests deletions and cannot see every caller — [read the caveat](#deadcode-is-a-candidate-list-not-a-delete-list). |
 | Non-loopback serving | `serve-http` is stdlib `http.server`. It binds loopback by default for a reason; front it with a reverse proxy and see [docs/deploy.md](docs/deploy.md). |
-| RBAC as a hard trust boundary | Token→role scoping works and is server-authoritative, but it is new and has not been audited externally. |
+| RBAC between **untrusting** tenants | It separates privilege levels among callers you already trust. It is not a wall against an adversary with write access to their own root — see the warning in [docs/deploy.md](docs/deploy.md). |
 | Unattended automation | Anything that acts on a result without a human reading it deserves a pilot first. |
+
+**On the test numbers.** The suite is large and the coverage floor is enforced, but read the figure
+with its caveat: the graph and LSP backends are external binaries that are **not installed in CI**,
+so those two engines are exercised against hand-authored mocks rather than the real wire contract,
+and the release canary — which does assert on real answer text against a built wheel — currently
+covers the semantic engine only. Line coverage measures how much of the intended behavior runs, not
+how much of reality it has met.
+
+**The honest one-paragraph version.** codeintel has been run on very few repositories its author did
+not write, and that is where its bugs have come from — every fix in `0.15.x` came from pointing it
+at an unfamiliar codebase. Its characteristic failure mode is **answering confidently from the
+wrong index rather than failing loudly**, which the never-raise contract makes harder to notice: a
+wrong answer and a right one are the same shape. Run `codeintel doctor` before trusting a repo-wide
+answer, treat `deadcode` as candidates for review, and if something looks off please
+[report it](#reporting-a-problem) — an issue from someone who is not the author is the single most
+useful thing this project can receive right now.
 
 **Engine coverage depends on external binaries.** Semantic search works out of the box. The graph
 engine needs `codebase-memory-mcp` and the LSP engine needs `uvx` on `PATH` — without them those

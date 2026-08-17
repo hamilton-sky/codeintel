@@ -311,7 +311,13 @@ def render_doctor_text(report: dict) -> str:
         run = c.status_cell(_state(e.get("runnable")), _RUN)
         repo = c.status_cell(_state(e.get("repo_indexed"), na_ok=True), _REPO)
         out.append("  " + name.ljust(_NAME) + " " + inst + " " + run + " " + repo)
-        if e.get("status") != "ok":
+        # Print the note whenever there is a REMEDIATION, not only when the row is non-ok. An
+        # engine can be installed, runnable and indexed — status "ok", three green cells — and
+        # still be answering from the wrong project, which is exactly the ancestor-match case.
+        # Keying the note off the status cell meant the renderer computed that warning and then
+        # dropped it, so the one command a user runs when confused stayed silent about the one
+        # thing most likely to be confusing them.
+        if e.get("status") != "ok" or e.get("remediation"):
             notes.append((name, e.get("detail", ""), e.get("remediation")))
 
     for name, detail, rem in notes:

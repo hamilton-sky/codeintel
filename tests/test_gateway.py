@@ -502,3 +502,94 @@ def test_reindex_pending_clears_even_when_both_passes_fail(monkeypatch):
     rx._in_flight.add("/repo")
     rx._do_reindex("/repo")
     assert rx.reindex_pending("/repo") is False
+
+
+# ---------------------------------------------------------------------------
+# "nothing found" must stay distinguishable from "nothing could be asked"
+#
+# `_merge` collapsed every engine's reason into a flat "no-result" — the string an agent is told
+# to read as "nothing found / not indexed yet". `context` fans out by default, so a fan-out with
+# both backends missing produced a confident "that symbol does not exist".
+# ---------------------------------------------------------------------------
+
+class _NullProvider:
+    """Available, but answers safe-null with a specific reason."""
+
+    available = True
+
+    def __init__(self, engine_name: str, reason: str) -> None:
+        self._engine_name = engine_name
+        self._reason = reason
+
+    def build_result(self, op, target, files, budget, project_root) -> Result:
+        return {
+            "ok": True, "op": str(op or ""), "target": str(target or ""), "result": None,
+            "engine": self._engine_name, "cached": False, "reason": self._reason,
+        }
+
+
+def test_a_fanout_where_no_engine_could_be_asked_is_not_reported_as_no_result():
+    gw = Gateway(graph=_NullProvider("graph", "engine-unavailable"),
+                 lsp=_NullProvider("lsp", "boot-failed"))
+    r = gw.query(op="context", target="foo", engine="both")
+    assert r["result"] is None
+    assert r["reason"] == "engines-unavailable"
+    # The per-engine causes survive the merge, and the envelope says plainly that this is not
+    # evidence of absence — the inference an agent would otherwise draw.
+    assert "graph: engine-unavailable" in r["hint"]
+    assert "lsp: boot-failed" in r["hint"]
+    assert "NOT evidence" in r["hint"]
+
+
+def test_a_fanout_where_engines_ran_and_found_nothing_still_reports_no_result():
+    """The distinction has to cut both ways, or it is just a rename."""
+    gw = Gateway(graph=_NullProvider("graph", "not-in-graph"),
+                 lsp=_NullProvider("lsp", "not-found"))
+    r = gw.query(op="context", target="nope", engine="both")
+    assert r["reason"] == "no-result"
+    assert "NOT evidence" not in (r.get("hint") or "")
+
+
+# ---------------------------------------------------------------------------
+# The staleness marker belongs on every exit
+# ---------------------------------------------------------------------------
+
+class _StubReindexer:
+    """Reports a reindex in flight, with a generation that does NOT advance — exactly the state in
+    which the cache serves an answer built from the previous index."""
+
+    def __init__(self) -> None:
+        self.generation_value = 7
+
+    def generation(self, root):
+        return self.generation_value
+
+    def reindex_pending(self, root=None):
+        return True
+
+    def maybe_reindex(self, *a, **k):
+        return None
+
+
+def _reindexing_gateway():
+    gw = Gateway(graph=_StubProvider("graph", "graph-data"), lsp=_StubProvider("lsp", "lsp-data"))
+    gw._reindexer = _StubReindexer()
+    return gw
+
+
+def test_a_cache_hit_during_a_reindex_is_marked_stale():
+    """The case the marker exists for, and the one path that used to drop it: the freshness
+    generation only advances when a reindex COMPLETES, so a hit taken mid-pass is served from the
+    previous index."""
+    gw = _reindexing_gateway()
+    first = gw.query(op="callers", target="x", engine="graph", project_root="/repo")
+    assert first["cached"] is False
+    second = gw.query(op="callers", target="x", engine="graph", project_root="/repo")
+    assert second["cached"] is True
+    assert second.get("reindexing") is True, "a cached answer mid-reindex must say it may be behind"
+
+
+def test_a_fanout_result_is_marked_stale_during_a_reindex():
+    gw = _reindexing_gateway()
+    r = gw.query(op="context", target="x", engine="both", project_root="/repo")
+    assert r.get("reindexing") is True

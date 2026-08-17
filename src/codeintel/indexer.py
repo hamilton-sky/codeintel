@@ -8,6 +8,8 @@ import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from codeintel.containment import contained_path, real_root
+
 if TYPE_CHECKING:
     from codeintel.semantic_db import SemanticDb
 
@@ -241,8 +243,14 @@ class Indexer:
                 "SELECT DISTINCT file_path FROM chunk_hashes WHERE project_root = ?",
                 (project_root_real,),
             ).fetchall()
+            # `.exists()` FOLLOWS symlinks, so a file replaced by a link pointing outside the root
+            # answered True and its row survived every reindex — the stale row that made the
+            # post-index symlink swap a standing hole rather than a race. Asking the containment
+            # module instead means "no longer a readable file genuinely inside this root" is one
+            # predicate, and a swapped file is reconciled away like a deleted one.
+            root_real = real_root(str(root))
             deleted_paths = [
-                row[0] for row in rows if not (root / row[0]).exists()
+                row[0] for row in rows if contained_path(root_real, root / row[0]) is None
             ]
             for fp in deleted_paths:
                 chunk_ids = [
@@ -282,9 +290,9 @@ class Indexer:
         ignores = set(_SKIP_DIRS) | set(_DEFAULT_IGNORES) | self._load_gitignore(root)
         real_root_str = str(root)
         try:
-            real_root = os.path.realpath(root)
+            root_real = real_root(str(root))
         except Exception:
-            real_root = str(root)
+            root_real = str(root)
         for dirpath, dirnames, filenames in os.walk(root):
             at_root = os.path.realpath(dirpath) == os.path.realpath(real_root_str)
             dirnames[:] = [
@@ -299,27 +307,13 @@ class Indexer:
                 if Path(fname).suffix.lower() not in _INDEXED_EXTS:
                     continue
                 candidate = Path(dirpath) / fname
-                try:
-                    real = os.path.realpath(candidate)
-                except Exception:
-                    continue
-                if real != real_root and not real.startswith(real_root + os.sep):
-                    logger.warning("skipping %s — it resolves outside the indexed root", candidate)
-                    continue
-                # A HARDLINK is a second directory entry for the same inode. It is physically
-                # inside the root, so its realpath is inside the root and the check above passes
-                # — `realpath` cannot see it. That reopened exactly the hole the symlink guard
-                # closes: a tenant able to write in their own root could `ln` another tenant's
-                # file in and have it indexed. There is no way to ask "does this inode also live
-                # outside?", so treat extra links as disqualifying. Measured at 0 occurrences
-                # across 3213 source files of a real repo, so the false-positive cost is nil.
-                try:
-                    links = os.stat(real).st_nlink
-                except OSError:
-                    continue
-                if links > 1:
-                    logger.warning("skipping %s — %d hard links, so its content may also live "
-                                   "outside the indexed root", candidate, links)
+                # Symlink escape and hard-link aliasing are both decided by `contained_path`, which
+                # the searcher and the cleanup pass also call. Keeping the rule in one module is
+                # the point: it was reimplemented per-site before, so the query-time read had no
+                # check at all and a file swapped after indexing was served from outside the root.
+                if contained_path(root_real, candidate) is None:
+                    logger.warning("skipping %s — it does not resolve to a file inside the indexed "
+                                   "root (symlink out, or extra hard links)", candidate)
                     continue
                 # A source extension is not a promise of source. A compiled artifact or blob named
                 # `.py` was read with errors="replace" and embedded as replacement-character

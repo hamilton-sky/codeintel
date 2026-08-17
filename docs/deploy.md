@@ -58,6 +58,28 @@ Binding a non-loopback host **requires** `--allow-remote` **and** authentication
 
 ### Role-based access control (RBAC)
 
+> ### ⚠️ Do not rely on this as an isolation boundary between untrusted tenants
+>
+> **A caller who can WRITE inside their own allowed root can read files outside it.** Path
+> containment is enforced when a repository is *indexed*, not when a result is *read back*. A file
+> that is indexed normally and then replaced with a symlink pointing outside the root is still
+> served: the stored row is never reconciled (a symlink to an existing target passes the
+> "does this file still exist?" check), and the query-time snippet read follows it. Roughly 40
+> lines are returned per planted chunk, and the target can be anything the **server process** can
+> read — including another role's repository and `~/.codeintel/auth.toml`, which holds the tokens.
+>
+> This is a standing hole, not a race: the swap can happen at any time after indexing.
+>
+> RBAC is sound for the case it was built for — **separating privilege levels among callers you
+> already trust**, so a narrow role cannot run `deadcode` or point an op at an unrelated
+> directory by accident. The role is genuinely server-authoritative and the root check itself
+> resists `..` and symlinked roots. Treat it as a guardrail against mistakes, not as a wall
+> against an adversary with write access.
+>
+> The `team-a` / `team-b` example below is a *shape*, not an endorsement of running mutually
+> untrusting teams against one server. Until this is fixed, give each untrusting tenant its own
+> process and its own OS user.
+
 For multiple callers with different privileges, define a token→role map in `~/.codeintel/auth.toml`
 (or `$CODEINTEL_AUTH_CONFIG`). Each role lists the ops it may run (`["*"]` means all) **and** the project roots it may target. Both are needed: ops without roots leaves the target unbounded.
 

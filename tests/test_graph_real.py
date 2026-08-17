@@ -170,14 +170,14 @@ def _provider(monkeypatch, responses):
 
 def test_resolve_prefers_exact_over_parent_prefix(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS})
-    name = p._resolve_project("/Users/x/Documents/project/codeintel")
+    name = p._resolve_project("/Users/x/Documents/project/codeintel").name
     assert name == "codeintel"  # NOT "parent-project"
 
 
 def test_resolve_prefix_when_inside_subdir(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS})
     # A path inside codeintel (no exact entry) resolves to the longest prefix = codeintel.
-    name = p._resolve_project("/Users/x/Documents/project/codeintel/src/codeintel")
+    name = p._resolve_project("/Users/x/Documents/project/codeintel/src/codeintel").name
     assert name == "codeintel"
 
 

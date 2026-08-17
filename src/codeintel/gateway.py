@@ -159,7 +159,25 @@ class Gateway:
                 parts.append(f"## [{eng}]\n{r['result']}")
 
         if not parts:
-            return safe_null_result(op_str, target_str, engine=engine_str, reason="no-result")
+            # Every engine's own reason is discarded here unless we carry it out. "no-result" is
+            # what an agent is told to read as "nothing found / not indexed yet" — so collapsing
+            # "neither engine could even be asked" into it produces a confident "that symbol does
+            # not exist" from a fan-out where both backends were simply missing. `context` is a
+            # fan-out op by default, so this was the common path, and it is the one place the
+            # codebase throws away the could-not-ask / asked-and-found-nothing distinction it is
+            # otherwise careful to preserve per-provider.
+            reasons = {eng: str(r.get("reason") or "no-result") for eng, r in results.items()}
+            unreachable = {"engine-unavailable", "boot-failed", "warming", "project-not-indexed",
+                           "project-not-indexed-standalone", "error", "timeout"}
+            all_unreachable = bool(reasons) and all(v in unreachable for v in reasons.values())
+            summary = "engines-unavailable" if all_unreachable else "no-result"
+            detail = ", ".join(f"{eng}: {why}" for eng, why in sorted(reasons.items()))
+            return safe_null_result(
+                op_str, target_str, engine=engine_str, reason=summary,
+                hint=(f"no engine produced an answer — {detail}"
+                      + ("; this is NOT evidence the target does not exist"
+                         if all_unreachable else "")),
+            )
 
         return {
             "ok": True,
@@ -306,14 +324,14 @@ class Gateway:
                     else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
                 )
                 if cached_result is not None:
-                    return {**cached_result, "cached": True}
+                    return _mark_reindexing({**cached_result, "cached": True}, reindexing)
                 # "both" is graph+lsp; "all" adds semantic.
                 engines = ["graph", "lsp"] if engine_str == "both" else ["graph", "lsp", "semantic"]
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
                 if not uncacheable:
                     self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
-                return result
+                return _mark_reindexing(result, reindexing)
 
             # Single-engine dispatch (`uncacheable`, computed above, also guards this path).
             cached_result = (
@@ -321,7 +339,13 @@ class Gateway:
                 else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
             )
             if cached_result is not None:
-                return {**cached_result, "cached": True}
+                # The staleness marker belongs on EVERY exit, and a cache hit is the exit that
+                # needs it most: the cache key's freshness generation only advances when a reindex
+                # COMPLETES, so a hit taken while one is in flight is precisely the "answer from
+                # the previous index" case the marker exists to disclose. It was applied on the
+                # single fresh-dispatch path only, so the three paths that could actually serve a
+                # stale answer were the three that stayed silent about it.
+                return _mark_reindexing({**cached_result, "cached": True}, reindexing)
             provider = self._provider_for(engine_str)
             result = self._dispatch_single(provider, op_str, target_str, budget, project_root, engine_str)
 

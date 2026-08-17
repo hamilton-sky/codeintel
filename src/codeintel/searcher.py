@@ -8,6 +8,8 @@ import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from codeintel.containment import ContainmentError, open_contained
+
 if TYPE_CHECKING:
     from codeintel.semantic_db import SemanticDb
 
@@ -113,27 +115,35 @@ class Searcher:
         distinguish 'nothing indexed yet' (no-index) from 'matches below floor'."""
         return self._row_count(os.path.realpath(project_root)) > 0
 
-    def _read_snippet(self, file_path: Path, chunk_start: int) -> str:
+    def _read_snippet(self, root_real: str, file_path: Path, chunk_start: int) -> str:
         try:
-            with open(file_path, encoding="utf-8", errors="replace") as f:
+            with open_contained(root_real, file_path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             snippet_lines = lines[chunk_start: chunk_start + _SNIPPET_LINES]
             return "".join(snippet_lines).rstrip()
+        except ContainmentError:
+            # Distinct from "not found": the row is stale AND the path now escapes the root, so
+            # something replaced an indexed file with a link out. Say so rather than reporting the
+            # generic missing-file text, which would read as ordinary index drift.
+            return "[refused: resolves outside the indexed root]"
         except FileNotFoundError:
             return "[file not found]"
         except Exception as exc:
             logger.debug("snippet read failed for %s:%d: %s", file_path, chunk_start, exc)
             return "[file not found]"
 
-    def _read_chunk(self, file_path: Path, chunk_start: int) -> list[str] | None:
+    def _read_chunk(self, root_real: str, file_path: Path, chunk_start: int) -> list[str] | None:
         """Bounded re-read from ``chunk_start`` for rerank lexical scoring (and the snippet in one
         read). Uses ``islice`` so a huge multi-line file is not fully materialised just to take a
         40-line window. ``None`` on any failure — the caller scores that candidate 0 and shows a
         not-found snippet, never crashing (a missing/edited file must degrade, per never-raise)."""
         try:
-            with open(file_path, encoding="utf-8", errors="replace") as f:
+            with open_contained(root_real, file_path, encoding="utf-8", errors="replace") as f:
                 return list(itertools.islice(f, chunk_start, chunk_start + _RERANK_READ_LINES))
         except Exception as exc:
+            # `open_contained` logs the escape at WARNING before raising, so a containment refusal
+            # is visible even though this handler degrades it to "score this candidate 0" like any
+            # other unreadable file — which is the correct never-raise behaviour here.
             logger.debug("chunk re-read failed for %s:%d: %s", file_path, chunk_start, exc)
             return None
 
@@ -200,7 +210,7 @@ class Searcher:
         lex = [0.0] * n
         boost = [0.0] * n
         for i, c in enumerate(candidates):
-            lines = self._read_chunk(root / c["path"], c["line"])
+            lines = self._read_chunk(project_root_real, root / c["path"], c["line"])
             if lines is None:
                 c["snippet"] = "[file not found]"
                 text = ""
@@ -317,7 +327,7 @@ class Searcher:
             # _rerank caches the snippet on each candidate it read; fill it in otherwise.
             snippet = c.get("snippet")
             if snippet is None:
-                snippet = self._read_snippet(root / c["path"], c["line"])
+                snippet = self._read_snippet(project_root_real, root / c["path"], c["line"])
             results.append({
                 "path": c["path"],
                 "line": c["line"],
