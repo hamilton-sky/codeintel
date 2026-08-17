@@ -1,0 +1,54 @@
+name: Corpus (real repositories)
+
+# Runs the engines against real, SHA-pinned repositories and asserts invariants that must hold on
+# ANY codebase. This is the automation of the one technique that has actually found this project's
+# bugs: every serious defect so far — a vendored tree ranked as a hotspot, answers served from a
+# containing repo, a dead graph engine, a language server error returned as an answer — was found
+# by pointing the tool at an unfamiliar repository, and never by the unit suite, whose fixtures are
+# all synthetic two-to-five-file micro-repos.
+#
+# NIGHTLY, not per-PR, and deliberately so. It clones over the network and takes minutes; wired
+# into every push it would be the check people learn to ignore, and a corpus job that gets
+# rubber-stamped is worth less than none. A nightly failure is a real signal worth reading.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:        # and on demand, e.g. before cutting a release
+
+jobs:
+  corpus:
+    name: Corpus invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      # Pinned for the same reason the graph-contract job pins it: 0.10.x changed the response
+      # format and returns nothing for every op but resolution.
+      - name: Install the pinned graph backend
+        run: pip install 'codebase-memory-mcp==0.9.*'
+
+      - name: Warm the backend runtime
+        run: codebase-memory-mcp --version
+
+      # Cloned repos are keyed by the SHAs in tests/test_corpus.py, so the cache is invalidated
+      # exactly when the corpus changes.
+      - name: Cache the corpus checkouts
+        uses: actions/cache@v4
+        with:
+          path: /tmp/codeintel-corpus
+          key: corpus-${{ hashFiles('tests/test_corpus.py') }}
+
+      # `-o addopts=` drops the project-wide coverage floor: this job runs one file and would
+      # otherwise fail for a reason unrelated to any invariant. `-rs` prints skip reasons, because
+      # a silently skipped corpus check is the failure mode this whole job exists to prevent.
+      - name: Corpus invariants
+        env:
+          CODEINTEL_CORPUS: "1"
+        run: pytest tests/test_corpus.py -v -rs -o addopts=
