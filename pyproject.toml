@@ -19,7 +19,11 @@ keywords = [
     "lsp", "semantic-search", "knowledge-graph", "static-analysis", "developer-tools",
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    # Beta, deliberately. The package is well-tested and the `code.query` surface has been stable
+    # since 0.8, but the project is young, pre-1.0, and still finding real defects each time it
+    # meets an unfamiliar repository. "Production/Stable" is a claim to make after that curve
+    # flattens and external users have exercised it — not before.
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Environment :: Console",
     "Operating System :: OS Independent",

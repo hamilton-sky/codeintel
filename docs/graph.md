@@ -44,7 +44,13 @@ The result says which verification actually ran: a full source check, a missing 
 a repo past the scan cap. It is a name-frequency heuristic and errs toward hiding real dead code
 rather than reporting live code as dead — it cannot see a symbol reached only through a decorator
 registry, `getattr` dispatch, an object-literal property a library calls, or a name in a template,
-YAML or TOML. Treat the output as candidates.
+YAML or TOML. Nor can it see an entry point declared in packaging metadata, a plugin discovered at
+runtime, or a caller in a language the graph does not parse.
+
+**Treat the output as candidates — a ranked list of places worth looking, never a work order.**
+Review each hit before deleting anything, and do not wire `deadcode` into an agent that deletes
+without a human in the loop. The verification removes the common false positives; it does not make
+the answer complete, and no reachability analysis on this shape of input could.
 
 The three repo-scan ops (`changed`, `deadcode`, `hotspots`) key on the whole index / git state, not a
 symbol, so `target` is ignored. An empty scan (clean tree, no dead code) is a **true answer** and

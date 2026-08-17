@@ -4,6 +4,37 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Release-process and documentation work from a production-readiness review. No behavior changes —
+nothing in the engines, the query path, or the safe-null contract moves.
+
+### Added
+- **A CI check that a documented version was actually released.** Releases ship on a `vX.Y.Z` tag
+  and nothing else, so bumping the version and writing the CHANGELOG without pushing the tag fails
+  silently — green CI, and the release never reaches users. It had already happened three times:
+  0.13.2, 0.14.1 and 0.15.0 were each bumped, documented and committed without a tag, and their
+  fixes sat unshipped behind a newer version number. `scripts/check_release_consistency.py` fails
+  when a CHANGELOG version has no matching tag, when the newest entry disagrees with
+  `__version__`, and when tags were not fetched; it exempts the in-flight version and records the
+  three known-superseded ones. It runs as its own CI job so the failure reads as one red line.
+- **A release checklist in CONTRIBUTING.md**, including the step that was being skipped: confirm
+  the version actually appears on PyPI.
+- **A `Project status` section in the README** stating plainly what is solid, what is young, what
+  the tool is designed for, and what to be careful with — plus PyPI, Python-version and license
+  badges, and a status note at the top.
+
+### Changed
+- **The PyPI classifier is now `4 - Beta`, not `5 - Production/Stable`.** The package is
+  well-tested and its one-call surface has been stable since 0.8, but the project is days old,
+  pre-1.0, and still finding real defects on first contact with unfamiliar repositories — as
+  0.15.0 and 0.15.1 record. `Production/Stable` was a claim it could not yet back.
+- **`deadcode` now carries an explicit caveat in the README and `docs/graph.md`**, since it is the
+  one op whose output invites a destructive action. The source verification removes the common
+  false positives but cannot make the answer complete: entry points in packaging metadata, plugin
+  discovery, reflection, and callers in unparsed languages are all invisible to it. Documented as
+  a candidate list, never a work order, and not to be wired into an agent that deletes unattended.
+
 ## [0.15.1] — 2026-08-16
 
 Found by pointing the tool at two more unfamiliar repositories.

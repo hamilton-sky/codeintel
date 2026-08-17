@@ -3,6 +3,16 @@
 **One MCP tool that lets a coding agent search, trace, and *understand* a codebase — structurally, not by grepping.** codeintel unifies three engines — a call/import **graph**, an **LSP** for exact symbols, and **semantic** embedding search — behind a single `code.query` call that routes to the right engine, caches the answer, and **never throws**. The agent always gets back a clean, well-formed result to reason over.
 
 [![CI](https://github.com/hamilton-sky/codeintel/actions/workflows/ci.yml/badge.svg)](https://github.com/hamilton-sky/codeintel/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/codecortex.svg)](https://pypi.org/project/codecortex/)
+[![Python](https://img.shields.io/pypi/pyversions/codecortex.svg)](https://pypi.org/project/codecortex/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> **Status: beta (`0.x`), and young.** The `code.query` surface is one call and has been stable
+> since `0.8`, the suite is thorough, and every release is gated by a canary that runs a real query
+> against a built wheel. But this is a new project with a single maintainer, and each time it has
+> been pointed at an unfamiliar codebase it has found real bugs. **Use it locally, on a developer
+> machine, for a single user** — that is the case it is built and tested for. Before relying on it
+> for anything beyond that, read **[Project status](#project-status)**.
 
 ![codeintel's own call graph — an interactive, self-contained HTML view with force / radial / layered / module layouts, complexity-sized nodes, and click-to-inspect metrics.](docs/images/graph-codeintel.png)
 
@@ -48,9 +58,23 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Everything about one symbol | `context` | graph + lsp | both views merged |
 | **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
 | Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
-| Unreferenced (dead) code | `deadcode` | graph | non-test symbols with no callers, **verified against the source** |
+| Unreferenced (dead) code | `deadcode` | graph | non-test symbols with no callers, **verified against the source** — [treat as candidates, not instructions](#deadcode-is-a-candidate-list-not-a-delete-list) |
 
 Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
+
+#### `deadcode` is a candidate list, not a delete list
+
+`deadcode` is the one op whose output invites a destructive action, so it gets an explicit caveat.
+Every hit is re-read and verified against the source before it is reported, which removes the
+common false positives — but **no reachability analysis sees every caller.** Dynamic dispatch,
+registries and decorators, `getattr` lookups, entry points declared in packaging metadata, plugin
+discovery, reflection, and calls from languages the graph does not parse are all invisible to it.
+Through `0.14.x` it was systematically wrong on callback-heavy code and confident about it; that
+class of defect is fixed, but the underlying limit is structural and permanent.
+
+**So: review each hit before deleting anything, and never wire `deadcode` into an agent that
+deletes without a human in the loop.** Used as a ranked list of *places worth looking*, it is
+genuinely useful. Used as a work order, it will eventually remove live code.
 
 **Example — "who uses `safe_null_result`?"**
 
@@ -421,6 +445,47 @@ Plus **bearer-token auth** — or **RBAC** (per-token roles + op scopes via `aut
 docker build -t codeintel . && docker run -p 127.0.0.1:8766:8766 \
   -e CODEINTEL_HTTP_TOKEN="$(openssl rand -hex 32)" codeintel
 ```
+
+## Project status
+
+An honest picture, so you can decide what to trust this with.
+
+**What's solid.** The suite is large and real — more test code than source, a coverage floor
+enforced in CI, and fault-injection tests behind the never-raise contract. CI runs lint, `mypy`,
+and the full suite on Python 3.11/3.12/3.13, then builds the wheel, installs it into a clean
+environment, and runs a **release canary** that registers the build with Codex and Claude Code in a
+throwaway `HOME`, boots the server those configs name, and asserts on the answer text of a real
+`code.query`. A release that installs into a file no host reads, or that boots and answers nothing,
+fails before it ships. The `code.query` envelope has been stable since `0.8`.
+
+**What's young.** The project is pre-1.0 and moves fast. The honest signal is in the
+[CHANGELOG](CHANGELOG.md): `0.15.0` and `0.15.1` were written almost entirely from pointing the
+tool at four repositories it had never seen, and several of those defects had survived multiple
+adversarial review rounds. **The rate at which new codebases surface new bugs has not yet flattened.**
+Expect to be the first person to hit something, and please report it — see below.
+
+**Use it for.** Local, single-user code intelligence on a developer machine. That is the designed
+case, it is the tested case, and the blast radius of a wrong answer is a wasted tool call: the
+safe-null contract means a failing engine degrades to `null` with a reason, so your agent falls
+back to grep rather than crashing.
+
+**Be careful with.**
+
+| Area | Why |
+|---|---|
+| `deadcode` | It suggests deletions and cannot see every caller — [read the caveat](#deadcode-is-a-candidate-list-not-a-delete-list). |
+| Non-loopback serving | `serve-http` is stdlib `http.server`. It binds loopback by default for a reason; front it with a reverse proxy and see [docs/deploy.md](docs/deploy.md). |
+| RBAC as a hard trust boundary | Token→role scoping works and is server-authoritative, but it is new and has not been audited externally. |
+| Unattended automation | Anything that acts on a result without a human reading it deserves a pilot first. |
+
+**Engine coverage depends on external binaries.** Semantic search works out of the box. The graph
+engine needs `codebase-memory-mcp` and the LSP engine needs `uvx` on `PATH` — without them those
+engines safe-null and you get a fraction of the capability table above. `codeintel setup --all`
+installs what it can and `codeintel doctor` tells you exactly what is missing and how to fix it.
+Run `doctor` first if the tool seems quieter than the docs suggest.
+
+**Maintenance.** One maintainer, MIT licensed, issues and PRs welcome. There is no support
+guarantee — factor that into anything load-bearing.
 
 ## Reporting a problem
 

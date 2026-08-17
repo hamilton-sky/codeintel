@@ -28,6 +28,26 @@ jobs:
       - name: mypy
         run: mypy
 
+  # Its own check for the same reason lint is split from test: a version that was documented but
+  # never tagged is a specific, actionable mistake, and it should read as one red line rather than
+  # hide inside another job. Needs full history + tags, which the other jobs deliberately skip.
+  release-consistency:
+    name: Release consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # No dependencies: the script parses __version__ with ast and shells out to `git tag`.
+      - name: Every documented version is tagged
+        run: python scripts/check_release_consistency.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
