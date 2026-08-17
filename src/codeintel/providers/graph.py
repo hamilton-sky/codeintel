@@ -278,7 +278,8 @@ _SUPPORTED_BACKEND = "0.9.x"
 _INCOMPATIBLE_HINT = (
     "the graph backend returned a response this release cannot parse — codebase-memory-mcp "
     f"{_SUPPORTED_BACKEND} answers with JSON rows, and 0.10.x replaced that with a text format. "
-    "Pin the supported backend (`pip install 'codebase-memory-mcp==0.9.*'`) or check for a newer "
+    "Pin the supported backend (pip/uv: `pip install 'codebase-memory-mcp==0.9.*'`; standalone "
+    "binary: re-install the 0.9.x build) or check for a newer "
     "codeintel. This is NOT a statement about whether your repository is indexed."
 )
 
@@ -639,8 +640,15 @@ class GraphProvider:
                           f"{_SUPPORTED_BACKEND}, which answers queries with JSON rows; the "
                           f"installed backend replies in a text format, so every graph op except "
                           f"project resolution returns nothing",
-                "remediation": "pip install 'codebase-memory-mcp==0.9.*'  (or check for a newer "
-                               "codeintel that speaks the new format)",
+                # Two install shapes exist and only one takes a pip command: the PyPI launcher, and
+                # a standalone native binary that self-manages. Naming only pip left the binary
+                # users — including this project's own maintainer — with an instruction they could
+                # not run, which is the failure mode this whole check exists to avoid.
+                "remediation": "downgrade the backend to 0.9.x — pip/uv installs: "
+                               "`pip install 'codebase-memory-mcp==0.9.*'`; standalone binary: "
+                               "re-install the 0.9.x build for your platform (note `codebase-"
+                               "memory-mcp update` self-updates back to 0.10.x). Or check for a "
+                               "newer codeintel that speaks the new format.",
             }
         resolution = self._match_project(raw, project_root)
         if resolution is None:
