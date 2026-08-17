@@ -88,7 +88,40 @@ def tagged_versions() -> set[str]:
     return {line[1:] for line in out.split() if re.fullmatch(r"v\d+\.\d+\.\d+", line)}
 
 
+def check_tag(tag: str) -> int:
+    """Verify a tag about to be published matches what the tree actually ships.
+
+    The reverse of the check below, and the case that bit for real: `v0.15.3` was pushed while
+    `__version__` still read `0.15.2`. The build produced a wheel labelled 0.15.2, PyPI rejected it
+    as a duplicate, and the publish failed several minutes in with "File already exists" — naming
+    neither the tag nor the mismatch that caused it. Run as the FIRST step of the publish workflow
+    so it costs seconds and says what to do.
+    """
+    wanted = tag[1:] if tag.startswith("v") else tag
+    version = current_version()
+    if wanted != version:
+        print(
+            f"tag {tag} does not match __version__ ({version}).\n"
+            f"Bump __version__ and the CHANGELOG, move the tag onto that commit, and push again:\n"
+            f"  git tag -f {tag} && git push --force origin {tag}"
+        )
+        return 1
+    if version not in changelog_versions():
+        print(f"CHANGELOG.md has no '## [{version}]' section — publishing a version with no entry "
+              f"is how three earlier releases went out undocumented.")
+        return 1
+    print(f"tag {tag} matches __version__ ({version}), and the CHANGELOG documents it")
+    return 0
+
+
 def main() -> int:
+    if "--tag" in sys.argv:
+        idx = sys.argv.index("--tag")
+        if idx + 1 >= len(sys.argv):
+            print("--tag needs a value, e.g. --tag v1.2.3")
+            return 1
+        return check_tag(sys.argv[idx + 1])
+
     version = current_version()
     documented = changelog_versions()
     tags = tagged_versions()
