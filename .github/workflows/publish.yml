@@ -29,6 +29,30 @@ jobs:
         with:
           python-version: "3.12"
 
+      # FIRST, before anything is built. Tagging without bumping `__version__` produces a wheel
+      # labelled with the PREVIOUS version, which PyPI then rejects as a duplicate — several
+      # minutes in, with an error ("File already exists") that names neither the tag nor the
+      # mismatch. Real occurrence: v0.15.3 was pushed while `__version__` still read 0.15.2.
+      # Failing here costs seconds and says exactly what is wrong.
+      - name: The tag must match __version__
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(python -c "import ast,pathlib;
+src=pathlib.Path('src/codeintel/__init__.py').read_text()
+print([ast.literal_eval(n.value) for n in ast.parse(src).body
+       if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == '__version__'][0])")
+          echo "tag=$TAG  __version__=$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match __version__ ($VERSION). Bump __version__ and"
+            echo "::error::the CHANGELOG, move the tag to that commit, and push again."
+            exit 1
+          fi
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section — a release with no entry"
+            echo "::error::is how three earlier versions went out undocumented."
+            exit 1
+          fi
+
       - name: Build sdist + wheel
         run: |
           python -m pip install --upgrade build twine
