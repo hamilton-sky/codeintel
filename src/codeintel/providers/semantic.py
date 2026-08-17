@@ -52,9 +52,20 @@ class SemanticProvider:
             from codeintel.semantic_db import default_db_path
             model = str(load_config(project_root).get("model") or "")
             db_path = default_db_path(model)
-        except Exception:
-            db_path = ""
-        if not db_path or not os.path.exists(db_path):
+        except Exception as exc:
+            # Do NOT fold this into "no index database yet". Resolving the cache path fails when
+            # the environment has no resolvable home directory — routine in a container running as
+            # a UID with no passwd entry, which is how agents are often run — and reporting it as
+            # "not indexed yet" sent the user to `codeintel index`, which fails the same way for
+            # the same reason. They then loop between two commands, neither of which names the
+            # actual problem. Say what broke and how to override it.
+            return {
+                "installed": True, "runnable": False, "repo_indexed": False,
+                "detail": f"cannot locate the index cache directory: {exc}",
+                "remediation": "set HOME (or CODEINTEL_HOME) to a writable directory — this "
+                               "environment has no resolvable home directory",
+            }
+        if not os.path.exists(db_path):
             return {
                 "installed": True, "runnable": True, "repo_indexed": False,
                 "detail": "no semantic index database yet",

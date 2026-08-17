@@ -83,6 +83,18 @@ were still leaking the home path"* is that property announcing itself).
   `qualified_name` and never covered this channel.
 
 ### Added
+- **`CODEINTEL_HOME` overrides the cache location.** `Path.home()` raises when a process has no
+  resolvable home directory — a container running as a UID with no passwd entry and no `$HOME`,
+  which is routine for the coding agents this server exists to be launched by. There was no way to
+  proceed except changing the environment, and the failure surfaced as a `RuntimeError` several
+  layers from anything that named it.
+- **`doctor` now names an unresolvable cache directory instead of calling it "not indexed yet".**
+  That report sent the user to `codeintel index`, which fails identically for the same reason — two
+  commands, neither naming the problem.
+- **`setup --all` names the reason indexing failed.** Its step table said only "indexer reported an
+  unrecoverable failure" while the real cause — a blocked model download, an unwritable cache
+  directory — sat in an unlinked stderr line above it. `Indexer.index()` still returns `-1`, but it
+  now also keeps the reason on `last_error` for callers that must show one rather than log one.
 - **A CI check that a documented version was actually released.** Releases ship on a `vX.Y.Z` tag
   and nothing else, so bumping the version and writing the CHANGELOG without pushing the tag fails
   silently — green CI, and the release never reaches users. It had already happened three times:

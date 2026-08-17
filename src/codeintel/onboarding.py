@@ -81,13 +81,16 @@ def _bounded_index(project_root: str, *, timeout_s: float, out) -> dict:
             db = SemanticDb(db_path)
             try:
                 db.init()
-                outcome["count"] = Indexer(
+                indexer = Indexer(
                     db, model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
                     window=int(cfg.get("window", 20)), stride=int(cfg.get("stride", 10)),
                     max_chunks=int(cfg.get("max_chunks", 500)),
                     max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
                     chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-                ).index(project_root)
+                )
+                outcome["count"] = indexer.index(project_root)
+                if indexer.last_error:
+                    outcome["reason"] = indexer.last_error
             finally:
                 db.close()
         except Exception as exc:
@@ -106,7 +109,14 @@ def _bounded_index(project_root: str, *, timeout_s: float, out) -> dict:
         return {"status": "fail", "chunks": 0, "detail": outcome["error"]}
     count = outcome.get("count", 0)
     if count < 0:
-        return {"status": "fail", "chunks": 0, "detail": "indexer reported an unrecoverable failure"}
+        # Name the cause here. "an unrecoverable failure" told the user only that something went
+        # wrong, while the actual reason — a blocked model download, an unwritable cache directory
+        # — sat in a stderr line above, unlinked to this row and easy to scroll past.
+        reason = str(outcome.get("reason") or "").strip()
+        return {"status": "fail", "chunks": 0,
+                "detail": (f"indexing failed — {reason}" if reason
+                           else "indexer reported an unrecoverable failure (run `codeintel index "
+                                "<repo>` to see the error)")}
     return {"status": "ok", "chunks": count, "detail": f"indexed {count} new chunk(s)"}
 
 

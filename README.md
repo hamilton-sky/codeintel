@@ -369,6 +369,7 @@ Config is **validated on load** — an out-of-range number, a misspelled enum, o
 | `CODEINTEL_HTTP_ACCESS_LOG=1` | One log line per HTTP request (method, path, status, latency) |
 | `CODEINTEL_DEBUG=1` | Log the full traceback of any error the never-throw contract swallows (silent by default) — the switch for diagnosing an unexpected `null` |
 | `CODEINTEL_REINDEX=off` | Disable the background reindexer; queries then index inline to stay fresh |
+| `CODEINTEL_HOME` | Where the index cache lives (default `~/.codeintel`). Set this when the process has **no resolvable home directory** — a container running as a UID with no passwd entry and no `$HOME`, which is common when an agent runs in one. Without it, `Path.home()` raises and every command fails somewhere far from the cause. |
 
 ## Privacy & dependencies
 

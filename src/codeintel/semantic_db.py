@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import pathlib
 import re
 import sqlite3
@@ -16,7 +17,18 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
 def _base_dir() -> pathlib.Path:
     """The per-machine cache directory. A single seam so tests can redirect every model's db
-    file at once (patch this, not each computed path)."""
+    file at once (patch this, not each computed path).
+
+    ``CODEINTEL_HOME`` overrides it outright. `Path.home()` raises when the process has no
+    resolvable home directory — a UID with no passwd entry and no ``$HOME`` — which is not exotic
+    for this tool: it is routine for a container, and this is an MCP server whose whole purpose is
+    to be launched by coding agents that often run in one. Without an override the only fix was to
+    change the environment, and the failure surfaced as a `RuntimeError` several layers away from
+    anything that named it.
+    """
+    override = os.environ.get("CODEINTEL_HOME", "").strip()
+    if override:
+        return pathlib.Path(override).expanduser()
     return pathlib.Path.home() / ".codeintel"
 
 

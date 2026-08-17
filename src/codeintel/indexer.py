@@ -207,6 +207,8 @@ class Indexer:
         )
         self._embedder = None
         self._ts_parsers: dict = {}  # per-instance tree-sitter parser cache (lang -> parser|None)
+        # Why the last index() failed, for callers that must SHOW a reason rather than log one.
+        self.last_error: str | None = None
 
     def _get_embedder(self):
         if self._embedder is None:
@@ -215,11 +217,20 @@ class Indexer:
         return self._embedder
 
     def index(self, project_root: str) -> int:
-        """Return count of newly embedded chunks, or -1 on unrecoverable failure."""
+        """Return count of newly embedded chunks, or -1 on unrecoverable failure.
+
+        The failure REASON is kept on ``self.last_error`` as well as logged. Returning a bare -1
+        left every caller able to say only "an unrecoverable failure" — which is what `setup --all`
+        printed in its step table, while the actual cause (a blocked model download, an unwritable
+        cache directory) sat in a stderr line the user had already scrolled past and had no reason
+        to connect to the row in front of them.
+        """
+        self.last_error = None
         try:
             return self._index(project_root)
         except Exception as exc:
             logger.error("Indexer.index() unrecoverable failure: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return -1
 
     def _load_gitignore(self, root: Path) -> set[str]:

@@ -7,8 +7,11 @@ never hang). No engine check may raise, hang, load the embedding model, or mutat
 """
 from __future__ import annotations
 
+import io
 import os
 import time
+
+import pytest
 
 from codeintel import doctor
 from codeintel.provider import safe_null_result
@@ -289,3 +292,78 @@ def test_safe_null_hint_is_optional():
     assert "hint" not in without  # key absent unless set (envelope stability)
     with_hint = safe_null_result("op", "t", engine="graph", reason="x", hint="do this")
     assert with_hint["hint"] == "do this"
+
+
+# --------------------------------------------------------------------------- #
+# First-run failure modes: name the cause, don't send the user in a circle
+# --------------------------------------------------------------------------- #
+
+def test_an_unresolvable_home_is_not_reported_as_simply_not_indexed(monkeypatch):
+    """Resolving the cache path fails when a process has no home directory — routine for a
+    container running as a UID with no passwd entry, which is how coding agents are often run.
+    Reporting that as "no semantic index database yet" sent the user to `codeintel index`, which
+    fails the same way for the same reason: two commands, neither naming the problem."""
+    from codeintel.providers.semantic import SemanticProvider
+
+    def _boom(*a, **k):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", _boom)
+    p = SemanticProvider()
+    if not p.available:                       # fastembed/sqlite-vec absent in this environment
+        pytest.skip("semantic engine not installed")
+    report = p.probe("/some/repo")
+
+    assert report["repo_indexed"] is False
+    assert "no semantic index database yet" not in report["detail"]
+    assert "home directory" in report["detail"] or "cache directory" in report["detail"]
+    # The remediation must be actionable and must NOT be the command that fails identically.
+    assert "CODEINTEL_HOME" in report["remediation"] or "HOME" in report["remediation"]
+    assert report["remediation"] != "codeintel index /some/repo"
+
+
+def test_codeintel_home_overrides_an_unusable_default(tmp_path, monkeypatch):
+    """The override the remediation above points at has to actually exist, or the advice is a
+    dead end of its own."""
+    from codeintel.semantic_db import default_db_path
+
+    monkeypatch.setenv("CODEINTEL_HOME", str(tmp_path / "cache"))
+    assert default_db_path(None).startswith(str(tmp_path / "cache"))
+
+    monkeypatch.delenv("CODEINTEL_HOME", raising=False)
+    assert not default_db_path(None).startswith(str(tmp_path / "cache"))
+
+
+def test_a_blank_codeintel_home_falls_back_rather_than_using_the_cwd(monkeypatch):
+    """An empty env var is a common accident (`CODEINTEL_HOME=` in a shell profile); treating it
+    as a path would scatter the cache into whatever directory the process started in."""
+    from codeintel.semantic_db import default_db_path
+
+    monkeypatch.setenv("CODEINTEL_HOME", "   ")
+    path = default_db_path(None)
+    assert path.endswith("semantic.db")
+    assert not path.startswith("semantic.db")     # not a bare relative path in the cwd
+
+
+def test_setup_names_the_reason_indexing_failed(tmp_path, monkeypatch):
+    """The step table said only "indexer reported an unrecoverable failure" while the real cause
+    sat in an unlinked stderr line above it."""
+    from codeintel import onboarding
+
+    class _FailingIndexer:
+        def __init__(self, *a, **k):
+            self.last_error = None
+
+        def index(self, root):
+            self.last_error = "ProxyError: 403 Forbidden"
+            return -1
+
+    monkeypatch.setattr("codeintel.indexer.Indexer", _FailingIndexer)
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path",
+                        lambda *a, **k: str(tmp_path / "db.sqlite"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "a.py").write_text("def f(): pass\n")
+
+    step = onboarding._bounded_index(str(repo), timeout_s=30.0, out=io.StringIO())
+    assert step["status"] == "fail"
+    assert "403 Forbidden" in step["detail"], step["detail"]
