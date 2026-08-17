@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from codeintel.providers.graph import GraphProvider, ProjectResolution
+from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
 from codeintel.server import code_status_handler
 
 
@@ -253,8 +253,8 @@ def _provider_answering(dispatch_result):
     dispatching to a fixed result — so the reason-mapping is tested, not the subprocess."""
     gp = GraphProvider.__new__(GraphProvider)
     gp.available = True                                            # type: ignore[attr-defined]
-    gp._resolve_project = lambda root: ProjectResolution(          # type: ignore[method-assign]
-        name="proj", matched_root="/repo", scope="exact")
+    gp._lookup_project = lambda root: ProjectLookup(               # type: ignore[method-assign]
+        ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
     gp._dispatch = lambda *a, **k: dispatch_result                 # type: ignore[method-assign]
     return gp
 
@@ -662,8 +662,8 @@ def _provider_resolving(scope, dispatch_result="## Answer\nrow"):
     """A provider whose resolution lands on `scope` ("exact" or "ancestor")."""
     gp = GraphProvider.__new__(GraphProvider)
     gp.available = True                                            # type: ignore[attr-defined]
-    gp._resolve_project = lambda root: ProjectResolution(          # type: ignore[method-assign]
-        name="parent-project", matched_root="/repos", scope=scope)
+    gp._lookup_project = lambda root: ProjectLookup(               # type: ignore[method-assign]
+        ProjectResolution(name="parent-project", matched_root="/repos", scope=scope), "ok")
     gp._dispatch = lambda *a, **k: dispatch_result                 # type: ignore[method-assign]
     return gp
 
@@ -709,10 +709,93 @@ def test_the_not_in_graph_hint_does_not_leak_the_backends_project_id():
     home-path leaks grepped for `qualified_name` and never covered this channel."""
     gp = GraphProvider.__new__(GraphProvider)
     gp.available = True                                            # type: ignore[attr-defined]
-    gp._resolve_project = lambda root: ProjectResolution(          # type: ignore[method-assign]
-        name="Users-alice-Documents-work-secret-repo", matched_root="/x", scope="exact")
+    gp._lookup_project = lambda root: ProjectLookup(               # type: ignore[method-assign]
+        ProjectResolution(name="Users-alice-Documents-work-secret-repo", matched_root="/x",
+                          scope="exact"), "ok")
     gp._dispatch = lambda *a, **k: None                            # type: ignore[method-assign]
     res = gp.build_result("callers", "nope", [], 5000, "/x")
     assert res["reason"] == "not-in-graph"
     assert "Users-alice" not in res["hint"]
     assert "secret-repo" not in res["hint"]
+
+
+# --------------------------------------------------------------------------- #
+# Backend wire-format compatibility
+#
+# codebase-memory-mcp 0.9.x answers query_graph/search_graph with {"columns", "rows"}. 0.10.x
+# replaced that with a compact text format while KEEPING list_projects as JSON — so resolution and
+# doctor kept working while every actual query returned nothing, and the tool reported "not in the
+# graph index" about a fully indexed repository. No CI job installs the backend, so nothing caught
+# it; the one live test that would have failed skipped instead, on a condition this bug produced.
+# --------------------------------------------------------------------------- #
+
+def _provider_speaking(stdout_bytes):
+    """A provider whose backend subprocess returns *stdout_bytes* verbatim."""
+    import subprocess as _sp
+
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                            # type: ignore[attr-defined]
+    gp._cmd = "/fake/codebase-memory-mcp"                          # type: ignore[attr-defined]
+    gp._saw_unparsable = False                                     # type: ignore[attr-defined]
+    gp._project_cache = {}                                         # type: ignore[attr-defined]
+    gp._negative_until = {}                                        # type: ignore[attr-defined]
+    gp._project_cache_lock = __import__("threading").Lock()        # type: ignore[attr-defined]
+
+    def _fake(cmd, **kwargs):
+        return _sp.CompletedProcess(cmd, 0, stdout=stdout_bytes, stderr=b"")
+
+    return gp, _fake
+
+
+def test_a_text_speaking_backend_is_reported_as_incompatible_not_as_missing_data(monkeypatch):
+    """The exact 0.10.x behaviour: exit 0, and a human-readable body where JSON was promised."""
+    text = b'rows: 2  (cols: a.name)\n  "codeintel"\n  "codeintel.viewer"\ntotal: 2\n'
+    gp, fake = _provider_speaking(text)
+    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
+    gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
+        ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
+
+    res = gp.build_result("callers", "thing", [], 5000, "/repo")
+    assert res["ok"] is True
+    assert res["result"] is None
+    # The critical assertion: it must NOT claim the symbol is absent from the index.
+    assert res["reason"] == "backend-incompatible"
+    assert res["reason"] != "not-in-graph"
+    assert "0.9" in res["hint"]
+    assert "NOT a statement about whether your repository is indexed" in res["hint"]
+
+
+def test_a_json_speaking_backend_is_not_flagged_incompatible(monkeypatch):
+    """The guard against a false positive: the supported dialect must stay silent."""
+    body = b'{"columns":["a.name","a.qualified_name","a.file_path","type(c)"],' \
+           b'"rows":[["bar","pkg.bar","bar.py","CALLS"]],"total":1}'
+    gp, fake = _provider_speaking(body)
+    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
+    gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
+        ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
+
+    res = gp.build_result("callers", "thing", [], 5000, "/repo")
+    assert res.get("reason") is None
+    assert res["result"] is not None and "pkg.bar" in res["result"]
+    assert gp._saw_unparsable is False
+
+
+def test_a_slow_backend_is_not_reported_as_an_unindexed_project(monkeypatch):
+    """Resolution used a hardcoded 3000ms budget while the real backend measured ~5.8s per call,
+    so EVERY query timed out during resolution and was reported as `project-not-indexed` with the
+    advice to re-index a repository that was already indexed. A timeout is a fact about the
+    backend, not about the repository."""
+    gp = GraphProvider.__new__(GraphProvider)
+    gp.available = True                                            # type: ignore[attr-defined]
+    gp._cmd = "/fake/codebase-memory-mcp"                          # type: ignore[attr-defined]
+    gp._saw_unparsable = False                                     # type: ignore[attr-defined]
+    gp._project_cache = {}                                         # type: ignore[attr-defined]
+    gp._negative_until = {}                                        # type: ignore[attr-defined]
+    gp._project_cache_lock = __import__("threading").Lock()        # type: ignore[attr-defined]
+    gp._run = lambda method, payload, timeout_ms: None             # type: ignore[method-assign]
+
+    res = gp.build_result("callers", "thing", [], 5000, "/repo")
+    assert res["reason"] == "backend-unreachable"
+    assert res["reason"] != "project-not-indexed"
+    # And a timeout must not be cached as a miss, or a slow moment is remembered as "no index".
+    assert "/repo" not in gp._negative_until

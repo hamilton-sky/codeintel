@@ -14,6 +14,39 @@ answered from the wrong index**; and **cross-cutting properties are retrofitted 
 one lands at some call sites and misses others (the commit titled *"a third and fourth renderer
 were still leaking the home path"* is that property announcing itself).
 
+### Fixed — the graph engine was entirely non-functional, silently
+These three were found the first time the real backend was ever installed alongside the test
+suite. Each one disabled the graph engine completely while the tool reported itself healthy.
+
+- **Project resolution used a 3000 ms budget against a backend that takes ~5.8 s.** `list_projects`
+  spawns a native binary that re-initialises its own allocator on every invocation — measured at
+  ~5.8s *consistently*, not merely on a cold start. Every graph query resolves a project first, so
+  every graph query timed out, and the caller reported `project-not-indexed` with the advice to run
+  `codeintel index` — on a repository that was already fully indexed. The budget is now 20 s
+  (overridable via `CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS`), a successful lookup is cached, and a
+  timeout is no longer cached as a miss so one slow moment is not remembered as "no index".
+- **A timeout is no longer reported as "not indexed".** Those are different facts with different
+  remedies, and collapsing them produced the most useless possible instruction: re-index a repo
+  that is indexed. Resolution now distinguishes `backend-unreachable` from `project-not-indexed`.
+- **`codebase-memory-mcp` 0.10.x is incompatible, and this is now detected instead of silent.**
+  0.9.x answers `query_graph`/`search_graph` with `{"columns": [...], "rows": [...]}`, which every
+  renderer here parses. 0.10.x replaced that with a compact text format — while keeping
+  `list_projects` as JSON. The combination is the worst available: resolution and `doctor` kept
+  succeeding, so the engine looked healthy, while `callers`, `callees`, `impact`, `chain`,
+  `pattern`, `overview`, `changed`, `deadcode` and `hotspots` all returned nothing and the tool
+  said `not-in-graph` — a false claim about the user's index. The provider now tells "the backend
+  spoke a dialect I cannot read" apart from "the process failed", reports `backend-incompatible`
+  with the pin, and `doctor` probes with a real query rather than trusting `list_projects`.
+  **`0.9.x` is the supported range**; the backend self-updates, so `codebase-memory-mcp update` can
+  break the engine.
+
+> **None of this was reachable by the existing suite**, because no CI job installs the backend and
+> the provider's unit tests assert what codeintel *intends* to send. The one live test that would
+> have failed skipped instead — with "project not indexed in this environment", a condition the
+> resolution-timeout bug itself produced. A new `graph-contract` CI job installs the pinned backend,
+> runs the live tests, and **fails if they skip**, because a skipped contract test is what let this
+> ship.
+
 ### Security
 - **A file swapped for a symlink AFTER indexing could be read back from outside the root.**
   Containment was enforced in the indexing *walk* and nowhere else: `Searcher._read_snippet` and

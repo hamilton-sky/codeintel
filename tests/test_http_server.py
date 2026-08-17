@@ -8,6 +8,12 @@ import pytest
 
 from codeintel.http_server import _MAX_BODY_BYTES, CodeIntelHTTPServer, _Handler, _is_loopback, run
 
+# A request that reaches a live graph/LSP backend legitimately takes seconds: the backend is a
+# native binary that re-initialises per invocation (~6s measured). The old 5s client timeout was
+# fine only because no CI job installs those backends — with one present these tests time out,
+# which is a property of the harness, not of the server.
+_HTTP_TEST_TIMEOUT_S = 60
+
 
 @pytest.fixture
 def server():
@@ -22,7 +28,7 @@ def server():
 
 
 def _post(port: int, path: str, body: bytes, content_type: str = "application/json") -> tuple[int, dict]:
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
     headers = {"Content-Type": content_type, "Content-Length": str(len(body))}
     conn.request("POST", path, body=body, headers=headers)
     resp = conn.getresponse()
@@ -32,7 +38,7 @@ def _post(port: int, path: str, body: bytes, content_type: str = "application/js
 
 
 def _get(port: int, path: str) -> tuple[int, dict]:
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
     conn.request("GET", path)
     resp = conn.getresponse()
     data = json.loads(resp.read())
@@ -43,7 +49,7 @@ def _get(port: int, path: str) -> tuple[int, dict]:
 def _post_with_headers(port: int, path: str, body: bytes, headers: dict) -> tuple[int, dict]:
     # Bypasses http.client's automatic Content-Length calculation so a test can
     # send a header that lies about the body size without transferring that many bytes.
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
     conn.request("POST", path, body=body, headers=headers)
     resp = conn.getresponse()
     data = json.loads(resp.read())
@@ -70,7 +76,7 @@ def test_query_bad_json(server):
 
 def test_query_empty_body(server):
     _, port = server
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
     conn.request("POST", "/code/query", body=b"", headers={"Content-Length": "0"})
     resp = conn.getresponse()
     data = json.loads(resp.read())

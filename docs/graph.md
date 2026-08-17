@@ -13,6 +13,31 @@ install the build for your OS/arch and ensure it is on `PATH` (it self-manages v
 `codebase-memory-mcp install|update`). Run `codeintel doctor` to confirm it is detected and that
 this repo is indexed.
 
+> ### Supported backend version: `0.9.x`
+>
+> ```bash
+> pip install 'codebase-memory-mcp==0.9.*'
+> ```
+>
+> **`0.10.x` does not work with this release.** It replaced the `{"columns": [...], "rows": [...]}`
+> response that every renderer here parses with a compact human-readable text format. Crucially it
+> kept `list_projects` as JSON — so project resolution and `codeintel doctor` still succeed, while
+> **every other op returns nothing**: `callers`, `callees`, `impact`, `chain`, `pattern`,
+> `overview`, `changed`, `deadcode` and `hotspots` all come back empty against a fully indexed
+> repository.
+>
+> As of this release `doctor` detects the mismatch by asking a real query rather than trusting
+> `list_projects`, and reports `backend-incompatible` with the pin above. Queries report the same
+> reason instead of `not-in-graph`, so the tool no longer makes a false claim about your index.
+>
+> **The backend self-updates.** `codebase-memory-mcp update` can therefore break the graph engine.
+> If graph ops stop returning results, check the version first.
+>
+> Note also that the backend re-initialises a native runtime on every invocation — roughly **6
+> seconds per call** on an ordinary machine. `codebase-memory-mcp daemon start` keeps one warm and
+> removes that cost. If your machine is slower still, raise
+> `CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS` (default 20000).
+
 ## Supported ops
 
 | op | target | What it returns |

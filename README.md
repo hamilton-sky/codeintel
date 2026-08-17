@@ -267,7 +267,7 @@ The optional keys are the ones worth reading when an answer surprises you:
 
 | Engine | Key ops | Install prereq |
 |---|---|---|
-| `graph` | `impact`, `callers`, `callees`, `chain`, `pattern`, `overview`, `context` | `codebase-memory-mcp` CLI on PATH — see [docs/graph.md](docs/graph.md) |
+| `graph` | `impact`, `callers`, `callees`, `chain`, `pattern`, `overview`, `context` | `codebase-memory-mcp` **0.9.x** on PATH (`pip install 'codebase-memory-mcp==0.9.*'`) — 0.10.x changed its response format and returns nothing for every op but resolution; see [docs/graph.md](docs/graph.md) |
 | `lsp` | `symbol`, `overview`, `context` | `uvx` on PATH — serena is fetched from GitHub on first use; see [docs/lsp.md](docs/lsp.md) |
 | `semantic` | `search`, `context` | `fastembed` + `sqlite-vec` (installed with the package) — see [docs/semantic.md](docs/semantic.md) |
 

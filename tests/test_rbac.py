@@ -14,6 +14,12 @@ from codeintel.auth import TokenAuth, load_auth
 from codeintel.http_server import CodeIntelHTTPServer, _Handler
 from codeintel.reindexer import Reindexer
 
+# A request that reaches a live graph/LSP backend legitimately takes seconds: the backend is a
+# native binary that re-initialises per invocation (~6s measured). The old 5s client timeout was
+# fine only because no CI job installs those backends — with one present these tests time out,
+# which is a property of the harness, not of the server.
+_HTTP_TEST_TIMEOUT_S = 60
+
 # --------------------------------------------------------------------------- auth config loading
 
 def test_load_auth_parses_roles_and_tokens(tmp_path, monkeypatch):
@@ -80,7 +86,7 @@ def _query(port, body, token=None):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
     c.request("POST", "/code/query", json.dumps(body).encode(), headers)
     r = c.getresponse()
     out = json.loads(r.read())
@@ -131,7 +137,7 @@ def test_load_auth_non_list_ops_fails_closed(tmp_path, monkeypatch):
 
 
 def _doctor(port, token):
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
     c.request("POST", "/code/doctor", b'{"project_root":"/tmp"}',
               {"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
     r = c.getresponse()
@@ -178,7 +184,7 @@ def test_denied_op_does_no_reindex_work(monkeypatch):
 
 
 def test_rbac_healthz_still_unauthenticated(rbac_server):
-    c = http.client.HTTPConnection("127.0.0.1", rbac_server, timeout=5)
+    c = http.client.HTTPConnection("127.0.0.1", rbac_server, timeout=_HTTP_TEST_TIMEOUT_S)
     c.request("GET", "/healthz")
     assert c.getresponse().status == 200  # probes never require a token, even under RBAC
     c.close()

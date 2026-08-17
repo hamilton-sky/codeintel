@@ -485,6 +485,12 @@ def test_live_callers_of_safe_null_result():
     skip rather than fail."""
     p = GraphProvider()
     assert p.available is True
+    # An incompatible backend is a real, reported condition (see the wire-format tests in
+    # test_graph_provider.py and the doctor probe) — but it makes this end-to-end answer test
+    # meaningless, so name it rather than failing with a confusing "no callers".
+    if p._probe_wire_format(p._any_project_name(p._run("list_projects", {}, 30000))) is False:
+        pytest.skip("installed codebase-memory-mcp speaks the 0.10.x text format, which this "
+                    "release cannot parse — pin 0.9.x to run the live graph tests")
     if p._resolve_project(REPO_ROOT) is None:
         pytest.skip("codeintel project not indexed in this environment")
 

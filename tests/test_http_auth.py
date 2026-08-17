@@ -11,6 +11,12 @@ import pytest
 
 from codeintel.http_server import _MAX_CONCURRENT_REQUESTS, CodeIntelHTTPServer, _Handler
 
+# A request that reaches a live graph/LSP backend legitimately takes seconds: the backend is a
+# native binary that re-initialises per invocation (~6s measured). The old 5s client timeout was
+# fine only because no CI job installs those backends — with one present these tests time out,
+# which is a property of the harness, not of the server.
+_HTTP_TEST_TIMEOUT_S = 60
+
 
 def _serve(token=None):
     server = CodeIntelHTTPServer(("127.0.0.1", 0), _Handler)
@@ -113,7 +119,7 @@ def test_server_refuses_with_503_when_at_capacity():
     for _ in range(_MAX_CONCURRENT_REQUESTS):
         assert server._slots.acquire(blocking=False)
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
         conn.request("GET", "/code/status")
         assert conn.getresponse().status == 503
         conn.close()

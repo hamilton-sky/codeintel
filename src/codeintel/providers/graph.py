@@ -256,6 +256,45 @@ def _collapse_repeats(label: str) -> str:
     return ".".join(out)
 
 
+# How long `list_projects` may take before resolution gives up. The old value was 3000ms, chosen
+# against a mocked backend; the real one spawns a native binary that re-initialises its allocator
+# per invocation and measured ~5.8s consistently on an ordinary machine. Every graph query resolves
+# a project first, so a budget below the backend's real latency does not degrade the engine — it
+# disables it. Generous on purpose: a successful lookup is cached for the process's lifetime, so
+# this is paid approximately once, and being slow is enormously better than being silently wrong.
+# Overridable for a machine slower still, or for a test that wants to force the timeout path.
+try:
+    _RESOLVE_TIMEOUT_MS = max(1, int(os.environ.get("CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS", "20000")))
+except ValueError:
+    _RESOLVE_TIMEOUT_MS = 20000
+
+
+# The supported backend range. `codebase-memory-mcp` 0.9.x answers `query_graph`/`search_graph`
+# with `{"columns": [...], "rows": [...]}`, which every renderer here parses. 0.10.x replaced that
+# with a compact human-readable text format; `list_projects` stayed JSON, so project resolution and
+# `doctor` still work while EVERY other op silently returns nothing. That combination is the worst
+# possible: the tool looks healthy and answers "not in the graph index" about a fully indexed repo.
+_SUPPORTED_BACKEND = "0.9.x"
+_INCOMPATIBLE_HINT = (
+    "the graph backend returned a response this release cannot parse — codebase-memory-mcp "
+    f"{_SUPPORTED_BACKEND} answers with JSON rows, and 0.10.x replaced that with a text format. "
+    "Pin the supported backend (`pip install 'codebase-memory-mcp==0.9.*'`) or check for a newer "
+    "codeintel. This is NOT a statement about whether your repository is indexed."
+)
+
+
+@dataclass(frozen=True)
+class ProjectLookup:
+    """A resolution attempt AND why it failed, which the caller must tell apart.
+
+    "The backend did not answer" and "this repository is not indexed" are different facts with
+    different remedies, and collapsing them is what turned a timeout into `project-not-indexed`
+    plus an instruction to re-index a repository that was already indexed."""
+
+    resolution: ProjectResolution | None
+    reason: str  # "ok" | "not-indexed" | "backend-unreachable"
+
+
 @dataclass(frozen=True)
 class ProjectResolution:
     """How a project_root resolved to a backend project, INCLUDING whether the match was exact.
@@ -362,6 +401,11 @@ class GraphProvider:
     """
 
     def __init__(self) -> None:
+        # Set once the backend answers something that is not JSON — i.e. it speaks a dialect this
+        # provider cannot read. Sticky for the provider's lifetime: the condition is a version
+        # mismatch, not a transient, and it is the difference between "your symbol is not indexed"
+        # and "your backend and this release do not agree on a wire format".
+        self._saw_unparsable = False
         self._project_cache: dict[str, ProjectResolution] = {}   # resolved projects (stable, kept)
         self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
         self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
@@ -379,6 +423,9 @@ class GraphProvider:
     # Sentinel: distinguishes "the subprocess call failed" from "it succeeded and returned JSON
     # null". Overloading None for both would make a legit null result wrongly trigger the fallback.
     _FAIL = object()
+    # Sentinel: the backend ran and exited 0, but did not speak JSON — a protocol/version
+    # mismatch rather than a failure. Kept separate from _FAIL so it survives to the caller.
+    _UNPARSABLE = object()
 
     def _run(self, method: str, payload: dict, timeout_ms: int) -> Any | None:
         # Prefer PIPED STDIN — the stable, non-deprecated form the backend documents
@@ -389,12 +436,17 @@ class GraphProvider:
         body = json.dumps(payload)
         deadline = time.monotonic() + max(0.0, timeout_ms / 1000)
         out = self._run_stdin(method, body, timeout_ms)
+        if out is self._UNPARSABLE:
+            # Retrying the deprecated positional form would only get the same dialect back.
+            return None
         if out is not self._FAIL:
             return out  # success (including a legit null) → no fallback
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             return None
         out = self._run_rawjson(method, body, remaining_ms)
+        if out is self._UNPARSABLE:
+            return None
         return None if out is self._FAIL else out
 
     def _run_stdin(self, method: str, body: str, timeout_ms: int) -> Any:
@@ -409,7 +461,18 @@ class GraphProvider:
             )
             if result.returncode != 0:
                 return self._FAIL  # unsupported / error → let the raw-JSON fallback try
-            return json.loads(result.stdout)
+            try:
+                return json.loads(result.stdout)
+            except ValueError:
+                # The backend RAN and exited 0 — it simply did not answer in JSON. That is a
+                # dialect mismatch, not a failure, and it must not be folded into the same `None`
+                # as a crash: `codebase-memory-mcp` 0.10.x replaced the `{columns, rows}` payload
+                # this provider parses with a compact human-readable text format, so every op that
+                # is not `list_projects` (still JSON) silently returned "not in graph index" — on a
+                # repository that was fully indexed. Distinguishing it is what lets the caller say
+                # so instead of sending the user to re-index for the third time.
+                self._saw_unparsable = True
+                return self._UNPARSABLE
         except Exception:
             return self._FAIL
 
@@ -426,7 +489,11 @@ class GraphProvider:
             )
             if result.returncode != 0:
                 return self._FAIL
-            return json.loads(result.stdout)
+            try:
+                return json.loads(result.stdout)
+            except ValueError:
+                self._saw_unparsable = True
+                return self._UNPARSABLE
         except Exception:
             return self._FAIL
 
@@ -497,16 +564,36 @@ class GraphProvider:
                 return ProjectResolution(name=str(name), matched_root=root_path, scope=scope)
         return None
 
-    def _resolve_project(self, project_root: str) -> ProjectResolution | None:
+    def _lookup_project(self, project_root: str) -> ProjectLookup:
+        """Resolve a root to a backend project, distinguishing "not indexed" from "could not ask".
+
+        The timeout here used to be a hardcoded 3000ms, and the real backend takes appreciably
+        longer than that: `list_projects` spawns a native binary that initialises its own allocator
+        on every invocation, measured at ~5.8s CONSISTENTLY — not just on a cold start. The effect
+        was total. Every graph query timed out during resolution, `_match_project` was handed
+        `None`, and the caller reported `project-not-indexed` with the advice to run
+        `codeintel index` — which cannot help, because the repository was already indexed. The
+        entire graph engine was dead on any machine where the backend is this slow, and it said so
+        in the one way guaranteed to send the user somewhere useless.
+
+        Nothing caught it because the backend is installed in no CI job, and the one live test that
+        would have failed instead SKIPPED — with "project not indexed in this environment", a
+        condition produced by this very bug.
+        """
         with self._project_cache_lock:
             if project_root in self._project_cache:
-                return self._project_cache[project_root]  # positive: a repo's name is stable
+                return ProjectLookup(self._project_cache[project_root], "ok")
             neg_until = self._negative_until.get(project_root)
             if neg_until is not None and time.monotonic() < neg_until:
-                return None  # a recently-failed lookup, still within its short TTL
+                return ProjectLookup(None, "not-indexed")  # recent genuine miss, within its TTL
         # list_projects shells out — resolve it OUTSIDE the lock so a slow backend can't serialize
         # every concurrent request. A rare duplicate lookup on first contact is harmless.
-        raw = self._run("list_projects", {}, 3000)
+        raw = self._run("list_projects", {}, _RESOLVE_TIMEOUT_MS)
+        if raw is None:
+            # `_run` returns None on timeout/crash. That is NOT evidence the project is unindexed,
+            # and it must not be cached as a miss: a backend having a slow moment would then be
+            # remembered as "this repo has no index" for the next 30 seconds.
+            return ProjectLookup(None, "backend-unreachable")
         resolution = self._match_project(raw, project_root)
         with self._project_cache_lock:
             if resolution is not None:
@@ -516,9 +603,13 @@ class GraphProvider:
                 # Cache the MISS only briefly, so a repo indexed into the graph AFTER this failed
                 # lookup is picked up within the TTL rather than staying stuck until a restart.
                 self._negative_until[project_root] = time.monotonic() + 30.0
-        return resolution
+        return ProjectLookup(resolution, "ok" if resolution is not None else "not-indexed")
 
-    def probe(self, project_root: str, timeout_ms: int = 3000) -> dict:
+    def _resolve_project(self, project_root: str) -> ProjectResolution | None:
+        """The resolution alone, for callers that only branch on found/not-found."""
+        return self._lookup_project(project_root).resolution
+
+    def probe(self, project_root: str, timeout_ms: int = _RESOLVE_TIMEOUT_MS) -> dict:
         """Cheap, never-raise, single-subprocess health check for the doctor.
 
         Returns ``{installed, runnable, repo_indexed, project, detail, remediation}`` — one
@@ -537,6 +628,19 @@ class GraphProvider:
                 "installed": True, "runnable": False, "repo_indexed": False, "project": None,
                 "detail": "codebase-memory-mcp is installed but list_projects failed/timed out",
                 "remediation": "check `codebase-memory-mcp cli list_projects '{}'` works",
+            }
+        # `list_projects` is the ONE call 0.10.x still answers in JSON, so a probe that stopped
+        # here would report a fully healthy graph engine on a backend where every actual query
+        # returns nothing. Ask a real query the way a query would, and report the mismatch.
+        if self._probe_wire_format(self._any_project_name(raw)) is False:
+            return {
+                "installed": True, "runnable": False, "repo_indexed": False, "project": None,
+                "detail": f"incompatible codebase-memory-mcp — this release needs "
+                          f"{_SUPPORTED_BACKEND}, which answers queries with JSON rows; the "
+                          f"installed backend replies in a text format, so every graph op except "
+                          f"project resolution returns nothing",
+                "remediation": "pip install 'codebase-memory-mcp==0.9.*'  (or check for a newer "
+                               "codeintel that speaks the new format)",
             }
         resolution = self._match_project(raw, project_root)
         if resolution is None:
@@ -570,6 +674,67 @@ class GraphProvider:
             "detail": f"resolved project '{resolution.name}' in codebase-memory-mcp",
             "remediation": None,
         }
+
+    # Process-wide, because the answer is a property of the INSTALLED BACKEND, not of a provider
+    # instance — and providers are constructed per call in several paths. Without this, every
+    # `doctor`/`status` paid an extra `query_graph` round trip against a backend that takes
+    # seconds per invocation, which turned a health check into a visible stall.
+    _wire_format_ok: bool | None = None
+    _wire_format_lock = threading.Lock()
+
+    # Declared at class level, not only in __init__: several call sites (and the test helpers)
+    # build a provider with `GraphProvider.__new__(GraphProvider)` to stub the subprocess seam,
+    # which skips __init__ entirely. An instance-only attribute then raises AttributeError deep in
+    # build_result, where the never-raise handler turns it into a generic "error" — a fault
+    # injected by the fix itself.
+    _saw_unparsable: bool = False
+
+    @classmethod
+    def _reset_wire_format_cache(cls) -> None:
+        """Forget the cached compatibility verdict.
+
+        Process-wide caches need an explicit way back or they leak between callers — in tests, one
+        real backend call would otherwise fix the verdict for every later case in the run. Also the
+        hook to call if the backend is upgraded under a long-lived server."""
+        with cls._wire_format_lock:
+            cls._wire_format_ok = None
+
+    def _probe_wire_format(self, project: str) -> bool | None:
+        """Whether the backend answers a real QUERY in a shape this release can read.
+
+        `list_projects` alone is not enough to judge compatibility — it is the one call that stayed
+        JSON across the 0.9→0.10 change, so a probe based on it reports a perfectly healthy engine
+        that cannot answer a single question. It must therefore be a genuine `query_graph`, and
+        against a REAL project name: an empty or unknown project is rejected before the backend
+        ever formats a response, so the reply says nothing about which dialect it speaks.
+        ``None`` when the check could not run, so an unrelated hiccup is never called an
+        incompatibility.
+        """
+        if not project:
+            return None
+        with GraphProvider._wire_format_lock:
+            if GraphProvider._wire_format_ok is not None:
+                return GraphProvider._wire_format_ok
+        self._saw_unparsable = False
+        raw = self._run(
+            "query_graph", {"project": project, "query": "MATCH (a) RETURN a.name LIMIT 1"}, 15000,
+        )
+        verdict = False if self._saw_unparsable else (None if raw is None else True)
+        if verdict is not None:                 # don't cache "could not tell"
+            with GraphProvider._wire_format_lock:
+                GraphProvider._wire_format_ok = verdict
+        return verdict
+
+    @staticmethod
+    def _any_project_name(raw: Any) -> str:
+        """Any registered project name, to give the wire-format probe something real to ask about."""
+        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
+        if not isinstance(entries, list):
+            return ""
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name"):
+                return str(entry["name"])
+        return ""
 
     @staticmethod
     def _project_root_of(raw: Any, name: str | None) -> str | None:
@@ -981,7 +1146,18 @@ class GraphProvider:
                 budget_ms = 0
             timeout_ms = budget_ms if budget_ms > 0 else 5000
 
-            resolution = self._resolve_project(root_str)
+            lookup = self._lookup_project(root_str)
+            if lookup.reason == "backend-unreachable":
+                # Do NOT say "not indexed" here. That claim is about the repository, this failure
+                # is about the backend, and the remedy it implies (`codeintel index`) cannot fix a
+                # backend that is not answering — it just runs the same timeout again.
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="backend-unreachable",
+                    hint="the graph backend did not respond in time — check "
+                         "`codebase-memory-mcp cli list_projects '{}'` runs, and raise "
+                         "CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS if it is simply slow on this machine",
+                )
+            resolution = lookup.resolution
             if resolution is None:
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="project-not-indexed",
@@ -1017,6 +1193,14 @@ class GraphProvider:
                 # naming it leaks the server's directory layout to any caller — the same home-path
                 # disclosure the renderers were swept for, through a channel that sweep did not
                 # cover because it greps for `qualified_name`.
+                if self._saw_unparsable:
+                    # Never claim "not in the index" when we could not read the answer. This is
+                    # the difference between a true statement about the repository and a false one
+                    # caused by a wire-format change upstream.
+                    return safe_null_result(
+                        op_str, target_str, engine="graph", reason="backend-incompatible",
+                        hint=_INCOMPATIBLE_HINT,
+                    )
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",
                     hint=f"`{target_str}` is not in the graph index for this project — if "

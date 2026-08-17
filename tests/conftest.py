@@ -66,3 +66,20 @@ def console_script(monkeypatch) -> str:
         pytest.skip(f"no `codeintel` console script installed for {sys.executable} "
                     f"(looked in {scripts}); `pip install -e .` to run these")
     return resolved
+
+
+@pytest.fixture(autouse=True)
+def _reset_graph_wire_format_cache():
+    """Clear GraphProvider's process-wide backend-compatibility verdict between tests.
+
+    The verdict is cached at class level because it is a property of the INSTALLED backend rather
+    than of any provider instance, and re-probing it costs a subprocess round trip on every
+    `doctor`. That makes it global mutable state: on a machine where the real backend IS installed,
+    one live call fixes the verdict for the rest of the session, and the unit tests that stub the
+    subprocess seam then inherit a verdict that has nothing to do with their stub.
+    """
+    from codeintel.providers.graph import GraphProvider
+
+    GraphProvider._reset_wire_format_cache()
+    yield
+    GraphProvider._reset_wire_format_cache()

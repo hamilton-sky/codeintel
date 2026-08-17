@@ -104,7 +104,11 @@ def test_live_stdin_list_projects():
     """Acceptance test for the migration: the REAL backend answers the piped-stdin form.
     When this is green in CI, the raw-JSON fallback in _run can be removed."""
     p = GraphProvider()
-    raw = p._run_stdin("list_projects", "{}", 3000)
+    # Not 3000ms: the real backend re-initialises a native runtime per invocation and measures
+    # ~5.8s, so that budget failed here for the same reason it disabled resolution in the
+    # product. A live test that times out reads as a contract failure and sends the reader
+    # looking for a protocol bug that is not there.
+    raw = p._run_stdin("list_projects", "{}", 30000)
     assert isinstance(raw, dict) and "projects" in raw
 
 
@@ -129,7 +133,10 @@ def test_live_reindex_argument_name_is_the_one_the_backend_accepts(tmp_path):
     Reindexer()._graph_reindex(str(tmp_path))
 
     # The reindex must have registered the repo — proof the payload was accepted, not just sent.
-    raw = GraphProvider()._run_stdin("list_projects", "{}", 5000)
+    # 5000ms was below the real backend's measured ~5.8s per invocation, so this timed out and
+    # the assertion below blamed the payload for what was actually the deadline — the same
+    # mistake that disabled project resolution in the product.
+    raw = GraphProvider()._run_stdin("list_projects", "{}", 30000)
     roots = {p.get("root_path") for p in raw.get("projects", []) if isinstance(p, dict)}
     assert str(tmp_path.resolve()) in {os.path.realpath(r) for r in roots if r}, (
         "the backend did not register the repo — the reindex payload was rejected")

@@ -72,6 +72,57 @@ jobs:
       - name: Run tests
         run: pytest tests/ -q
 
+  # The graph engine's real wire contract. Everything else in this file validates the graph
+  # provider against hand-authored mocks, which assert what codeintel INTENDS to send — worthless
+  # when the intent is wrong, as the 0.13.1 → 0.13.2 pair already demonstrated.
+  #
+  # This job exists because the backend being absent from CI hid a total outage: codebase-memory-mcp
+  # 0.10.x replaced the `{columns, rows}` JSON payload with a text format while KEEPING
+  # list_projects as JSON, so project resolution and `doctor` went on reporting a healthy engine
+  # while every actual query returned nothing and the tool said "not in the graph index" about a
+  # fully indexed repository. The one live test that would have caught it skipped instead — on a
+  # condition that same bug produced.
+  graph-contract:
+    name: Graph backend contract (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      # PINNED, and pinned narrowly. This backend self-updates and has changed its response format
+      # within a minor release; an unpinned install silently re-breaks every graph op. When raising
+      # this, run the live tests locally first — they are the only thing that checks the format.
+      - name: Install the pinned graph backend
+        run: pip install 'codebase-memory-mcp==0.9.*'
+
+      # First invocation downloads a platform-specific native runtime and verifies its checksum.
+      # Doing it as its own step keeps that cost (and any failure) out of the test output.
+      - name: Warm the backend runtime
+        run: codebase-memory-mcp --version
+
+      # `-o addopts=` drops the coverage floor from pyproject: this job runs one file, so the
+      # project-wide threshold would fail it for reasons that have nothing to do with the contract.
+      # `-rs` prints skip reasons — a skip here means the contract went unchecked, which is the
+      # failure mode that let this ship, so it must be visible in the log.
+      - name: Live graph contract tests
+        run: pytest tests/test_graph_real.py tests/test_graph_stdin.py -v -rs -o addopts=
+
+      # A skip is not a pass. If the backend is installed and the repo is indexed, these tests must
+      # actually run; anything else means the contract was not exercised.
+      - name: Fail if the contract tests were skipped
+        run: |
+          pytest tests/test_graph_stdin.py -q -rs -o addopts= 2>&1 | tee /tmp/graph.log
+          if grep -qE "^SKIPPED|[0-9]+ skipped" /tmp/graph.log; then
+            echo "::error::live graph tests skipped — the backend contract went unverified"
+            exit 1
+          fi
+
   build:
     name: Build + verify the package
     runs-on: ubuntu-latest
