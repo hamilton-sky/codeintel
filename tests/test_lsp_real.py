@@ -245,9 +245,12 @@ def test_symbol_tool_returns_none_degrades(monkeypatch):
     monkeypatch.setattr(p, "_call_tool", lambda *a, **k: None)  # every tool call fails
     r = p.build_result("symbol", "safe_null_result", [], 0, "/repo")
     assert r["ok"] is True
-    # No JSON to parse → definition falls back to "(not found)", references empty, no crash.
-    assert r["result"] is not None
-    assert "(not found)" in r["result"]
+    # This used to render "## Symbol: x\n(not found)" — a claim that the symbol does not exist,
+    # made when every tool call had FAILED. For an agent deciding whether to create something,
+    # "I could not ask" and "it is not there" are opposite answers, so a dead backend degrades to
+    # a safe-null carrying a reason rather than to a confident negative.
+    assert r["result"] is None
+    assert r["reason"] == "backend-error"
 
 
 def test_symbol_tool_raising_is_caught(monkeypatch):
@@ -282,9 +285,20 @@ def test_live_symbol_returns_definition_and_references():
         if r["result"] is not None:
             result = r["result"]
             break
-        assert r["reason"] in ("warming", "boot-failed")
+        assert r["reason"] in ("warming", "boot-failed", "backend-error")
         if r["reason"] == "boot-failed":
             pytest.skip("serena failed to boot in this environment")
+        if r["reason"] == "backend-error":
+            # serena started but its language server did not (commonly a missing runtime, or no
+            # network to fetch one). The ANSWER cannot be checked here — but the invariant that
+            # made this test worth running still can, and it is the one that was broken: a backend
+            # failure must not reach the caller dressed as data. Assert that, then skip.
+            assert r["result"] is None
+            blob = f"{r.get('result')} {r.get('hint')}"
+            for leak in ("Inform the user", "initializationOptions", "Error executing tool"):
+                assert leak not in blob, f"backend error prose reached the caller: {leak!r}"
+            pytest.skip("serena's language server did not start here — error correctly reported, "
+                        "but the symbol answer cannot be verified in this environment")
         time.sleep(0.5)
 
     assert result is not None, "serena never returned a definition"

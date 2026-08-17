@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from mcp.client.stdio import stdio_client
 
 from codeintel.provider import Result, log_swallowed, safe_null_result
 
+logger = logging.getLogger(__name__)
+
 _COOLDOWN_SECONDS = 60
 _DEFAULT_TIMEOUT_S = 5.0
 
@@ -24,6 +27,49 @@ _DEFAULT_TIMEOUT_S = 5.0
 # against the installed serena and the machine's own serena MCP config — pulls it straight from
 # the upstream repo and starts the stdio MCP server, binding the project via `--project`.
 _SERENA_GIT = "git+https://github.com/oraios/serena"
+
+
+# Prefixes serena uses when a tool call fails. Checked in addition to the MCP `isError` flag,
+# which is not set by every server or version — and the cost of missing one is that a failure is
+# served to an agent as an answer.
+_BACKEND_ERROR_MARKERS = (
+    "error executing tool",
+    "exception:",
+    "traceback (most recent call last)",
+    "the language server manager is not initialized",
+)
+
+
+def _looks_like_backend_error(text: str) -> bool:
+    """Whether *text* is a backend failure message rather than a result.
+
+    Anchored to the START of the payload, and only after ruling out JSON. Both guards are load
+    bearing, and the second was added because the first was not enough: a `symbol` lookup quotes
+    real source back, so a perfectly good JSON response whose body contained
+    `raise RuntimeError('Exception: bad input')` matched a substring search inside its first few
+    hundred characters. Hiding real answers to catch errors would just trade one silent wrong
+    answer for another — serena's failures are plain prose beginning with a known phrase, and a
+    successful response is JSON, so the two never overlap.
+    """
+    head = text.lstrip()
+    if head[:1] in ("[", "{"):
+        return False                     # a structured response, whatever it happens to quote
+    return head.lower().startswith(_BACKEND_ERROR_MARKERS)
+
+
+def _summarize_backend_error(text: str | None) -> str:
+    """A short, SAFE description of a backend failure — never the backend's own prose.
+
+    The raw text is not forwarded anywhere a caller can see it. serena's failure messages contain
+    instructions addressed to a language model ("do not attempt workarounds. Inform the user and
+    wait for further instructions before you continue!") plus a dump of LSP initialisation
+    parameters. Passing that through would hand a backend's error path a direct line to the
+    calling agent's instructions, and leak internals in the same breath. The full text is logged
+    for the operator instead; the caller gets a fixed, boring summary.
+    """
+    if text:
+        logger.warning("serena returned an error result: %s", text[:2000])
+    return "the language server reported an error for this query"
 
 
 def _open_errlog():
@@ -125,10 +171,18 @@ class LspProvider:
     Finding references therefore needs two steps: locate the symbol, then query with its path.
     """
 
+    # Class-level default so a provider built via `__new__` (the test stubs do this) still has it
+    # rather than raising AttributeError inside the never-raise handler.
+    _last_backend_error: str | None = None
+
     def __init__(self) -> None:
         self._sessions: dict[str, _LspSession] = {}
         self._sessions_lock = threading.Lock()
+        self._last_backend_error = None
         self._detect_backend()
+
+    def _clear_backend_error(self) -> None:
+        self._last_backend_error = None
 
     def _detect_backend(self) -> None:
         # Prefer a directly-installed serena; otherwise drive it through uvx.
@@ -245,8 +299,21 @@ class LspProvider:
                 return safe_null_result(op_str, target_str, engine="lsp", reason="boot-failed")
 
             # READY
+            # Cleared through a method rather than a direct assignment: `_dispatch` sets this as a
+            # side effect, which a type checker cannot see, so an inline `= None` narrows the
+            # attribute to None and makes the branch below look unreachable.
+            self._clear_backend_error()
             result_text = self._dispatch(session, op_str, target_str, root_str, timeout_s)
             if result_text is None:
+                # A backend failure is not an unsupported op. Reporting it as one sends the agent
+                # looking for a different tool when the language server simply did not start —
+                # the same misleading string the graph provider already had to stop emitting.
+                if self._last_backend_error:
+                    return safe_null_result(
+                        op_str, target_str, engine="lsp", reason="backend-error",
+                        hint=f"{self._last_backend_error} — run `codeintel doctor --deep` to boot-"
+                             f"check serena; the full backend message is in the server log",
+                    )
                 return safe_null_result(op_str, target_str, engine="lsp", reason="unsupported-op")
 
             return {
@@ -294,11 +361,38 @@ class LspProvider:
             return None
 
     def _extract_text(self, raw: Any) -> str | None:
+        """The text payload of a tool result, or None — including when the result is an ERROR.
+
+        An MCP `CallToolResult` carries `isError`, and this read straight past it: serena's failure
+        text was harvested like any other content and handed back as the answer. What an agent then
+        received for "where is this symbol defined?" was `ok: true`, no `reason`, and a body reading
+
+            Error executing tool find_symbol: Exception: The language server manager is not
+            initialized … do not attempt workarounds. Inform the user and wait for further
+            instructions before you continue!
+
+        followed by a dump of the LSP initialisation params. Three separate problems in one string:
+        it is a failure presented as a result, it leaks internals, and — worst — it carries
+        imperative instructions aimed at a language model into a field an agent reads as data. A
+        backend's error path must never become a channel for telling the caller's agent what to do.
+        """
         if raw is None:
             return None
         if isinstance(raw, str):
-            return raw
-        # mcp CallToolResult has a .content list of TextContent
+            return None if _looks_like_backend_error(raw) else raw
+        if getattr(raw, "isError", False):
+            self._last_backend_error = _summarize_backend_error(self._raw_text(raw))
+            return None
+        text = self._raw_text(raw)
+        # `isError` is not always set by every server/version, so the text shape is a second gate.
+        if text is not None and _looks_like_backend_error(text):
+            self._last_backend_error = _summarize_backend_error(text)
+            return None
+        return text
+
+    @staticmethod
+    def _raw_text(raw: Any) -> str | None:
+        """Concatenated text of an MCP result's content blocks, with no error interpretation."""
         try:
             parts = [item.text for item in raw.content if hasattr(item, "text")]
             return "\n".join(parts) if parts else None
@@ -375,15 +469,28 @@ class LspProvider:
                 {"name_path_pattern": target, "include_body": True, "max_matches": 5},
                 timeout_s,
             )
+            if def_raw is None:
+                # The tool call itself failed or timed out. Rendering "(not found)" here — which is
+                # what this did — states that the symbol does not exist, on no evidence whatsoever.
+                # For an agent deciding whether to create something, "I could not ask" and "it is
+                # not there" are opposite answers.
+                self._last_backend_error = "the language server did not respond to this query"
+                return None
             def_text = self._extract_text(def_raw)
             matches = self._loads(def_text)
 
             first: dict | None = None
             if isinstance(matches, list) and matches:
                 def_section, first = self._format_matches(target, matches)
+            elif def_text is None:
+                # `_extract_text` returns None for an error result, and there is nothing to render
+                # from a failure. Returning None here routes to a safe-null carrying a real reason
+                # rather than dressing the failure up as "## Symbol: x" with the error underneath.
+                return None
             else:
-                # Non-JSON / degenerate response — surface whatever serena returned.
-                def_section = f"## Symbol: {target}\n{def_text or '(not found)'}"
+                # Non-JSON but not an error — surface what serena returned, which is how a
+                # degenerate-but-real response still reaches the caller.
+                def_section = f"## Symbol: {target}\n{def_text}"
 
             # References require the located symbol's own path (two-step contract).
             ref_section = "## References\n(none)"

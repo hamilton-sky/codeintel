@@ -123,6 +123,45 @@ jobs:
             exit 1
           fi
 
+  # The LSP engine's real contract — the same blind spot as graph, one engine over.
+  #
+  # This job is why it exists: the live LSP test had never run anywhere, and the first execution
+  # showed the provider handing serena's ERROR TEXT back as a successful answer — `ok: true`, no
+  # `reason`, and a body containing a dump of the LSP init params plus instructions addressed to a
+  # language model ("Inform the user and wait for further instructions before you continue!").
+  # A backend's error path had a direct line into what the calling agent reads as data.
+  #
+  # Kept separate from graph-contract so a serena regression and a codebase-memory-mcp regression
+  # are two distinct red checks, and `continue-on-error` because serena is fetched from a git HEAD
+  # that this project does not control — an upstream breakage must be visible without blocking an
+  # unrelated release. Read this job's status; do not assume green means checked.
+  lsp-contract:
+    name: LSP backend contract (live)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      - name: Install uv (provides uvx, which fetches serena)
+        run: pip install uv
+
+      # First launch pulls serena from GitHub and can take tens of seconds; doing it here keeps
+      # that cost and any upstream fetch failure out of the test output.
+      - name: Warm serena
+        run: uvx --from git+https://github.com/oraios/serena serena --help
+
+      - name: Live LSP contract tests
+        env:
+          CODEINTEL_LIVE_LSP: "1"
+        run: pytest tests/test_lsp_real.py -v -rs -o addopts=
+
   build:
     name: Build + verify the package
     runs-on: ubuntu-latest

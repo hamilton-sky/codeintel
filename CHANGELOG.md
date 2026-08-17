@@ -4,6 +4,38 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **The LSP engine served serena's error text to agents as an answer, instructions included.**
+  `_extract_text` harvested `.text` from every MCP content block and ignored the result's
+  `isError` flag, so a failed tool call came back as `ok: true`, **no `reason`**, and a `result`
+  body containing the backend's error message. Three problems in one string: a failure presented
+  as data; a dump of the LSP initialisation parameters; and — the reason this is filed here —
+  imperative text addressed to a language model, verbatim:
+  > `do not attempt workarounds. Inform the user and wait for further instructions before you continue!`
+
+  A backend's error path had a direct channel into what the calling agent reads as its answer. The
+  provider now detects an error result (by `isError`, and by response shape for servers that do not
+  set it), returns a safe-null with `reason: backend-error`, and hands back a **fixed, boring
+  summary** — the backend's own prose is logged for the operator and forwarded nowhere a model can
+  read it. Detection is anchored to the start of the payload and skips JSON, so a `symbol` lookup
+  quoting real source containing "Exception:" is not mistaken for a failure.
+
+### Fixed
+- **A failed language-server call reported the symbol as not found.** When a tool call returned
+  nothing, `symbol` rendered `(not found)` — asserting the symbol does not exist, on no evidence.
+  For an agent deciding whether to create something, "I could not ask" and "it is not there" are
+  opposite answers. It now degrades to a safe-null with a reason.
+- **A backend failure is no longer reported as `unsupported-op`**, which sent the agent looking for
+  a different tool when the language server simply had not started.
+
+### Added
+- **A `lsp-contract` CI job** running the live serena tests, which had never executed anywhere —
+  the same blind spot as the graph backend, one engine over, and it hid the bug above. Marked
+  `continue-on-error` because serena is fetched from an upstream git HEAD this project does not
+  control: a breakage there must be visible without blocking an unrelated release.
+
 ## [0.15.2] — 2026-08-17
 
 A production-readiness review — four independent audit passes over correctness, security,
