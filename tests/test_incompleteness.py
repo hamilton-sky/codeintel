@@ -60,7 +60,7 @@ def test_line_conversion_is_one_based(line0, expected):
 def test_no_rendered_location_is_ever_line_zero():
     """`path:0` is the tell. It is not a valid line number in any editor, and it was shipping from
     two different engines — LSP body locations and semantic chunk starts."""
-    for line0 in range(0, 200):
+    for line0 in range(200):
         assert not loc("a.py", line0).endswith(":0")
         assert not span("a.py", line0, line0 + 3).split("-")[0].endswith(":0")
 
@@ -252,6 +252,7 @@ def _provider_modules():
     bug was found at, which is exactly the habit that let the same defect reappear three times.
     """
     import importlib
+
     import codeintel.providers as pkg
 
     d = pathlib.Path(pkg.__file__).parent

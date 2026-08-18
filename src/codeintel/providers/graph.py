@@ -378,10 +378,10 @@ def _language_coverage_note(rows: list[dict]) -> str:
         if ext:
             exts[ext] = exts.get(ext, 0) + 1
     total = sum(exts.values())
-    if total < 5 or len(exts) < 2:
-        # Too few rows, or a genuinely single-language repo — nothing meaningful to compare.
-        if total < 5 or not exts:
-            return ""
+    # Too few rows to say anything. A genuinely single-language ranking is NOT excluded here — it
+    # is exactly the case worth reporting, and test_a_single_language_ranking_says_so pins that.
+    if total < 5 or not exts:
+        return ""
     top_ext, top_n = max(exts.items(), key=lambda kv: kv[1])
     if top_n / total < 0.9:
         return ""
@@ -1087,16 +1087,16 @@ class GraphProvider:
                 f"non-code file, than the caller); every row returned was dropped, so this may "
                 f"under-report — resolution is by symbol name, not by type",
             )
-            note = ("\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
-                    "repository is called `%s`, their callees are merged here. Verify before "
-                    "relying on a row you did not expect._" % target)
+            note = (f"\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
+                    f"repository is called `{target}`, their callees are merged here. Verify before "
+                    f"relying on a row you did not expect._")
             return (f"## Callees of {target} (0)\n(no callee survived name-collision filtering)"
                     + note)
         lines = [self._display(r, "b.name", "b.qualified_name", "b.file_path") for r in kept]
         out = f"## Callees of {target} ({len(lines)})\n" + "\n".join(lines)
-        note = ("\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
-                "repository is called `%s`, their callees are merged here. Verify before relying "
-                "on a row you did not expect._" % target)
+        note = (f"\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
+                f"repository is called `{target}`, their callees are merged here. Verify before "
+                f"relying on a row you did not expect._")
         if dropped:
             self._add_gap(
                 "callees", "name-collisions-dropped",

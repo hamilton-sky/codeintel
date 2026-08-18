@@ -9,10 +9,10 @@ from mcp.server.mcpserver.server import MCPServer
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
 from codeintel.provider import Result, safe_null_result
-from codeintel.redact import redact
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider
 from codeintel.providers.semantic import SemanticProvider
+from codeintel.redact import redact
 from codeintel.reindexer import Reindexer
 
 _REINDEXER = Reindexer()

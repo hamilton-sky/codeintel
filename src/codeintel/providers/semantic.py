@@ -4,8 +4,8 @@ import os
 import pathlib
 
 from codeintel.loc import loc
-from codeintel.source_kind import partition_by_corpus
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
+from codeintel.source_kind import partition_by_corpus
 
 try:
     import fastembed  # noqa: F401

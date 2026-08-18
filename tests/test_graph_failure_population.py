@@ -183,10 +183,10 @@ def test_the_real_run_records_why_every_transport_failure_happened():
     ]
     for label, stdin_out, raw_out in cases:
         gp = _run_only_provider()
-        sentinel = {"_FAIL": GraphProvider._FAIL, "_UNPARSABLE": GraphProvider._UNPARSABLE}
-        gp._run_stdin = lambda m, b, t, _s=stdin_out: sentinel[_s]     # type: ignore[method-assign]
+        _S = {"_FAIL": GraphProvider._FAIL, "_UNPARSABLE": GraphProvider._UNPARSABLE}
+        gp._run_stdin = lambda m, b, t, _s=stdin_out, _m=_S: _m[_s]     # type: ignore[method-assign]
         if raw_out is not None:
-            gp._run_rawjson = lambda m, b, t, _s=raw_out: sentinel[_s]  # type: ignore[method-assign]
+            gp._run_rawjson = lambda m, b, t, _s=raw_out, _m=_S: _m[_s]  # type: ignore[method-assign]
         out = gp._run("query_graph", {"project": "p"}, 5000)
         assert out is None, (label, out)
         assert isinstance(gp._last_failure, Missing), (

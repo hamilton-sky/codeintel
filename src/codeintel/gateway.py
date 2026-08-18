@@ -198,9 +198,8 @@ class Gateway:
         # which reads as "that engine had nothing to add" rather than "that engine could not be asked".
         merged_gaps: list[dict] = []
         for eng, r in results.items():
-            for g in (r.get("gaps") or []):
-                if isinstance(g, dict):
-                    merged_gaps.append({**g, "engine": eng})
+            merged_gaps.extend({**g, "engine": eng}
+                               for g in (r.get("gaps") or []) if isinstance(g, dict))
             if r.get("result") is None:
                 merged_gaps.append({
                     "section": eng,

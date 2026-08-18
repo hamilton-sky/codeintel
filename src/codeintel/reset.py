@@ -141,7 +141,7 @@ def _reset_graph_cache(apply: bool) -> dict:
     for name in names:
         if name == "_config.db" or name.startswith("_config.db-"):
             continue
-        if not (".db" in name):
+        if ".db" not in name:
             continue
         path = os.path.join(directory, name)
         if not os.path.isfile(path):
