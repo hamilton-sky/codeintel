@@ -132,6 +132,7 @@ _STATUS_FALLBACK: dict = {
     "model": None,
     "healthy": False,
     "readiness": {},
+    "version_skew": None,
 }
 
 
@@ -228,6 +229,11 @@ def _code_status_handler_inner(args: dict) -> dict:
             "healthy": bool(summary.get("healthy")),
             "readiness": readiness,
             "versions": report.get("versions", {}) if isinstance(report, dict) else {},
+            # Null on the normal path. Non-null means every other field above describes the code
+            # this process loaded at startup rather than the code that is installed — so it is
+            # surfaced on `status`, not just in `doctor`, because `status` is what a caller checks
+            # when an expected fix appears to be missing.
+            "version_skew": report.get("version_skew") if isinstance(report, dict) else None,
         }
     except Exception:
         return dict(_STATUS_FALLBACK)

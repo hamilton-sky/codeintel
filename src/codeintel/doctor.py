@@ -8,6 +8,7 @@ effects). The same report drives the CLI `doctor` command, the `code.doctor` MCP
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 from collections.abc import Callable
 from typing import Any
@@ -104,6 +105,51 @@ def _dist_version(name: str) -> str | None:
         return md.version(name)
     except Exception:
         return None
+
+
+def running_version_skew() -> tuple[str, str] | None:
+    """``(running, on_disk)`` when this process is serving code older than what is installed.
+
+    A long-lived server holds the module it imported at startup. Upgrading the package underneath
+    it — `uv tool install`, `pip install -U` — replaces the files on disk and changes nothing about
+    the running process, which keeps answering with the old code until something restarts it. That
+    gap is silent and it is not hypothetical: a fix can be committed, released, installed, read in
+    the CHANGELOG, and still absent from every answer the user is getting, with `status` reporting
+    the stale version as if it were the truth.
+
+    Detected by re-reading `__version__` out of the very file this module was loaded FROM, at call
+    time. `importlib.metadata` would be the obvious route and is the wrong one here: it answers
+    "what does the installed distribution claim", which is the same number for a fresh process and
+    a stale one, and its path caches make the negative case unreliable. Parsed with `ast` rather
+    than imported or regexed — re-importing would either return the cached stale module or execute
+    freshly-installed code inside a process running the old version, and neither is something a
+    health check should do.
+
+    Never raises, and stays silent whenever it cannot be sure: a missing file, an unparseable
+    source, or an absent `__version__` all mean "no claim", because a false upgrade prompt costs
+    more trust than a missed one.
+    """
+    try:
+        import ast as _ast
+
+        import codeintel
+        running = getattr(codeintel, "__version__", None)
+        path = getattr(codeintel, "__file__", None)
+        if not isinstance(running, str) or not path:
+            return None
+        src = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+        for node in _ast.parse(src).body:
+            if not isinstance(node, _ast.Assign):
+                continue
+            for target in node.targets:
+                if isinstance(target, _ast.Name) and target.id == "__version__":
+                    on_disk = _ast.literal_eval(node.value)
+                    if isinstance(on_disk, str) and on_disk != running:
+                        return (running, on_disk)
+                    return None
+    except Exception:
+        return None
+    return None
 
 
 def collect_versions(engines: dict) -> dict:
@@ -270,12 +316,27 @@ def run_doctor(
     healthy = all(
         e.get("status") != "fail" for n, e in engines.items() if n not in _OPTIONAL_ENGINES
     )
+    # A skew is reported even when every engine is green, because it makes all the other numbers
+    # untrustworthy: they describe the code this process loaded, not the code that is installed.
+    skew = running_version_skew()
     return {
         "ok": True,
         "project_root": root,
         "deep": bool(deep),
         "treesitter": treesitter,
         "versions": versions,
+        "version_skew": (
+            {
+                "running": skew[0],
+                "installed": skew[1],
+                "remediation": (
+                    f"this process is serving {skew[0]} while {skew[1]} is installed — "
+                    "restart the codeintel server (or the agent hosting it) to pick it up"
+                ),
+            }
+            if skew
+            else None
+        ),
         "summary": {"ready": ready, "total": len(engines), "healthy": healthy},
         "engines": engines,
         "registrations": collect_registrations(),
@@ -325,6 +386,16 @@ def render_doctor_text(report: dict) -> str:
         out.append("  " + c.dim("└─") + " " + c.cyan(name) + ": " + detail)
         if rem:
             out.append("     " + c.bold(c.cyan("fix:")) + " " + rem)
+
+    # Rendered with the engine notes rather than in the version block: it is a gap with a fix,
+    # which is what this section is for, and it outranks the engine rows — those describe the
+    # loaded code, and a skew means the loaded code is not the installed code.
+    skew = report.get("version_skew")
+    if isinstance(skew, dict) and skew.get("running") and skew.get("installed"):
+        out.append("  " + c.dim("└─") + " " + c.cyan("codeintel")
+                   + f": serving {skew['running']}, installed is {skew['installed']}")
+        out.append("     " + c.bold(c.cyan("fix:")) + " restart the codeintel server "
+                   "(or the agent hosting it) to pick up the installed version")
 
     summ = report.get("summary", {})
     ready, total, healthy = summ.get("ready", "?"), summ.get("total", "?"), summ.get("healthy")

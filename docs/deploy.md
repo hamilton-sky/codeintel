@@ -71,10 +71,14 @@ Binding a non-loopback host **requires** `--allow-remote` **and** authentication
 > This is a standing hole, not a race: the swap can happen at any time after indexing.
 >
 > RBAC is sound for the case it was built for — **separating privilege levels among callers you
-> already trust**, so a narrow role cannot run `deadcode` or point an op at an unrelated
+> already trust**, so a narrow role cannot run `hotspots` or point an op at an unrelated
 > directory by accident. The role is genuinely server-authoritative and the root check itself
 > resists `..` and symlinked roots. Treat it as a guardrail against mistakes, not as a wall
 > against an adversary with write access.
+>
+> (`deadcode` is currently withdrawn for every role, regardless of RBAC — it safe-nulls with
+> `reason: "op-withdrawn"` unless `CODEINTEL_ENABLE_UNVERIFIED_OPS=1` is set on the server process,
+> which is not per-role. See [README.md#deadcode-is-withdrawn](../README.md#deadcode-is-withdrawn).)
 >
 > The `team-a` / `team-b` example below is a *shape*, not an endorsement of running mutually
 > untrusting teams against one server. Until this is fixed, give each untrusting tenant its own
@@ -88,7 +92,12 @@ For multiple callers with different privileges, define a token→role map in `~/
 admin    = ["*"]
 reader   = ["search", "symbol", "overview", "callers", "callees", "impact", "chain", "context",
             "changed", "deadcode", "hotspots"]   # list EVERY op the role may run — a new op is
-                                                 # denied to a restricted role until it's added here
+                                                 # denied to a restricted role until it's added here.
+                                                 # `deadcode` is withdrawn for every role right now
+                                                 # (safe-nulls, reason: "op-withdrawn") — listing it
+                                                 # here grants no extra capability today; kept in the
+                                                 # allowlist so `reader` is not silently denied it the
+                                                 # day it is reinstated. See README.md#deadcode-is-withdrawn.
 searcher = ["search", "context"]
 
 # REQUIRED. Which project directories each role may point those ops AT.

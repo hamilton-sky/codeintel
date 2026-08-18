@@ -204,3 +204,53 @@ def test_a_successful_run_records_no_failure():
     out = gp._run("query_graph", {"project": "p"}, 5000)
     assert out == {"columns": [], "rows": []}
     assert gp._last_failure is None
+
+
+# --------------------------------------------------------------------------------------------- #
+# T8 — a `callees` name-collision is resolved against ITS OWN caller row, not against the union of
+# every caller family sharing the bare `target` name.
+#
+# `target` is a bare name, so the Cypher match can return edges from more than one distinct caller
+# (a Python `target` and an unrelated TypeScript `target`). The collision filter used to build one
+# set of families from ALL rows' `a.file_path` and check each callee against that set — so a `.ts`
+# name-collision callee reached from the *Python* caller survived, because the set also contained
+# `ts-js` from the unrelated TypeScript caller's own (legitimate) row. The row carries its own
+# caller's file; the filter must use that, not the union.
+# --------------------------------------------------------------------------------------------- #
+
+def test_callees_cross_language_drop_is_resolved_per_row_not_by_the_caller_union():
+    def _rows(cypher, project, timeout_ms):
+        return [
+            {  # real Python caller -> real Python callee: keep
+                "b.name": "helper", "b.qualified_name": "pkg.helper",
+                "b.file_path": "src/bar.py", "type(c)": "CALLS",
+                "a.file_path": "src/foo.py",
+            },
+            {  # SAME Python caller -> a `.ts` name collision: must drop
+                "b.name": "util", "b.qualified_name": "ui.util",
+                "b.file_path": "ui/util.ts", "type(c)": "USAGE",
+                "a.file_path": "src/foo.py",
+            },
+            {  # unrelated TypeScript caller sharing the bare name -> real TS callee: keep
+                "b.name": "sibling", "b.qualified_name": "ui.sibling",
+                "b.file_path": "ui/helper.ts", "type(c)": "CALLS",
+                "a.file_path": "ui/main.ts",
+            },
+        ]
+
+    gp = _gp(query_rows=_rows)
+    env = gp.build_result("callees", "target", [], 30000, "/tmp/x")
+
+    assert env["ok"] is True
+    result = env["result"]
+    assert result is not None
+    assert "ui/util.ts" not in result, (
+        "the .ts row reached from the Python caller must be dropped as a name collision, "
+        "not kept because an UNRELATED TypeScript caller happens to share the bare name"
+    )
+    assert "src/bar.py" in result
+    assert "ui/helper.ts" in result
+    assert "(2)" in result
+    assert env.get("confidence") == "partial"
+    gaps = env.get("gaps") or []
+    assert any(g.get("kind") == "name-collisions-dropped" for g in gaps), gaps

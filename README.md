@@ -58,23 +58,29 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Everything about one symbol | `context` | graph + lsp | both views merged |
 | **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
 | Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
-| Unreferenced (dead) code | `deadcode` | graph | non-test symbols with no callers, **verified against the source** — [treat as candidates, not instructions](#deadcode-is-a-candidate-list-not-a-delete-list) |
+| Unreferenced (dead) code | `deadcode` | graph | **withdrawn** — measured wrong in both directions on real repos; safe-nulls with `reason: "op-withdrawn"` unless you opt in — [why, and what to use instead](#deadcode-is-withdrawn) |
 
 Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
 
-#### `deadcode` is a candidate list, not a delete list
+#### `deadcode` is withdrawn
 
-`deadcode` is the one op whose output invites a destructive action, so it gets an explicit caveat.
-Every hit is re-read and verified against the source before it is reported, which removes the
-common false positives — but **no reachability analysis sees every caller.** Dynamic dispatch,
-registries and decorators, `getattr` lookups, entry points declared in packaging metadata, plugin
-discovery, reflection, and calls from languages the graph does not parse are all invisible to it.
-Through `0.14.x` it was systematically wrong on callback-heavy code and confident about it; that
-class of defect is fixed, but the underlying limit is structural and permanent.
+`deadcode` is withdrawn: it returns a safe-null (`reason: "op-withdrawn"`) instead of running. It
+was measured wrong in **both** directions on real repositories — on one it named five candidates of
+which four were live code (a rollup plugin hook; two entries of a `Record<string, fn>` reached by a
+runtime string; a `predicate` passed inline to the call that consumes it), and on another it
+reported "(none found)" for a 4,883-function codebase that had at least three genuinely unreferenced
+private helpers. It is the one op whose output is an instruction to delete code, so it needs the
+highest evidence bar of any op here, and currently has the least. It returns when a labelled corpus
+measures its precision and recall — not before.
 
-**So: review each hit before deleting anything, and never wire `deadcode` into an agent that
-deletes without a human in the loop.** Used as a ranked list of *places worth looking*, it is
-genuinely useful. Used as a work order, it will eventually remove live code.
+**Use `callers` on a specific symbol instead.** "Does anything call this?" is exactly the question
+`deadcode` was trying to answer in bulk, and `callers` answers it accurately, one symbol at a time.
+
+**Escape hatch, if you understand the risk.** Set `CODEINTEL_ENABLE_UNVERIFIED_OPS=1` to run it
+anyway. It still re-reads the source before reporting a hit, which removes the *common* false
+positives — but that verification is exactly what was measured wrong on the repositories above, so
+**review every hit before deleting anything, and never wire it into an agent that deletes without a
+human in the loop.**
 
 **Example — "who uses `safe_null_result`?"**
 
@@ -474,7 +480,7 @@ back to grep rather than crashing.
 
 | Area | Why |
 |---|---|
-| `deadcode` | It suggests deletions and cannot see every caller — [read the caveat](#deadcode-is-a-candidate-list-not-a-delete-list). |
+| `deadcode` | Withdrawn by default (`reason: "op-withdrawn"`) — measured wrong in both directions on real repos. Use `callers` on a specific symbol instead — [details](#deadcode-is-withdrawn). |
 | Non-loopback serving | `serve-http` is stdlib `http.server`. It binds loopback by default for a reason; front it with a reverse proxy and see [docs/deploy.md](docs/deploy.md). |
 | RBAC between **untrusting** tenants | It separates privilege levels among callers you already trust. It is not a wall against an adversary with write access to their own root — see the warning in [docs/deploy.md](docs/deploy.md). |
 | Unattended automation | Anything that acts on a result without a human reading it deserves a pilot first. |
@@ -491,9 +497,9 @@ not write, and that is where its bugs have come from — every fix in `0.15.x` c
 at an unfamiliar codebase. Its characteristic failure mode is **answering confidently from the
 wrong index rather than failing loudly**, which the never-raise contract makes harder to notice: a
 wrong answer and a right one are the same shape. Run `codeintel doctor` before trusting a repo-wide
-answer, treat `deadcode` as candidates for review, and if something looks off please
-[report it](#reporting-a-problem) — an issue from someone who is not the author is the single most
-useful thing this project can receive right now.
+answer — and `deadcode` in particular is withdrawn rather than merely caveated (see above) — and if
+something looks off please [report it](#reporting-a-problem) — an issue from someone who is not the
+author is the single most useful thing this project can receive right now.
 
 **Engine coverage depends on external binaries.** Semantic search works out of the box. The graph
 engine needs `codebase-memory-mcp` and the LSP engine needs `uvx` on `PATH` — without them those

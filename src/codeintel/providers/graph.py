@@ -1070,6 +1070,15 @@ class GraphProvider:
         does filter them: a callee in a different language family than the caller, or in a file that
         is not code at all, is not a callee — it is a name collision, and dropping it costs nothing
         real. What survives is marked so the caller knows the resolution is name-based.
+
+        The family check is resolved PER ROW against that row's own `a.file_path`, not against the
+        set of families across every row. `target` can itself be a bare name shared by callers in
+        more than one language, and comparing a row's callee to the UNION of every caller's family
+        let a genuine collision hide behind an unrelated caller: three rows for a Python `target`
+        and a TypeScript `target` made `caller_families = {python, ts-js}`, so a `.ts` name-collision
+        callee reached from the *Python* caller passed the check — it shares a family with the
+        wrong caller. Each row already carries the one caller file it actually came from, so that is
+        what it is checked against.
         """
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(target)}" '
@@ -1079,10 +1088,6 @@ class GraphProvider:
         if not rows:
             return None
 
-        caller_families = {
-            _lang_family(str(r.get("a.file_path") or "")) for r in rows
-        } - {""}
-
         kept: list[dict] = []
         dropped = 0
         for r in rows:
@@ -1090,9 +1095,10 @@ class GraphProvider:
             if _is_non_code(path):
                 dropped += 1          # a data/doc file cannot be a callee
                 continue
-            fam = _lang_family(path)
-            if fam and caller_families and fam not in caller_families:
-                dropped += 1          # cross-language name collision
+            callee_fam = _lang_family(path)
+            caller_fam = _lang_family(str(r.get("a.file_path") or ""))
+            if callee_fam and caller_fam and callee_fam != caller_fam:
+                dropped += 1          # cross-language name collision, resolved against THIS row's own caller
                 continue
             kept.append(r)
 

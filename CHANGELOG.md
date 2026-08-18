@@ -4,6 +4,57 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`status` and `doctor` now report when this process is serving code older than what is
+  installed.** Upgrading the package replaces files on disk and changes nothing about a running
+  server, which keeps answering from the module it imported at startup. Nothing goes red — every
+  engine stays green and `status` reports the stale version as though it were the truth — so a fix
+  that is committed, released, installed and readable in this file can be absent from every answer
+  the user actually gets. Not hypothetical: it happened while releasing `0.15.4`, where the server
+  kept serving `0.15.3` after the install succeeded.
+
+  Detected by re-reading `__version__` out of the very file the module was loaded FROM, at call
+  time. `importlib.metadata` is the obvious route and the wrong one: it answers "what does the
+  installed distribution claim", which is the same number for a fresh process and a stale one, and
+  its path caches make the negative case unreliable. Parsed with `ast` rather than imported —
+  re-importing would either hand back the cached stale module or execute freshly-installed code
+  inside a process running the old version, and a health check should do neither. Every uncertain
+  case (missing file, unparseable source, non-literal `__version__`) stays silent: a false "restart
+  your server" prompt costs more trust than a missed one. Surfaced on `code.status` as
+  `version_skew`, and as a `fix:` note in `codeintel status` / `codeintel doctor` — the check is
+  worthless in a field nobody reads.
+
+### Fixed
+- **`callees` could keep a name-collision row instead of dropping it, when the collision was a
+  cross-language match reached from a DIFFERENT caller than the one on the row.** `target` is a bare
+  name, so a `callers`-matching query can return edges from more than one distinct symbol sharing
+  it. The collision filter unioned every matched row's `a.file_path` into one `caller_families` set
+  and checked each callee's language against that set — so a `.ts` name-collision callee reached
+  from a *Python* caller of `target` survived, because the set also contained `ts-js` from an
+  unrelated TypeScript caller of the same bare name, three rows down. Each row already carries the
+  one caller file it actually came from; the check now compares a row's callee language against that
+  row's own caller, not the union across every caller the bare name happened to match.
+
+### Documentation
+- **`README.md` and `docs/` still presented `deadcode` as a working, source-verified capability
+  after `graph.py`'s `_WITHDRAWN_OPS` pulled it** — the capability table, a dedicated "candidate
+  list, not a delete list" section, the "be careful with" table, the project-status paragraph, and
+  `docs/graph.md`'s op table and op-detail section all read as if the op ran. A user acting on the
+  README would reach for an op that refuses to run and get no explanation why. Every mention now
+  says the op is withdrawn, why in one line, that `callers` on a specific symbol is the accurate
+  substitute, and the `CODEINTEL_ENABLE_UNVERIFIED_OPS=1` escape hatch with its risk — rather than
+  silently dropping the capability-table row, which would tell a returning user nothing happened to
+  it. `docs/deploy.md`'s RBAC allowlist example still lists `deadcode` as an op a role may run:
+  withdrawal is enforced server-wide regardless of role, so listing it grants no capability today,
+  and removing it would silently deny it to `reader` the day it is reinstated — kept, with a note
+  explaining both facts, rather than removed.
+
+  A hand-typed doc-vs-code population is exactly the defect class `0.15.4` fixed for `source_kind`
+  a day earlier; a new test derives the withdrawn set from `_WITHDRAWN_OPS` by import (never a
+  literal op name) and fails if any live doc mentions a withdrawn op without also saying so.
+
 ## [0.15.4] — 2026-08-18
 
 ### Fixed

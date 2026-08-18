@@ -32,6 +32,16 @@ def run(args: Any) -> int:
     if status.get("healthy") is False:
         print("\n  run `codeintel doctor` for the fix for each gap")
 
+    # Printed before anything else the user might act on. A skew means every line above describes
+    # the code this process loaded, not the code installed — so a fix the user can read in the
+    # CHANGELOG can be absent from every answer while the engines all report green.
+    skew = status.get("version_skew")
+    if isinstance(skew, dict) and skew.get("running") and skew.get("installed"):
+        print(
+            f"\n  ! serving {skew['running']}, but {skew['installed']} is installed"
+            "\n    restart the codeintel server (or the agent hosting it) to pick it up"
+        )
+
     from codeintel.config import load_config
     from codeintel.semantic_db import default_db_path
 

@@ -49,8 +49,19 @@ this repo is indexed.
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | (ignored) | Impact of the **uncommitted git worktree**: changed files → impacted symbols (via `detect_changes`) |
-| `deadcode` | (ignored) | Unreferenced non-test symbols — dead-code candidates, biggest first (via `search_graph`, in-degree 0), then **verified against the source** (see below) |
+| `deadcode` | (ignored) | **Withdrawn.** Safe-nulls with `reason: "op-withdrawn"` by default — see below. |
 | `hotspots` | (ignored) | Highest complexity / fan-in symbols — refactor-risk hotspots (via `search_graph`, client-sorted) |
+
+### `deadcode` is withdrawn
+
+`deadcode` is withdrawn (`_WITHDRAWN_OPS` in `graph.py`): it returns a safe-null with
+`reason: "op-withdrawn"` instead of running, because it was measured wrong in **both** directions on
+real repositories — false positives (framework-dispatched symbols reported as dead) and false
+negatives (unreferenced helpers missed). Use `callers` on a specific symbol instead; it answers the
+same underlying question — "does anything call this?" — accurately. Set
+`CODEINTEL_ENABLE_UNVERIFIED_OPS=1` to run it anyway; see the README section
+[`deadcode` is withdrawn](../README.md#deadcode-is-withdrawn) for the full evidence and the risk of
+opting in. The rest of this section describes what runs behind that flag.
 
 ### Why `deadcode` re-reads the source
 
@@ -113,6 +124,7 @@ defaults to **5000 ms**.
 | `'engine-unavailable'` | `codebase-memory-mcp` not on PATH |
 | `'project-not-indexed'` | No project found for the given `project_root` |
 | `'unsupported-op'` | `op` is not one of the nine ops above |
+| `'op-withdrawn'` | `op` is `deadcode` and `CODEINTEL_ENABLE_UNVERIFIED_OPS` is not set — see [above](#deadcode-is-withdrawn) |
 | `'error'` | Unexpected exception during execution |
 
 ## Envelope shape
