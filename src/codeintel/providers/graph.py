@@ -12,7 +12,7 @@ from typing import Any
 
 from codeintel.outcome import Missing
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
-from codeintel.source_kind import looks_generated_path, looks_generated_text
+from codeintel.source_kind import is_code_path, looks_generated_path, looks_generated_text
 
 
 def _cypher_literal(s: Any) -> str:
@@ -1304,11 +1304,20 @@ class GraphProvider:
                 return None
             # The backend returns DUPLICATE changed_files (staged + unstaged views) — dedupe,
             # order-preserving (dogfooding showed 6 real files reported as 11).
-            files, seen_f = [], set()
+            # …and scope to SOURCE. Dogfooding reported "4 files → 28 symbols" where the files were
+            # `.gitignore`, two plan JSONs and `CODE_INTEL.md` — codeintel's OWN artifact — and all
+            # 28 "impacted symbols" were markdown headings out of it. The indexer's corpus policy
+            # cannot be reused here: it admits `.md` on purpose, for semantic search. `dropped`
+            # remembers that non-source changes existed, so a tree full of them cannot be reported
+            # as "clean" — that would trade a noisy answer for a false one.
+            files, seen_f, dropped = [], set(), 0
             for f in files_raw if isinstance(files_raw, list) else []:
                 if isinstance(f, str) and f not in seen_f:
                     seen_f.add(f)
-                    files.append(f)
+                    if is_code_path(f):
+                        files.append(f)
+                    else:
+                        dropped += 1
             # impacted_symbols interleaves real symbols with bare file/module markers whose label IS
             # its own path (name == qualified_name == file_path). Drop those structurally by comparing
             # label to file_path — this catches a root-level marker (`main.py`, no "/") AND avoids
@@ -1322,12 +1331,21 @@ class GraphProvider:
                 fp = str(s.get("file_path") or s.get("file") or "")
                 if not label or label == fp:
                     continue
+                # Same source scoping as the file list. A symbol whose file_path is MISSING is kept:
+                # an absent path is a backend quirk, not evidence of junk, and dropping it would
+                # under-report real impact — the one failure mode worse than over-reporting here.
+                if fp and not is_code_path(fp):
+                    dropped += 1
+                    continue
                 key = (label, fp)
                 if key in seen_s:
                     continue
                 seen_s.add(key)
                 syms.append((label, fp))
             if not files and not syms:
+                if dropped:
+                    return ("## Changes impact\n(no source changes — the working tree's "
+                            f"{dropped} uncommitted change(s) are all non-source files)")
                 return "## Changes impact\n(working tree clean — no uncommitted changes)"
             parts = [f"## Changes impact ({len(files)} files → {len(syms)} symbols)"]
             if files:

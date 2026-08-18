@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from codeintel.containment import contained_path, real_root
 from codeintel.source_kind import (
+    CODE_EXTS,
     load_gitattributes_globs,
     looks_generated_file,
     looks_generated_path,
@@ -31,12 +32,10 @@ _MAX_CHUNK_CHARS = 200_000
 # signal and is what `git` itself uses.
 _BINARY_SNIFF_BYTES = 8192
 
-_INDEXED_EXTS = frozenset({
-    ".py", ".md",
-    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",       # TS/JS variants
-    ".go", ".rs", ".java",
-    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",    # C/C++ variants
-})
+# Derived from the shared policy rather than repeated: the corpus is "code, plus markdown". Two
+# hand-typed copies of one population is how the sign-out bug in the review notes happened — one
+# copy drifts and nothing says so.
+_INDEXED_EXTS = CODE_EXTS | {".md"}
 _SKIP_DIRS = frozenset({"__pycache__", ".git", "node_modules"})
 # Directory names that mean "generated" only at the REPO ROOT. Matching them at any depth hid real
 # source: `coverage/` is the coverage.py package, `src/build/` is pypa/build's entire codebase

@@ -223,6 +223,34 @@ def is_prose(file_path: str) -> bool:
     return any(part in p.lower() for part in PROSE_DIR_PARTS)
 
 
+# Extensions that hold CODE. The indexer's corpus is deliberately wider than this — it takes `.md`
+# too, because semantic search over docs is worth having — so the corpus policy cannot answer
+# "is this file source?". `changed` needs that narrower question: a change-impact answer is about
+# code, and reporting `.gitignore`, a plan JSON, `.DS_Store` or the tool's own CODE_INTEL.md as
+# "impacted" is noise that reads as signal. Kept here, beside the prose list, so the two policies
+# stay in one module; the indexer derives its corpus from this set rather than repeating it.
+CODE_EXTS = frozenset({
+    ".py",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",        # TS/JS variants
+    ".go", ".rs", ".java",
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",    # C/C++ variants
+})
+
+
+def is_code_path(file_path: str) -> bool:
+    """Whether a path is source code — a KNOWN code extension, not prose, not generated.
+
+    The inverse of `is_prose`'s conservatism, and deliberately so: this one allow-lists. `is_prose`
+    guards a ranking (admitting one extra doc is cheap), while this guards a *population* that gets
+    reported as fact, where admitting `.gitignore` costs the reader's trust in the whole answer."""
+    if not file_path:
+        return False
+    p = str(file_path).replace(os.sep, "/")
+    if os.path.splitext(p)[1].lower() not in CODE_EXTS:
+        return False
+    return not is_prose(p) and not looks_generated_path(p)
+
+
 def partition_by_corpus(items: list, path_of=lambda m: m.get("path", "")) -> tuple[list, list]:
     """Split ranked hits into (code, prose), preserving each list's existing order."""
     code: list = []

@@ -519,3 +519,53 @@ def test_live_callers_of_safe_null_result():
     impact = p.build_result("impact", "safe_null_result", [], 0, REPO_ROOT)
     assert impact["result"] is not None
     assert "## Callers of" in impact["result"]
+
+
+# ---- F5: `changed` must be scoped to SOURCE ------------------------------------------------
+# Dogfooding on snitch-simulator reported "4 files → 28 symbols" where the files were `.gitignore`,
+# two plan JSONs and `CODE_INTEL.md`, and all 28 "impacted symbols" were markdown HEADINGS out of
+# CODE_INTEL.md — a file codeintel itself writes into the repo. On pathly-adapters it counted
+# `.DS_Store`. A change-impact answer is about code; the indexer's corpus policy cannot be the
+# filter here because `.md` is in the corpus DELIBERATELY, for semantic search.
+
+def test_changed_drops_non_source_files_and_the_tools_own_artifact(monkeypatch):
+    # The exact observed F5 payload: nothing here is source, and the "symbols" are md headings.
+    resp = {"changed_files": [".gitignore", "plans/01-plan.json", "plans/02-plan.json",
+                              "CODE_INTEL.md"],
+            "impacted_symbols": [
+                {"name": "## Top symbols", "qualified_name": "## Top symbols",
+                 "file_path": "CODE_INTEL.md"},
+                {"name": "## Entry points", "qualified_name": "## Entry points",
+                 "file_path": "CODE_INTEL.md"},
+            ]}
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert r["ok"] is True and r["result"] is not None
+    assert "CODE_INTEL.md" not in r["result"]      # never report the tool's own artifact
+    assert ".gitignore" not in r["result"]
+    assert "01-plan.json" not in r["result"]
+    assert "Top symbols" not in r["result"]        # md headings are not impacted symbols
+    # And it must NOT claim the tree is clean — there ARE changes, just none of them source.
+    assert "working tree clean" not in r["result"]
+
+
+def test_changed_drops_ds_store(monkeypatch):
+    resp = {"changed_files": [".DS_Store"], "impacted_symbols": []}
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert ".DS_Store" not in r["result"]
+
+
+def test_changed_counts_only_source_when_mixed(monkeypatch):
+    # Real source alongside junk: the header count must reflect the source only.
+    resp = {"changed_files": ["CODE_INTEL.md", ".gitignore", "src/app.py"],
+            "impacted_symbols": [
+                {"name": "## Top symbols", "qualified_name": "## Top symbols",
+                 "file_path": "CODE_INTEL.md"},
+                {"name": "serve", "qualified_name": "src.app.serve", "file_path": "src/app.py"},
+            ]}
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
+    r = p.build_result("changed", "", [], 0, ROOT)
+    assert "Changes impact (1 files → 1 symbols)" in r["result"]
+    assert "src/app.py" in r["result"] and "src.app.serve" in r["result"]
+    assert "CODE_INTEL.md" not in r["result"] and ".gitignore" not in r["result"]
