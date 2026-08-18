@@ -18,6 +18,15 @@ serena session survive across an agent's calls). In tests that singleton is cros
 a provider built under one test's monkeypatched PATH would still be answering `code.status` in
 the next test. Reset it around every test so each one sees providers built under its own
 environment.
+
+Both autouse resets below are IN-PROCESS: they clear state between tests running inside one
+interpreter that has already imported every provider module, already warmed a serena session,
+already cached a graph wire-format verdict — from some EARLIER test. They cannot express, and are
+blind to, a defect that only exists on the very first call of a brand-new process (no prior
+import, no prior warm session, no prior cache entry to reset). That class of defect — B1
+(docs/eval-2026-08-17.md:65-103): a cold LSP timeout rendered as a confident "(none)" — has its
+own tier in tests/test_cold_process.py, which drives `sys.executable -m codeintel` as a real
+subprocess instead of relying on these fixtures.
 """
 from __future__ import annotations
 

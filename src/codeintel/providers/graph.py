@@ -528,6 +528,11 @@ class GraphProvider:
         # mismatch, not a transient, and it is the difference between "your symbol is not indexed"
         # and "your backend and this release do not agree on a wire format".
         self._saw_unparsable = False
+        # Why the most recent backend call failed, or None if none did. Also declared at class
+        # level (see the attribute below) for callers that bypass __init__ via __new__; set here
+        # too so every entry point that DOES run __init__ starts from a known state rather than
+        # the class-level default it happens to share.
+        self._last_failure: Missing | None = None
         self._project_cache: dict[str, ProjectResolution] = {}   # resolved projects (stable, kept)
         self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
         self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
@@ -1069,7 +1074,24 @@ class GraphProvider:
             kept.append(r)
 
         if not kept:
-            return None
+            # `rows` was non-empty (the `if not rows: return None` above already handled the
+            # genuine miss), so every row this op found was dropped by OUR OWN collision filter.
+            # That is an answer WE emptied, not an absence in the repository, and routing it into
+            # the `result_text is None` branch would report it as `not-in-graph` — "0 callees" —
+            # when the honest statement is "N callees, all of them filtered out for a reason that
+            # has nothing to do with the code". Same wording as the partial-drop note below,
+            # adjusted for the total case.
+            self._add_gap(
+                "callees", "name-collisions-dropped",
+                f"{dropped} row(s) were dropped as name collisions (a different language, or a "
+                f"non-code file, than the caller); every row returned was dropped, so this may "
+                f"under-report — resolution is by symbol name, not by type",
+            )
+            note = ("\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
+                    "repository is called `%s`, their callees are merged here. Verify before "
+                    "relying on a row you did not expect._" % target)
+            return (f"## Callees of {target} (0)\n(no callee survived name-collision filtering)"
+                    + note)
         lines = [self._display(r, "b.name", "b.qualified_name", "b.file_path") for r in kept]
         out = f"## Callees of {target} ({len(lines)})\n" + "\n".join(lines)
         note = ("\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
@@ -1158,7 +1180,13 @@ class GraphProvider:
                 label = str(r.get("label") or "")
                 file = str(r.get("file") or "")
                 start = r.get("start_line")
-                loc = f"{file}:{start}" if file and start is not None else file
+                # `codebase-memory-mcp` reports 1-based line numbers (LINE_BASES["graph"] in
+                # loc.py), so a usable line here has to be a real int >= 1 — the same policy
+                # loc.py:48-49 already applies for the 0-based engines. Rendering anything less
+                # (0, -1, or a non-int the backend happened to send) produced `path:0`, a line
+                # number that does not exist in any editor.
+                usable = isinstance(start, int) and not isinstance(start, bool) and start >= 1
+                loc = f"{file}:{start}" if file and usable else file
                 ml = r.get("match_lines")
                 ml_s = f"  (lines {', '.join(str(x) for x in ml)})" if isinstance(ml, list) and ml else ""
                 badge = f" [{label}]" if label else ""
@@ -1475,6 +1503,20 @@ class GraphProvider:
                     return safe_null_result(
                         op_str, target_str, engine="graph", reason="backend-incompatible",
                         hint=_INCOMPATIBLE_HINT,
+                    )
+                # Sibling of the check at line ~1449 above, and the check lsp.py:333-342 already
+                # made for the LSP engine: a backend call inside this op failed (timeout / crash /
+                # error) rather than genuinely returning "no rows", and that failure collapsed to
+                # the same bare `None` a real miss produces. Reported as `not-in-graph` before this
+                # check existed — an agent reading "not in the graph index" about a query that never
+                # returned would take a backend outage for a fact about the repository, which is the
+                # exact misreading that makes "safe to delete" the wrong conclusion.
+                if self._last_failure is not None:
+                    miss = self._last_failure
+                    return safe_null_result(
+                        op_str, target_str, engine="graph", reason=miss.kind,
+                        hint=f"{miss.describe()} — this is not a statement about your code: the "
+                             f"query did not return. Re-ask, or run `codeintel doctor`.",
                     )
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",

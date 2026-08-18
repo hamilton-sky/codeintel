@@ -162,6 +162,23 @@ jobs:
           CODEINTEL_LIVE_LSP: "1"
         run: pytest tests/test_lsp_real.py -v -rs -o addopts=
 
+      # Call #1 in a PRISTINE process, not call #2 in this job's already-warmed one. See
+      # tests/test_cold_process.py's module docstring: B1 (docs/eval-2026-08-17.md:65-103) was a
+      # cold LSP session that timed out on the very first call of a fresh process and rendered the
+      # resulting empty reference list as a confident "(none)" — a shape no test above this line
+      # can express, because every one of them runs inside an interpreter (or, for the live tests,
+      # a job) that has already warmed something. Reuses this job's already-warmed uvx above.
+      - name: Cold-process tier (call #1 in a pristine process)
+        env:
+          CODEINTEL_LIVE_LSP: "1"
+          CODEINTEL_COLD_PROCESS: "1"
+        run: |
+          pytest tests/test_cold_process.py -v -rs -o addopts= 2>&1 | tee /tmp/cold.log
+          if grep -qE "^SKIPPED|[0-9]+ skipped" /tmp/cold.log; then
+            echo "::error::cold-process tests skipped — the first-call defect class went unverified"
+            exit 1
+          fi
+
   build:
     name: Build + verify the package
     runs-on: ubuntu-latest

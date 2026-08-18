@@ -8,10 +8,10 @@ found that following the first would have introduced a NEW off-by-one: the graph
 directly and must keep doing so. Centralising a guarantee only removes a defect class when the
 implementations agree on the semantics being centralised — here they do not.
 
-    LINE BASES, verified by probing each backend:
-      serena / LSP          0-based  -> use loc()/span()
-      semantic chunk_start  0-based  -> use loc()      (chunk_start = max(0, start - 1), indexer.py)
-      codebase-memory-mcp   1-based  -> do NOT use loc(); emit as-is
+    LINE BASES, verified by probing each backend — see LINE_BASES below:
+      serena / LSP          -> use loc()/span()
+      semantic chunk_start  -> use loc()      (chunk_start = max(0, start - 1), indexer.py)
+      codebase-memory-mcp   -> see LINE_BASES below; do NOT use loc(); emit as-is
 
 Use ``loc()``/``span()`` for the 0-based backends. Every human, editor and terminal that consumes
 our output counts from one, and agent hosts turn ``path:line`` into a clickable link. Each
@@ -30,6 +30,11 @@ Centralising the conversion is what stops the next renderer from re-deciding thi
 """
 
 from __future__ import annotations
+
+# The measured line base of each backend. The prose table above is the explanation; THIS is the
+# enforced form (tests/test_loc_census.py drives every provider and checks the number it emits
+# against this map). A new provider file with no entry here fails the census.
+LINE_BASES: dict[str, int] = {"lsp": 0, "semantic": 0, "graph": 1}
 
 
 def line1(line0: object) -> int | None:
