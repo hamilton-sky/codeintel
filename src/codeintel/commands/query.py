@@ -1,6 +1,7 @@
 """`codeintel query` — one question against the gateway: search, callers, callees, impact, chain."""
 
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -20,6 +21,27 @@ _WARMING_TIMEOUT_S = 45.0
 # as "(none)": a confident false answer produced by a missing argument. A CLI invocation is a
 # human or an agent waiting on one question; it can afford to wait properly.
 _CLI_BUDGET_MS = 30_000
+
+
+def _budget_ms() -> int:
+    """The per-query budget, overridable via ``CODEINTEL_BUDGET_MS``.
+
+    Two reasons this is an env var rather than a constant. Operators on slow machines or huge
+    repositories need to raise it. And tests need to LOWER it: the cold-process tier exists to catch
+    the defect where a timed-out backend call is rendered as a confident "(none)", but on a fast
+    machine the cold call simply succeeds, so the tier passed with that exact regression planted
+    back in. A budget it can drive to near-zero lets it reproduce the starvation condition
+    deterministically instead of waiting for a slow day.
+    """
+    raw = os.environ.get("CODEINTEL_BUDGET_MS", "").strip()
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    return _CLI_BUDGET_MS
 
 
 def run(args: Any) -> int:
@@ -74,7 +96,7 @@ def _query(args: Any) -> Result:
             target=args.target,
             engine=engine,
             role="",
-            budget=_CLI_BUDGET_MS,
+            budget=_budget_ms(),
             project_root=project_root,
         )
 

@@ -481,3 +481,52 @@ def test_a_cold_semantic_query_returns_within_its_budget(tmp_path):
         timeout=120,
     )
     assert envelope.get("ok") is True, envelope
+
+
+def test_a_starved_budget_never_renders_an_emptiness_claim(tmp_path):
+    """No answer produced under a budget nothing could meet may claim to be a complete absence.
+
+    READ THIS BEFORE TRUSTING THIS TIER TO CATCH B1 — IT CANNOT, AND THAT IS MEASURED.
+
+    This file was built for B1: a cold backend call that times out and gets rendered as a confident
+    "(none)". It does not catch it. Reintroducing the exact regression (swallow the Missing and
+    return an empty References section) leaves every test in this file GREEN. Two reasons, and the
+    second is structural rather than incidental:
+
+      1. On a fast machine with warm caches the cold call simply SUCCEEDS, so the failing branch is
+         never reached.
+      2. Starving the budget does not help either. B1 needs a DIFFERENTIAL failure — find_symbol
+         SUCCEEDS and find_referencing_symbols then times out — because the reference renderer is
+         only reached once a definition has resolved. A single global budget starves the FIRST call,
+         so the op returns a null result with reason "backend-error" and the reference branch is
+         never entered. Measured: CODEINTEL_BUDGET_MS=1 gives result=None, reason=backend-error.
+         No process-level knob can produce "first call fine, second call not".
+
+    B1's rendering defect is therefore guarded IN-PROCESS, where the two tool calls can be stubbed
+    independently: tests/test_incompleteness.py::test_starved_symbol_never_claims_zero_references.
+    That one DOES go red on the planted regression — verified the same way.
+
+    What this test is worth: it pins the weaker, environment-level invariant that a real subprocess
+    under an impossible budget still returns an honest envelope rather than a confident absence. Keep
+    it, but do not let this file's existence persuade anyone that B1 is covered here.
+    """
+    repo = _hermetic_repo(tmp_path)
+    env = _sandbox_env(tmp_path, shim=False)
+    env["CODEINTEL_BUDGET_MS"] = "1"          # nothing answers in 1ms
+
+    for op, target, engine in (("symbol", "make_widget", "lsp"),
+                               ("callers", "make_widget", "graph")):
+        env_out = _query(repo, env, op=op, target=target, engine=engine, timeout=120)
+        assert env_out["ok"] is True, (op, env_out)
+        result = env_out.get("result")
+        if result is None:
+            # Honest: it could not ask, and said so.
+            assert env_out.get("reason") not in _ASKED_AND_FOUND_NOTHING, (op, env_out)
+            continue
+        # It produced a body under a budget nothing could meet. That body may not assert absence
+        # while also claiming completeness.
+        claimed_empty = any(m in result for m in _EMPTINESS_MARKERS)
+        assert not (claimed_empty and env_out.get("confidence") == "complete"), (
+            f"{op}: rendered an emptiness claim with confidence=complete under a 1ms budget — "
+            f"this is B1's exact shape: {result[:300]}"
+        )
