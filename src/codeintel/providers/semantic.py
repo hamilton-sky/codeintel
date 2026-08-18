@@ -4,6 +4,7 @@ import os
 import pathlib
 
 from codeintel.loc import loc
+from codeintel.source_kind import partition_by_corpus
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 
 try:
@@ -158,8 +159,13 @@ class SemanticProvider:
                     hint=f"run: codeintel index {project_root}  (or: codeintel doctor)",
                 )
 
+            # Over-retrieve, then fill from the code corpus first. Partitioning the FINAL ten was
+            # not enough: on a doc-heavy repository all ten candidates were prose, so re-ordering
+            # had nothing to promote. The bias is in retrieval, so the widening has to happen there
+            # — ask for several times the display budget and let the code corpus claim its share.
+            _display_k = 10
             matches = searcher.search(
-                target, project_root,
+                target, project_root, k=_display_k * 6,
                 cosine_floor=float(cfg.get("cosine_floor", 0.25)),
                 rerank=str(cfg.get("rerank", "on")),
                 rerank_candidates=int(cfg.get("rerank_candidates", 30)),
@@ -171,8 +177,23 @@ class SemanticProvider:
             # indexer (`start0 = max(0, start - 1)`). Emitting it raw put every semantic hit one
             # line above the truth and rendered anything at the top of a file as `path:0` — a line
             # number that does not exist. `loc()` owns the conversion for every engine.
+            # Code first, prose second. Semantic search embeds implementations and the prose that
+            # DESCRIBES them into one vector space, and prose about a subject is written in the
+            # language of a question about that subject — so on a doc-heavy repository the docs
+            # systematically outranked the code, and a query whose answer was a specific function
+            # returned ten markdown files and zero source. Ranking within each corpus is unchanged;
+            # only the interleaving is. Prose is kept, not dropped: it is often the right answer to
+            # "how does this work", just not to "where is this done".
+            code_hits, prose_hits = partition_by_corpus(matches)
+            # Code first, but never a pure-code wall: prose genuinely answers "how does this work".
+            # Reserve at least a third of the slots for prose when both corpora have hits.
+            if code_hits and prose_hits:
+                keep_code = min(len(code_hits), max(1, (_display_k * 2) // 3))
+                ordered = code_hits[:keep_code] + prose_hits[:_display_k - keep_code]
+            else:
+                ordered = (code_hits + prose_hits)[:_display_k]
             lines = [f"{loc(m['path'], m['line'])} | {_first_meaningful_line(m['snippet'])}"
-                     for m in matches]
+                     for m in ordered]
             result: Result = {
                 "ok": True,
                 "op": op,
@@ -181,11 +202,26 @@ class SemanticProvider:
                 "engine": "semantic",
                 "cached": False,
             }
-            # No gaps modelled here YET — the known one is the code/prose corpus mix, which needs
-            # the index split before it can be reported honestly rather than guessed at. Stamped
-            # `complete` regardless, because an ABSENT confidence is the ambiguity this field exists
-            # to remove: a caller must never have to wonder whether the engine simply does not say.
-            return attach_confidence(result)
+            # The corpus mix is now a REPORTED gap rather than an unmodelled one. A caller that
+            # asked "where is X done" and received only prose needs to know that no code matched —
+            # otherwise an empty code corpus reads as "the implementation does not exist".
+            gaps = []
+            if not code_hits and prose_hits:
+                gaps.append({
+                    "section": "corpus",
+                    "kind": "no-code-matches",
+                    "detail": f"no source file matched this query; all {len(prose_hits)} hits are "
+                              f"documentation or fixtures. Absence of code hits here is NOT evidence "
+                              f"the implementation is missing — try a symbol name, or `callers`.",
+                })
+            elif prose_hits and len(prose_hits) > len(code_hits):
+                gaps.append({
+                    "section": "corpus",
+                    "kind": "prose-heavy",
+                    "detail": f"{len(prose_hits)} of {len(ordered)} hits are documentation rather "
+                              f"than code; code hits are listed first.",
+                })
+            return attach_confidence(result, gaps)
         except Exception as exc:
             log_swallowed("SemanticProvider.build_result", exc)
             return safe_null_result(op, target, engine="semantic", reason="provider-error")

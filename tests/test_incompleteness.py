@@ -490,3 +490,36 @@ def test_withdrawn_ops_are_still_measured_by_the_corpus_oracle():
             f"ops {sorted(_WITHDRAWN_OPS)} are withdrawn pending measurement, but the corpus job "
             "does not enable them, so they are never measured"
         )
+
+
+# --------------------------------------------------------------------------- corpus split (B5)
+
+def test_prose_is_classified_without_swallowing_code():
+    """Conservative by design: an unknown extension is CODE. The bug being fixed is prose crowding
+    code out, and an over-eager rule would simply invert it."""
+    from codeintel.source_kind import is_prose
+
+    for p in ("docs/x.md", "README.md", "tests/snapshots/t.claude.md", "a/.archive/s.json"):
+        assert is_prose(p), p
+    for p in ("src/a.py", "src/ui/W.tsx", "main.go", "lib/thing.unknownext"):
+        assert not is_prose(p), p
+
+
+def test_code_hits_outrank_prose_and_the_mix_is_reported():
+    """Retrieval, not just rendering. Partitioning the final ten was not enough — on a doc-heavy
+    repository all ten candidates were prose, so re-ordering had nothing to promote."""
+    from codeintel.source_kind import partition_by_corpus
+
+    hits = [{"path": f"docs/d{i}.md"} for i in range(8)] + [{"path": "src/impl.py"}]
+    code, prose = partition_by_corpus(hits)
+    assert [m["path"] for m in code] == ["src/impl.py"]
+    assert len(prose) == 8
+
+
+def test_an_all_prose_answer_says_no_code_matched():
+    """A caller who asked 'where is X done' and got only prose must be told no source matched —
+    otherwise an empty code corpus reads as 'the implementation does not exist'."""
+    src = pathlib.Path(__file__).resolve().parent.parent / "src" / "codeintel" / "providers" / "semantic.py"
+    body = src.read_text()
+    assert "no-code-matches" in body
+    assert "NOT evidence" in body

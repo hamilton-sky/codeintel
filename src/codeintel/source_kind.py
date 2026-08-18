@@ -189,3 +189,43 @@ def matches_any_glob(file_path: str, globs: list[str]) -> bool:
         if not pat.endswith("*") and (norm == pat or norm.startswith(pat.rstrip("/") + "/")):
             return True
     return False
+
+
+# --------------------------------------------------------------------------- code vs prose
+
+# Extensions whose contents are PROSE ABOUT code rather than code. Semantic search embeds both into
+# one vector space and ranks by cosine similarity — and prose about a subject is written in the
+# language of a question about that subject, so it systematically outranks the implementation. On a
+# repository carrying a large markdown corpus this made `search` useless: a query for "where does
+# the FSM decide the next stage transition" returned ten markdown files and zero Python, while the
+# function literally named `evaluate_transition_rules` sat unreturned. This is not a tuning problem;
+# the embedding is doing exactly what it was asked. The corpora have to be separated.
+PROSE_EXTS = frozenset({
+    ".md", ".mdx", ".markdown", ".rst", ".txt", ".adoc", ".org",
+})
+
+# Trees that are prose or fixtures regardless of extension.
+PROSE_DIR_PARTS = ("/docs/", "/doc/", "/snapshots/", "/__snapshots__/", "/.archive/",
+                   "/adr/", "/rfc/", "/changelog/")
+
+
+def is_prose(file_path: str) -> bool:
+    """Whether a path holds prose about code rather than code itself.
+
+    Deliberately conservative: an unknown extension counts as CODE, because demoting a real
+    implementation is a worse failure than admitting one more doc — the bug being fixed here is
+    prose crowding code out, and an over-eager rule would just invert it."""
+    if not file_path:
+        return False
+    p = "/" + str(file_path).replace(os.sep, "/").lstrip("/")
+    if os.path.splitext(p)[1].lower() in PROSE_EXTS:
+        return True
+    return any(part in p.lower() for part in PROSE_DIR_PARTS)
+
+
+def partition_by_corpus(items: list, path_of=lambda m: m.get("path", "")) -> tuple[list, list]:
+    """Split ranked hits into (code, prose), preserving each list's existing order."""
+    code, prose = [], []
+    for m in items:
+        (prose if is_prose(str(path_of(m) or "")) else code).append(m)
+    return code, prose
