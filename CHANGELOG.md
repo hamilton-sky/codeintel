@@ -4,6 +4,30 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.4] — 2026-08-18
+
+### Fixed
+- **`changed` reported files that are not source, including this tool's own artifact.** On one
+  repository it answered *"4 files → 28 symbols"* where the four files were `.gitignore`, two plan
+  JSONs and `CODE_INTEL.md` — and every one of the 28 "impacted symbols" was a markdown **heading**
+  out of that file, which codeintel itself had written into the repo. On another it counted
+  `.DS_Store`. A change-impact answer is about code; noise of this shape reads as signal, and an
+  answer that opens by citing four files nobody edited spends the reader's trust before it gets to
+  the real ones.
+
+  The indexer's corpus policy could not be reused as the filter, and that is exactly how the
+  artifact leaked through: the corpus admits `.md` **deliberately**, because semantic search over
+  documentation is worth having. So `source_kind` now owns the narrower question — `CODE_EXTS` plus
+  `is_code_path` (a known code extension, not prose, not generated) — and the indexer derives its
+  corpus from that set rather than keeping a second hand-typed copy of it. Two hand-typed copies of
+  one population is how these drift apart with nothing to say so.
+
+### Changed
+- **`changed` now separates "no source changes" from "working tree clean."** Filtering can empty the
+  list on a tree that genuinely has uncommitted edits. Calling that clean would trade a noisy answer
+  for a false one, so it reports which of the two it is, and how many non-source changes it set
+  aside.
+
 ## [0.15.3] — 2026-08-17
 
 ### Security
