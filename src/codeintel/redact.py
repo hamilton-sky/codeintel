@@ -46,7 +46,13 @@ def _flattened_home() -> str:
     home = _home()
     if not home:
         return ""
-    return home.strip("/").replace("/", "-")
+    # BOTH separators, and the drive colon. This was written `home.strip("/").replace("/", "-")`,
+    # which is POSIX-only: on Windows `C:\\Users\\alice` came back unchanged, so the detector
+    # returned False for a leak that plainly contained the username. The macOS/Linux form of this
+    # bug was found by evaluating a third LANGUAGE; this one is the same defect one PLATFORM over,
+    # and nothing in CI would have caught it — the matrix is ubuntu-only.
+    flat = home.replace("\\", "/").strip("/").replace("/", "-")
+    return flat.replace(":", "")
 
 
 def redact_text(text: str) -> str:

@@ -556,3 +556,25 @@ def test_a_flat_namespace_qualified_name_still_gets_its_project_prefix_stripped(
     assert _strip_project_prefix("use-toast.ts") == "use-toast.ts"
     assert _strip_project_prefix("1731900000000-CreateInitialTables.ts") == (
         "1731900000000-CreateInitialTables.ts")
+
+
+@pytest.mark.parametrize("home,expected_flat", [
+    ("/Users/alice", "Users-alice"),
+    ("/home/bob", "home-bob"),
+    ("C:\\Users\\alice", "C-Users-alice"),      # Windows: backslashes AND a drive colon
+])
+def test_the_flattened_home_is_detected_on_every_platform(home, expected_flat, monkeypatch):
+    """The flattened-home redaction was written POSIX-only — `strip("/").replace("/", "-")` — so on
+    Windows it returned the home path unchanged and the detector reported False for a leak that
+    plainly contained the username. CI is ubuntu-only, so nothing would have caught it.
+
+    The macOS/Linux form of this same defect was found by evaluating a third LANGUAGE; this one is
+    the same defect one PLATFORM over. Parametrised rather than fixed to the host, so the platform
+    this happens to run on stops deciding what gets verified."""
+    import codeintel.redact as r
+
+    monkeypatch.setattr(r, "_home", lambda: home)
+    assert r._flattened_home() == expected_flat
+    leak = f"private-tmp-{expected_flat}-proj.Execute"
+    assert r.contains_home_path(leak), "a leak the detector cannot see is a leak that ships"
+    assert not r.contains_home_path(r.redact_text(leak))
