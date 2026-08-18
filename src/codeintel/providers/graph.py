@@ -104,15 +104,27 @@ def _strip_project_prefix(qualified_name: str) -> str:
     # 985 names in one real repo, 811 in another. The `changed` op takes exactly this path,
     # because its rows carry `name` and no `qualified_name`, so its symbols rendered as `ts`.
     #
-    # A project slug is the head of a DOTTED PATH: there has to be a path after it, and the
-    # remainder has to look like one. A bare filename's remainder is a lone extension.
-    if "-" not in head or " " in head or "." not in rest:
+    # A project slug is the head of a dotted path. What follows it does NOT have to be dotted:
+    # requiring that broke every flat-namespace language. Go qualified names are `project.FuncName`
+    # — one segment, no package path — so on a Go repository this stripped nothing and every row
+    # rendered the full flattened absolute path, username included, straight into `result`. Found
+    # by evaluating against a third language; two languages could not have shown it, because both
+    # of them happen to produce dotted remainders.
+    # The space test covers the WHOLE name, not just the head. Dropping the dotted-remainder rule
+    # cost this: `EC-1.1: Empty workflow plan` is a document heading whose head happens to be
+    # hyphenated, and it was previously spared only because its remainder had no dot. A qualified
+    # name never contains a space, in any language, so that is the durable discriminator.
+    if "-" not in head or " " in qualified_name or not rest:
         return qualified_name
     # `my-component.spec.ts` also has a dotted remainder, so "has dots" is not enough. What
     # actually separates a filename from a qualified name is the LAST segment: a module path ends
     # in a symbol, a filename ends in an extension.
     if qualified_name.rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS:
         return qualified_name
+    # `use-toast.ts` is now only distinguishable from `my-repo.Execute` by that extension check, so
+    # a hyphenated head with a single non-extension segment after it is treated as a slug. That is
+    # the correct call: a kebab-case FILE whose extension we do not know is rare, while a flat
+    # qualified name is the norm for Go, Java, C# and Ruby.
     return rest
 
 

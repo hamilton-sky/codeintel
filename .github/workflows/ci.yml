@@ -7,8 +7,16 @@ on:
 jobs:
   # Fast static gate. Split from `test` so a lint or typing regression is one obvious red check
   # rather than a failure buried in a matrix leg, and so it reports in seconds.
+  # ruff and mypy are SEPARATE JOBS, for the reason release-consistency below is separate — and
+  # because this file already stated that principle and then did the opposite here. They shared one
+  # job; steps in a job are fail-fast; ruff went red and mypy therefore did not run for an entire
+  # stretch of work. What was hiding behind it: both "did a backend call fail?" checks in
+  # graph.build_result had become UNREACHABLE to a type checker, so the code that stops a dead
+  # backend being reported as an absence in the user's repository was, formally, dead. A blocking
+  # gate that silently does not run is worse than no gate, because the green tick still appears
+  # next to every other job. One gate, one job, one red line that names which gate failed.
   lint:
-    name: Lint + types
+    name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -22,6 +30,19 @@ jobs:
 
       - name: ruff
         run: ruff check src tests
+
+  types:
+    name: Types (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
 
       # Checks src/ only: the config is deliberately not --strict, because the provider seams
       # cross into untyped backends where demanding annotations buys noise rather than safety.

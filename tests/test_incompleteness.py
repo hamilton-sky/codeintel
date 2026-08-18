@@ -524,3 +524,35 @@ def test_an_all_prose_answer_says_no_code_matched():
     body = src.read_text()
     assert "no-code-matches" in body
     assert "NOT evidence" in body
+
+
+def test_the_home_path_is_redacted_in_its_flattened_form_too():
+    """The graph backend's project id for a path-slug registration IS the flattened absolute path —
+    separators turned into dashes. Redaction matched only the slash form, so it passed straight
+    through, and on a Go repository (flat qualified names, so the project prefix was not stripped
+    either) every result row carried the username mid-identifier. Two independent defences both
+    missed the same leak, which is the argument for keeping both."""
+    import os
+
+    from codeintel.redact import contains_home_path, redact_text
+
+    home = os.path.expanduser("~")
+    flat = home.strip("/").replace("/", "-")
+    leaky = f"private-tmp-{flat}-scratch-cobra.Execute"
+    assert contains_home_path(leaky), "the detector cannot see the form that leaked"
+    assert not contains_home_path(redact_text(leaky))
+
+
+def test_a_flat_namespace_qualified_name_still_gets_its_project_prefix_stripped():
+    """Go, Java, C# and Ruby produce `project.Symbol` — ONE segment after the project id. The
+    stripper required a dotted remainder, so on those languages it stripped nothing at all. Two
+    languages could not surface this; both Python and TypeScript happen to produce dotted
+    remainders."""
+    from codeintel.providers.graph import _strip_project_prefix
+
+    assert _strip_project_prefix("my-repo.Execute") == "Execute"
+    assert _strip_project_prefix("Users-alice-work-cobra.ExecuteC") == "ExecuteC"
+    # ...without eating the kebab-case FILENAMES the dotted-remainder rule was added to protect.
+    assert _strip_project_prefix("use-toast.ts") == "use-toast.ts"
+    assert _strip_project_prefix("1731900000000-CreateInitialTables.ts") == (
+        "1731900000000-CreateInitialTables.ts")

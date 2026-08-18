@@ -33,6 +33,22 @@ def _home() -> str:
     return h.rstrip(os.sep) if h and h != "~" else ""
 
 
+def _flattened_home() -> str:
+    """The home path as the graph backend spells it in a project id: separators become dashes.
+
+    `/Users/alice` becomes `Users-alice`. Redaction matched only the slash form, so a project id —
+    which for a path-slug registration IS the flattened absolute path — sailed straight through.
+    Found on a Go repository, where flat qualified names meant the project prefix was not stripped
+    either, and every result row read
+    `private-tmp-...-Users-alice-...-cobra.Execute`. Two independent defences both missed it, which
+    is the argument for having two.
+    """
+    home = _home()
+    if not home:
+        return ""
+    return home.strip("/").replace("/", "-")
+
+
 def redact_text(text: str) -> str:
     """Replace occurrences of the home directory with `~`, including its /private-prefixed form.
 
@@ -45,6 +61,10 @@ def redact_text(text: str) -> str:
     for prefix in (f"/private{home}", home):
         if prefix in out:
             out = out.replace(prefix, "~")
+    flat = _flattened_home()
+    if flat and flat in out:
+        # No `~` here: this appears mid-identifier, where a tilde would read as part of the name.
+        out = out.replace(flat, "<home>")
     return out
 
 
@@ -67,11 +87,15 @@ def redact(value: object, _depth: int = 0) -> object:
 
 
 def contains_home_path(text: str) -> bool:
-    """Whether *text* still carries an absolute home path. For tests and for `doctor`."""
+    """Whether *text* still carries the home path in ANY form we have seen it leak in — slashed,
+    /private-prefixed, or flattened into a backend project id. For tests and for `doctor`."""
     home = _home()
     if not home or not text:
         return False
-    return home in text or f"/private{home}" in text
+    if home in text or f"/private{home}" in text:
+        return True
+    flat = _flattened_home()
+    return bool(flat) and flat in text
 
 
 # A username-shaped absolute path, for the assertion that no NEW leak channel has opened using a
