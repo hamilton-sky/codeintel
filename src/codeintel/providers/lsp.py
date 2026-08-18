@@ -10,17 +10,25 @@ import shutil
 import sys
 import threading
 import time
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
-from codeintel.provider import Result, log_swallowed, safe_null_result
+from codeintel.loc import loc, span
+from codeintel.outcome import Missing, Ok, Outcome
+from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 
 logger = logging.getLogger(__name__)
 
 _COOLDOWN_SECONDS = 60
-_DEFAULT_TIMEOUT_S = 5.0
+# A cold serena has to boot the language server AND let it load the workspace before the first
+# query can be answered. Measured against a real 841-file TypeScript repo, that first `symbol`
+# call took 11.65s — more than twice the 5s this used to allow, so it timed out every time and the
+# empty reference list that fell out of it was rendered as "(none)". The budget is now sized for
+# the cold path; a warm call returns in ~1s and never approaches it.
+_DEFAULT_TIMEOUT_S = 30.0
 
 # Serena ships as the `serena-agent` package (executable name `serena`); `uvx serena` does NOT
 # work ("Package `serena` does not provide any executables"). The working invocation — verified
@@ -174,15 +182,33 @@ class LspProvider:
     # Class-level default so a provider built via `__new__` (the test stubs do this) still has it
     # rather than raising AttributeError inside the never-raise handler.
     _last_backend_error: str | None = None
+    # Sections of the current answer that are known to be short of an answer. An op appends here
+    # instead of quietly rendering an empty section, and `build_result` turns them into the
+    # envelope's `gaps` / `confidence`. Class-level default for the same __new__ reason as above.
+    _pending_gaps: tuple[dict[str, Any], ...] = ()
 
     def __init__(self) -> None:
         self._sessions: dict[str, _LspSession] = {}
         self._sessions_lock = threading.Lock()
         self._last_backend_error = None
+        self._pending_gaps = ()
         self._detect_backend()
 
     def _clear_backend_error(self) -> None:
         self._last_backend_error = None
+        self._pending_gaps = ()
+
+    def _add_gap(self, section: str, missing: Missing) -> None:
+        """Record that a named part of the answer could not be retrieved. The body text says so
+        too — this is the machine-readable half of the same statement."""
+        gap: dict[str, Any] = {
+            "section": section,
+            "kind": missing.kind,
+            "detail": missing.describe(),
+        }
+        if missing.retry_after_s is not None:
+            gap["retry_after_s"] = missing.retry_after_s
+        self._pending_gaps = (*self._pending_gaps, gap)
 
     def _detect_backend(self) -> None:
         # Prefer a directly-installed serena; otherwise drive it through uvx.
@@ -316,7 +342,7 @@ class LspProvider:
                     )
                 return safe_null_result(op_str, target_str, engine="lsp", reason="unsupported-op")
 
-            return {
+            envelope: Result = {
                 "ok": True,
                 "op": op_str,
                 "target": target_str,
@@ -324,6 +350,11 @@ class LspProvider:
                 "engine": "lsp",
                 "cached": False,
             }
+            # A non-null result is no longer a promise that the answer is whole. When a named
+            # section could not be retrieved, say so in machine-readable form as well as in the
+            # body — an agent that only reads `result` still sees it, and one that reads the
+            # envelope can branch on it.
+            return attach_confidence(envelope, self._pending_gaps)
         except Exception as exc:
             log_swallowed("LspProvider.build_result", exc)
             return safe_null_result(op, target, engine="lsp", reason="error")
@@ -349,16 +380,29 @@ class LspProvider:
         tool: str,
         args: dict,
         timeout_s: float,
-    ) -> Any | None:
+    ) -> Outcome[Any]:
+        """Call a serena tool, returning why it failed rather than collapsing failure to None.
+
+        The distinction is the whole point: a caller that receives `Missing` cannot accidentally
+        render it as an empty answer, which is what happened when this returned `None` on timeout
+        and the reference renderer read that as "no references exist".
+        """
         try:
             mcp_session = session._mcp_session
             if mcp_session is None:
-                return None
+                return Missing("not-asked", "the language server session was not available")
             coro = mcp_session.call_tool(tool, args)
             future = asyncio.run_coroutine_threadsafe(coro, session._loop)
-            return future.result(timeout=timeout_s)
-        except Exception:
-            return None
+            return Ok(future.result(timeout=timeout_s))
+        except FuturesTimeout:
+            return Missing(
+                "timeout",
+                "the language server had not finished loading this workspace in time",
+                retry_after_s=5.0,
+            )
+        except Exception as exc:
+            log_swallowed(f"LspProvider._call_tool({tool})", exc)
+            return Missing("backend-error", "the language server did not answer this call")
 
     def _extract_text(self, raw: Any) -> str | None:
         """The text payload of a tool result, or None — including when the result is an ERROR.
@@ -409,13 +453,21 @@ class LspProvider:
             return None
 
     @staticmethod
-    def _ref_line(content: Any) -> str | None:
+    def _ref_line(content: Any) -> int | None:
         """Pull the referenced line number out of serena's `content_around_reference` blob,
-        which marks the reference line with a leading `>` (e.g. `  >   7:from ...`)."""
+        which marks the reference line with a leading `>` (e.g. `  >   7:from ...`).
+
+        Returned as serena reports it — 0-based. Conversion to the 1-based number a human or an
+        editor expects belongs to `loc()`, and to nothing else."""
         if not isinstance(content, str):
             return None
         m = re.search(r">\s*(\d+):", content)
-        return m.group(1) if m else None
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
 
     def _format_matches(self, target: str, matches: list) -> tuple[str, dict | None]:
         parts = [f"## Symbol: {target}"]
@@ -428,10 +480,9 @@ class LspProvider:
             kind = m.get("kind") or "symbol"
             rel = m.get("relative_path") or "?"
             raw_loc = m.get("body_location")
-            loc = raw_loc if isinstance(raw_loc, dict) else {}
-            s, e = loc.get("start_line"), loc.get("end_line")
-            span = f":{s}-{e}" if s is not None else ""
-            parts.append(f"**{kind}** — {rel}{span}")
+            body_loc = raw_loc if isinstance(raw_loc, dict) else {}
+            # serena's body_location is 0-based; `span()` owns the conversion.
+            parts.append(f"**{kind}** — {span(rel, body_loc.get('start_line'), body_loc.get('end_line'))}")
             body = m.get("body")
             if body:
                 parts.append(f"```\n{body}\n```")
@@ -451,10 +502,9 @@ class LspProvider:
                     if not isinstance(ent, dict):
                         continue
                     np = str(ent.get("name_path") or "").strip()
-                    line = self._ref_line(ent.get("content_around_reference"))
-                    loc = f"{file}:{line}" if line else str(file)
+                    line0 = self._ref_line(ent.get("content_around_reference"))
                     suffix = f"  ({np})" if np else ""
-                    lines.append(f"- {loc}{suffix}")
+                    lines.append(f"- {loc(file, line0)}{suffix}")
                     if len(lines) >= 50:
                         return lines
         return lines
@@ -463,19 +513,20 @@ class LspProvider:
         self, session: _LspSession, target: str, root: str, timeout_s: float
     ) -> str | None:
         try:
-            def_raw = self._call_tool(
+            def_out = self._call_tool(
                 session,
                 "find_symbol",
                 {"name_path_pattern": target, "include_body": True, "max_matches": 5},
                 timeout_s,
             )
-            if def_raw is None:
+            if isinstance(def_out, Missing):
                 # The tool call itself failed or timed out. Rendering "(not found)" here — which is
                 # what this did — states that the symbol does not exist, on no evidence whatsoever.
                 # For an agent deciding whether to create something, "I could not ask" and "it is
                 # not there" are opposite answers.
-                self._last_backend_error = "the language server did not respond to this query"
+                self._last_backend_error = def_out.describe()
                 return None
+            def_raw = def_out.value
             def_text = self._extract_text(def_raw)
             matches = self._loads(def_text)
 
@@ -493,36 +544,81 @@ class LspProvider:
                 def_section = f"## Symbol: {target}\n{def_text}"
 
             # References require the located symbol's own path (two-step contract).
-            ref_section = "## References\n(none)"
-            if first and first.get("relative_path"):
-                ref_raw = self._call_tool(
-                    session,
-                    "find_referencing_symbols",
-                    {
-                        "name_path": first.get("name_path") or target,
-                        "relative_path": first.get("relative_path"),
-                    },
-                    timeout_s,
+            #
+            # There is no longer a default "(none)" string here, and that is the point. This
+            # section is rendered from an Outcome, so "the reference lookup did not answer" and
+            # "this symbol has no references" cannot produce the same bytes. The old default
+            # survived a timed-out call and asserted, with no evidence and no `reason`, that
+            # nothing referenced the symbol — the permissive answer to the one question an agent
+            # asks before deleting code.
+            if not (first and first.get("relative_path")):
+                miss = Missing(
+                    "not-asked",
+                    "the symbol's file path was not resolved, so references were never requested",
                 )
-                ref_lines = self._format_refs(self._loads(self._extract_text(ref_raw)))
+                self._add_gap("references", miss)
+                ref_section = f"## References — not retrieved\n> {miss.describe()}."
+                return f"{def_section}\n\n{ref_section}"
+
+            ref_out = self._call_tool(
+                session,
+                "find_referencing_symbols",
+                {
+                    "name_path": first.get("name_path") or target,
+                    "relative_path": first.get("relative_path"),
+                },
+                timeout_s,
+            )
+            miss: Missing | None = None
+            if isinstance(ref_out, Missing):
+                miss = ref_out
+            else:
+                ref_text = self._extract_text(ref_out.value)
+                if ref_text is None:
+                    # `_extract_text` returns None for an error payload — and it has already
+                    # recorded the backend's own message. That is a failure, not an empty answer.
+                    miss = Missing("backend-error",
+                                   self._last_backend_error
+                                   or "the language server returned an error for this lookup")
+                else:
+                    parsed = self._loads(ref_text)
+                    if parsed is None:
+                        miss = Missing("unparsable",
+                                       "the reference list could not be read from the backend's reply")
+
+            if miss is not None:
+                self._add_gap("references", miss)
+                retry = " Re-ask in a few seconds." if miss.retry_after_s else ""
+                ref_section = f"## References — not retrieved\n> {miss.describe()}.{retry}"
+            else:
+                ref_lines = self._format_refs(parsed)
                 if ref_lines:
                     ref_section = f"## References ({len(ref_lines)})\n" + "\n".join(ref_lines)
+                else:
+                    # Asked, answered, genuinely nothing. Distinct wording from the branch above
+                    # so the two states are distinguishable in the body text as well as in `gaps`.
+                    ref_section = ("## References (0)\n"
+                                   "(the language server reports no references to this symbol)")
 
             return f"{def_section}\n\n{ref_section}"
-        except Exception:
+        except Exception as exc:
+            log_swallowed("LspProvider._op_symbol", exc)
             return None
 
     def _op_overview(
         self, session: _LspSession, target: str, root: str, timeout_s: float
     ) -> str | None:
         try:
-            raw = self._call_tool(
+            out = self._call_tool(
                 session,
                 "get_symbols_overview",
                 {"relative_path": target or ""},
                 timeout_s,
             )
-            text = self._extract_text(raw)
+            if isinstance(out, Missing):
+                self._last_backend_error = out.describe()
+                return None
+            text = self._extract_text(out.value)
             if not text:
                 return None
             parsed = self._loads(text)

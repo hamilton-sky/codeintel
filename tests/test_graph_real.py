@@ -322,6 +322,10 @@ def _capturing_provider(monkeypatch, method_response):
         if method == "list_projects":
             return CAP_LIST_PROJECTS
         seen["method"], seen["payload"], seen["timeout"] = method, payload, timeout_ms
+        # An op may legitimately issue more than one backend call (hotspots asks for Function and
+        # Method nodes separately). `seen` keeps the last for the existing single-call assertions;
+        # `calls` keeps them all, for assertions about the set.
+        seen.setdefault("calls", []).append({"method": method, "payload": payload})
         return method_response
     monkeypatch.setattr(p, "_run", _cap)
     return p, seen
@@ -400,6 +404,7 @@ def test_changed_payload_ignores_target_and_raises_timeout_floor(monkeypatch):
 
 
 def test_deadcode_filters_tests_and_synthetic(monkeypatch):
+    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_DEADCODE})
     r = p.build_result("deadcode", "", [], 0, ROOT)
     assert r["result"] is not None
@@ -408,6 +413,7 @@ def test_deadcode_filters_tests_and_synthetic(monkeypatch):
 
 
 def test_deadcode_all_filtered_is_informative(monkeypatch):
+    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     only_tests = {"total": 1, "results": [CAP_DEADCODE["results"][0]]}  # just test_x
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": only_tests})
     r = p.build_result("deadcode", "", [], 0, ROOT)
@@ -421,6 +427,7 @@ def test_deadcode_malformed_is_safe_null(monkeypatch):
 
 
 def test_deadcode_payload_has_degree_filters(monkeypatch):
+    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     p, seen = _capturing_provider(monkeypatch, CAP_DEADCODE)
     p.build_result("deadcode", "", [], 0, ROOT)
     assert seen["payload"].get("max_degree") == 0
@@ -429,6 +436,7 @@ def test_deadcode_payload_has_degree_filters(monkeypatch):
 
 
 def test_hotspots_sorts_by_complexity_client_side(monkeypatch):
+    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_HOTSPOTS})
     r = p.build_result("hotspots", "", [], 0, ROOT)
     assert r["result"] is not None
@@ -439,10 +447,18 @@ def test_hotspots_sorts_by_complexity_client_side(monkeypatch):
 
 
 def test_hotspots_payload_has_min_degree(monkeypatch):
+    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     p, seen = _capturing_provider(monkeypatch, CAP_HOTSPOTS)
     p.build_result("hotspots", "", [], 0, ROOT)
     assert seen["payload"].get("min_degree") is not None
-    assert seen["payload"].get("label") == "Function"
+    # Both node labels must be requested. Asking only for `Function` made every class method
+    # invisible to this op — on one evaluated repo that hid 2,381 symbols — and a ranking that
+    # cannot see methods reads exactly like a ranking that considered them.
+    labels = {c["payload"].get("label") for c in seen["calls"]}
+    assert labels == {"Function", "Method"}
+    # The candidate set must be big enough that the client-side sort is ranking, not sampling: the
+    # backend returns rows in NAME order, so a small cap makes "top hotspots" an alphabetical slice.
+    assert seen["payload"].get("limit", 0) >= 1000
 
 
 def test_chain_carries_risk_labels(monkeypatch):

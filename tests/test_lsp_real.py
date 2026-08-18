@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from codeintel.outcome import Missing, Ok
 from codeintel.providers.lsp import LspProvider, _serena_launch_args, _State
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -108,10 +109,10 @@ def test_symbol_two_step_uses_located_relative_path(monkeypatch):
     def _fake_call_tool(sess, tool, args, timeout_s):
         calls.append((tool, args))
         if tool == "find_symbol":
-            return _FakeToolResult(FIND_SYMBOL_JSON)
+            return Ok(_FakeToolResult(FIND_SYMBOL_JSON))
         if tool == "find_referencing_symbols":
-            return _FakeToolResult(FIND_REFS_JSON)
-        return None
+            return Ok(_FakeToolResult(FIND_REFS_JSON))
+        return Missing("backend-error", "unstubbed tool")
 
     monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
 
@@ -132,11 +133,11 @@ def test_symbol_two_step_uses_located_relative_path(monkeypatch):
     assert "project_root" not in fr
 
     # Rendered output carries the real definition + parsed references (with line numbers).
-    assert "**Function** — src/codeintel/provider.py:30-45" in body
+    assert "**Function** — src/codeintel/provider.py:31-46" in body   # 1-based: serena reports 30
     assert "def safe_null_result" in body
     assert "## References (3)" in body
-    assert "src/codeintel/gateway.py:7" in body      # line parsed from content_around_reference
-    assert "src/codeintel/server.py:72" in body
+    assert "src/codeintel/gateway.py:8" in body      # serena marks line 7 (0-based) -> 8
+    assert "src/codeintel/server.py:73" in body
 
 
 def test_context_aliases_to_symbol(monkeypatch):
@@ -147,10 +148,10 @@ def test_context_aliases_to_symbol(monkeypatch):
 
     def _fake_call_tool(sess, tool, args, timeout_s):
         if tool == "find_symbol":
-            return _FakeToolResult(FIND_SYMBOL_JSON)
+            return Ok(_FakeToolResult(FIND_SYMBOL_JSON))
         if tool == "find_referencing_symbols":
-            return _FakeToolResult(FIND_REFS_JSON)
-        return None
+            return Ok(_FakeToolResult(FIND_REFS_JSON))
+        return Missing("backend-error", "unstubbed tool")
 
     monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
     r = p.build_result("context", "safe_null_result", [], 0, "/repo")
@@ -166,14 +167,18 @@ def test_symbol_definition_only_when_no_references(monkeypatch):
 
     def _fake_call_tool(sess, tool, args, timeout_s):
         if tool == "find_symbol":
-            return _FakeToolResult(FIND_SYMBOL_JSON)
-        return _FakeToolResult("{}")  # no referencing symbols
+            return Ok(_FakeToolResult(FIND_SYMBOL_JSON))
+        return Ok(_FakeToolResult("{}"))  # no referencing symbols
 
     monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
     r = p.build_result("symbol", "safe_null_result", [], 0, "/repo")
     assert r["result"] is not None
     assert "**Function**" in r["result"]
-    assert "## References" in r["result"]  # section present, empty
+    # Asked, answered, genuinely nothing — which must stay expressible and must NOT be a gap.
+    assert "## References (0)" in r["result"]
+    assert "not retrieved" not in r["result"]
+    assert not r.get("gaps")
+    assert r.get("confidence") == "complete"
 
 
 # --------------------------------------------------------------------------- #
@@ -190,8 +195,8 @@ def test_overview_parses_symbols_overview(monkeypatch):
     def _fake_call_tool(sess, tool, args, timeout_s):
         seen[tool] = args
         if tool == "get_symbols_overview":
-            return _FakeToolResult(OVERVIEW_JSON)
-        return None
+            return Ok(_FakeToolResult(OVERVIEW_JSON))
+        return Missing("backend-error", "unstubbed tool")
 
     monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
     r = p.build_result("overview", "src/codeintel/provider.py", [], 0, "/repo")
@@ -242,7 +247,7 @@ def test_symbol_tool_returns_none_degrades(monkeypatch):
     monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/repo"] = _ready_session()
-    monkeypatch.setattr(p, "_call_tool", lambda *a, **k: None)  # every tool call fails
+    monkeypatch.setattr(p, "_call_tool", lambda *a, **k: Missing("backend-error", "every tool call fails"))
     r = p.build_result("symbol", "safe_null_result", [], 0, "/repo")
     assert r["ok"] is True
     # This used to render "## Symbol: x\n(not found)" — a claim that the symbol does not exist,

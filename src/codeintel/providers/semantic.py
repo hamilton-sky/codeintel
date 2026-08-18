@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 import pathlib
 
-from codeintel.provider import Result, log_swallowed, safe_null_result
+from codeintel.loc import loc
+from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 
 try:
     import fastembed  # noqa: F401
@@ -166,7 +167,11 @@ class SemanticProvider:
             if not matches:
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")
 
-            lines = [f"{m['path']}:{m['line']} | {_first_meaningful_line(m['snippet'])}"
+            # `m['line']` is the chunk's `chunk_start`, which is 0-based by construction in the
+            # indexer (`start0 = max(0, start - 1)`). Emitting it raw put every semantic hit one
+            # line above the truth and rendered anything at the top of a file as `path:0` — a line
+            # number that does not exist. `loc()` owns the conversion for every engine.
+            lines = [f"{loc(m['path'], m['line'])} | {_first_meaningful_line(m['snippet'])}"
                      for m in matches]
             result: Result = {
                 "ok": True,
@@ -176,7 +181,11 @@ class SemanticProvider:
                 "engine": "semantic",
                 "cached": False,
             }
-            return result
+            # No gaps modelled here YET — the known one is the code/prose corpus mix, which needs
+            # the index split before it can be reported honestly rather than guessed at. Stamped
+            # `complete` regardless, because an ABSENT confidence is the ambiguity this field exists
+            # to remove: a caller must never have to wonder whether the engine simply does not say.
+            return attach_confidence(result)
         except Exception as exc:
             log_swallowed("SemanticProvider.build_result", exc)
             return safe_null_result(op, target, engine="semantic", reason="provider-error")

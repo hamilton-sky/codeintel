@@ -111,6 +111,54 @@ def _reset_all(path: str, apply: bool) -> dict:
             "applied": bool(apply), "detail": detail}
 
 
+def _graph_cache_dir() -> str:
+    """Where codebase-memory-mcp keeps one sqlite file per indexed project.
+
+    codeintel does not own this directory, which is exactly why `reset --all` never touched it —
+    and why "start from a clean index" was not true for the graph engine. Honouring the backend's
+    own override so a relocated cache is still cleared."""
+    override = os.environ.get("CODEBASE_MEMORY_HOME") or os.environ.get("CODEBASE_MEMORY_CACHE_DIR")
+    if override:
+        return os.path.expanduser(override)
+    return os.path.join(os.path.expanduser("~"), ".cache", "codebase-memory-mcp")
+
+
+def _reset_graph_cache(apply: bool) -> dict:
+    """Remove every per-project graph index (and the `.corrupt` files left behind by torn writes).
+
+    Deliberately leaves `_config.db` alone: that is registration/config, not an index, and removing
+    it is a different and more destructive operation than "clear the indexes"."""
+    directory = _graph_cache_dir()
+    count = 0
+    corrupt = 0
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return {"count": 0, "corrupt": 0}
+    except Exception as exc:
+        return {"count": 0, "corrupt": 0, "unreachable": type(exc).__name__}
+
+    for name in names:
+        if name == "_config.db" or name.startswith("_config.db-"):
+            continue
+        if not (".db" in name):
+            continue
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        if name.endswith(".corrupt"):
+            corrupt += 1
+        if apply:
+            try:
+                os.remove(path)
+                count += 1
+            except Exception:
+                pass
+        else:
+            count += 1
+    return {"count": count, "corrupt": corrupt}
+
+
 def _looks_unreadable(exc: Exception) -> bool:
     """Whether *exc* means "this file is not a usable sqlite cache" (as opposed to e.g. a lock)."""
     text = f"{type(exc).__name__}: {exc}".lower()
@@ -153,9 +201,22 @@ def run_reset(
         files = _cache_files() or [default_db_path()]
         if all_projects:
             count = sum(_reset_all(p, apply)["count"] for p in files)
+            graph = _reset_graph_cache(apply)
             verb = "removed" if apply else "would remove"
-            return {"ok": True, "mode": "all", "target": "ALL", "count": count,
-                    "applied": bool(apply), "detail": f"{verb} {count} index file(s) across all models"}
+            detail = f"{verb} {count} semantic index file(s) across all models"
+            # `--all` used to mean "all SEMANTIC models", which is not what it says and not what a
+            # caller told to "start from a clean index" would assume. It left every graph project
+            # in place — including, on the evaluated machine, an index of the PARENT directory of
+            # every repository, which is what a later query silently fell back to. Say what was
+            # actually cleared, and clear the graph too.
+            detail += f"; {verb} {graph['count']} graph project file(s)"
+            if graph.get("corrupt"):
+                detail += f" (including {graph['corrupt']} previously-corrupt file(s))"
+            if graph.get("unreachable"):
+                detail += (f"\nnote: the graph cache directory could not be read "
+                           f"({graph['unreachable']}) — graph projects were NOT cleared")
+            return {"ok": True, "mode": "all", "target": "ALL", "count": count + graph["count"],
+                    "applied": bool(apply), "detail": detail}
         real = os.path.realpath(str(project_root))
         results = [_reset_scoped(project_root, p, apply) for p in files]
         count = sum(r["count"] for r in results)

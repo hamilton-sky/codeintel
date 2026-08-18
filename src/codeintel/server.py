@@ -17,7 +17,7 @@ from codeintel.reindexer import Reindexer
 _REINDEXER = Reindexer()
 
 
-def _build_gateway() -> Gateway:
+def _build_gateway(oneshot: bool = False) -> Gateway:
     graph = None
     lsp = None
     try:
@@ -42,7 +42,8 @@ def _build_gateway() -> Gateway:
         policy = auth.build_policy() if auth.enabled else TieringPolicy(enabled=False)
     except Exception:
         policy = TieringPolicy(enabled=False)
-    return Gateway(graph=graph, lsp=lsp, semantic=semantic, policy=policy, reindexer=_REINDEXER)
+    return Gateway(graph=graph, lsp=lsp, semantic=semantic, policy=policy, reindexer=_REINDEXER,
+                   oneshot=oneshot)
 
 
 _GATEWAY: Gateway | None = None
@@ -315,14 +316,18 @@ _MCP_INSTRUCTIONS = (
     "(callees), impact of a change, where-a-symbol-is-defined, how a call chain flows, and "
     "natural-language 'find the code that does Y' search. It is graph-augmented and ranked, so it "
     "beats raw grep for locating and relating code.\n\n"
-    "Before you edit, run `changed` to see which symbols your uncommitted edits ripple into; reach "
-    "for `hotspots` (complexity/fan-in risk) and `deadcode` when planning a refactor.\n\n"
+    "Before you edit, run `changed` to see which symbols your uncommitted edits ripple into; "
+    "reach for `hotspots` (complexity/fan-in risk) when planning a refactor.\n\n"
     "Orient on a new repo with `code.map` (ranked architecture: top symbols, entry points, routes). "
     "If results look empty, call `code.doctor` — it says exactly what to index or install. "
     "`code.status` reports engine health.\n\n"
     "Every result is a safe envelope: `ok` is always true; a null `result` with a `reason` means "
     "'nothing found / not indexed yet', NOT an error — read the `reason`/`hint` and, if it says the "
-    "repo isn't indexed, that resolves on the first query or via `codeintel index`."
+    "repo isn't indexed, that resolves on the first query or via `codeintel index`.\n\n"
+    "A NON-null `result` is not a promise that the answer is whole. Check `confidence`: when it is "
+    "`partial`, a named part of the answer could not be retrieved — `gaps` says which section and "
+    "why, and the body text says so too. Treat a partial reference list as 'unknown', never as "
+    "'none': the difference decides whether deleting or changing a symbol is safe."
 )
 
 
@@ -362,9 +367,10 @@ def run() -> None:
         "`symbol` (definition/signature), `callers`, `callees`, `impact`, `chain` (\"A->B\" call "
         "path, risk-labeled), `pattern` (graph-augmented grep), `overview` (architecture), "
         "`context` (fan-out), `changed` (impact of your uncommitted git edits — no target needed), "
-        "`deadcode` (unreferenced non-test symbols), `hotspots` (highest fan-in/complexity symbols). "
+        "`hotspots` (highest fan-in/complexity symbols). "
         "`target` is the symbol/query; optional `engine` (auto|graph|lsp|semantic), `project_root`. "
-        "Never raises: `ok` is always true; a null `result` + `reason` means not-found/not-indexed."
+        "Never raises: `ok` is always true; a null `result` + `reason` means not-found/not-indexed. "
+        "A non-null `result` may still be incomplete — check `confidence`/`gaps`."
     ))
     mcp.add_tool(_code_status, name="code.status", description=(
         "Which engines (graph/LSP/semantic) are available and whether this repo is indexed. Check "

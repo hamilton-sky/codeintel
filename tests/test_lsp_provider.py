@@ -6,6 +6,7 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
+from codeintel.outcome import Missing, Ok
 from codeintel.providers.lsp import LspProvider, _State
 from codeintel.server import code_status_handler
 
@@ -133,10 +134,10 @@ def test_lsp_provider_ready_symbol(monkeypatch):
 
     def _fake_call_tool(session, tool, args, timeout_s):
         if tool == "find_symbol":
-            return "def parse_result(x): ..."
+            return Ok("def parse_result(x): ...")
         if tool == "find_referencing_symbols":
-            return "main.py:10"
-        return None
+            return Ok("main.py:10")
+        return Missing("backend-error", "unstubbed tool")
 
     monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
     monkeypatch.setattr(p, "_extract_text", lambda raw: raw if isinstance(raw, str) else None)
@@ -242,7 +243,7 @@ def _provider_returning(raw):
         _lock = _th.Lock()
 
     p._get_or_create_session = lambda root: _ReadySession()        # type: ignore[method-assign]
-    p._call_tool = lambda *a, **k: raw                             # type: ignore[method-assign]
+    p._call_tool = lambda *a, **k: Ok(raw)                         # type: ignore[method-assign]
     return p
 
 

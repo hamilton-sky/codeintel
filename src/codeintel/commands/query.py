@@ -12,6 +12,15 @@ from codeintel.provider import Result, safe_null_result
 # and reporting whatever the gateway last said.
 _WARMING_TIMEOUT_S = 45.0
 
+# Per-query time budget, in milliseconds, handed to whichever engine answers.
+#
+# This used to be omitted entirely, so every engine fell back to its own default — 5s for the LSP
+# provider — against a cold first `symbol` query measured at 11.65s on a real 841-file TypeScript
+# repo. The call timed out, the reference lookup came back empty, and the empty list was rendered
+# as "(none)": a confident false answer produced by a missing argument. A CLI invocation is a
+# human or an agent waiting on one question; it can afford to wait properly.
+_CLI_BUDGET_MS = 30_000
+
 
 def run(args: Any) -> int:
     """`--json` promises parseable stdout, so its failures must be JSON too.
@@ -55,7 +64,9 @@ def _query(args: Any) -> Result:
 
     project_root = resolve_root(args)
     engine = args.engine if args.engine != "auto" else None
-    gw = server._build_gateway()
+    # oneshot: this process exits when the query returns, so it must not start a background
+    # reindex it cannot finish (and must not then report that reindex as staleness).
+    gw = server._build_gateway(oneshot=True)
 
     def _run_query() -> Result:
         return gw.query(
@@ -63,6 +74,7 @@ def _query(args: Any) -> Result:
             target=args.target,
             engine=engine,
             role="",
+            budget=_CLI_BUDGET_MS,
             project_root=project_root,
         )
 

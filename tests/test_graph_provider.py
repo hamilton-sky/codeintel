@@ -694,7 +694,7 @@ def test_symbol_scoped_ops_still_answer_from_an_ancestor_but_say_so(op):
     assert "codeintel index /repos/my-app" in res["result"]
 
 
-@pytest.mark.parametrize("op", ["deadcode", "callers"])
+@pytest.mark.parametrize("op", ["overview", "callers"])
 def test_an_exact_match_is_never_caveated_or_refused(op):
     """The guard must not fire on a correctly-indexed repo — that would make every ordinary answer
     carry a scope warning, which trains the reader to ignore it."""

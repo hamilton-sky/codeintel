@@ -399,10 +399,11 @@ def test_cache_get_and_put_always_use_the_same_key():
 
     from codeintel.gateway import Gateway
 
-    source = inspect.getsource(Gateway.query)
+    # `query` is a thin redaction wrapper; the dispatch body (and so the cache) lives in `_query`.
+    source = inspect.getsource(Gateway._query)
     gets = re.findall(r"_cache\.get\(\s*([^)]*)\)", source)
     puts = re.findall(r"_cache\.put\(\s*([^)]*)\)", source)
-    assert gets and puts, "cache call sites not found — did query() get restructured?"
+    assert gets and puts, "cache call sites not found — did the query body get restructured?"
 
     def engine_arg(call: str) -> str:
         return [a.strip() for a in call.split(",")][2]

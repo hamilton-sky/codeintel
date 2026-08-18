@@ -8,6 +8,7 @@ from codeintel.cache import ContentHashCache
 from codeintel.policy import TieringPolicy
 from codeintel.provider import Result, log_swallowed, safe_null_result
 from codeintel.providers.none import NoneProvider
+from codeintel.redact import redact
 from codeintel.reindexer import Reindexer
 
 _KNOWN_ENGINES: frozenset[str] = frozenset({"graph", "lsp", "semantic", "auto", "both", "all"})
@@ -51,7 +52,17 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
 
 class Gateway:
     def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None,
-                 reindexer: Reindexer | None = None):
+                 reindexer: Reindexer | None = None, oneshot: bool = False):
+        # A one-shot process (the `codeintel` CLI) must not run the long-lived server's background
+        # machinery. It used to: every query called `maybe_reindex`, which in a fresh process always
+        # passed the debounce (`_last_fired` starts empty) and submitted a pass to a DAEMON pool —
+        # then the same query asked `reindex_pending` ten lines later and was told "yes", by itself.
+        # That is why `reindexing: true` accompanied literally every answer this tool has ever
+        # produced, and why the tree was re-walked on every query. Worse, a daemon thread is killed
+        # wherever it happens to be when the process exits, so those passes never completed and wrote
+        # torn state on the way out — the most plausible source of the `.corrupt` index files found
+        # in the cache. A process that cannot finish a reindex must not start one.
+        self._oneshot = bool(oneshot)
         # Backward-compat: old tests pass a list as the first positional arg.
         if isinstance(graph, list):
             self._legacy_providers: list | None = graph
@@ -236,6 +247,28 @@ class Gateway:
         budget=None,
         project_root=None,
     ) -> Result:
+        """Answer one question. Never raises.
+
+        A thin wrapper over `_query`, existing so that redaction has exactly ONE seam to cover.
+        Every leak found in the evaluation was in a field some renderer built and no one swept —
+        the scope note inside `result`, the "index it standalone with:" command inside `hint`. Both
+        are downstream of here, and so is anything added later."""
+        result = self._query(op, target, engine, role, budget, project_root)
+        try:
+            return redact(result)  # type: ignore[return-value]
+        except Exception as exc:
+            log_swallowed("Gateway.query.redact", exc)
+            return result
+
+    def _query(
+        self,
+        op=None,
+        target=None,
+        engine=None,
+        role: str = "",
+        budget=None,
+        project_root=None,
+    ) -> Result:
         try:
             op_str = str(op or "")
             target_str = str(target or "")
@@ -258,20 +291,28 @@ class Gateway:
                                             hint="this token's role is not scoped to that "
                                                  "project_root (see the [roots] table in auth.toml)")
 
-            try:
-                self._reindexer.maybe_reindex(str(project_root or ""))
-            except Exception:
-                pass
+            if not self._oneshot:
+                try:
+                    self._reindexer.maybe_reindex(str(project_root or ""))
+                except Exception:
+                    pass
 
             # If a reindex is running, this answer comes from the PREVIOUS index. Structural
             # answers (callers/impact/hotspots) hash a symbol name, not file bytes, so nothing
             # else in the envelope can reveal that — and an agent that just edited and asked
             # "what did I break?" lands precisely here. Busting the cache would not help: the
             # index itself is behind, so re-asking refetches the same stale data.
-            try:
-                reindexing = self._reindexer.reindex_pending(str(project_root or ""))
-            except Exception:
+            # In one-shot mode this is always False and the flag is simply never emitted: no
+            # reindex was started, so there is nothing for the answer to be behind. In server mode
+            # the flag now means what it always claimed to — a pass this process did not start is
+            # genuinely still running — which is why it is fixed at the cause rather than deleted.
+            if self._oneshot:
                 reindexing = False
+            else:
+                try:
+                    reindexing = self._reindexer.reindex_pending(str(project_root or ""))
+                except Exception:
+                    reindexing = False
 
             # Legacy list-based path (backward compat with pre-Phase-2 tests)
             if self._legacy_providers is not None:

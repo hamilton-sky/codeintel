@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from codeintel.provider import Result, log_swallowed, safe_null_result
+from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.source_kind import looks_generated_path, looks_generated_text
 
 
@@ -38,6 +38,40 @@ _GRAPH_OPS = frozenset({
 # subdirectory of a monorepo, an ancestor index is the CORRECT place to find a symbol's callers, so
 # those answer and carry a caveat instead.
 _ROOT_SCOPED_OPS = frozenset({"overview", "changed", "changes", "deadcode", "hotspots"})
+
+# Ops withdrawn from the product because they were measured wrong, not merely imprecise.
+#
+# `deadcode` was wrong in BOTH directions on real repositories: on one it named five candidates of
+# which four were live (a rollup plugin hook; two entries of a `Record<string, fn>` reached by a
+# runtime string; a `predicate` property passed inline to the call that consumes it), and on another
+# it reported "(none found)" for a 4,883-function codebase containing at least three genuinely
+# unreferenced private helpers. It is the one op whose output is an instruction to delete code, so
+# it needs the highest evidence bar and currently has the least. It returns when a labelled corpus
+# measures its precision and recall — not before.
+#
+# `hotspots` was withdrawn alongside it and has since been REINSTATED. Its rankings were 100% `.tsx`
+# on two repositories that are two-thirds Python and backend TypeScript, caused by two request bugs
+# rather than by a missing metric: it asked only for `Function` nodes (so every class method was
+# invisible — 2,381 of them on one repo) and capped candidates at 200 rows returned in NAME order,
+# making the client-side sort rank an alphabetical 4% slice. Both are fixed, and the fix is measured:
+# `test_hotspots_ranks_across_languages` pins the mixed-language behaviour, and re-running the two
+# evaluation repositories now yields 11 `.py` / 12 `.tsx` / 2 `.ts` and 18 `.ts` / 7 `.tsx` with the
+# gnarliest Python and backend functions at the top. A ranking that cannot see a language now says
+# so via `_language_coverage_note` instead of reading like a result.
+_WITHDRAWN_OPS: dict[str, str] = {
+    "deadcode": (
+        "`deadcode` is withdrawn: it was measured producing both false positives (framework-"
+        "dispatched symbols reported as dead) and false negatives (unreferenced helpers missed), "
+        "and its output invites deletion. Use `callers` on a specific symbol instead — that is "
+        "verified accurate. Set CODEINTEL_ENABLE_UNVERIFIED_OPS=1 to run it anyway."
+    ),
+}
+
+
+def _unverified_ops_enabled() -> bool:
+    return os.environ.get("CODEINTEL_ENABLE_UNVERIFIED_OPS", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
 
 
 # Trailing segments that mean "this is a filename, not a dotted module path".
@@ -282,6 +316,92 @@ _INCOMPATIBLE_HINT = (
     "binary: re-install the 0.9.x build) or check for a newer "
     "codeintel. This is NOT a statement about whether your repository is indexed."
 )
+
+
+# File extensions grouped by the language they belong to. A call edge cannot cross these groups
+# without an explicit FFI/IPC mechanism, and the extractor emits no such edge type — so a callee in
+# another group is a name collision, not a call.
+_LANG_FAMILIES: dict[str, str] = {
+    ".py": "python", ".pyi": "python", ".pyx": "python",
+    ".ts": "ts-js", ".tsx": "ts-js", ".mts": "ts-js", ".cts": "ts-js",
+    ".js": "ts-js", ".jsx": "ts-js", ".mjs": "ts-js", ".cjs": "ts-js",
+    ".go": "go", ".rs": "rust", ".rb": "ruby", ".php": "php",
+    ".java": "jvm", ".kt": "jvm", ".scala": "jvm",
+    ".c": "c-cpp", ".h": "c-cpp", ".cc": "c-cpp", ".cpp": "c-cpp", ".hpp": "c-cpp",
+    ".cs": "dotnet", ".swift": "swift", ".sh": "shell", ".bash": "shell",
+}
+
+
+# Extensions that cannot contain a callable symbol. Deliberately an ALLOW-list of things to drop
+# rather than a deny-list of things to keep: an unrecognised extension might be a language we have
+# not enumerated, and silently dropping real callees would trade a visible bug for an invisible
+# one. Synthetic nodes with no path (`builtins.str`) are likewise kept — they are not collisions.
+_NON_CODE_EXTS = frozenset({
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties",
+    ".md", ".mdx", ".rst", ".txt", ".csv", ".tsv", ".lock", ".log",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".pdf",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+})
+
+
+def _lang_family(path: str) -> str:
+    """The language family of a file, or "" when it is unknown or the path is empty."""
+    if not path:
+        return ""
+    return _LANG_FAMILIES.get(os.path.splitext(path)[1].lower(), "")
+
+
+def _is_non_code(path: str) -> bool:
+    """Whether a path is a file that cannot define a callable symbol.
+
+    The evaluation found `pathly/features/.archive/…/RUNNER_STATE.json` reported as a callee of a
+    Python function, reached because the extractor matched a bare parameter name. A JSON file has
+    no callees to be."""
+    if not path:
+        return False
+    return os.path.splitext(path)[1].lower() in _NON_CODE_EXTS
+
+
+def _language_coverage_note(rows: list[dict]) -> str:
+    """Warn when a ranking is dominated by one file type.
+
+    A "where is my complexity?" answer that is 100% `.tsx` on a repo that is two-thirds Python is
+    not a ranking, it is a coverage failure — and it reads identically to a real result. Both repos
+    in the 2026-08-17 evaluation returned exactly that, and nothing in the output said so. This
+    cannot decide whether the cause is a metric the extractor does not compute for a language or a
+    genuine concentration of complexity, so it states the observation and lets the reader judge."""
+    exts: dict[str, int] = {}
+    for r in rows:
+        path = str(r.get("file_path") or "")
+        ext = os.path.splitext(path)[1].lower()
+        if ext:
+            exts[ext] = exts.get(ext, 0) + 1
+    total = sum(exts.values())
+    if total < 5 or len(exts) < 2:
+        # Too few rows, or a genuinely single-language repo — nothing meaningful to compare.
+        if total < 5 or not exts:
+            return ""
+    top_ext, top_n = max(exts.items(), key=lambda kv: kv[1])
+    if top_n / total < 0.9:
+        return ""
+    return (
+        f"\n\n_Coverage: {top_n} of the top {total} ranked symbols are `{top_ext}` files. If this "
+        f"repository has substantial code in other languages, they are absent from this ranking "
+        f"rather than less complex — treat it as covering `{top_ext}` only._"
+    )
+
+
+def _same_path(a: str | None, b: str | None) -> bool:
+    """Whether two paths denote the same directory, after realpath.
+
+    Needed because a registry can hold `/tmp/x` while the caller asks about `/private/tmp/x` (macOS
+    symlinks every `/tmp`), and a string comparison there reports a mismatch that does not exist."""
+    if not a or not b:
+        return False
+    try:
+        return os.path.realpath(str(a)) == os.path.realpath(str(b))
+    except Exception:
+        return str(a) == str(b)
 
 
 @dataclass(frozen=True)
@@ -696,6 +816,29 @@ class GraphProvider:
     # build_result, where the never-raise handler turns it into a generic "error" — a fault
     # injected by the fix itself.
     _saw_unparsable: bool = False
+    # The root the ANSWERING project is registered under, recorded per query so a renderer can
+    # check what it is about to attribute. Class-level default for the same __new__ reason.
+    _answered_root: str | None = None
+    # Parts of this answer known to be short of an answer. Graph has two real cases: a symbol-scoped
+    # answer served from a CONTAINING project, and callee rows dropped as name collisions.
+    _pending_gaps: tuple[dict[str, Any], ...] = ()
+
+    def _add_gap(self, section: str, kind: str, detail: str) -> None:
+        self._pending_gaps = (*self._pending_gaps, {
+            "section": section, "kind": kind, "detail": detail,
+        })
+
+    def _answered_root_mismatch(self, asked_root: str) -> bool:
+        """Whether this answer is about a tree other than the one the caller asked about.
+
+        A check on the resolved DATA rather than on the registry's claim. Resolution can legitimately
+        report an exact match while the backend answers from elsewhere — removing a project's index
+        file does not deregister it — so a renderer that wants to name the repo has to ask this
+        first. Returns False when the answering root is unknown, because an unverifiable mismatch is
+        not evidence of one."""
+        if not self._answered_root or not asked_root:
+            return False
+        return not _same_path(self._answered_root, asked_root)
 
     @classmethod
     def _reset_wire_format_cache(cls) -> None:
@@ -868,15 +1011,62 @@ class GraphProvider:
         return f"## Callers of {target} ({len(lines)})\n" + "\n".join(lines)
 
     def _op_callees(self, target: str, project: str, timeout_ms: int) -> str | None:
+        """What *target* calls or uses.
+
+        This keys on the UNQUALIFIED name, which is the honest limitation of the traversal: every
+        node named `write_board_mirror` matches, and so do the edges out of all of them. Worse, the
+        extractor emits edges for bare local names, so a function whose body says `f.write(...)`,
+        `conn`, `tmp_path` or `snapshot` acquires edges to whatever else in the repository happens
+        to carry those names. On one evaluated symbol that produced five wrong rows out of seven —
+        including a TypeScript function in an Electron preload reached from a Python file-writer,
+        and a JSON file inside an `.archive/` directory reported as a callee.
+
+        Two of those three causes are upstream in the extractor and can only be filtered here. This
+        does filter them: a callee in a different language family than the caller, or in a file that
+        is not code at all, is not a callee — it is a name collision, and dropping it costs nothing
+        real. What survives is marked so the caller knows the resolution is name-based.
+        """
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(target)}" '
-            "RETURN b.name, b.qualified_name, b.file_path, type(c) LIMIT 50"
+            "RETURN b.name, b.qualified_name, b.file_path, type(c), a.file_path LIMIT 50"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
             return None
-        lines = [self._display(r, "b.name", "b.qualified_name", "b.file_path") for r in rows]
-        return f"## Callees of {target} ({len(lines)})\n" + "\n".join(lines)
+
+        caller_families = {
+            _lang_family(str(r.get("a.file_path") or "")) for r in rows
+        } - {""}
+
+        kept: list[dict] = []
+        dropped = 0
+        for r in rows:
+            path = str(r.get("b.file_path") or "")
+            if _is_non_code(path):
+                dropped += 1          # a data/doc file cannot be a callee
+                continue
+            fam = _lang_family(path)
+            if fam and caller_families and fam not in caller_families:
+                dropped += 1          # cross-language name collision
+                continue
+            kept.append(r)
+
+        if not kept:
+            return None
+        lines = [self._display(r, "b.name", "b.qualified_name", "b.file_path") for r in kept]
+        out = f"## Callees of {target} ({len(lines)})\n" + "\n".join(lines)
+        note = ("\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
+                "repository is called `%s`, their callees are merged here. Verify before relying "
+                "on a row you did not expect._" % target)
+        if dropped:
+            self._add_gap(
+                "callees", "name-collisions-dropped",
+                f"{dropped} row(s) were dropped as name collisions (a different language, or a "
+                f"non-code file, than the caller); resolution is by symbol name, not by type",
+            )
+            note = (f"\n\n_{dropped} row(s) dropped as name collisions (a different language, or a "
+                    f"non-code file, than the caller)._" + note)
+        return out + note
 
     def _op_impact(self, target: str, project: str, timeout_ms: int) -> str | None:
         callers = self._op_callers(target, project, timeout_ms)
@@ -971,9 +1161,23 @@ class GraphProvider:
             # flattened absolute path (`Users-alice-Documents-project-myrepo`), and this heading
             # lands in CODE_INTEL.md — a file that gets committed and pushed, so an internal
             # identifier there leaks the author's home directory layout into the repository.
-            name = _repo_display_name(root)
+            #
+            # But naming the CALLER's directory unconditionally made the presentation layer assert
+            # a provenance the data layer never established. With a project's index file removed
+            # from under it, the backend answered from a different tree and this heading still read
+            # `## Architecture: <the caller's repo>` — wrong numbers, confidently attributed. Claim the
+            # repo's name only when the resolved project actually matched THIS root; otherwise say
+            # what the answer is really about.
+            answered_elsewhere = self._answered_root_mismatch(root)
+            name = "" if answered_elsewhere else _repo_display_name(root)
             name = name or str(raw.get("project") or project)
             parts = [f"## Architecture: {name}"]
+            if answered_elsewhere:
+                parts.append(
+                    "> Provenance: this answer comes from the indexed project that contains "
+                    "the directory you asked about, so the counts below describe a different "
+                    "tree. Index it standalone for an answer scoped to it."
+                )
             tn, te = raw.get("total_nodes"), raw.get("total_edges")
             if tn is not None or te is not None:
                 parts.append(f"{tn or 0} nodes, {te or 0} edges")
@@ -1109,17 +1313,37 @@ class GraphProvider:
     def _op_hotspots(self, project: str, timeout_ms: int) -> str | None:
         """Highest complexity / fan-in symbols (refactor-risk hotspots). search_graph returns rows
         UNSORTED (name order) and caps at ``limit``, so we over-request then sort CLIENT-SIDE by
-        (complexity, in_degree). Tests/builtins filtered out."""
+        (complexity, in_degree). Tests/builtins filtered out.
+
+        Two things were wrong with the request itself, and together they made this op report the
+        UI layer of every repo it was pointed at:
+
+        - It asked for ``label: "Function"`` only. A class method is a ``Method`` node, so every
+          Python method and every TypeScript class method was invisible to it — on one evaluated
+          repo that hid 2,381 symbols behind 1,343 that were considered.
+        - It capped at 200 rows and then sorted those. The backend returns rows in NAME order, so
+          that is an arbitrary alphabetical slice, not the 200 most complex — the client-side sort
+          could only ever rank what the truncation happened to admit. On a 4,883-function repo the
+          sample was 4% of the candidates and the "top hotspots" were the top of that 4%.
+        """
         try:
-            rows = self._search_symbols(
-                {"label": "Function", "min_degree": 1, "limit": 200}, project, timeout_ms,
-            )
-            if rows is None:
+            rows: list[dict] = []
+            saw_any = False
+            for label in ("Function", "Method"):
+                got = self._search_symbols(
+                    {"label": label, "min_degree": 1, "limit": 2000}, project, timeout_ms,
+                )
+                if got is None:
+                    continue
+                saw_any = True
+                rows.extend(got)
+            if not saw_any:
                 return None
             kept = [r for r in rows if not self._is_noise(r)]
             if not kept:
                 return "## Complexity / fan-in hotspots\n(none found)"
             kept.sort(key=lambda r: (r.get("complexity") or 0, r.get("in_degree") or 0), reverse=True)
+            coverage = _language_coverage_note(kept[:30])
 
             def _meta(r: dict) -> list[str]:
                 m = [f"in:{r.get('in_degree') or 0} out:{r.get('out_degree') or 0}",
@@ -1128,7 +1352,7 @@ class GraphProvider:
                     m.append(f"{r.get('lines')} lines")
                 return m
 
-            return self._render_scan(kept, "Complexity / fan-in hotspots", 25, _meta)
+            return self._render_scan(kept, "Complexity / fan-in hotspots", 25, _meta) + coverage
         except Exception:
             return None
 
@@ -1190,7 +1414,19 @@ class GraphProvider:
                          f"Index it standalone with: codeintel index {root_str}",
                 )
 
+            # Checked AFTER the scope gate on purpose: "this repo is not indexed on its own" is the
+            # more specific and more actionable answer, and it stays the one the caller gets.
+            if op_str in _WITHDRAWN_OPS and not _unverified_ops_enabled():
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="op-withdrawn",
+                    hint=_WITHDRAWN_OPS[op_str],
+                )
+
             project = resolution.name
+            # Record what the answer will actually be about, so renderers can check before they
+            # attribute it to the caller's repo.
+            self._answered_root = resolution.matched_root
+            self._pending_gaps = ()
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
             if result_text is None:
                 # A supported op that matched nothing is NOT an unsupported op, and saying so sends
@@ -1220,6 +1456,11 @@ class GraphProvider:
             # agent will not read past the answer. Say it in the result text itself, which is the
             # only channel that reaches the model today.
             if resolution.is_ancestor:
+                self._add_gap(
+                    "scope", "ancestor-scope",
+                    "this repository is not indexed on its own, so the answer comes from the "
+                    "indexed project containing it and may include results from outside it",
+                )
                 result_text = (
                     f"{result_text}\n\n> Scope: `{root_str}` is not indexed on its own — this "
                     f"answer comes from the indexed project that contains it, so it may include "
@@ -1227,14 +1468,14 @@ class GraphProvider:
                     f"`codeintel index {root_str}` for an answer scoped to it."
                 )
 
-            return {
+            return attach_confidence({
                 "ok": True,
                 "op": op_str,
                 "target": target_str,
                 "result": result_text,
                 "engine": "graph",
                 "cached": False,
-            }
+            }, self._pending_gaps)
         except Exception as exc:
             log_swallowed("GraphProvider.build_result", exc)
             return safe_null_result(op, target, engine="graph", reason="error")

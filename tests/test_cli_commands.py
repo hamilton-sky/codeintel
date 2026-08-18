@@ -308,7 +308,7 @@ def _query_args(**kw):
 
 def test_query_prints_the_result(monkeypatch, capsys):
     monkeypatch.setattr("codeintel.server._build_gateway",
-                        lambda: _Gateway([{"result": "## Callers of main (1)"}]))
+                        lambda **_kw: _Gateway([{"result": "## Callers of main (1)"}]))
     assert import_module("codeintel.commands.query").run(_query_args()) == 0
     assert "## Callers of main (1)" in capsys.readouterr().out
 
@@ -322,7 +322,7 @@ def test_query_waits_out_the_lsp_warming_window(monkeypatch, capsys):
         {"result": None, "reason": "warming"},
         {"result": "def main() -> None"},
     ])
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda: gw)
+    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: gw)
     monkeypatch.setattr(query.time, "sleep", lambda _s: None)
 
     assert query.run(_query_args()) == 0
@@ -335,7 +335,7 @@ def test_query_gives_up_when_warming_never_finishes(monkeypatch, capsys):
     query = import_module("codeintel.commands.query")
     clock = iter([0.0] + [float(i) for i in range(200)])
     monkeypatch.setattr("codeintel.server._build_gateway",
-                        lambda: _Gateway([{"result": None, "reason": "warming"}]))
+                        lambda **_kw: _Gateway([{"result": None, "reason": "warming"}]))
     monkeypatch.setattr(query.time, "sleep", lambda _s: None)
     monkeypatch.setattr(query.time, "monotonic", lambda: next(clock))
 
@@ -344,7 +344,7 @@ def test_query_gives_up_when_warming_never_finishes(monkeypatch, capsys):
 
 
 def test_query_surfaces_the_reason_and_hint_when_empty(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda: _Gateway([
+    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Gateway([
         {"result": None, "reason": "not_indexed", "hint": "run `codeintel index`"}]))
 
     assert import_module("codeintel.commands.query").run(_query_args()) == 0
@@ -363,7 +363,7 @@ def test_query_auto_engine_becomes_no_engine_preference(monkeypatch):
             seen.update(kw)
             return {"result": "ok"}
 
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda: _Recorder())
+    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Recorder())
     import_module("codeintel.commands.query").run(_query_args())
     assert seen["engine"] is None
 
@@ -373,7 +373,7 @@ def test_query_auto_engine_becomes_no_engine_preference(monkeypatch):
 
 def test_query_never_raises(monkeypatch, capsys):
     monkeypatch.setattr("codeintel.server._build_gateway",
-                        lambda: (_ for _ in ()).throw(RuntimeError("no graph backend")))
+                        lambda **_kw: (_ for _ in ()).throw(RuntimeError("no graph backend")))
     assert import_module("codeintel.commands.query").run(_query_args()) == 0
     assert "No result (reason: no graph backend)" in capsys.readouterr().out
 
@@ -819,7 +819,7 @@ def test_query_json_emits_the_whole_envelope(monkeypatch, capsys):
     unreachable — documentation describing a workflow the tool did not support."""
     import json as _json
 
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda: _Gateway([{
+    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Gateway([{
         "ok": True, "op": "callers", "target": "f", "result": "## Callers",
         "engine": "graph", "cached": True, "reindexing": True}]))
 
@@ -834,7 +834,7 @@ def test_query_json_emits_the_whole_envelope(monkeypatch, capsys):
 def test_query_without_json_still_prints_only_the_answer(monkeypatch, capsys):
     """The default stays human-facing — an agent host reads the envelope over MCP, not the CLI."""
     monkeypatch.setattr("codeintel.server._build_gateway",
-                        lambda: _Gateway([{"result": "## Callers", "engine": "graph"}]))
+                        lambda **_kw: _Gateway([{"result": "## Callers", "engine": "graph"}]))
 
     import_module("codeintel.commands.query").run(_query_args(json=False))
     out = capsys.readouterr().out
@@ -849,7 +849,7 @@ def test_query_json_stays_parseable_when_the_query_itself_fails(monkeypatch, cap
     import json as _json
 
     monkeypatch.setattr("codeintel.server._build_gateway",
-                        lambda: (_ for _ in ()).throw(RuntimeError("backend exploded")))
+                        lambda **_kw: (_ for _ in ()).throw(RuntimeError("backend exploded")))
 
     assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 0
     payload = _json.loads(capsys.readouterr().out)      # must not raise
