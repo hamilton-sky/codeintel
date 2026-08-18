@@ -9,6 +9,7 @@ from mcp.server.mcpserver.server import MCPServer
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
 from codeintel.provider import Result, safe_null_result
+from codeintel.redact import redact
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider
 from codeintel.providers.semantic import SemanticProvider
@@ -134,7 +135,7 @@ _STATUS_FALLBACK: dict = {
 }
 
 
-def code_status_handler(args: dict) -> dict:
+def _code_status_handler_inner(args: dict) -> dict:
     """Engine readiness for an agent.
 
     Reports the SAME tri-state doctor computes — installed / runnable / repo_indexed — against
@@ -232,7 +233,7 @@ def code_status_handler(args: dict) -> dict:
         return dict(_STATUS_FALLBACK)
 
 
-def code_doctor_handler(args: dict) -> dict:
+def _code_doctor_handler_inner(args: dict) -> dict:
     try:
         from codeintel import doctor as _doctor
 
@@ -273,7 +274,7 @@ def code_doctor_handler(args: dict) -> dict:
         }
 
 
-def code_map_handler(args: dict) -> dict:
+def _code_map_handler_inner(args: dict) -> dict:
     try:
         from codeintel.injector import Injector
         from codeintel.mapper import MapGenerator
@@ -387,3 +388,20 @@ def run() -> None:
     ))
 
     anyio.run(mcp.run_stdio_async)
+
+
+# `redact` was placed on the Gateway.query seam alone, which covered `code.query` and nothing else.
+# These three handlers reach the same callers over the same transports — `code.doctor` was measured
+# emitting nine absolute home paths on a single call — so they route through the same function. One
+# wrapper each, so a handler cannot be added later that quietly bypasses it: see
+# tests/test_incompleteness.py::test_no_mcp_handler_bypasses_redaction, which enumerates them.
+def code_status_handler(args: dict) -> dict:
+    return redact(_code_status_handler_inner(args))  # type: ignore[return-value]
+
+
+def code_doctor_handler(args: dict) -> dict:
+    return redact(_code_doctor_handler_inner(args))  # type: ignore[return-value]
+
+
+def code_map_handler(args: dict) -> dict:
+    return redact(_code_map_handler_inner(args))  # type: ignore[return-value]

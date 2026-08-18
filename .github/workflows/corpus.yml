@@ -51,4 +51,8 @@ jobs:
       - name: Corpus invariants
         env:
           CODEINTEL_CORPUS: "1"
+          # Withdrawn ops are withdrawn from the DEFAULT surface, not from measurement.
+          # Without this the nightly grep-oracle silently skipped `deadcode` — the one op
+          # whose precision has to be measured before it can ever return.
+          CODEINTEL_ENABLE_UNVERIFIED_OPS: "1"
         run: pytest tests/test_corpus.py -v -rs -o addopts=

@@ -6,7 +6,7 @@ from typing import Any
 
 from codeintel.cache import ContentHashCache
 from codeintel.policy import TieringPolicy
-from codeintel.provider import Result, log_swallowed, safe_null_result
+from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.providers.none import NoneProvider
 from codeintel.redact import redact
 from codeintel.reindexer import Reindexer
@@ -190,14 +190,33 @@ class Gateway:
                          if all_unreachable else "")),
             )
 
-        return {
+        # A fan-out answer is only as whole as its parts. This used to hand-build a six-key envelope
+        # and drop both `confidence` and `gaps` on the floor — so a `context` request (the DEFAULT
+        # fan-out op) whose graph half timed out returned the lsp half alone, unqualified, and a
+        # `partial` a provider had explicitly produced was destroyed on the way out. Worse, an engine
+        # that answered NOTHING is silently absent from `parts`: the body simply does not mention it,
+        # which reads as "that engine had nothing to add" rather than "that engine could not be asked".
+        merged_gaps: list[dict] = []
+        for eng, r in results.items():
+            for g in (r.get("gaps") or []):
+                if isinstance(g, dict):
+                    merged_gaps.append({**g, "engine": eng})
+            if r.get("result") is None:
+                merged_gaps.append({
+                    "section": eng,
+                    "kind": str(r.get("reason") or "no-result"),
+                    "detail": f"the {eng} engine contributed nothing to this answer "
+                              f"({r.get('reason') or 'no-result'})",
+                    "engine": eng,
+                })
+        return attach_confidence({
             "ok": True,
             "op": op_str,
             "target": target_str,
             "result": "\n\n".join(parts),
             "engine": engine_str,
             "cached": False,
-        }
+        }, merged_gaps)
 
     def _dispatch_single(
         self,

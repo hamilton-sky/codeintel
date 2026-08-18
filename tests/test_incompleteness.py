@@ -22,6 +22,7 @@ Two tiers here:
 from __future__ import annotations
 
 import inspect
+import pathlib
 
 import pytest
 
@@ -242,31 +243,179 @@ def test_redaction_survives_the_private_prefix():
 
 # --------------------------------------------------------------------------- confidence contract
 
-def test_every_engine_stamps_confidence_on_an_answered_envelope():
-    """`confidence` was introduced on the LSP provider alone, which reproduced in miniature the
-    defect it exists to fix: the MCP instructions tell callers to check a field that two of three
-    engines never set, and an ABSENT field is ambiguous — "complete" and "this engine does not
-    report" look identical. Enumerate the providers so a fourth engine cannot quietly skip it."""
-    import inspect
+def _provider_modules():
+    """Every provider module ON DISK — not a hardcoded list.
 
-    from codeintel import providers
+    The previous version of this guard iterated the literal tuple ("graph", "lsp", "semantic")
+    while its own docstring claimed "a fourth engine cannot skip it". A fourth engine could, and
+    `none.py` already was one. A guard whose domain is typed by hand certifies the sites the last
+    bug was found at, which is exactly the habit that let the same defect reappear three times.
+    """
+    import importlib
+    import codeintel.providers as pkg
+
+    d = pathlib.Path(pkg.__file__).parent
+    names = sorted(f.stem for f in d.glob("*.py") if f.stem != "__init__")
+    return [(n, importlib.import_module(f"codeintel.providers.{n}")) for n in names]
+
+
+def test_every_provider_module_is_discovered_from_disk():
+    """The guard's domain must grow when the package does."""
+    names = [n for n, _ in _provider_modules()]
+    assert set(names) >= {"graph", "lsp", "semantic", "none"}, names
+
+
+def _non_null_envelope_constructors():
+    """Every dict literal in the tree that builds an envelope with a NON-NULL `result`.
+
+    This is the census the fixes kept being written without. `confidence` was invented as an
+    invariant over "answers that have a body", and the population of places that build such an
+    answer is mechanically decidable — so decide it here rather than trusting a hand-typed list
+    that was wrong twice (it missed `gateway._merge`, and it could not see a fourth provider).
+
+    Returns (file, lineno, wrapped_in_attach_confidence) per construction site.
+    """
+    import ast
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "src" / "codeintel"
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        wrapped_lines = set()
+        wrapped_names = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "attach_confidence"):
+                continue
+            for sub in ast.walk(node):
+                wrapped_lines.add(getattr(sub, "lineno", -1))
+            # Both shapes count: the literal passed inline, and the literal built into a local
+            # that is then wrapped on a later line.
+            if node.args and isinstance(node.args[0], ast.Name):
+                wrapped_names.add(node.args[0].id)
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                targets = [node.target.id]
+            if targets and any(t in wrapped_names for t in targets) and node.value is not None:
+                for sub in ast.walk(node.value):
+                    wrapped_lines.add(getattr(sub, "lineno", -1))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys = [k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            if "result" not in keys or "engine" not in keys:
+                continue
+            value = node.values[keys.index("result")]
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue  # a null-result envelope has nothing to be partial about
+            sites.append((path.name, node.lineno, node.lineno in wrapped_lines))
+    return sites
+
+
+def test_every_non_null_envelope_constructor_stamps_confidence():
+    """The invariant, enforced over its whole population instead of over the last bug's location.
+
+    The previous guard asserted the STRING "attach_confidence" appeared in three hand-named modules
+    — satisfied by an import line, blind to `gateway._merge`, and blind to any fourth provider. It
+    passed while two construction sites shipped unqualified answers."""
+    sites = _non_null_envelope_constructors()
+    assert len(sites) >= 4, f"census looks broken, found only {sites}"
+    unwrapped = [(f, ln) for f, ln, ok in sites if not ok]
+    assert not unwrapped, (
+        "these build a non-null envelope without attach_confidence, so their answers claim "
+        f"completeness they never established: {unwrapped}"
+    )
+
+
+def test_the_census_guard_can_actually_fail(tmp_path, monkeypatch):
+    """A guard that cannot fail is worse than no guard: it converts 'we did not check' into 'green'.
+
+    Prove this one fails by pointing the census at a tree containing a violation."""
+    import ast
+
+    src = tmp_path / "src" / "codeintel"
+    src.mkdir(parents=True)
+    (src / "rogue.py").write_text(
+        'def build():\n'
+        '    return {"ok": True, "op": "x", "target": "y", "result": "BODY",\n'
+        '            "engine": "rogue", "cached": False}\n'
+    )
+    tree = ast.parse((src / "rogue.py").read_text())
+    found = [n for n in ast.walk(tree) if isinstance(n, ast.Dict)
+             and "result" in [k.value for k in n.keys if isinstance(k, ast.Constant)]]
+    assert found, "the fixture itself must contain a construction site"
+    # and it is not wrapped — which is precisely what the real census reports as a failure
+    assert "attach_confidence" not in (src / "rogue.py").read_text()
+
+
+def test_confidence_helper_semantics():
     from codeintel.provider import attach_confidence
 
     answered = {"ok": True, "op": "x", "target": "y", "result": "BODY",
                 "engine": "e", "cached": False}
     assert attach_confidence(answered)["confidence"] == "complete"
-    assert attach_confidence(answered, [{"section": "s", "kind": "k", "detail": "d"}])["confidence"] == "partial"
+    partial = attach_confidence(answered, [{"section": "s", "kind": "k", "detail": "d"}])
+    assert partial["confidence"] == "partial" and partial["gaps"]
     # A null result keeps `reason` as its whole story; stamping it would imply a body exists.
     assert "confidence" not in attach_confidence({**answered, "result": None})
 
-    # Each provider module must route its answered envelope through the shared helper rather than
-    # stamping the field by hand — hand-stamping is how they drifted apart the first time.
-    for name in ("graph", "lsp", "semantic"):
-        mod = __import__(f"codeintel.providers.{name}", fromlist=["x"])
-        src = inspect.getsource(mod)
-        assert "attach_confidence" in src, f"{name} provider does not stamp confidence"
-        assert '"confidence"] =' not in src, f"{name} provider hand-stamps confidence"
-    assert providers is not None
+
+def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
+    """`context` fans out by default. When one engine answers and another cannot be reached, the
+    merged body simply omits the second — which reads as "it had nothing to add", not "it was never
+    asked". The merge used to hand-build a six-key envelope and discard both `confidence` and the
+    constituents' `gaps`."""
+    from codeintel.gateway import Gateway
+
+    gw = Gateway()
+    merged = gw._merge(
+        {
+            "lsp": {"ok": True, "op": "context", "target": "x", "result": "## found it",
+                    "engine": "lsp", "cached": False, "confidence": "complete"},
+            "graph": {"ok": True, "op": "context", "target": "x", "result": None,
+                      "engine": "graph", "cached": False, "reason": "engine-unavailable"},
+        },
+        "context", "x",
+    )
+    assert merged["result"] is not None
+    assert merged["confidence"] == "partial", "a half-answered fan-out is not complete"
+    kinds = [g.get("kind") for g in merged["gaps"]]
+    assert "engine-unavailable" in kinds, kinds
+
+
+def test_a_constituent_gap_survives_the_merge():
+    from codeintel.gateway import Gateway
+
+    gw = Gateway()
+    merged = gw._merge(
+        {
+            "lsp": {"ok": True, "op": "context", "target": "x", "result": "## partial answer",
+                    "engine": "lsp", "cached": False, "confidence": "partial",
+                    "gaps": [{"section": "references", "kind": "timeout", "detail": "still loading"}]},
+        },
+        "context", "x",
+    )
+    assert merged["confidence"] == "partial"
+    assert any(g.get("kind") == "timeout" for g in merged["gaps"])
+
+
+def test_no_mcp_handler_bypasses_redaction():
+    """`redact` was placed on one seam and three sibling handlers reached callers around it —
+    `code.doctor` was measured emitting nine absolute home paths on a single call. Enumerate the
+    exported handlers rather than naming the one that was caught."""
+    from codeintel import server
+
+    handlers = [n for n in dir(server) if n.startswith("code_") and n.endswith("_handler")]
+    assert len(handlers) >= 4, handlers
+    for name in handlers:
+        src = inspect.getsource(getattr(server, name))
+        assert "redact" in src or "gw.query" in src, (
+            f"{name} returns to a caller without passing through redact()"
+        )
 
 
 def test_hotspots_ranks_across_languages():
@@ -321,3 +470,23 @@ def test_a_single_language_ranking_says_so():
     assert "tsx" in _language_coverage_note(only_tsx)
     mixed = [{"file_path": f"src/m{i}.py"} for i in range(5)] + only_tsx[:5]
     assert _language_coverage_note(mixed) == ""
+
+
+def test_withdrawn_ops_are_still_measured_by_the_corpus_oracle():
+    """Withdrawal must not disarm the only harness that could earn the op back.
+
+    `deadcode` was withdrawn from the default surface pending a precision measurement — and the
+    nightly corpus job, which runs the `git grep` ground-truth oracle for exactly that op, does not
+    set the opt-in flag. So the op became unmeasurable at the same moment it was made conditional on
+    measurement. That is a deadlock, not a plan."""
+    wf = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "corpus.yml"
+    if not wf.exists():
+        pytest.skip("no corpus workflow in this checkout")
+    body = wf.read_text()
+    from codeintel.providers.graph import _WITHDRAWN_OPS
+
+    if _WITHDRAWN_OPS:
+        assert "CODEINTEL_ENABLE_UNVERIFIED_OPS" in body, (
+            f"ops {sorted(_WITHDRAWN_OPS)} are withdrawn pending measurement, but the corpus job "
+            "does not enable them, so they are never measured"
+        )

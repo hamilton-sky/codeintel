@@ -1,6 +1,19 @@
-"""The only place in codeintel permitted to format a ``path:line`` reference.
+"""Line-number conversion for the backends whose numbering differs from ours.
 
-Every backend we speak to counts lines from zero. Every human, editor and terminal that consumes
+**This module does not apply to every backend, and the line base is data, not a rule.** An earlier
+version of this docstring asserted "the only place in codeintel permitted to format a path:line" and
+"every backend we speak to counts lines from zero". The second claim is false, and an investigation
+found that following the first would have introduced a NEW off-by-one: the graph backend
+(codebase-memory-mcp) reports 1-based line numbers, so ``graph.py`` formats its own ``path:line``
+directly and must keep doing so. Centralising a guarantee only removes a defect class when the
+implementations agree on the semantics being centralised — here they do not.
+
+    LINE BASES, verified by probing each backend:
+      serena / LSP          0-based  -> use loc()/span()
+      semantic chunk_start  0-based  -> use loc()      (chunk_start = max(0, start - 1), indexer.py)
+      codebase-memory-mcp   1-based  -> do NOT use loc(); emit as-is
+
+Use ``loc()``/``span()`` for the 0-based backends. Every human, editor and terminal that consumes
 our output counts from one, and agent hosts turn ``path:line`` into a clickable link. Each
 renderer used to do its own conversion, which meant each renderer got to forget it independently
 — and two of them did:

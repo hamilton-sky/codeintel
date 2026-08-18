@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from codeintel.outcome import Missing
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.source_kind import looks_generated_path, looks_generated_text
 
@@ -559,16 +560,23 @@ class GraphProvider:
         out = self._run_stdin(method, body, timeout_ms)
         if out is self._UNPARSABLE:
             # Retrying the deprecated positional form would only get the same dialect back.
+            self._last_failure = Missing("unparsable", "the graph backend's reply could not be read")
             return None
         if out is not self._FAIL:
             return out  # success (including a legit null) → no fallback
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
+            self._last_failure = Missing(
+                "timeout", "the graph backend did not respond within the time budget")
             return None
         out = self._run_rawjson(method, body, remaining_ms)
         if out is self._UNPARSABLE:
+            self._last_failure = Missing("unparsable", "the graph backend's reply could not be read")
             return None
-        return None if out is self._FAIL else out
+        if out is self._FAIL:
+            self._last_failure = Missing("backend-error", "the graph backend did not answer")
+            return None
+        return out
 
     def _run_stdin(self, method: str, body: str, timeout_ms: int) -> Any:
         if self._cmd is None:                  # backend not on PATH — nothing to exec
@@ -819,6 +827,15 @@ class GraphProvider:
     # The root the ANSWERING project is registered under, recorded per query so a renderer can
     # check what it is about to attribute. Class-level default for the same __new__ reason.
     _answered_root: str | None = None
+    # Why the most recent backend call failed, or None if none did. Set at `_run` — the one seam all
+    # nine ops funnel through — so a single check downstream covers the whole op population instead
+    # of each op having to remember. `_run` used to collapse four distinguishable states (binary
+    # absent, non-zero exit, unparsable payload, timeout) into a bare `None`, `_query_rows` turned
+    # that `None` into `[]`, the ops turned `[]` into `None`, and `_op_impact` turned `None` into
+    # "(none found)" — B1's exact bytes, reproduced in the graph engine after it had been fixed in
+    # the LSP engine and declared closed. Fixing it per-op is what produced that miss; this is the
+    # population-level equivalent.
+    _last_failure: Missing | None = None
     # Parts of this answer known to be short of an answer. Graph has two real cases: a symbol-scoped
     # answer served from a CONTAINING project, and callee rows dropped as name collisions.
     _pending_gaps: tuple[dict[str, Any], ...] = ()
@@ -1427,7 +1444,21 @@ class GraphProvider:
             # attribute it to the caller's repo.
             self._answered_root = resolution.matched_root
             self._pending_gaps = ()
+            self._last_failure = None
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
+            if result_text is not None and self._last_failure is not None:
+                # A backend call failed somewhere inside this op, yet it still produced a body. That
+                # body may therefore contain a count or an emptiness claim resting on data that was
+                # never retrieved — `_op_impact` renders "## Callees of X (0)\n(none found)" when one
+                # of its two independent queries times out. Say so once, here, rather than in each of
+                # nine ops: this is the check whose ABSENCE let B1 reappear in this engine.
+                miss = self._last_failure
+                self._add_gap("backend", miss.kind, miss.describe())
+                result_text = (
+                    f"{result_text}\n\n> Incomplete: {miss.describe()}. Any count or "
+                    f"\"none found\" above may reflect a query that did not return, not an "
+                    f"absence in the code — re-ask before relying on it."
+                )
             if result_text is None:
                 # A supported op that matched nothing is NOT an unsupported op, and saying so sends
                 # the agent looking for a different tool when the real answer is almost always a
