@@ -47,7 +47,7 @@ def line1(line0: object) -> int | None:
     if line0 is None or isinstance(line0, bool):
         return None
     try:
-        n = int(line0)
+        n = int(line0)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     # A negative line is meaningless; clamp rather than emit `path:-1` or `path:0`.

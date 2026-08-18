@@ -552,12 +552,12 @@ class LspProvider:
             # nothing referenced the symbol — the permissive answer to the one question an agent
             # asks before deleting code.
             if not (first and first.get("relative_path")):
-                miss = Missing(
+                unasked = Missing(
                     "not-asked",
                     "the symbol's file path was not resolved, so references were never requested",
                 )
-                self._add_gap("references", miss)
-                ref_section = f"## References — not retrieved\n> {miss.describe()}."
+                self._add_gap("references", unasked)
+                ref_section = f"## References — not retrieved\n> {unasked.describe()}."
                 return f"{def_section}\n\n{ref_section}"
 
             ref_out = self._call_tool(
@@ -570,6 +570,7 @@ class LspProvider:
                 timeout_s,
             )
             miss: Missing | None = None
+            parsed: object = None
             if isinstance(ref_out, Missing):
                 miss = ref_out
             else:

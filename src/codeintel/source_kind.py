@@ -225,7 +225,8 @@ def is_prose(file_path: str) -> bool:
 
 def partition_by_corpus(items: list, path_of=lambda m: m.get("path", "")) -> tuple[list, list]:
     """Split ranked hits into (code, prose), preserving each list's existing order."""
-    code, prose = [], []
+    code: list = []
+    prose: list = []
     for m in items:
         (prose if is_prose(str(path_of(m) or "")) else code).append(m)
     return code, prose

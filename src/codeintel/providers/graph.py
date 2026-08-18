@@ -845,6 +845,17 @@ class GraphProvider:
     # answer served from a CONTAINING project, and callee rows dropped as name collisions.
     _pending_gaps: tuple[dict[str, Any], ...] = ()
 
+    def _clear_failure(self) -> None:
+        """Reset the per-query failure record.
+
+        Cleared through a method rather than an inline ``self._last_failure = None`` for the same
+        reason ``lsp.py`` clears its backend error through ``_clear_backend_error`` — a lesson that
+        module learned and this one then repeated. ``_dispatch`` sets the attribute as a SIDE
+        EFFECT, which a type checker cannot see, so an inline assignment narrows it to ``None`` for
+        the rest of the function and makes both "did a backend call fail?" checks below read as
+        unreachable code. The checks are the entire point of the attribute."""
+        self._last_failure = None
+
     def _add_gap(self, section: str, kind: str, detail: str) -> None:
         self._pending_gaps = (*self._pending_gaps, {
             "section": section, "kind": kind, "detail": detail,
@@ -1472,7 +1483,7 @@ class GraphProvider:
             # attribute it to the caller's repo.
             self._answered_root = resolution.matched_root
             self._pending_gaps = ()
-            self._last_failure = None
+            self._clear_failure()
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
             if result_text is not None and self._last_failure is not None:
                 # A backend call failed somewhere inside this op, yet it still produced a body. That
