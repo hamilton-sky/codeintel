@@ -51,8 +51,8 @@ jobs:
       - name: Corpus invariants
         env:
           CODEINTEL_CORPUS: "1"
-          # Withdrawn ops are withdrawn from the DEFAULT surface, not from measurement.
-          # Without this the nightly grep-oracle silently skipped `deadcode` — the one op
-          # whose precision has to be measured before it can ever return.
-          CODEINTEL_ENABLE_UNVERIFIED_OPS: "1"
+          # `CODEINTEL_ENABLE_UNVERIFIED_OPS` used to be exported here so the nightly oracle could
+          # measure `deadcode` while it was withdrawn from the default surface. That measurement has
+          # happened (`test_deadcode_precision_and_recall_are_measured_not_assumed`) and retired the
+          # op, so the flag now enables nothing and exporting it would imply otherwise.
         run: pytest tests/test_corpus.py -v -rs -o addopts=

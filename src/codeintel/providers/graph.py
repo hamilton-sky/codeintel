@@ -12,7 +12,7 @@ from typing import Any
 
 from codeintel.outcome import Missing
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
-from codeintel.source_kind import is_code_path, looks_generated_path, looks_generated_text
+from codeintel.source_kind import is_code_path, looks_generated_path
 
 
 def _cypher_literal(s: Any) -> str:
@@ -33,26 +33,52 @@ _GRAPH_OPS = frozenset({
 # Ops whose answer is DEFINED BY the repository boundary rather than by a symbol inside it. When
 # resolution lands on a containing project instead of the repo that was asked about, these must
 # refuse rather than answer: "the monorepo's hotspots" is not a lower-confidence answer to "this
-# repo's hotspots", it is the answer to a different question. `deadcode` is the dangerous one — a
-# symbol that is dead within one repo is routinely live in its sibling, so an ancestor-scoped
-# answer tells an agent to delete working code. The symbol-scoped ops are not listed: for a genuine
-# subdirectory of a monorepo, an ancestor index is the CORRECT place to find a symbol's callers, so
-# those answer and carry a caveat instead.
+# repo's hotspots", it is the answer to a different question. `deadcode` was the dangerous one — a
+# symbol that is dead within one repo is routinely live in its sibling, so an ancestor-scoped answer
+# told an agent to delete working code — and it is kept in this set although it is now retired and
+# refuses earlier, for the same reason `docs/deploy.md` keeps it in the RBAC example: removing it
+# would silently un-scope it the day something takes its name. The symbol-scoped ops are not listed:
+# for a genuine subdirectory of a monorepo, an ancestor index is the CORRECT place to find a
+# symbol's callers, so those answer and carry a caveat instead.
 _ROOT_SCOPED_OPS = frozenset({"overview", "changed", "changes", "deadcode", "hotspots"})
 
 # Ops withdrawn from the product because they were measured wrong, not merely imprecise.
 #
-# `deadcode` was wrong in BOTH directions on real repositories: on one it named five candidates of
-# which four were live (a rollup plugin hook; two entries of a `Record<string, fn>` reached by a
-# runtime string; a `predicate` property passed inline to the call that consumes it), and on another
-# it reported "(none found)" for a 4,883-function codebase containing at least three genuinely
-# unreferenced private helpers. It is the one op whose output is an instruction to delete code, so
-# it needs the highest evidence bar and currently has the least. It returns when a labelled corpus
-# measures its precision and recall — not before.
+# `deadcode` is RETIRED: the implementation is gone, and this entry remains so the op name still
+# explains itself to anyone who asks for it. It was withdrawn pending "a labelled corpus measures
+# its precision and recall"; that corpus exists now
+# (`tests/test_corpus.py::test_deadcode_precision_and_recall_are_measured_not_assumed`) and the
+# measurement is what retired it:
 #
-# `hotspots` was withdrawn alongside it and has since been REINSTATED. Its rankings were 100% `.tsx`
-# on two repositories that are two-thirds Python and backend TypeScript, caused by two request bugs
-# rather than by a missing metric: it asked only for `Function` nodes (so every class method was
+#   Two pinned real Python repositories, every function and method labelled from the AST — 2,425
+#   definitions — with liveness decided by an oracle that errs toward LIVE and records the reference
+#   behind each label. Precision AS SHIPPED: 6/24 = 25%. Restricted to real code, with the planted
+#   canaries removed, it named 18 candidates on those two repositories and every single one was
+#   live. Recall was 60%, and every dead symbol in that denominator was planted: in 2,425 real
+#   definitions across two maintained repositories there was NOT ONE dead private symbol to find.
+#
+# Both directions of the repair were measured too, and neither rescues it. Applying the two fixes
+# this codebase already contains elsewhere — requesting `Method` nodes as `hotspots` learned to, and
+# restricting candidates to code files as `changed` learned to in 0.15.4 — reaches 89% precision and
+# 80% recall on the planted set, but on real code it then names exactly one candidate, and that one
+# is `MockRequest.get_type` in requests: a method `http.cookiejar` calls by duck-typed convention,
+# whose name appears once in the source.
+#
+# That last false positive is the whole story, and it is why no further repair was attempted. The
+# verification is a name-frequency scan, so it fails on exactly one condition — a symbol whose name
+# appears once in the source and is called by a convention outside it. Two repositories produced
+# three distinct instances of that condition (non-code nodes the backend labels `Function`,
+# interpreter-called dunders, stdlib duck-typed protocol methods), the recorded TypeScript evidence
+# adds a fourth and fifth (a rollup plugin hook, object-literal properties), and the set is not
+# enumerable: no specification lists `get_type`. An op whose measured yield on real code is zero
+# true positives has no benefit to weigh against that.
+#
+# `callers` on a specific symbol answers the same underlying question — "does anything call this?" —
+# and is accurate. That is the substitute, and it is what the docs point at.
+#
+# `hotspots` was withdrawn alongside `deadcode` and has since been REINSTATED. Its rankings were 100%
+# `.tsx` on two repositories that are two-thirds Python and backend TypeScript, caused by two request
+# bugs rather than by a missing metric: it asked only for `Function` nodes (so every class method was
 # invisible — 2,381 of them on one repo) and capped candidates at 200 rows returned in NAME order,
 # making the client-side sort rank an alphabetical 4% slice. Both are fixed, and the fix is measured:
 # `test_hotspots_ranks_across_languages` pins the mixed-language behaviour, and re-running the two
@@ -61,18 +87,12 @@ _ROOT_SCOPED_OPS = frozenset({"overview", "changed", "changes", "deadcode", "hot
 # so via `_language_coverage_note` instead of reading like a result.
 _WITHDRAWN_OPS: dict[str, str] = {
     "deadcode": (
-        "`deadcode` is withdrawn: it was measured producing both false positives (framework-"
-        "dispatched symbols reported as dead) and false negatives (unreferenced helpers missed), "
-        "and its output invites deletion. Use `callers` on a specific symbol instead — that is "
-        "verified accurate. Set CODEINTEL_ENABLE_UNVERIFIED_OPS=1 to run it anyway."
+        "`deadcode` is retired, not merely disabled: a labelled corpus measured its precision at "
+        "25%, and on real code with nothing planted it named 18 candidates across two repositories "
+        "of which every one was live. There is no implementation left to enable. Use `callers` on a "
+        "specific symbol instead — that answers the same question and is verified accurate."
     ),
 }
-
-
-def _unverified_ops_enabled() -> bool:
-    return os.environ.get("CODEINTEL_ENABLE_UNVERIFIED_OPS", "").strip().lower() in (
-        "1", "true", "on", "yes",
-    )
 
 
 # Trailing segments that mean "this is a filename, not a dotted module path".
@@ -139,111 +159,14 @@ def _strip_project_prefix(qualified_name: str, *, may_be_filename: bool = True) 
     # qualified name is the norm for Go, Java, C# and Ruby.
     return rest
 
-# Files consulted when verifying dead-code candidates, and the extensions worth reading. Bounded
-# so `deadcode` on a very large monorepo stays a query rather than a second index pass.
-_VERIFY_FILE_CAP = 6000
-# Not hand-written source: vendored trees and build output. Only `.venv` was excluded before (as
-# a dot-directory), so a plain `venv/`, `vendor/` or `third_party/` both blew the file cap and
-# fed generated code into the occurrence counts.
+
+# Directory names that are not hand-written source: vendored trees and build output. Retained after
+# `deadcode` was retired because `_is_archived_path` — and through it `_is_noise`, which `hotspots`
+# and `changed` both use — still classifies paths with it.
 _VERIFY_SKIP_DIRS = frozenset({
     "node_modules", "__pycache__", "dist", "build", "out", "target", "vendor", "vendored",
     "third_party", "thirdparty", "venv", "env", "site-packages", "coverage", "generated",
 })
-# Extensions the reference scan reads. A name can be referenced from a file that is not itself a
-# "source" file in the graph's sense — SCSS `@include button-base`, a template, a config — and if
-# the scan cannot open it, the symbol reads as dead while the note claims verification succeeded.
-# That is worse than not verifying at all, so this list is generous: a false reference only hides
-# a candidate, while a missed one names live code.
-_VERIFY_EXTS = frozenset({
-    ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java", ".kt",
-    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".cs", ".rb", ".php", ".swift", ".scala",
-    ".css", ".scss", ".sass", ".less", ".html", ".htm", ".vue", ".svelte", ".astro",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml", ".graphql", ".proto",
-    ".sql", ".sh", ".bash", ".zsh", ".rst", ".md", ".mdx", ".txt", ".tpl", ".j2", ".hbs", ".ejs",
-})
-
-
-def _drop_referenced_symbols(rows: list[dict], root: str) -> tuple[list[dict], str]:
-    """Remove candidates whose name actually appears somewhere else in the source.
-
-    `deadcode` asks the graph for functions with **in-degree 0**, and a function that is passed as
-    a REFERENCE rather than called has in-degree 0 — every React event handler, every
-    `addEventListener('keydown', onKeyDown)`, every callback handed to a framework. On a real
-    TypeScript repo that made 181 of 181 sampled candidates false, and an agent acting on the
-    answer would delete live code. A wrong answer here is worse than no answer.
-
-    The graph cannot see those edges, so verify against the source: one pass over the repo,
-    counting word-boundary occurrences of each candidate name. A name appearing anywhere beyond
-    its own definition is referenced and drops out. Returns (kept, verified) — `verified` is False
-    when the repo exceeded the file cap, so the caller can say the check was partial rather than
-    imply a confidence it does not have.
-    """
-    if not rows:
-        return rows, "ok"
-    if not root or not os.path.isdir(root):
-        # Distinct from the cap: the MCP tool defaults project_root to "", so this is the DEFAULT
-        # call path, and blaming the file cap told the user their repo was too big when the real
-        # cause was a missing argument.
-        return rows, "no-root"
-
-    names = {str(r.get("name") or "") for r in rows}
-    names.discard("")
-    if not names:
-        return rows, "ok"
-
-    # How many candidates share each name. Compared against a GLOBAL occurrence count, a fixed
-    # allowance of 1 meant two dead functions with the same name each counted as the other's
-    # "use" and both vanished.
-    definitions: dict[str, int] = {}
-    for r in rows:
-        key = str(r.get("name") or "")
-        definitions[key] = definitions.get(key, 0) + 1
-    pattern = re.compile(r"\b(" + "|".join(re.escape(n) for n in sorted(names)) + r")\b")
-
-    seen: dict[str, int] = {}
-    scanned = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        # Skip what is NOT hand-written source. Generated bundles were the worst offender: a
-        # 6.7MB minified `out/` bundle supplied 46 occurrences of a `toJSON` that appears zero
-        # times in real source, hiding it. Dot-directories use the archive list, so `.github`
-        # scripts and `.claude/hooks` are scanned — they were being skipped here while
-        # `_is_archived_path` counted them as live, so a live CI helper still read as dead.
-        dirnames[:] = [d for d in dirnames if d.lower() not in _VERIFY_SKIP_DIRS
-                       and d.lower() not in _ARCHIVE_DIRS
-                       and not looks_generated_path(d + "/x")]
-        for fname in filenames:
-            if os.path.splitext(fname)[1].lower() not in _VERIFY_EXTS:
-                continue
-            if looks_generated_path(fname):     # `*.min.js`/`*_pb2.py` beside real source
-                continue
-            scanned += 1
-            if scanned > _VERIFY_FILE_CAP:
-                return rows, "capped"           # too big to verify — report unfiltered, and say so
-            try:
-                with open(os.path.join(dirpath, fname), encoding="utf-8", errors="replace") as fh:
-                    text = fh.read()
-            except OSError:
-                continue
-            # This loop already holds the file's text, so the content check is free here — and it
-            # is the only signal that catches a bundle whose directory and filename both look
-            # ordinary. A generated file must not VOUCH for a name: its occurrences are what hid a
-            # genuinely dead `toJSON` behind 46 matches from one minified chunk.
-            if looks_generated_text(text):
-                continue
-            for match in pattern.findall(text):
-                seen[match] = seen.get(match, 0) + 1
-
-    # A name's own definitions account for that many occurrences; anything beyond them is a use
-    # the graph could not see.
-    kept = [r for r in rows
-            if seen.get(str(r.get("name") or ""), 0) <= definitions.get(str(r.get("name") or ""), 1)]
-    return kept, "ok"
-
-
-# Directories whose contents are retired or generated, named explicitly. The first version of
-# this excluded EVERY dot-directory, which swept up a great deal of live code: `.claude/hooks`,
-# `.storybook`, `.husky`, `.server`, `src/.internal`. Naming what is actually an archive is a
-# smaller claim and a safer one — an unknown dot-directory is now assumed to be source.
 _ARCHIVE_DIRS = frozenset({
     ".archive", ".archived", ".backup", ".backups", ".bak", ".old", ".deprecated", ".trash",
     ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".gradle", ".terraform",
@@ -276,23 +199,6 @@ def _is_archived_path(file_path: str) -> bool:
         return True
     return looks_generated_path(file_path)
 
-
-# What the source-verification pass can and cannot claim, stated per outcome. The single old note
-# blamed the file cap unconditionally, so the DEFAULT MCP call path — which omits project_root —
-# told users their repo was too big when the real cause was a missing argument.
-_RAW_CAVEAT = (" — these are raw call-graph results, so a function used only as a callback "
-               "reference (a React handler, an `addEventListener` argument) will appear here. "
-               "Confirm before deleting.")
-_VERIFY_NOTES = {
-    "ok": ("\n\n_Verified against the source: a candidate whose name appears anywhere beyond its "
-           "own definition was dropped. A name scan still cannot see a symbol reached only "
-           "through a framework — an object-literal property a library calls, a decorator "
-           "registry, `getattr` dispatch, or a name in a template, YAML or TOML. Treat these as "
-           "candidates and confirm before deleting._"),
-    "no-root": ("\n\n_Unverified: no `project_root` was given, so the source could not be checked"
-                + _RAW_CAVEAT + "_"),
-    "capped": ("\n\n_Unverified: the repo exceeded the source-scan cap" + _RAW_CAVEAT + "_"),
-}
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -413,6 +319,149 @@ def _language_coverage_note(rows: list[dict]) -> str:
         f"repository has substantial code in other languages, they are absent from this ranking "
         f"rather than less complex — treat it as covering `{top_ext}` only._"
     )
+
+
+# The row cap on the two symbol-edge queries. Named rather than inlined because the RENDERER needs
+# to know it: an answer that came back exactly AT the cap was truncated by us, and a truncated
+# callee list that reads as complete is the same defect class as a filtered one that reads as
+# complete. `callees` feeds "is this safe to change?", where "unknown" and "none" are opposite
+# answers.
+_EDGE_ROW_LIMIT = 50
+
+# How many same-named candidates to name when the answer has to ask "which one?". A list long enough
+# to be unreadable is not a choice offered, and the count always states the full total.
+_CANDIDATE_CAP = 12
+
+
+@dataclass(frozen=True)
+class _SymbolTarget:
+    """A ``target`` that may say WHICH symbol it means.
+
+    The symbol-edge ops key on the unqualified name, so a repository with three functions called
+    `handle` answers for all three at once and the caller has no way to ask for one. The graph
+    already tells them apart — every row carries `qualified_name` and `file_path` — and both are
+    printed on the result lines the caller has just read, so the disambiguator is text they already
+    hold:
+
+    * ``handle``                     every symbol named `handle`
+    * ``api.routes.handle``          the one whose qualified name ends in those segments
+    * ``handle@src/api/routes.py``   the one defined in that file
+
+    Applied to rows rather than pushed into the Cypher ``WHERE``: a suffix match needs a string
+    predicate, and which of those this backend supports is not something this project can pin — the
+    0.9→0.10 wire-format break is the standing reminder that its dialect is not a stable interface.
+    Narrowing rows already in hand costs one pass and cannot be broken by a backend release.
+    """
+
+    name: str
+    qualified: str = ""
+    file_hint: str = ""
+
+    @property
+    def narrowed(self) -> bool:
+        """Whether the caller asked for one specific symbol rather than every symbol by that name."""
+        return bool(self.qualified or self.file_hint)
+
+    def describe(self) -> str:
+        parts = []
+        if self.qualified:
+            parts.append(f"qualified name `{self.qualified}`")
+        if self.file_hint:
+            parts.append(f"file `{self.file_hint}`")
+        return " in ".join(parts) or f"`{self.name}`"
+
+    def matches(self, qualified_name: Any, file_path: Any) -> bool:
+        """Whether the symbol at *qualified_name* / *file_path* is the one this target names."""
+        if self.qualified and not _qualified_name_matches(qualified_name, self.qualified):
+            return False
+        return not (self.file_hint and not _file_path_matches(file_path, self.file_hint))
+
+
+def _parse_symbol_target(target: Any) -> _SymbolTarget:
+    """Split a ``target`` into a symbol name and whatever disambiguator it carries."""
+    raw = str(target or "").strip()
+    file_hint = ""
+    if "@" in raw:
+        head, _, tail = raw.rpartition("@")
+        # A leading `@` is a decorator (`@app.route`), not a file hint, and `handle@` names no file.
+        if head.strip() and tail.strip():
+            raw, file_hint = head.strip(), tail.strip()
+    qualified = ""
+    if "." in raw:
+        head, _, last = raw.rpartition(".")
+        # `use-toast.ts` is a FILENAME, not a qualified name. Reading `ts` as the symbol name would
+        # send a query for something nobody asked about — the same trap `_strip_project_prefix`
+        # guards against, so the same derived extension set answers it.
+        if head and last and last.lower() not in _FILE_EXTENSIONS:
+            qualified, raw = raw, last
+    return _SymbolTarget(name=raw, qualified=qualified, file_hint=file_hint)
+
+
+def _qualified_name_matches(qualified_name: Any, wanted: str) -> bool:
+    """Whether *qualified_name* ends with the dotted segments *wanted*.
+
+    Segment-aligned, so `routes.handle` does not match `api.myroutes.handle`. Compared against both
+    the raw name and its `_strip_project_prefix` form, because the caller will have copied the
+    stripped one off a previous result line while the backend still stores the prefixed one."""
+    raw = str(qualified_name or "")
+    if not raw or not wanted:
+        return False
+    return any(have == wanted or have.endswith("." + wanted)
+               for have in (raw, _strip_project_prefix(raw, may_be_filename=False)))
+
+
+def _file_path_matches(file_path: Any, hint: str) -> bool:
+    """Whether *file_path* is the file the caller named.
+
+    A path-segment suffix match: `routes.py`, `api/routes.py` and the full repo-relative path all
+    identify `src/api/routes.py` — all three are things a caller reasonably types, and the last is
+    what the result lines print. A hint that stays ambiguous is not a problem to be solved here: two
+    files can match, and the answer then says so rather than picking one silently."""
+    have = str(file_path or "").replace("\\", "/").strip().lower()
+    want = str(hint or "").replace("\\", "/").strip().strip("/").lower()
+    if not have or not want:
+        return False
+    return have == want or have.endswith("/" + want)
+
+
+@dataclass
+class _EdgeGroup:
+    """The rows belonging to ONE symbol, held apart from every other symbol sharing its bare name.
+
+    Grouping is what stops a `callees` answer from being the union of several questions with no way
+    to tell which row came from where. It also makes the per-row language check structural rather
+    than remembered: a row can only ever be compared against its own group's caller, so the
+    caller-family UNION bug that `0.15.5` fixed by hand cannot be written again here."""
+
+    label: str
+    qn_raw: str
+    file: str
+    rows: list[dict]
+
+    def describe(self) -> str:
+        if self.label and self.file:
+            return f"`{self.label}` ({self.file})"
+        if self.label:
+            return f"`{self.label}`"
+        return self.file or "(a symbol the index does not name)"
+
+
+def _group_edges(rows: list[dict], name_key: str, qn_key: str, file_key: str) -> list[_EdgeGroup]:
+    """Partition *rows* by the distinct symbol they belong to, preserving the backend's row order.
+
+    Keyed on the qualified name AND the file: one file legitimately holds two symbols with the same
+    bare name (a method on two classes), and a row carrying neither still has to land somewhere
+    rather than being dropped."""
+    groups: dict[tuple[str, str], _EdgeGroup] = {}
+    for r in rows:
+        file = str(r.get(file_key) or "")
+        qn_raw = str(r.get(qn_key) or "")
+        label = _strip_project_prefix(qn_raw, may_be_filename=False) or str(r.get(name_key) or "")
+        key = (label, file)
+        if key not in groups:
+            groups[key] = _EdgeGroup(label=label, qn_raw=qn_raw, file=file, rows=[])
+        groups[key].rows.append(r)
+    return list(groups.values())
 
 
 def _same_path(a: str | None, b: str | None) -> bool:
@@ -825,7 +874,10 @@ class GraphProvider:
         # what a query actually does can no longer disagree.
         if resolution.is_ancestor:
             own_repo = _has_own_git_dir(project_root)
-            scoped = "the repo-wide ops (overview, changed, deadcode, hotspots) will refuse"
+            # Derived, not typed: a retired op named in this list would send the reader looking
+            # for something that refuses for an unrelated reason.
+            runnable_scoped = ", ".join(sorted(_ROOT_SCOPED_OPS - set(_WITHDRAWN_OPS)))
+            scoped = f"the repo-wide ops ({runnable_scoped}) will refuse"
             return {
                 "installed": True, "runnable": True, "repo_indexed": True,
                 "project": resolution.name,
@@ -1031,7 +1083,7 @@ class GraphProvider:
     @classmethod
     def _is_noise(cls, r: dict) -> bool:
         """Rows a code-quality scan should hide: builtins/generated nodes and test code (the backend's
-        own ``is_test`` is unreliable — see ``_looks_like_test``). Shared by deadcode + hotspots."""
+        own ``is_test`` is unreliable — see ``_looks_like_test``). Shared by the repo-scan ops."""
         fp = str(r.get("file_path") or "")
         return (cls._is_synthetic(fp)
                 or cls._looks_like_test(fp, str(r.get("name") or ""))
@@ -1040,7 +1092,7 @@ class GraphProvider:
     def _render_scan(self, kept: list[dict], title: str, cap: int, meta_fn) -> str:
         """Render a repo-scan op's markdown from filtered+sorted rows: ``## title (count)`` + one
         ``- label (file)  [meta]`` line per row (top ``cap``) + a ``+N more`` note when truncated.
-        ``meta_fn(row) -> list[str]`` supplies the per-op metric badge, so deadcode/hotspots share
+        ``meta_fn(row) -> list[str]`` supplies the per-op metric badge, so the repo-scan ops share
         the row format and truncation note (the drift-prone parts) and differ only in their metrics."""
         lines = []
         for r in kept[:cap]:
@@ -1061,15 +1113,76 @@ class GraphProvider:
     # ------------------------------------------------------------------ ops
 
     def _op_callers(self, target: str, project: str, timeout_ms: int) -> str | None:
+        """What calls or uses *target*.
+
+        Honours the same disambiguator `callees` does (`_SymbolTarget`), applied to the far end of
+        the edge — the symbol being called. Without it, `impact` would narrow one of its two halves
+        and not the other, and a blast-radius answer whose callers belong to a DIFFERENT symbol of
+        the same name is worse than an un-narrowed one: it reads as precise."""
+        wanted = _parse_symbol_target(target)
         cypher = (
-            f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.name="{_cypher_literal(target)}" '
-            "RETURN a.name, a.qualified_name, a.file_path, type(c) LIMIT 50"
+            f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
+            "RETURN a.name, a.qualified_name, a.file_path, type(c), b.name, b.qualified_name, "
+            f"b.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
             return None
-        lines = [self._display(r, "a.name", "a.qualified_name", "a.file_path") for r in rows]
-        return f"## Callers of {target} ({len(lines)})\n" + "\n".join(lines)
+        truncated = len(rows) >= _EDGE_ROW_LIMIT
+
+        called = _group_edges(rows, "b.name", "b.qualified_name", "b.file_path")
+        selected = [g for g in called if wanted.matches(g.qn_raw, g.file)]
+        if wanted.narrowed and not selected:
+            return self._no_symbol_matched_the_hint("callers", target, wanted, called)
+
+        notes = self._row_cap_note("callers", target) if truncated else ""
+        return self._render_edge_answer(
+            "callers", "caller", target, wanted, selected,
+            ("a.name", "a.qualified_name", "a.file_path"), truncated, notes)
+
+    def _no_symbol_matched_the_hint(
+        self, op: str, target: str, wanted: _SymbolTarget, candidates: list[_EdgeGroup]
+    ) -> str:
+        """The caller named a specific symbol, and no symbol matching it has edges of this kind.
+
+        Two wrong answers to avoid. Falling back to every symbol with that bare name answers a
+        question the caller explicitly narrowed away from. Reporting zero rows claims the symbol has
+        none, which is a statement about the code rather than about the lookup. So: say the hint
+        matched nothing, and name the symbols that DO carry the name — the information needed to ask
+        again correctly, and already in hand.
+
+        Careful about what is claimed: the population here is the symbols this op's own query
+        returned, NOT the index. A symbol can be perfectly well indexed and still be absent from
+        this list — `Group.invoke` has callees but no callers on one real repository — so saying
+        "not in this index" would be a second false claim in a message written to avoid the first."""
+        self._add_gap(
+            op, "target-hint-unmatched",
+            f"no symbol matching {wanted.describe()} has {op} here; {len(candidates)} other "
+            f"symbol(s) named `{wanted.name}` do, so this is not evidence that `{target}` has none",
+        )
+        listing = "\n".join(f"- {g.describe()}" for g in candidates[:_CANDIDATE_CAP])
+        more = (f"\n… (+{len(candidates) - _CANDIDATE_CAP} more)"
+                if len(candidates) > _CANDIDATE_CAP else "")
+        return (f"## {op.capitalize()} of {target}\n"
+                f"**No symbol matching {wanted.describe()} has {op} in this index** — which says "
+                f"nothing about whether that symbol exists or what it calls; it may simply have no "
+                f"edge of this kind. {len(candidates)} symbol(s) named `{wanted.name}` do have "
+                f"{op} here:\n" + listing + more)
+
+    def _row_cap_note(self, op: str, target: str) -> str:
+        """Disclose a list this op truncated itself.
+
+        A query that came back exactly at its own `LIMIT` has almost certainly been cut short, and
+        the rendered list gives no sign of it. For `callees` in particular the whole point is
+        "everything this reaches", so a silently-capped list is the partial-reads-as-complete
+        failure in its purest form."""
+        self._add_gap(
+            op, "row-cap-reached",
+            f"the query returned the maximum {_EDGE_ROW_LIMIT} rows, so this list is truncated "
+            f"and may be missing rows — not a complete answer for `{target}`",
+        )
+        return (f"\n\n_Truncated: the graph returned the maximum {_EDGE_ROW_LIMIT} rows, so rows "
+                f"beyond that are missing from this list._")
 
     def _op_callees(self, target: str, project: str, timeout_ms: int) -> str | None:
         """What *target* calls or uses.
@@ -1085,38 +1198,70 @@ class GraphProvider:
         Two of those three causes are upstream in the extractor and can only be filtered here. This
         does filter them: a callee in a different language family than the caller, or in a file that
         is not code at all, is not a callee — it is a name collision, and dropping it costs nothing
-        real. What survives is marked so the caller knows the resolution is name-based.
+        real.
 
-        The family check is resolved PER ROW against that row's own `a.file_path`, not against the
-        set of families across every row. `target` can itself be a bare name shared by callers in
-        more than one language, and comparing a row's callee to the UNION of every caller's family
-        let a genuine collision hide behind an unrelated caller: three rows for a Python `target`
-        and a TypeScript `target` made `caller_families = {python, ts-js}`, so a `.ts` name-collision
-        callee reached from the *Python* caller passed the check — it shares a family with the
-        wrong caller. Each row already carries the one caller file it actually came from, so that is
-        what it is checked against.
+        The remaining cause — several distinct symbols sharing the bare name — is not a collision to
+        drop but a question to ask. It used to be neither: rows from every matched caller were
+        flattened into one list, so the answer was the union of several questions with nothing
+        saying which row came from where. Now the rows are GROUPED by their caller, and:
+
+        * a target carrying a disambiguator (`pkg.mod.handle`, `handle@src/mod.py`) selects one
+          group and answers only for it — resolution rather than disclosure;
+        * without one, every group is rendered under its own heading, the count of same-named
+          symbols is stated, and nothing is dropped for being ambiguous. Three symbols named
+          `handle` is not a degraded answer, it is a question, and the result can ask it.
+
+        Grouping also makes the language check structural. It is resolved against the group's own
+        caller file, so the union-across-callers bug that `0.15.5` fixed — a `.ts` callee reached
+        from a *Python* caller surviving because an unrelated TypeScript caller shared the bare name
+        contributed `ts-js` to a shared set — is no longer expressible here: there is no shared set
+        to compare against.
         """
+        wanted = _parse_symbol_target(target)
         cypher = (
-            f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(target)}" '
-            "RETURN b.name, b.qualified_name, b.file_path, type(c), a.file_path LIMIT 50"
+            f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
+            "RETURN b.name, b.qualified_name, b.file_path, type(c), a.name, a.qualified_name, "
+            f"a.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
             return None
+        truncated = len(rows) >= _EDGE_ROW_LIMIT
 
-        kept: list[dict] = []
+        callers = _group_edges(rows, "a.name", "a.qualified_name", "a.file_path")
+        selected = [g for g in callers if wanted.matches(g.qn_raw, g.file)]
+        if wanted.narrowed and not selected:
+            return self._no_symbol_matched_the_hint("callees", target, wanted, callers)
+
         dropped = 0
-        for r in rows:
-            path = str(r.get("b.file_path") or "")
-            if _is_non_code(path):
-                dropped += 1          # a data/doc file cannot be a callee
-                continue
-            callee_fam = _lang_family(path)
-            caller_fam = _lang_family(str(r.get("a.file_path") or ""))
-            if callee_fam and caller_fam and callee_fam != caller_fam:
-                dropped += 1          # cross-language name collision, resolved against THIS row's own caller
-                continue
-            kept.append(r)
+        for group in selected:
+            caller_fam = _lang_family(group.file)
+            keep = []
+            for r in group.rows:
+                path = str(r.get("b.file_path") or "")
+                if _is_non_code(path):
+                    dropped += 1          # a data/doc file cannot be a callee
+                    continue
+                callee_fam = _lang_family(path)
+                if callee_fam and caller_fam and callee_fam != caller_fam:
+                    dropped += 1          # a cross-language collision, against THIS group's caller
+                    continue
+                keep.append(r)
+            group.rows = keep
+
+        answered = [g for g in selected if g.rows]
+        kept = sum(len(g.rows) for g in answered)
+        notes = ""
+        if dropped:
+            self._add_gap(
+                "callees", "name-collisions-dropped",
+                f"{dropped} row(s) were dropped as name collisions (a different language, or a "
+                f"non-code file, than the caller); resolution is by symbol name, not by type",
+            )
+            notes += (f"\n\n_{dropped} row(s) dropped as name collisions (a different language, or "
+                      f"a non-code file, than the caller)._")
+        if truncated:
+            notes = self._row_cap_note("callees", target) + notes
 
         if not kept:
             # `rows` was non-empty (the `if not rows: return None` above already handled the
@@ -1124,33 +1269,87 @@ class GraphProvider:
             # That is an answer WE emptied, not an absence in the repository, and routing it into
             # the `result_text is None` branch would report it as `not-in-graph` — "0 callees" —
             # when the honest statement is "N callees, all of them filtered out for a reason that
-            # has nothing to do with the code". Same wording as the partial-drop note below,
-            # adjusted for the total case.
-            self._add_gap(
-                "callees", "name-collisions-dropped",
-                f"{dropped} row(s) were dropped as name collisions (a different language, or a "
-                f"non-code file, than the caller); every row returned was dropped, so this may "
-                f"under-report — resolution is by symbol name, not by type",
-            )
-            note = (f"\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
-                    f"repository is called `{target}`, their callees are merged here. Verify before "
-                    f"relying on a row you did not expect._")
+            # has nothing to do with the code".
+            if not dropped:              # nothing found and nothing dropped cannot both be true
+                self._add_gap(
+                    "callees", "name-collisions-dropped",
+                    "every row returned was set aside, so this may under-report — resolution is "
+                    "by symbol name, not by type",
+                )
             return (f"## Callees of {target} (0)\n(no callee survived name-collision filtering)"
-                    + note)
-        lines = [self._display(r, "b.name", "b.qualified_name", "b.file_path") for r in kept]
-        out = f"## Callees of {target} ({len(lines)})\n" + "\n".join(lines)
-        note = (f"\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
-                f"repository is called `{target}`, their callees are merged here. Verify before "
-                f"relying on a row you did not expect._")
-        if dropped:
+                    + notes + self._name_resolution_note(wanted, selected, truncated))
+
+        return self._render_edge_answer(
+            "callees", "callee", target, wanted, selected,
+            ("b.name", "b.qualified_name", "b.file_path"), truncated, notes)
+
+    def _render_edge_answer(
+        self, op: str, unit: str, target: str, wanted: _SymbolTarget,
+        groups: list[_EdgeGroup], row_keys: tuple[str, str, str], truncated: bool,
+        extra_notes: str = "",
+    ) -> str:
+        """Render one edge-op answer from rows already grouped by the symbol they belong to.
+
+        Shared by `callers` and `callees` for the same reason `_render_scan` is shared by the
+        repo-scan ops: the drift-prone parts are the heading, the ambiguity disclosure and the
+        truncation note, and having two copies of those is how one op ends up honest and the other
+        one silent. Each group's heading names the matched TARGET symbol and its rows are the other
+        end of the edge, which is the same shape in both directions."""
+        name_key, qn_key, file_key = row_keys
+        answered = [g for g in groups if g.rows]
+        kept = sum(len(g.rows) for g in answered)
+        head = f"## {op.capitalize()} of {target} ({kept})\n"
+
+        if len(answered) == 1:
+            body = head + "\n".join(self._display(r, name_key, qn_key, file_key)
+                                    for r in answered[0].rows)
+        else:
+            # Several distinct symbols share the name. Keep every one of them, each under its own
+            # heading — a merged list presented as one symbol's answer is the reading these ops most
+            # need to prevent, since they feed "is this safe to change?".
             self._add_gap(
-                "callees", "name-collisions-dropped",
-                f"{dropped} row(s) were dropped as name collisions (a different language, or a "
-                f"non-code file, than the caller); resolution is by symbol name, not by type",
+                op, "target-ambiguous",
+                f"{len(answered)} distinct symbols named `{wanted.name}` match this target; their "
+                f"{unit}s are grouped separately rather than merged into one list. Narrow the target "
+                f"with a qualified name or `{wanted.name}@<file>` to answer about one of them",
             )
-            note = (f"\n\n_{dropped} row(s) dropped as name collisions (a different language, or a "
-                    f"non-code file, than the caller)._" + note)
-        return out + note
+            sections = [
+                f"### {g.describe()} — {len(g.rows)} {unit}(s)\n"
+                + "\n".join(self._display(r, name_key, qn_key, file_key) for r in g.rows)
+                for g in answered[:_CANDIDATE_CAP]
+            ]
+            if len(answered) > _CANDIDATE_CAP:
+                sections.append(f"… (+{len(answered) - _CANDIDATE_CAP} more symbol(s) with this "
+                                f"name, not shown)")
+            body = (head
+                    + f"**{len(answered)} distinct symbols in this index are named `{wanted.name}`** "
+                      f"— these are that many separate answers, not one. Ask again as "
+                      f"`{answered[0].label or wanted.name}` or "
+                      f"`{wanted.name}@{answered[0].file or '<file>'}` for a single symbol.\n"
+                    + "\n" + "\n\n".join(sections))
+        return body + extra_notes + self._name_resolution_note(wanted, answered, truncated)
+
+    def _name_resolution_note(
+        self, wanted: _SymbolTarget, groups: list[_EdgeGroup], truncated: bool
+    ) -> str:
+        """State how the target was resolved — which is a different fact in each case.
+
+        The old note was one conditional sentence for every answer ("IF more than one symbol is
+        called X, their callees are merged here"), which is true but tells the reader to worry
+        without saying whether there is anything to worry about. Grouping means the count is now
+        known, so this says which of the three situations produced the answer in hand. It does not
+        claim uniqueness when the row cap was hit: a symbol whose rows fell past the cap is
+        indistinguishable from one that does not exist."""
+        if wanted.narrowed:
+            named = ", ".join(g.describe() for g in groups) or "nothing"
+            return (f"\n\n_Narrowed by the {wanted.describe()} in the target to {named}. Other "
+                    f"symbols named `{wanted.name}` are not included._")
+        if len(groups) == 1 and groups[0].label and not truncated:
+            return (f"\n\n_Resolved by symbol NAME, not by type: {groups[0].describe()} is the "
+                    f"only symbol named `{wanted.name}` with edges in this index._")
+        return (f"\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
+                f"repository is called `{wanted.name}`, their edges are reported together here. "
+                f"Verify before relying on a row you did not expect._")
 
     def _op_impact(self, target: str, project: str, timeout_ms: int) -> str | None:
         callers = self._op_callers(target, project, timeout_ms)
@@ -1167,6 +1366,14 @@ class GraphProvider:
     def _op_chain(self, target: str, project: str, timeout_ms: int) -> str | None:
         # Accept an "A->B" form (trace from the source symbol) or a bare symbol.
         src = target.split("->")[0].strip() if "->" in target else target.strip()
+        # A `name@file` hint is codeintel's own disambiguator (see `_SymbolTarget`); `trace_path`
+        # would look for a function literally called that and report nothing found. A DOTTED target
+        # is deliberately left intact — the backend resolves qualified names itself and reports its
+        # own ambiguity, which is better information than anything reconstructed from a bare name.
+        if "@" in src:
+            head, _, tail = src.rpartition("@")
+            if head.strip() and tail.strip():
+                src = head.strip()
         if not src:
             return None
         raw = self._run(
@@ -1387,38 +1594,6 @@ class GraphProvider:
         except Exception:
             return None
 
-    def _op_deadcode(self, project: str, timeout_ms: int, root: str = "") -> str | None:
-        """Unreferenced non-test symbols (dead-code candidates): in-degree 0 Functions, entry points
-        excluded server-side, tests/builtins filtered client-side, biggest first."""
-        try:
-            rows = self._search_symbols(
-                {"label": "Function", "max_degree": 0, "exclude_entry_points": True, "limit": 200},
-                project, timeout_ms,
-            )
-            if rows is None:
-                return None
-            # `is_entry_point` is deliberate belt-and-suspenders on top of the server-side
-            # exclude_entry_points flag: it's an external-backend flag we don't independently verify,
-            # and main() shown as "dead" would be a visible embarrassment — one cheap client check.
-            kept = [r for r in rows if not self._is_noise(r) and not r.get("is_entry_point")]
-            kept, verify_state = _drop_referenced_symbols(kept, root)
-            if not kept:
-                return "## Dead-code candidates\n(none found)"
-            kept.sort(key=lambda r: r.get("lines") or 0, reverse=True)
-
-            def _meta(r: dict) -> list[str]:
-                m = []
-                if r.get("out_degree") is not None:
-                    m.append(f"out:{r.get('out_degree')}")
-                if r.get("lines") is not None:
-                    m.append(f"{r.get('lines')} lines")
-                return m
-
-            rendered = self._render_scan(kept, "Dead-code candidates", 30, _meta)
-            return rendered + _VERIFY_NOTES.get(verify_state, "")
-        except Exception:
-            return None
-
     def _op_hotspots(self, project: str, timeout_ms: int) -> str | None:
         """Highest complexity / fan-in symbols (refactor-risk hotspots). search_graph returns rows
         UNSORTED (name order) and caps at ``limit``, so we over-request then sort CLIENT-SIDE by
@@ -1510,8 +1685,9 @@ class GraphProvider:
 
             # The repo asked about is not indexed on its own; this answer would come from a project
             # that merely CONTAINS it. For a root-scoped op that is not a weaker answer to the
-            # question, it is a confident answer to a different one — `deadcode` over a parent
-            # directory reports symbols that are live in a sibling repo as dead. Refuse, and say
+            # question, it is a confident answer to a different one — `hotspots` over a parent
+            # directory ranks another repository's build output above this repo's own code. Refuse,
+            # and say
             # which project the answer would have come from so the caller can tell this apart from
             # "nothing indexed at all". Symbol-scoped ops fall through: for a real subdirectory of a
             # monorepo the containing index is exactly where a symbol's callers live.
@@ -1525,7 +1701,12 @@ class GraphProvider:
 
             # Checked AFTER the scope gate on purpose: "this repo is not indexed on its own" is the
             # more specific and more actionable answer, and it stays the one the caller gets.
-            if op_str in _WITHDRAWN_OPS and not _unverified_ops_enabled():
+            # Unconditional. There used to be a `CODEINTEL_ENABLE_UNVERIFIED_OPS=1` opt-in here,
+            # which made sense while a withdrawn op still had an implementation behind it. Retiring
+            # `deadcode` removed the thing the flag enabled, and a flag that enables nothing is a
+            # promise the code cannot keep — worse than no flag, because a reader sets it and
+            # believes something changed.
+            if op_str in _WITHDRAWN_OPS:
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="op-withdrawn",
                     hint=_WITHDRAWN_OPS[op_str],
@@ -1635,8 +1816,6 @@ class GraphProvider:
             return self._op_overview(target, project, timeout_ms, root)
         if op == "changed" or op == "changes":
             return self._op_changed(project, timeout_ms)
-        if op == "deadcode":
-            return self._op_deadcode(project, timeout_ms, root)
         if op == "hotspots":
             return self._op_hotspots(project, timeout_ms)
         return None

@@ -123,14 +123,6 @@ CAP_DETECT_CHANGES_DUPES = {
 
 # search_graph — real envelope {"total","has_more","results":[{…rich metrics…}]}. The `is_test:false`
 # on a pytest function is the real trap the client-side path filter exists to catch.
-CAP_DEADCODE = {"total": 8, "has_more": False, "results": [
-    {"name": "test_x", "qualified_name": "codeintel.tests.test_a.test_x", "file_path": "tests/test_a.py",
-     "in_degree": 0, "out_degree": 0, "complexity": 0, "lines": 3, "is_test": False, "is_entry_point": False},
-    {"name": "unused_helper", "qualified_name": "codeintel.src.codeintel.foo.unused_helper",
-     "file_path": "src/codeintel/foo.py", "in_degree": 0, "out_degree": 2, "complexity": 4, "lines": 18,
-     "is_test": False, "is_entry_point": False},
-]}
-# Deliberately NOT complexity-sorted (backend returns name order) — proves the client-side sort.
 CAP_HOTSPOTS = {"total": 3, "has_more": False, "results": [
     {"name": "code_status_handler", "qualified_name": "codeintel.src.codeintel.server.code_status_handler",
      "file_path": "src/codeintel/server.py", "in_degree": 5, "out_degree": 5, "complexity": 15,
@@ -403,40 +395,26 @@ def test_changed_payload_ignores_target_and_raises_timeout_floor(monkeypatch):
     assert seen["timeout"] >= 15000                        # higher floor: it drives a backend reindex
 
 
-def test_deadcode_filters_tests_and_synthetic(monkeypatch):
-    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
-    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_DEADCODE})
+def test_a_retired_op_refuses_and_explains_itself(monkeypatch):
+    """`deadcode` is retired: its implementation is gone and no flag brings it back.
+
+    What has to survive that is the EXPLANATION. The op name is still in `_GRAPH_OPS`, so asking for
+    it must produce `op-withdrawn` and a hint that says why and what to use instead — not
+    `unsupported-op`, which would send an agent looking for a different tool for a question this
+    tool has an accurate answer to (`callers` on a specific symbol).
+    """
+    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")   # must not resurrect it
+    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_HOTSPOTS})
     r = p.build_result("deadcode", "", [], 0, ROOT)
-    assert r["result"] is not None
-    assert "unused_helper" in r["result"]     # real dead code kept
-    assert "test_x" not in r["result"]        # pytest fn dropped despite backend is_test:false
 
-
-def test_deadcode_all_filtered_is_informative(monkeypatch):
-    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
-    only_tests = {"total": 1, "results": [CAP_DEADCODE["results"][0]]}  # just test_x
-    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": only_tests})
-    r = p.build_result("deadcode", "", [], 0, ROOT)
-    assert r["result"] is not None and "none found" in r["result"]
-
-
-def test_deadcode_malformed_is_safe_null(monkeypatch):
-    p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": {"results": "nope"}})
-    r = p.build_result("deadcode", "", [], 0, ROOT)
-    assert r["ok"] is True and r["result"] is None
-
-
-def test_deadcode_payload_has_degree_filters(monkeypatch):
-    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
-    p, seen = _capturing_provider(monkeypatch, CAP_DEADCODE)
-    p.build_result("deadcode", "", [], 0, ROOT)
-    assert seen["payload"].get("max_degree") == 0
-    assert seen["payload"].get("exclude_entry_points") is True
-    assert seen["payload"].get("label") == "Function"
+    assert r["ok"] is True
+    assert r["result"] is None
+    assert r["reason"] == "op-withdrawn", r
+    assert "callers" in (r.get("hint") or ""), r
+    assert "retired" in (r.get("hint") or "").lower(), r
 
 
 def test_hotspots_sorts_by_complexity_client_side(monkeypatch):
-    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "search_graph": CAP_HOTSPOTS})
     r = p.build_result("hotspots", "", [], 0, ROOT)
     assert r["result"] is not None
@@ -447,7 +425,6 @@ def test_hotspots_sorts_by_complexity_client_side(monkeypatch):
 
 
 def test_hotspots_payload_has_min_degree(monkeypatch):
-    monkeypatch.setenv("CODEINTEL_ENABLE_UNVERIFIED_OPS", "1")  # withdrawn op: opt in to test it
     p, seen = _capturing_provider(monkeypatch, CAP_HOTSPOTS)
     p.build_result("hotspots", "", [], 0, ROOT)
     assert seen["payload"].get("min_degree") is not None

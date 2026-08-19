@@ -76,9 +76,9 @@ Binding a non-loopback host **requires** `--allow-remote` **and** authentication
 > resists `..` and symlinked roots. Treat it as a guardrail against mistakes, not as a wall
 > against an adversary with write access.
 >
-> (`deadcode` is currently withdrawn for every role, regardless of RBAC — it safe-nulls with
-> `reason: "op-withdrawn"` unless `CODEINTEL_ENABLE_UNVERIFIED_OPS=1` is set on the server process,
-> which is not per-role. See [README.md#deadcode-is-withdrawn](../README.md#deadcode-is-withdrawn).)
+> (`deadcode` is retired and refuses for every role regardless of RBAC — it safe-nulls with
+> `reason: "op-withdrawn"`, and the server-process opt-in that used to run it has been removed along
+> with the implementation. See [README.md#deadcode-is-retired](../README.md#deadcode-is-retired).)
 >
 > The `team-a` / `team-b` example below is a *shape*, not an endorsement of running mutually
 > untrusting teams against one server. Until this is fixed, give each untrusting tenant its own
@@ -91,13 +91,15 @@ For multiple callers with different privileges, define a token→role map in `~/
 [roles]
 admin    = ["*"]
 reader   = ["search", "symbol", "overview", "callers", "callees", "impact", "chain", "context",
-            "changed", "deadcode", "hotspots"]   # list EVERY op the role may run — a new op is
+            "changed", "hotspots"]               # list EVERY op the role may run — a new op is
                                                  # denied to a restricted role until it's added here.
-                                                 # `deadcode` is withdrawn for every role right now
-                                                 # (safe-nulls, reason: "op-withdrawn") — listing it
-                                                 # here grants no extra capability today; kept in the
-                                                 # allowlist so `reader` is not silently denied it the
-                                                 # day it is reinstated. See README.md#deadcode-is-withdrawn.
+                                                 # `deadcode` used to be listed here, withdrawn but
+                                                 # still nominally reinstatable, so that `reader`
+                                                 # would not be silently denied it on the day it came
+                                                 # back. It is now RETIRED — the implementation is
+                                                 # gone and there is no day — so listing it would
+                                                 # advertise a capability that cannot exist.
+                                                 # See README.md#deadcode-is-retired.
 searcher = ["search", "context"]
 
 # REQUIRED. Which project directories each role may point those ops AT.

@@ -376,6 +376,9 @@ def run() -> None:
         "`context` (fan-out), `changed` (impact of your uncommitted git edits — no target needed), "
         "`hotspots` (highest fan-in/complexity symbols). "
         "`target` is the symbol/query; optional `engine` (auto|graph|lsp|semantic), `project_root`. "
+        "When several symbols share a name, `callers`/`callees`/`impact` report each one separately "
+        "and say so — narrow to one with a qualified target (`core.Group.invoke`) or a file hint "
+        "(`invoke@src/click/testing.py`). "
         "Never raises: `ok` is always true; a null `result` + `reason` means not-found/not-indexed. "
         "A non-null `result` may still be incomplete — check `confidence`/`gaps`."
     ))

@@ -58,45 +58,61 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Everything about one symbol | `context` | graph + lsp | both views merged |
 | **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
 | Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
-| Unreferenced (dead) code | `deadcode` | graph | **withdrawn** — measured wrong in both directions on real repos; safe-nulls with `reason: "op-withdrawn"` unless you opt in — [why, and what to use instead](#deadcode-is-withdrawn) |
+| Unreferenced (dead) code | `deadcode` | graph | **withdrawn and now retired** — a labelled corpus measured its precision at 25%; safe-nulls with `reason: "op-withdrawn"`, and no flag brings it back — [the measurement, and what to use instead](#deadcode-is-retired) |
 
 Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
 
-#### `deadcode` is withdrawn
+`callers`, `callees` and `impact` resolve the target by its **unqualified name**. When several
+symbols share it, each matched symbol's rows are reported separately under its own heading and the
+result says how many it found — narrow to one with a qualified target (`core.Group.invoke`) or a file
+hint (`invoke@src/click/testing.py`); see
+[when several symbols share a name](docs/graph.md#when-several-symbols-share-a-name).
 
-`deadcode` is withdrawn: it returns a safe-null (`reason: "op-withdrawn"`) instead of running. It
-was measured wrong in **both** directions on real repositories — on one it named five candidates of
-which four were live code (a rollup plugin hook; two entries of a `Record<string, fn>` reached by a
-runtime string; a `predicate` passed inline to the call that consumes it), and on another it
-reported "(none found)" for a 4,883-function codebase that had at least three genuinely unreferenced
-private helpers. It is the one op whose output is an instruction to delete code, so it needs the
-highest evidence bar of any op here, and currently has the least. It returns when a labelled corpus
-measures its precision and recall — not before.
+#### `deadcode` is retired
+
+`deadcode` no longer exists. Asking for it returns a safe-null (`reason: "op-withdrawn"`) with a hint
+naming what to use instead, and **no flag brings it back** — the implementation has been deleted.
+
+It was withdrawn pending one condition: *"it returns when a labelled corpus measures its precision
+and recall — not before."* That corpus now exists, in
+[`tests/test_corpus.py`](tests/test_corpus.py), and the measurement is what retired it.
+
+**How it was measured.** Two pinned real Python repositories (`pallets/click`, `psf/requests`), with
+every function and method collected from the **AST** — 2,425 definitions, `async def` and class
+methods included, because a verification whose population comes from a pattern like `^\s*def ` cannot
+see half of them. Each is labelled live or dead with the reference behind the label recorded beside
+it. The oracle errs toward *live*: a decorator, a dunder, an override of an external interface, a
+string-dispatch mention, or public-API status is each enough to call a symbol live, so "dead" is only
+what survives all of them. That biases the numbers against the op, which is the correct direction for
+a check whose output is an instruction to delete code. Known-answer canaries are planted in both trees
+so recall has a denominator at all.
+
+**The numbers.**
+
+| | precision | recall |
+|---|---|---|
+| as shipped | **25%** (6 of 24) | 60% (6 of 10) |
+| with the two repairs this codebase already contains elsewhere | 89% (8 of 9) | 80% (8 of 10) |
+
+And the measurement that decided it — **real code only, canaries removed**: the op as shipped named
+**18 candidates across those two repositories, and every one of them was live.** All 18 were Makefile
+targets, which the graph backend indexes as `Function` nodes. Repaired, it names exactly one, and
+that one is `MockRequest.get_type` in requests — a method `http.cookiejar` calls by duck-typed
+convention, whose name appears once in the source.
+
+**Why it was not repaired further.** The verification was a name-frequency scan over the source, so it
+fails on exactly one condition: a symbol whose name appears once and is called by a convention
+outside the source. Two repositories produced three distinct instances of that condition — non-code
+nodes labelled `Function`, interpreter-called dunders, and stdlib duck-typed protocol methods — and
+the earlier TypeScript evidence adds a rollup plugin hook and object-literal properties. The set is
+not enumerable: no specification lists `get_type`. Every repository added revealed a new member of it.
+
+Weighed against that: in 2,425 real definitions across two maintained repositories there was **not
+one** dead private symbol to find. An op whose measured yield on real code is zero true positives has
+no benefit to set against that error rate.
 
 **Use `callers` on a specific symbol instead.** "Does anything call this?" is exactly the question
 `deadcode` was trying to answer in bulk, and `callers` answers it accurately, one symbol at a time.
-
-**Escape hatch, if you understand the risk.** Set `CODEINTEL_ENABLE_UNVERIFIED_OPS=1` to run it
-anyway. It still re-reads the source before reporting a hit, which removes the *common* false
-positives — but that verification is exactly what was measured wrong on the repositories above, so
-**review every hit before deleting anything, and never wire it into an agent that deletes without a
-human in the loop.**
-
-**Example — "who uses `safe_null_result`?"**
-
-```jsonc
-// request
-{ "op": "callers", "target": "safe_null_result", "engine": "auto" }
-
-// response — always this exact envelope; `result` is ready-to-read markdown
-{
-  "ok": true, "op": "callers", "target": "safe_null_result",
-  "engine": "graph", "cached": false,
-  "result": "## Callers of safe_null_result (7)\n- …gateway [USAGE] (src/codeintel/gateway.py)\n- …providers.graph [USAGE] (src/codeintel/providers/graph.py)\n- …server [USAGE] (src/codeintel/server.py)\n- … (4 more)"
-}
-```
-
-The agent hands `result` straight to the model. If the graph backend isn't installed, the identical call returns `"result": null, "reason": "engine-unavailable"` — no exception, and the agent just falls back to its own search.
 
 ## What makes it good
 
@@ -480,7 +496,7 @@ back to grep rather than crashing.
 
 | Area | Why |
 |---|---|
-| `deadcode` | Withdrawn by default (`reason: "op-withdrawn"`) — measured wrong in both directions on real repos. Use `callers` on a specific symbol instead — [details](#deadcode-is-withdrawn). |
+| `deadcode` | Withdrawn, then **retired** (`reason: "op-withdrawn"`) — a labelled corpus measured 25% precision. Use `callers` on a specific symbol instead — [the measurement](#deadcode-is-retired). |
 | Non-loopback serving | `serve-http` is stdlib `http.server`. It binds loopback by default for a reason; front it with a reverse proxy and see [docs/deploy.md](docs/deploy.md). |
 | RBAC between **untrusting** tenants | It separates privilege levels among callers you already trust. It is not a wall against an adversary with write access to their own root — see the warning in [docs/deploy.md](docs/deploy.md). |
 | Unattended automation | Anything that acts on a result without a human reading it deserves a pilot first. |
@@ -504,7 +520,7 @@ not write, and that is where its bugs have come from — every fix in `0.15.x` c
 at an unfamiliar codebase. Its characteristic failure mode is **answering confidently from the
 wrong index rather than failing loudly**, which the never-raise contract makes harder to notice: a
 wrong answer and a right one are the same shape. Run `codeintel doctor` before trusting a repo-wide
-answer — and `deadcode` in particular is withdrawn rather than merely caveated (see above) — and if
+answer — and `deadcode` in particular is retired rather than merely caveated (see above) — and if
 something looks off please [report it](#reporting-a-problem) — an issue from someone who is not the
 author is the single most useful thing this project can receive right now.
 

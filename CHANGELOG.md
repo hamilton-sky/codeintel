@@ -6,7 +6,131 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **`callees` stopped subtracting the ambiguity out of its answer and started reporting it.** The op
+  resolves its target by unqualified name, so a repository with four methods called `invoke` returned
+  the edges out of all four flattened into one list. On the pinned corpus repo that was literally
+  `## Callees of invoke (34)` — thirty-four rows belonging to four different functions, presented as
+  one symbol's callees, with `confidence: complete` and no gap. `callees` feeds "is this symbol safe
+  to change?", where a list read as complete is the dangerous direction.
+
+  Rows are now GROUPED by the symbol they came out of. Each group renders under a heading naming
+  that symbol and its file, the number of same-named symbols is stated in the body before any row,
+  and nothing is dropped for being ambiguous — the same 34 rows come back as four labelled answers
+  with a `target-ambiguous` gap and `confidence: partial`. Three symbols named `handle` is not a
+  degraded answer, it is a question, and `chain` already asked it (it renders the backend's own
+  `status: ambiguous` as a candidate list); `callees` now does the same in its own voice.
+
+  Grouping also makes the language-family check structural. `0.15.5` fixed that check by hand — it
+  compared each callee against a UNION of every matched caller's family, so a `.ts` collision reached
+  from a Python caller survived on the strength of an unrelated TypeScript caller three rows down.
+  A row can now only be compared against its own group's caller, so that bug is no longer
+  expressible here rather than merely fixed.
+- **`callers` now groups by the symbol being called, the way `callees` groups by the symbol doing the
+  calling.** It was given the disambiguator and not the grouping, on the argument that a merged caller
+  list over-reports and over-reporting is the safe direction for "is this symbol safe to change?".
+  That argument is about the SET, not about the answer: a reader told "3 callers of `invoke`" cannot
+  tell that one of the three calls a *different* `invoke`, and believing a caller exists that does
+  not is a wrong fact whichever direction it errs in. It also left `impact` internally inconsistent —
+  one half grouped per symbol and the other flat, from a single target — so a reader would see the
+  callees attributed per symbol and read the callers list as belonging to whichever one they were
+  looking at.
+
+  Both ops now render through one `_render_edge_answer`, for the reason the repo-scan ops share
+  `_render_scan`: the drift-prone parts are the count in the heading, the ambiguity disclosure and the
+  truncation note, and two copies of those is how one op ends up honest and the other silent. A test
+  reads both ops' bodies out of the AST and fails if either builds its own answer instead.
+- **The unmatched-hint message stopped overstating what it knew.** It said "Nothing in this index
+  matches `…`", which is a second false claim inside a message written to avoid the first: the
+  population it can speak for is the symbols its own query returned, not the index. On a real
+  repository `Group.invoke` has callees and no callers, so it is genuinely indexed and genuinely
+  absent from the callers list. It now says no symbol matching the hint has `callers` **here**, and
+  that this says nothing about whether the symbol exists.
+
+### Added
+- **A target may now say WHICH symbol it means**, so ambiguity can be resolved instead of only
+  disclosed: `core.Group.invoke` matches on a segment-aligned qualified-name suffix, and
+  `invoke@src/click/testing.py` (or a bare `invoke@testing.py`) matches on file. Both are text the
+  previous answer already printed on its result lines, which closes the loop: the ambiguous answer
+  names the candidates and shows the syntax to pick one. A narrowed answer carries no ambiguity gap
+  and reports `complete`, because it is.
+
+  Applied to rows in hand rather than pushed into the Cypher `WHERE`: a suffix match needs a string
+  predicate, and this backend's dialect is not an interface this project can pin — the 0.9→0.10
+  wire-format break is the standing reminder. `callers` honours the same hint, applied to the far end
+  of the edge, because `impact` is callers + callees on one target and narrowing one half only would
+  pair one symbol's callees with a different symbol's callers — an answer that reads as precise while
+  being about two different functions. Rejected: making a bare name refuse until disambiguated. The
+  merged answer over-reports rather than under-reports, and breaking every existing caller to fix a
+  disclosure problem is the wrong trade.
+- **A hint that matches nothing says so, and names the symbols that do carry the name.** Falling
+  back to every symbol with that bare name would answer a question the caller explicitly narrowed
+  away from; reporting zero callees would be a claim about the code rather than about the lookup.
+  "I could not find the symbol you named" and "that symbol calls nothing" are opposite answers, and
+  only one of them is about your repository.
+
+### Removed
+- **`deadcode` is retired: the implementation is deleted, and the `CODEINTEL_ENABLE_UNVERIFIED_OPS`
+  opt-in with it.** The op was withdrawn pending one condition — *"it returns when a labelled corpus
+  measures its precision and recall, not before"* — and that measurement is what retired it.
+
+  The corpus: two pinned real Python repositories (`pallets/click`, `psf/requests`), every function
+  and method collected from the **AST** rather than a regex, 2,425 definitions, `async def` and class
+  methods included. Each labelled live or dead with the reference behind the label recorded beside it,
+  by an oracle that errs toward LIVE — a decorator, a dunder, an override of an interface declared
+  outside the tree, a string-dispatch mention or public-API status is each enough — so "dead" is only
+  what survives all of them, and the numbers come out against the op rather than for it. Known-answer
+  canaries are planted in both trees because otherwise recall has no denominator at all.
+
+  **Precision as shipped: 6/24 = 25%.** Recall 60%. And the measurement that actually decided it:
+  restricted to real code with the canaries removed, the op named **18 candidates across the two
+  repositories and every single one was live** — all 18 Makefile targets, which the graph backend
+  indexes as `Function` nodes.
+
+  Both repairs were measured before the decision, not assumed away. Requesting `Method` nodes (the
+  fix `hotspots` already had) takes recall to 80% and precision to 67%; excluding interpreter-called
+  dunders takes precision back to 100% on `click`; restricting candidates to code files (the fix
+  `changed` already had, from `0.15.4`) reaches **89% precision and 80% recall** on the planted set.
+  On real code that repaired version names exactly one candidate, and it is
+  `MockRequest.get_type` in requests — a method `http.cookiejar` calls by duck-typed convention,
+  whose name appears once in the source.
+
+  That last false positive is why the repair stops there. The verification was a name-frequency scan,
+  so it fails on exactly one condition: a symbol whose name appears once and is called by a
+  convention outside the source. Two repositories produced three distinct instances of it (non-code
+  nodes labelled `Function`, dunders, stdlib duck-typed protocol methods); the 2026-08-17 TypeScript
+  evidence adds a rollup plugin hook and object-literal properties. The set is not enumerable — no
+  specification lists `get_type` — and every repository added revealed a new member. Weighed against
+  that: in 2,425 real definitions across two maintained repositories there was **not one** dead
+  private symbol to find. An op whose measured yield on real code is zero true positives has no
+  benefit to set against that error rate.
+
+  Reinstating narrowed was the option most seriously considered — `click` alone measured 100%
+  precision, and `Function`-plus-`Method`-minus-dunders on Python looked defensible. Adding the
+  second repository is what refused it, which is also the argument for `n>1`: a decision to hand an
+  agent a delete list on the strength of one repository is the pattern the withdrawal existed to
+  break. What survives is the `_WITHDRAWN_OPS` entry, so the op name still explains itself with a
+  hint naming `callers` as the accurate substitute, and the corpus machinery, so the decision can be
+  re-opened by measurement rather than by argument.
+
+  The escape hatch went with the code: a flag that enables nothing is a promise the product cannot
+  keep, and worse than no flag, because a reader sets it and believes something changed. The gate is
+  now unconditional, and three tests hold the pieces together — a withdrawal hint may only advertise
+  the opt-in if `build_result` still consults it AND the op still has an implementation; the corpus
+  job must not export a flag that enables nothing; and an op declared in `_GRAPH_OPS` with no dispatch
+  route must have a `_WITHDRAWN_OPS` entry, or it answers `unsupported-op` and sends an agent looking
+  for a different tool.
+
 ### Fixed
+- **A `callees` answer emptied entirely by the collision filter reported the dropped count in
+  `gaps` and nothing in the body.** The gap said `1 row(s) were dropped`; the body said
+  `(no callee survived name-collision filtering)` with no number anywhere in it. `attach_confidence`
+  states the rule this broke — the engine "is expected to have said the same thing in the body text,
+  because that is the field an agent actually reads" — so a count that lives only in the JSON is a
+  promise kept to the schema and broken to the reader. Both the count and the reason now render in
+  every partial case, and a new test derives the population of `callees` gap kinds from `graph.py`'s
+  **AST** and fails if any of them reports a number the body does not repeat. A hand-typed list
+  there would keep passing on the day a new gap kind ships with no body text behind it.
 - **A symbol whose name is also a file extension kept the backend's project id — the host's absolute
   path — in rendered output.** `requests.models.Response.json` is a method, the most-called one in
   that library, and `_strip_project_prefix`'s filename guard read the trailing `json` as an extension
@@ -27,8 +151,29 @@ All notable changes to codeintel are documented here. The format is based on
   for renderers emitting a raw qualified name now has a companion that sweeps for renderers stripping
   one with the filename guard left on, and both were upgraded to scan logical lines: a line break
   through the middle of a call had been enough to silence them.
+- **A callee list truncated by the query's own row cap read as a complete answer.** The Cypher ends
+  in `LIMIT 50`; a result that came back with exactly 50 rows had almost certainly been cut short,
+  and nothing in the rendered list said so. It now discloses the truncation in the body and carries a
+  `row-cap-reached` gap, and does not claim the target is the only symbol by that name — a symbol
+  whose rows fell past the cap is indistinguishable from one that is not there. A list one row short
+  of the cap is a complete answer and is left uncaveated.
 
 ### Tests
+- **The corpus harness gained a second pinned repository and a labelled dead-code oracle.**
+  `psf/requests` joins `pallets/click`; every corpus invariant now runs against both, which is how
+  the `Response.json` path leak above was found, and how the `deadcode` measurement avoided being
+  decided by one repository. The oracle derives its population from the AST, labels every definition
+  with recorded evidence, and is itself checked for non-vacuity against planted known-answer canaries
+  — an oracle whose liveness rules fire too eagerly labels a whole tree live and then "proves" any
+  dead-code heuristic worthless, so the canaries are the control. The `async def` canary has its own
+  assertion, because the human verification that once cleared a tree used `^\s*def ` and could not
+  see 33 of its 66 functions.
+
+  What remains measurable after the retirement is the SIGNAL rather than the op: the graph's raw
+  in-degree-0 symbol set, scoped as `deadcode` scoped it. The test asserts the premise the decision
+  rested on — that this signal is majority-live on real code — rather than the historical numbers,
+  which would churn on every backend release. If it ever fails, the premise has stopped holding and
+  the decision is worth re-opening with fresh measurements. That is a result, not a flake.
 - **The most destructive path in the product was the least tested.** `reset.py` sat at 60%, the
   lowest in the codebase, and the uncovered lines were not scattered — they were the deletions.
   The whole of `_reset_graph_cache`, which removes every per-project graph index, and the entire
@@ -68,6 +213,24 @@ All notable changes to codeintel are documented here. The format is based on
   sqlite's own `-wal`/`-shm` siblings in place. Opening a WAL database checkpoints and clears a
   stale journal, so the scoped dry-run, which opens the db to COUNT it, legitimately removes one.
   Measured while writing these, not assumed; the durable cache is what a dry-run must not touch.
+
+### Documentation
+- **Every live mention of `deadcode` now says it is retired rather than withdrawn-but-runnable**, and
+  the sections describing machinery that no longer exists are gone: `docs/graph.md`'s "Why `deadcode`
+  re-reads the source" described a source-verification pass that has been deleted, and the README's
+  escape-hatch paragraph offered a flag that no longer exists. The README carries the measurement in
+  full — the population, the oracle's bias, both repairs, and the one number that decided it.
+
+  `docs/deploy.md`'s RBAC allowlist example **drops** `deadcode`, reversing the call `0.15.5` made.
+  That call was to keep it listed so `reader` would not be silently denied the op "the day it is
+  reinstated"; there is no such day now, so listing it advertises a capability that cannot exist. The
+  comment records both the reversal and its reason rather than leaving a silent edit.
+
+  And the drift test learned its missing direction. Every existing check read `_WITHDRAWN_OPS` and
+  looked for the word "withdrawn", so on the day an op is REINSTATED they would all keep passing
+  while the docs still told a reader it refuses to run — the same shape as the README's CI claim that
+  `0.15.5` had to correct, pointing the other way. A table row naming an op that does run must now
+  not call it withdrawn.
 
 ## [0.15.5] — 2026-08-19
 

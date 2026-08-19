@@ -49,9 +49,58 @@ def test_withdrawn_ops_actually_exist_and_are_non_empty():
     assert _WITHDRAWN_OPS, "_WITHDRAWN_OPS is empty — the checks below would pass vacuously"
     for op, hint in _WITHDRAWN_OPS.items():
         assert isinstance(op, str) and op
-        assert "CODEINTEL_ENABLE_UNVERIFIED_OPS" in hint, (
-            op, "the withdrawal hint should name the escape hatch"
-        )
+        assert op in hint, (op, "the hint must name the op it is about")
+        assert len(hint) > 80, (op, "a withdrawal with no explanation is barely better than none")
+
+
+def test_a_withdrawal_hint_never_offers_a_way_to_run_an_op_that_cannot_run():
+    """A hint may only advertise the `CODEINTEL_ENABLE_UNVERIFIED_OPS` opt-in if the opt-in exists
+    AND the op has something to opt in to.
+
+    `deadcode` was withdrawn-but-present for a while, reachable behind that flag; it is now retired
+    and the flag is gone. A hint still naming it would send a reader to an environment variable that
+    changes nothing, which costs more trust than saying nothing would. Derived from the class and
+    the gate's own source, so it cannot be satisfied by a flag that is documented but unread."""
+    import inspect
+
+    from codeintel.providers.graph import GraphProvider
+
+    gate = inspect.getsource(GraphProvider.build_result)
+    flag_is_consulted = "_unverified_ops_enabled" in gate
+    for op, hint in _WITHDRAWN_OPS.items():
+        if "ENABLE_UNVERIFIED" not in hint.upper():
+            continue
+        assert flag_is_consulted, (
+            f"{op}'s hint advertises CODEINTEL_ENABLE_UNVERIFIED_OPS, but build_result no longer "
+            f"consults it — the flag enables nothing")
+        assert hasattr(GraphProvider, f"_op_{op}"), (
+            f"{op}'s hint advertises an opt-in, but there is no `_op_{op}` left to run")
+
+
+def test_live_docs_do_not_describe_a_RUNNING_op_as_withdrawn():
+    """The same drift pointing the other way, which is the half no test covered.
+
+    Every check here reads `_WITHDRAWN_OPS` and looks for the word "withdrawn"; on the day an op is
+    reinstated they all keep passing while the docs still tell a reader it refuses to run — the
+    exact shape of the README's CI claim that `0.15.5` had to correct. So: a table row naming an op
+    that DOES run must not call it withdrawn. Rows that also name a withdrawn op are skipped, since
+    those rows are about the withdrawal."""
+    from codeintel.providers.graph import _GRAPH_OPS, _WITHDRAWN_OPS
+
+    running = sorted(set(_GRAPH_OPS) - set(_WITHDRAWN_OPS))
+    assert running, "no running graph ops — this check would pass vacuously"
+    for path in _live_markdown_files():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if not (stripped.startswith("|") and stripped.endswith("|")):
+                continue
+            if "withdrawn" not in line.lower():
+                continue
+            if any(f"`{w}`" in line for w in _WITHDRAWN_OPS):
+                continue
+            named = [op for op in running if f"`{op}`" in line]
+            assert not named, (
+                f"{path}:{lineno} calls {named} withdrawn, but {named} runs: {line!r}")
 
 
 def test_live_docs_mark_every_withdrawn_op_as_withdrawn():

@@ -23,7 +23,7 @@ this repo is indexed.
 > response that every renderer here parses with a compact human-readable text format. Crucially it
 > kept `list_projects` as JSON — so project resolution and `codeintel doctor` still succeed, while
 > **every other op returns nothing**: `callers`, `callees`, `impact`, `chain`, `pattern`,
-> `overview`, `changed`, `deadcode` and `hotspots` all come back empty against a fully indexed
+> `overview`, `changed` and `hotspots` all come back empty against a fully indexed
 > repository.
 >
 > As of this release `doctor` detects the mismatch by asking a real query rather than trusting
@@ -42,55 +42,70 @@ this repo is indexed.
 
 | op | target | What it returns |
 |---|---|---|
-| `callers` | symbol name | Up to 20 callers of the symbol (name + file path) |
-| `callees` | symbol name | Up to 20 functions called by the symbol |
-| `impact` | symbol name | Combined callers + callees section |
+| `callers` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 callers of the symbol (name + file path) |
+| `callees` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 functions called by the symbol |
+| `impact` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Combined callers + callees section |
 | `chain` | `"A->B"` or symbol | Call path from A (trace_path), each hop risk-labeled when the backend classifies it |
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | (ignored) | Impact of the **uncommitted git worktree**: changed files → impacted symbols (via `detect_changes`) |
-| `deadcode` | (ignored) | **Withdrawn.** Safe-nulls with `reason: "op-withdrawn"` by default — see below. |
+| `deadcode` | (ignored) | **Retired.** Always safe-nulls with `reason: "op-withdrawn"` — see below. |
 | `hotspots` | (ignored) | Highest complexity / fan-in symbols — refactor-risk hotspots (via `search_graph`, client-sorted) |
 
-### `deadcode` is withdrawn
+### When several symbols share a name
 
-`deadcode` is withdrawn (`_WITHDRAWN_OPS` in `graph.py`): it returns a safe-null with
-`reason: "op-withdrawn"` instead of running, because it was measured wrong in **both** directions on
-real repositories — false positives (framework-dispatched symbols reported as dead) and false
-negatives (unreferenced helpers missed). Use `callers` on a specific symbol instead; it answers the
-same underlying question — "does anything call this?" — accurately. Set
-`CODEINTEL_ENABLE_UNVERIFIED_OPS=1` to run it anyway; see the README section
-[`deadcode` is withdrawn](../README.md#deadcode-is-withdrawn) for the full evidence and the risk of
-opting in. The rest of this section describes what runs behind that flag.
+`callers`, `callees` and `impact` resolve the target by its **unqualified name**, so a repository
+with four methods called `invoke` matches all four. Rows are reported **separately per matched
+symbol**, under a heading naming it, with the count of same-named symbols stated — they are that many
+separate answers, not one. Nothing is dropped for being ambiguous. `callees` groups by the symbol
+doing the calling and `callers` by the symbol being called; in both cases the heading is the symbol
+your target matched and the rows are the other end of the edge.
 
-### Why `deadcode` re-reads the source
+To ask about one of them, qualify the target with text the answer already printed:
 
-In-degree 0 means "nothing *calls* this". A function passed as a **reference** — a React event
-handler, an `addEventListener` argument, any framework callback — has in-degree 0 while being
-entirely live. On a real TypeScript repo the raw graph answer was 181 candidates of which every
-one sampled was live code, and an agent acting on that deletes working code.
+| target | means |
+|---|---|
+| `invoke` | every symbol named `invoke` |
+| `core.Group.invoke` | the one whose qualified name ends in those segments |
+| `invoke@src/click/testing.py` | the one defined in that file (a bare `testing.py` works too) |
 
-So candidates are checked against the source with a bounded word-boundary scan; a name appearing
-anywhere beyond its own definition drops out. The same repo returns 4. Generated output, vendored
-trees and retired directories are excluded from both the scan and the ranking — a checked-in
-minified bundle otherwise supplies enough occurrences to vouch for a genuinely dead name, and
-ranks as the most complex "function" in the repo.
+A qualified or file-hinted target that matches nothing says so and lists the symbols that **do**
+carry the name. It never reports zero rows, because "I could not find the symbol you named" and
+"that symbol calls nothing" are opposite answers and only one of them is about your code. Note what
+that message does and does not claim: a symbol can be indexed and still be absent from one of these
+lists — `Group.invoke` has callees but no callers on one real repository — so it says "no symbol
+matching this has callers here", never "not in this index".
 
-The result says which verification actually ran: a full source check, a missing `project_root`, or
-a repo past the scan cap. It is a name-frequency heuristic and errs toward hiding real dead code
-rather than reporting live code as dead — it cannot see a symbol reached only through a decorator
-registry, `getattr` dispatch, an object-literal property a library calls, or a name in a template,
-YAML or TOML. Nor can it see an entry point declared in packaging metadata, a plugin discovered at
-runtime, or a caller in a language the graph does not parse.
+Two things still limit these ops, and both are disclosed in the result rather than assumed away:
 
-**Treat the output as candidates — a ranked list of places worth looking, never a work order.**
-Review each hit before deleting anything, and do not wire `deadcode` into an agent that deletes
-without a human in the loop. The verification removes the common false positives; it does not make
-the answer complete, and no reachability analysis on this shape of input could.
+* The extractor emits edges for bare local names, so a callee in a different language family than
+  its caller, or in a file that cannot hold code at all, is dropped as a name collision — reported
+  as a count in the body and a `name-collisions-dropped` gap.
+* The query is capped at 50 rows. A result that came back at the cap is truncated, says so, and
+  carries a `row-cap-reached` gap.
 
-The three repo-scan ops (`changed`, `deadcode`, `hotspots`) key on the whole index / git state, not a
-symbol, so `target` is ignored. An empty scan (clean tree, no dead code) is a **true answer** and
-returns an informative string, not safe-null; only a backend failure returns safe-null.
+### `deadcode` is retired
+
+`deadcode` is retired (`_WITHDRAWN_OPS` in `graph.py`): it always returns a safe-null with
+`reason: "op-withdrawn"` and a hint naming the substitute, and **there is no implementation left to
+enable** — the `CODEINTEL_ENABLE_UNVERIFIED_OPS` opt-in that used to run it has been removed with it.
+
+It was withdrawn pending a labelled-corpus measurement of its precision and recall. That corpus is
+`tests/test_corpus.py::test_deadcode_precision_and_recall_are_measured_not_assumed`, and the
+measurement retired the op: **25% precision as shipped**, and on real code with the harness's own
+canaries removed it named 18 candidates across two pinned Python repositories of which **every one was
+live**. Repaired as far as this codebase's existing filters reach, it named exactly one candidate, and
+that one was live too. The README carries the full numbers and the reasoning:
+[`deadcode` is retired](../README.md#deadcode-is-retired).
+
+**Use `callers` on a specific symbol instead.** It answers the same underlying question — "does
+anything call this?" — accurately, one symbol at a time.
+
+### The repo-scan ops
+
+`changed` and `hotspots` key on the whole index / git state, not a symbol, so `target` is ignored. An
+empty scan (a clean worktree, no ranked symbols) is a **true answer** and returns an informative
+string, not safe-null; only a backend failure returns safe-null.
 
 ### `chain` detail
 
@@ -124,7 +139,7 @@ defaults to **5000 ms**.
 | `'engine-unavailable'` | `codebase-memory-mcp` not on PATH |
 | `'project-not-indexed'` | No project found for the given `project_root` |
 | `'unsupported-op'` | `op` is not one of the nine ops above |
-| `'op-withdrawn'` | `op` is `deadcode` and `CODEINTEL_ENABLE_UNVERIFIED_OPS` is not set — see [above](#deadcode-is-withdrawn) |
+| `'op-withdrawn'` | `op` is `deadcode`, which is retired — see [above](#deadcode-is-retired) |
 | `'error'` | Unexpected exception during execution |
 
 ## Envelope shape

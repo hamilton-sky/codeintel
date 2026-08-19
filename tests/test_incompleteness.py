@@ -483,13 +483,26 @@ def test_withdrawn_ops_are_still_measured_by_the_corpus_oracle():
     wf = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "corpus.yml"
     if not wf.exists():
         pytest.skip("no corpus workflow in this checkout")
-    body = wf.read_text()
-    from codeintel.providers.graph import _WITHDRAWN_OPS
+    # What the job EXPORTS, not what it mentions: a comment explaining why a flag was removed names
+    # the flag, and must not read as the flag still being set.
+    body = "\n".join(line for line in wf.read_text().splitlines()
+                     if not line.lstrip().startswith("#"))
+    from codeintel.providers.graph import _WITHDRAWN_OPS, GraphProvider
 
-    if _WITHDRAWN_OPS:
+    # Only an op that still HAS an implementation can be deadlocked this way. `deadcode` was, and
+    # the deadlock is how it stayed unmeasured for two releases; it has since been measured and
+    # retired, so there is nothing left to enable — and a corpus job still exporting the flag would
+    # imply otherwise.
+    runnable_but_withdrawn = [op for op in _WITHDRAWN_OPS
+                              if hasattr(GraphProvider, f"_op_{op}")]
+    if runnable_but_withdrawn:
         assert "CODEINTEL_ENABLE_UNVERIFIED_OPS" in body, (
-            f"ops {sorted(_WITHDRAWN_OPS)} are withdrawn pending measurement, but the corpus job "
-            "does not enable them, so they are never measured"
+            f"ops {sorted(runnable_but_withdrawn)} are withdrawn pending measurement, but the "
+            "corpus job does not enable them, so they are never measured"
+        )
+    else:
+        assert "CODEINTEL_ENABLE_UNVERIFIED_OPS" not in body, (
+            "the corpus job exports an opt-in flag that no longer enables any op"
         )
 
 

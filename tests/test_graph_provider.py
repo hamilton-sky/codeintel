@@ -238,14 +238,28 @@ def test_match_project_still_prefers_exact_over_a_richer_parent(tmp_path):
 
 def test_every_dispatched_op_is_declared_supported():
     """`_GRAPH_OPS` gates the unsupported-op reply, so an op wired into _dispatch but missing from
-    the set would be reported unsupported while being perfectly implemented."""
+    the set would be reported unsupported while being perfectly implemented.
+
+    The two sets are not identical, and the difference is derived rather than allowed for by hand:
+    a WITHDRAWN op stays in `_GRAPH_OPS` so that asking for it still explains itself, while having
+    no dispatch route because it has no implementation left. Anything else in the difference is
+    drift."""
     import inspect
 
-    from codeintel.providers.graph import _GRAPH_OPS
+    from codeintel.providers.graph import _GRAPH_OPS, _WITHDRAWN_OPS
 
     source = inspect.getsource(GraphProvider._dispatch)
     dispatched = set(re.findall(r'op == "([a-z]+)"', source))
-    assert dispatched == set(_GRAPH_OPS), f"drift: {dispatched ^ set(_GRAPH_OPS)}"
+    assert dispatched - set(_GRAPH_OPS) == set(), (
+        f"dispatched but not declared, so it answers as unsupported: {dispatched - set(_GRAPH_OPS)}")
+    unrouted = set(_GRAPH_OPS) - dispatched
+    assert unrouted == set(_WITHDRAWN_OPS), (
+        f"declared with no dispatch route and no withdrawal entry, so it silently answers "
+        f"`unsupported-op`: {sorted(unrouted - set(_WITHDRAWN_OPS))}")
+    for op in unrouted:
+        assert not hasattr(GraphProvider, f"_op_{op}"), (
+            f"{op} still has an implementation but no route — withdraw it at the gate, not by "
+            f"deleting its dispatch line, or the escape hatch reports `unsupported-op`")
 
 
 def _provider_answering(dispatch_result):
@@ -388,52 +402,6 @@ def test_no_renderer_anywhere_emits_a_raw_qualified_name():
 
 # --------------------------------------------------------------------------- scan accuracy
 
-def test_deadcode_drops_candidates_that_are_referenced_in_source(tmp_path):
-    """`deadcode` asks the graph for functions with IN-DEGREE 0, and a function passed as a
-    REFERENCE rather than called has in-degree 0 — every React handler, every
-    `addEventListener('keydown', onKeyDown)`, every framework callback. On a real TypeScript repo
-    that made 181 of 181 sampled candidates false, and an agent acting on it would delete live
-    code. The graph cannot see those edges, so verify against the source.
-    """
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / "hook.ts").write_text(
-        "function onKeyDown(e) { return e }\n"
-        "document.addEventListener('keydown', onKeyDown)\n"          # referenced, not called
-    )
-    (tmp_path / "orphan.ts").write_text("function reallyUnused() { return 1 }\n")
-
-    rows = [{"name": "onKeyDown"}, {"name": "reallyUnused"}]
-    kept, state = _drop_referenced_symbols(rows, str(tmp_path))
-
-    assert state == "ok"
-    assert [r["name"] for r in kept] == ["reallyUnused"]
-
-
-def test_deadcode_verification_reports_when_it_could_not_run(tmp_path, monkeypatch):
-    """Without the source pass these are raw in-degree-0 rows. Returning them unlabelled would
-    imply a confidence the check never earned."""
-    import codeintel.providers.graph as g
-
-    monkeypatch.setattr(g, "_VERIFY_FILE_CAP", 0)
-    (tmp_path / "a.py").write_text("def f(): pass\n")
-
-    kept, state = g._drop_referenced_symbols([{"name": "f"}], str(tmp_path))
-    assert state == "capped"
-    assert len(kept) == 1, "an unverifiable repo must return rows unfiltered, not empty"
-
-
-def test_deadcode_verification_is_word_boundary_accurate(tmp_path):
-    """A substring match would hide a genuinely dead `run` behind any `runtime` in the repo."""
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / "a.ts").write_text("function run() {}\nconst runtime = 1\nconst rerun = 2\n")
-    kept, state = _drop_referenced_symbols([{"name": "run"}], str(tmp_path))
-
-    assert state == "ok"
-    assert [r["name"] for r in kept] == ["run"], "substring hits must not count as references"
-
-
 def test_scan_ops_hide_archived_code(tmp_path):
     """A repo-scan ranks by complexity and fan-in, and archived code scores well on both: an 8MB
     `.archive/` tree put a retired 507-line component THIRD in a repo's refactor hotspots, a
@@ -448,83 +416,6 @@ def test_scan_ops_hide_archived_code(tmp_path):
 
 
 # --------------------------------------------------------------------------- verification limits
-
-def test_two_dead_functions_sharing_a_name_do_not_hide_each_other(tmp_path):
-    """A GLOBAL occurrence count against a fixed allowance of 1 meant each definition counted as
-    the other's "use" and both vanished. The allowance must be the number of definitions."""
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
-    (tmp_path / "a" / "mod.py").write_text("def helper(): pass\n")
-    (tmp_path / "b" / "mod.py").write_text("def helper(): pass\n")
-
-    rows = [{"name": "helper", "file_path": "a/mod.py"}, {"name": "helper", "file_path": "b/mod.py"}]
-    kept, state = _drop_referenced_symbols(rows, str(tmp_path))
-
-    assert state == "ok"
-    assert len(kept) == 2, "same-named dead functions cancelled each other out"
-
-
-def test_generated_bundles_do_not_count_as_references(tmp_path):
-    """A 6.7MB minified `out/` bundle supplied 46 occurrences of a `toJSON` that appears zero
-    times in hand-written source — enough to hide a genuinely dead function."""
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / "out").mkdir(); (tmp_path / "node_modules").mkdir()
-    (tmp_path / "out" / "bundle.js").write_text("toJSON toJSON toJSON\n")
-    (tmp_path / "node_modules" / "dep.js").write_text("toJSON\n")
-    (tmp_path / "live.py").write_text("def toJSON(): pass\n")
-
-    kept, state = _drop_referenced_symbols([{"name": "toJSON"}], str(tmp_path))
-    assert state == "ok"
-    assert [r["name"] for r in kept] == ["toJSON"]
-
-
-def test_the_verifier_scans_live_dot_directories(tmp_path):
-    """The walk skipped every dot-directory while `_is_archived_path` counted `.github` as live —
-    so a CI helper referenced only from `.github/scripts` still read as dead."""
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / ".github" / "scripts").mkdir(parents=True)
-    (tmp_path / ".github" / "scripts" / "gen.py").write_text(
-        "def build_matrix(): pass\nbuild_matrix()\n")
-
-    kept, state = _drop_referenced_symbols([{"name": "build_matrix"}], str(tmp_path))
-    assert state == "ok"
-    assert kept == [], "a reference inside a live dot-directory was not seen"
-
-
-def test_an_archived_directory_is_not_scanned_for_references(tmp_path):
-    """Symmetry with `_is_archived_path`: retired code must not vouch for a symbol's liveness."""
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / ".archive").mkdir()
-    (tmp_path / ".archive" / "old.py").write_text("dead_thing()\ndead_thing()\n")
-    (tmp_path / "live.py").write_text("def dead_thing(): pass\n")
-
-    kept, _ = _drop_referenced_symbols([{"name": "dead_thing"}], str(tmp_path))
-    assert [r["name"] for r in kept] == ["dead_thing"]
-
-
-@pytest.mark.parametrize("root,expected", [("", "no-root"), ("/no/such/dir/anywhere", "no-root")])
-def test_a_missing_project_root_is_reported_as_such_not_as_a_size_limit(root, expected):
-    """The MCP tool defaults `project_root` to "", so this is the DEFAULT call path — and the one
-    note blamed the file cap unconditionally, telling users their repo was too big when the real
-    cause was a missing argument."""
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    assert _drop_referenced_symbols([{"name": "x"}], root)[1] == expected
-
-
-def test_each_verification_outcome_has_its_own_note():
-    from codeintel.providers.graph import _VERIFY_NOTES
-
-    assert set(_VERIFY_NOTES) == {"ok", "no-root", "capped"}
-    assert "cap" in _VERIFY_NOTES["capped"] and "cap" not in _VERIFY_NOTES["no-root"]
-    assert "project_root" in _VERIFY_NOTES["no-root"]
-    # The verified note must still disclose what a name scan cannot see.
-    assert "getattr" in _VERIFY_NOTES["ok"] or "registr" in _VERIFY_NOTES["ok"]
-
 
 @pytest.mark.parametrize("path,archived", [
     ("x/.archive/Old.tsx", True), ("app/.next/page.js", True), ("x/.backup/a.py", True),
@@ -626,27 +517,6 @@ def test_a_real_project_slug_is_still_stripped(qn, expected):
     from codeintel.providers.graph import _strip_project_prefix
 
     assert _strip_project_prefix(qn) == expected
-
-
-def test_the_reference_scan_reads_the_file_types_that_hold_references():
-    """A name can be referenced from a file that is not "source" in the graph's sense — SCSS
-    `@include button-base` is the case that shipped, naming live styles as dead while the note
-    claimed verification had succeeded. That is worse than not verifying at all."""
-    from codeintel.providers.graph import _VERIFY_EXTS
-
-    for ext in (".scss", ".css", ".html", ".vue", ".svelte", ".yaml", ".toml", ".json", ".md"):
-        assert ext in _VERIFY_EXTS, f"{ext} can hold a reference the graph cannot see"
-
-
-def test_scss_references_keep_a_symbol_off_the_dead_list(tmp_path):
-    from codeintel.providers.graph import _drop_referenced_symbols
-
-    (tmp_path / "buttons.scss").write_text(
-        "@mixin button-base { color: red }\n.btn { @include button-base; }\n")
-    kept, state = _drop_referenced_symbols([{"name": "button-base"}], str(tmp_path))
-
-    assert state == "ok"
-    assert kept == [], "a SCSS @include is a reference"
 
 
 def test_probe_picks_the_same_duplicate_entry_the_resolver_did(monkeypatch, tmp_path):

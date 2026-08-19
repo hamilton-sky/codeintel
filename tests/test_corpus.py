@@ -28,12 +28,15 @@ of the backends installed. A skip is reported, never silently passed.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 
 import pytest
 
@@ -50,6 +53,15 @@ CORPUS = [
         "name": "click",
         "url": "https://github.com/pallets/click.git",
         "sha": "cbd7a4109da16ce58f54c2a618b4c986e3041fcf",
+    },
+    {
+        # A second pure-Python library, added for the `deadcode` measurement. One repository is not a
+        # corpus: `click` alone put the op's precision at 100%, and this one put it at 14% — the
+        # difference being Makefile targets, which the graph backend indexes as `Function` nodes.
+        # A measurement that would have reinstated an op on n=1 is the argument for n>1.
+        "name": "requests",
+        "url": "https://github.com/psf/requests.git",
+        "sha": "0e322af87745eff34caffe4df68456ebc20d9068",
     },
 ]
 
@@ -107,7 +119,75 @@ def corpus_repo(request):
     with open(os.path.join(assets, "chunk.js"), "w", encoding="utf-8") as fh:
         fh.write("!function(e,t){" + ("a=1;" * 4000) + "}();")
 
+    # Known-answer symbols for the dead-code measurement, in both directions. Without these the
+    # oracle has no dead symbols at all on either repository — see `_PLANTED_DEADCODE`.
+    with open(os.path.join(repo, "_planted_deadcode.py"), "w", encoding="utf-8") as fh:
+        fh.write(_PLANTED_DEADCODE)
+
     return repo
+
+
+# Planted inside every corpus repo. Private by FILENAME as well as by symbol name, so the oracle's
+# "public API of an installed package" rule cannot fire on it. Each group is a shape the `deadcode`
+# withdrawal evidence actually recorded.
+_PLANTED_DEADCODE = '''"""Planted by codeintel's corpus harness. Not part of this repository."""
+from __future__ import annotations
+
+import sys
+import typing as t
+
+_DISPATCH: dict[str, t.Callable[[], str]] = {}
+
+
+def _planted_register(fn: t.Callable[[], str]) -> t.Callable[[], str]:
+    _DISPATCH[fn.__name__] = fn
+    return fn
+
+
+# --- genuinely dead: no reference anywhere in this repository ---------------------------------
+
+def _planted_dead_plain() -> str:
+    return "nothing in this tree names me"
+
+
+async def _planted_dead_async() -> str:
+    # `async def`. A verification pattern of `^\\s*def ` cannot see this line, which is how 33 of
+    # 66 functions became invisible to the check that declared a tree clean.
+    return "nothing names me either"
+
+
+def _planted_dead_nested_owner() -> str:
+    def _planted_dead_inner() -> str:
+        return "nested, and nothing names me"
+    return "outer"
+
+
+class _PlantedHolder:
+    def _planted_dead_method(self) -> str:
+        return "no caller anywhere"
+
+
+# --- live, but carrying in-degree 0 in a call graph -------------------------------------------
+
+@_planted_register
+def _planted_live_registered() -> str:
+    """Reached only through the registry its decorator put it in — the rollup-plugin-hook shape."""
+    return "the decorator registered me"
+
+
+def _planted_live_by_string() -> str:
+    """Reached only by name through getattr — no syntactic caller exists."""
+    return "getattr finds me"
+
+
+def _planted_live_in_table() -> str:
+    """Reached only as a value in a dispatch table — the `Record<string, fn>` shape."""
+    return "a table holds me"
+
+
+_PLANTED_TABLE: dict[str, t.Callable[[], str]] = {"table": _planted_live_in_table}
+_PLANTED_RESOLVED = getattr(sys.modules[__name__], "_planted_live_by_string")
+'''
 
 
 # --------------------------------------------------------------------------- helpers
@@ -260,31 +340,99 @@ def test_generated_content_stays_out_of_the_corpus(corpus_repo):
     assert not ignored, f"git-ignored files entered the corpus: {ignored[:10]}"
 
 
-def test_deadcode_hits_have_no_textual_reference_in_the_tree(corpus_repo):
-    """`deadcode` names symbols an agent may delete, so its output gets checked against the source
-    rather than trusted. A name that appears anywhere beyond its own definition is not dead."""
-    import re
+def test_the_dead_code_oracle_can_actually_find_dead_code(corpus_repo):
+    """Non-vacuity for the oracle itself, and it has to come before any number derived from it.
 
-    p = _indexed_graph(corpus_repo)
-    r = p.build_result("deadcode", "", [], 60000, corpus_repo)
-    text = str(r.get("result") or "")
-    if not text or "(0)" in text:
-        pytest.skip("no deadcode candidates reported for this repo")
+    Every liveness rule in `_label_definition` is a reason to call a symbol LIVE, so an oracle with a
+    bug that makes one rule fire too eagerly labels the whole tree live and then "proves" any
+    dead-code heuristic worthless. The planted canaries are the control: they are known-dead by
+    construction, and the oracle has to find every one of them — including the `async def`, which is
+    the declaration form that made a human verification miss 33 of 66 functions.
+    """
+    population = _labelled_population(corpus_repo)
+    assert len(population) > 300, f"implausibly few definitions for a real repo: {len(population)}"
 
-    names = re.findall(r"^- ([\w.]+)", text, re.MULTILINE)[:10]
-    live: list[str] = []
-    for qualified in names:
-        name = qualified.rsplit(".", 1)[-1]
-        if len(name) < 4:            # too short to grep meaningfully
-            continue
-        hits = subprocess.run(
-            ["git", "-C", corpus_repo, "grep", "-c", "-w", name],
-            capture_output=True, text=True,
-        ).stdout.strip().splitlines()
-        total = sum(int(line.rsplit(":", 1)[-1]) for line in hits if ":" in line)
-        if total > 1:                # more than its own definition
-            live.append(f"{qualified}: {total} textual references")
-    assert not live, "deadcode named symbols that are referenced in the tree:\n  " + "\n  ".join(live)
+    dead = {defn.qualname for label, _evidence, defn in population.values() if label == "dead"}
+    planted = {defn.qualname for _l, _e, defn in population.values()
+               if defn.path == "_planted_deadcode.py"}
+    assert planted, "the canary file was not planted — the measurement below has no denominator"
+
+    must_be_dead = {q for q in planted if "_dead_" in q}
+    assert must_be_dead <= dead, f"the oracle missed known-dead symbols: {sorted(must_be_dead - dead)}"
+    assert any("async" in q for q in must_be_dead & dead), (
+        "the `async def` canary is not among the dead labels — the AST walk is missing a "
+        "declaration form, which is exactly the defect this population is derived to avoid")
+
+    must_be_live = {q for q in planted if "_live_" in q}
+    assert not (must_be_live & dead), (
+        f"the oracle called framework-reached symbols dead: {sorted(must_be_live & dead)}")
+
+
+def test_deadcode_precision_and_recall_are_measured_not_assumed(corpus_repo):
+    """The measurement that retired `deadcode`, kept runnable so the decision can be revisited.
+
+    `_op_deadcode` no longer exists, so what this measures is the SIGNAL it was built on: the graph's
+    raw in-degree-0 symbol set, scoped exactly as the op scoped it. That signal is what any future
+    dead-code op would start from, and the finding that retired this one is a property of the signal
+    rather than of the code that dressed it up — on two pinned real repositories it is dominated by
+    live symbols, and on `requests` it is dominated by **Makefile targets**, which the backend
+    indexes as `Function` nodes.
+
+    The recorded numbers, for the record and for comparison: precision 6/24 = 25% as shipped, and on
+    real code with the canaries removed it named 18 candidates of which every one was live. Recall
+    was 60%, against a denominator made entirely of planted symbols — in 2,425 real definitions
+    across the two repositories there was not one dead private symbol to find.
+
+    This test asserts the PREMISE of the retirement rather than the historical numbers, which would
+    churn on every upstream backend release. If it ever fails, the premise has stopped holding and
+    the decision is worth re-opening with fresh measurements — that is a result, not a flake.
+    """
+    provider = _indexed_graph(corpus_repo)
+    population = _labelled_population(corpus_repo)
+    label_of = {defn.name: label for label, _evidence, defn in population.values()}
+
+    rows = provider._search_symbols(
+        {"label": "Function", "max_degree": 0, "exclude_entry_points": True, "limit": 200},
+        _project_name(provider, corpus_repo), 120_000)
+    assert rows is not None, "the backend did not answer — nothing below would mean anything"
+    candidates = [r for r in rows
+                  if not provider._is_noise(r) and not r.get("is_entry_point")]
+    assert candidates, "no in-degree-0 candidates at all — this measurement proves nothing"
+
+    real = [r for r in candidates if str(r.get("file_path") or "") != "_planted_deadcode.py"]
+    live = [r for r in real if label_of.get(str(r.get("name") or "")) != "dead"]
+    detail = "\n".join(f"    {r.get('name')}  ({r.get('file_path')})  "
+                       f"oracle={label_of.get(str(r.get('name') or ''), '(not a python def)')}"
+                       for r in real[:25])
+    assert len(live) >= len(real) * 0.5, (
+        "the raw in-degree-0 signal is now MAJORITY DEAD on this repository, which is not what "
+        "retired `deadcode` — re-run the measurement and reconsider the decision.\n"
+        f"{len(live)} of {len(real)} real candidates were live:\n{detail}")
+
+    planted_dead = {defn.name for label, _e, defn in population.values()
+                    if label == "dead" and defn.path == "_planted_deadcode.py"}
+    found = {str(r.get("name") or "") for r in candidates} & planted_dead
+    assert found, (
+        f"the signal did not surface ANY planted dead symbol ({sorted(planted_dead)}), so this "
+        f"repository cannot speak to recall either way")
+
+
+def test_the_retired_op_refuses_on_a_real_repository(corpus_repo):
+    """And the retirement holds end-to-end, against a real index rather than a stub: `deadcode` must
+    safe-null with its explanation, not answer, and not report `unsupported-op`."""
+    provider = _indexed_graph(corpus_repo)
+    envelope = provider.build_result("deadcode", "", [], 60000, corpus_repo)
+
+    assert envelope["ok"] is True
+    assert envelope["result"] is None, envelope
+    assert envelope.get("reason") == "op-withdrawn", envelope
+    assert "callers" in (envelope.get("hint") or ""), envelope
+
+
+def _project_name(provider, repo: str) -> str:
+    resolution = provider._lookup_project(repo).resolution
+    assert resolution is not None
+    return resolution.name
 
 
 def test_a_nonsense_target_is_reported_as_absent_not_as_a_failure(corpus_repo):
@@ -333,3 +481,330 @@ def test_the_same_query_gives_the_same_answer_in_a_fresh_process(corpus_repo):
             pytest.skip(f"subprocess run failed: {out.stderr[-300:]}")
         runs.append(json.loads(out.stdout or "null"))
     assert runs[0] == runs[1], "the same query returned different answers in two fresh processes"
+
+
+# --------------------------------------------------------------------------- deadcode measurement
+#
+# `deadcode` is withdrawn (`_WITHDRAWN_OPS` in graph.py) until "a labelled corpus measures its
+# precision and recall". This is that corpus. It is the one op whose output is an instruction to
+# delete code, so the standard of evidence has to be higher than for any other, and "it looked right
+# on a repo I know" is what got it withdrawn in the first place.
+#
+# Three properties make these numbers mean something:
+#
+# * **The population comes from the AST, not from the op.** A sample drawn from what the op returns
+#   can only measure precision, and would report perfect recall by construction. Every function and
+#   method defined in the repository is labelled, so recall has an honest denominator.
+# * **`ast`, not a regex.** The human verification that cleared the recorded false negative used
+#   `^\s*def `, which never matches `async def` — 33 of the 66 functions in that tree were invisible
+#   to the check that declared the tree clean. A verification whose population is defined by a
+#   pattern is only as good as the pattern.
+# * **The labelling errs toward LIVE, on purpose.** Every rule below is a reason to call a symbol
+#   live; "dead" is only what survives all of them. That biases the measurement AGAINST the op — a
+#   symbol this oracle wrongly calls live costs the op precision — which is the right direction for
+#   a decision about whether to trust it to tell people to delete code.
+
+_MEASURED_LANGUAGE = ".py"       # the oracle below is Python-only; see `_label_definition`
+
+# Python calls these itself. `__init__` has no caller in any source tree and is not dead.
+_PROTOCOL_PREFIX = "__"
+
+
+@dataclass(frozen=True)
+class _Definition:
+    """One function or method, as the AST sees it."""
+
+    name: str
+    qualname: str
+    path: str
+    line: int
+    end_line: int
+    decorators: tuple[str, ...]
+    class_name: str
+    class_bases: tuple[str, ...] = ()
+
+    @property
+    def is_private(self) -> bool:
+        """Whether nothing outside this repository could name it.
+
+        A public symbol of an installed package is called by code that is not in the tree, so
+        in-degree 0 says nothing about it. Privacy is the property that makes "unreferenced here"
+        mean "unreferenced": a leading underscore on the symbol or on any package component of its
+        path."""
+        parts = self.path.replace("\\", "/").split("/")
+        return (self.name.startswith("_")
+                or any(part.startswith("_") and part != "__init__.py" for part in parts))
+
+
+def _python_definitions(repo: str) -> list[_Definition]:
+    """Every `def` and `async def` in *repo*, at any nesting depth, methods included.
+
+    The candidate population for the measurement. Files the product itself considers out of scope
+    (generated, archived) are skipped using the product's own predicates rather than a second
+    hand-typed copy of them."""
+    from codeintel.providers.graph import _ARCHIVE_DIRS, _VERIFY_SKIP_DIRS
+    from codeintel.source_kind import looks_generated_path, looks_generated_text
+
+    found: list[_Definition] = []
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames
+                       if d.lower() not in _VERIFY_SKIP_DIRS
+                       and d.lower() not in _ARCHIVE_DIRS
+                       and not looks_generated_path(d + "/x")]
+        for fname in sorted(filenames):
+            if not fname.endswith(_MEASURED_LANGUAGE) or looks_generated_path(fname):
+                continue
+            full = os.path.join(dirpath, fname)
+            try:
+                text = pathlib.Path(full).read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(text)
+            except (OSError, SyntaxError):
+                continue
+            if looks_generated_text(text):
+                continue
+            rel = os.path.relpath(full, repo)
+
+            def _walk(node, prefix: str, class_name: str,
+                      bases: tuple[str, ...] = (), rel=rel) -> None:
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, ast.ClassDef):
+                        _walk(child, f"{prefix}{child.name}.", child.name,
+                              tuple(ast.unparse(b) for b in child.bases))
+                    elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                        # `async def` is the whole point of using the AST here.
+                        found.append(_Definition(
+                            name=child.name,
+                            qualname=f"{prefix}{child.name}",
+                            path=rel,
+                            line=child.lineno,
+                            end_line=getattr(child, "end_lineno", child.lineno) or child.lineno,
+                            decorators=tuple(ast.unparse(d) for d in child.decorator_list),
+                            class_name=class_name,
+                            class_bases=bases,
+                        ))
+                        _walk(child, f"{prefix}{child.name}.", class_name, bases)
+                    else:
+                        _walk(child, prefix, class_name, bases)
+
+            _walk(tree, "", "")
+    return found
+
+
+def _python_references(repo: str) -> dict[str, list[tuple[str, int, str]]]:
+    """Every name USED anywhere in the tree → [(file, line, how)].
+
+    Four kinds of use, and the last two are the ones a naive scan misses — they are exactly the
+    shapes that made four of five candidates live on the repository that got this op withdrawn:
+
+    * a plain load (`handle(...)`, `x = handle`)
+    * an attribute (`self.handle()`, `click.echo`) — how every method is called
+    * an import alias (`from .core import Command`) — a library's public API is re-exported, and
+      that import is the only "reference" a public symbol has inside its own repository
+    * a string constant (`getattr(obj, "handle")`, `{"handle": handle}`, `__all__ = ["handle"]`) —
+      a runtime-dispatched name has no syntactic caller at all
+    """
+    uses: dict[str, list[tuple[str, int, str]]] = {}
+
+    def _note(name: str, rel: str, line: int, how: str) -> None:
+        if name:
+            uses.setdefault(name, []).append((rel, line, how))
+
+    for dirpath, _dirnames, filenames in os.walk(repo):
+        for fname in sorted(filenames):
+            if not fname.endswith(_MEASURED_LANGUAGE):
+                continue
+            full = os.path.join(dirpath, fname)
+            try:
+                tree = ast.parse(pathlib.Path(full).read_text(encoding="utf-8", errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            rel = os.path.relpath(full, repo)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    _note(node.id, rel, node.lineno, "load")
+                elif isinstance(node, ast.Attribute):
+                    _note(node.attr, rel, node.lineno, "attribute")
+                elif isinstance(node, ast.Import | ast.ImportFrom):
+                    for alias in node.names:
+                        _note(alias.name.rsplit(".", 1)[-1], rel, node.lineno, "import")
+                        _note(alias.asname or "", rel, node.lineno, "import")
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    _note(node.value.strip(), rel, node.lineno, "string")
+    return uses
+
+
+def _non_python_mentions(repo: str) -> dict[str, set[str]]:
+    """Names mentioned in files that are not Python — docs, templates, packaging metadata.
+
+    A name in `pyproject.toml` is an entry point the packaging system calls; a name in the docs is
+    public API someone is being told to call. Neither has a syntactic caller in the tree."""
+    mentions: dict[str, set[str]] = {}
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
+        for fname in filenames:
+            if fname.endswith(_MEASURED_LANGUAGE):
+                continue
+            full = os.path.join(dirpath, fname)
+            try:
+                text = pathlib.Path(full).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(text) > 2_000_000:
+                continue
+            rel = os.path.relpath(full, repo)
+            for word in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", text)):
+                mentions.setdefault(word, set()).add(rel)
+    return mentions
+
+
+def _label_definition(
+    defn: _Definition,
+    uses: dict[str, list[tuple[str, int, str]]],
+    same_name_methods: dict[str, set[str]],
+    declared_classes: dict[str, tuple[str, ...]],
+    mentions: dict[str, set[str]],
+) -> tuple[str, str]:
+    """``("live"|"dead", evidence)`` for one definition.
+
+    Every branch returning "live" records the reference that makes it live; the "dead" branch records
+    the searches that came back empty. The rules are disjunctive, so their order changes no outcome.
+
+    They are deliberately generous about liveness, and each one is a shape the withdrawal evidence
+    actually recorded: a decorator that registers a function under another name (the rollup plugin
+    hook, click's own `@group.command()` examples), a method implementing an interface its own
+    repository does not declare, a symbol whose only "caller" is a user of the published package.
+    Wrongly calling one of these dead is the failure mode that made an agent delete working code, so
+    the oracle refuses to call any of them dead — which costs the op precision rather than granting
+    it, the correct direction for this decision.
+    """
+    if defn.name.startswith("__") and defn.name.endswith("__"):
+        return "live", f"python protocol method — the interpreter calls `{defn.name}`"
+
+    if defn.decorators:
+        # A decorator either registers the function somewhere, replaces it with an object referenced
+        # under another name, or marks it as part of an interface. In all three cases the function's
+        # own name having in-degree 0 is not evidence about whether it runs.
+        return "live", f"decorated with @{defn.decorators[0]} — registered, wrapped or interface"
+
+    if re.match(r"test_", defn.name) and (
+            os.path.basename(defn.path).startswith(("test_", "conftest"))):
+        return "live", "collected and called by pytest, by naming convention"
+
+    for how in ("load", "attribute", "import", "string"):
+        for path, line, kind in uses.get(defn.name, ()):
+            if kind != how:
+                continue
+            # A reference inside the definition's OWN body is recursion, not a use of it.
+            if path == defn.path and defn.line <= line <= defn.end_line:
+                continue
+            return "live", f"{how} at {path}:{line}"
+
+    external = _first_external_base(defn.class_bases, declared_classes) if defn.class_name else ""
+    if external:
+        # `TextWrapper._wrap_chunks` overrides a stdlib base; `_WindowsConsoleReader.readinto`
+        # implements `io.RawIOBase` two links up. The interface is not declared in this tree, so
+        # nothing in this tree can call it by name.
+        return "live", f"method of a class extending {external}, which is defined outside this repo"
+
+    if defn.class_name and defn.name in _runtime_protocol_names():
+        # `ConsoleStream.writelines` — a duck-typed file wrapper with no base to inherit from. The
+        # interpreter and the stdlib call these names on anything that has them.
+        return "live", f"`{defn.name}` is a runtime protocol method called on duck-typed objects"
+
+    others = same_name_methods.get(defn.name, set()) - {f"{defn.path}:{defn.line}"}
+    if defn.class_name and others:
+        return "live", f"overrides/overridden — same name defined at {sorted(others)[0]}"
+
+    if not defn.is_private:
+        return "live", "public API of an installed package — its callers are outside this repository"
+
+    where = mentions.get(defn.name) or set()
+    if where:
+        return "live", f"named outside Python source (entry point/docs): {sorted(where)[0]}"
+
+    return "dead", (
+        f"private, undecorated, not a protocol method, not an override; no load, attribute, import "
+        f"or string use anywhere in the tree outside {defn.path}:{defn.line}-{defn.end_line}; "
+        f"not mentioned in any non-Python file"
+    )
+
+
+def _labelled_population(repo: str) -> dict[str, tuple[str, str, _Definition]]:
+    """``{"path:line": (label, evidence, definition)}`` for every function/method in *repo*."""
+    defs = _python_definitions(repo)
+    uses = _python_references(repo)
+    mentions = _non_python_mentions(repo)
+    same_name_methods: dict[str, set[str]] = {}
+    for d in defs:
+        if d.class_name:
+            same_name_methods.setdefault(d.name, set()).add(f"{d.path}:{d.line}")
+    classes = _class_bases_in(repo)
+    out = {}
+    for d in defs:
+        label, evidence = _label_definition(d, uses, same_name_methods, classes, mentions)
+        out[f"{d.path}:{d.line}"] = (label, evidence, d)
+    return out
+
+
+def _class_bases_in(repo: str) -> dict[str, tuple[str, ...]]:
+    """``{class name: its declared bases}`` for every class this repository declares.
+
+    Needed to answer "does this class inherit, transitively, from something defined OUTSIDE this
+    tree?" — because a method implementing an external interface has no caller here by construction.
+    `_WindowsConsoleReader(_WindowsConsoleRawIOBase)` looks entirely local until you follow one more
+    link to `io.RawIOBase`, and a non-transitive check called its `readinto` dead."""
+    bases: dict[str, tuple[str, ...]] = {}
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for fname in sorted(filenames):
+            if not fname.endswith(_MEASURED_LANGUAGE):
+                continue
+            try:
+                tree = ast.parse(pathlib.Path(os.path.join(dirpath, fname)).read_text(
+                    encoding="utf-8", errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    bases.setdefault(node.name, tuple(ast.unparse(b) for b in node.bases))
+    return bases
+
+
+def _first_external_base(bases: tuple[str, ...], declared: dict[str, tuple[str, ...]]) -> str:
+    """The first base in the transitive closure of *bases* that this repository does not declare.
+
+    A DOTTED base is always external: `textwrap.TextWrapper` names another module's class even when
+    the repo happens to declare a `TextWrapper` of its own — which is exactly how click's
+    `TextWrapper._wrap_chunks`, whose docstring says it mirrors the stdlib method it overrides, was
+    labelled unreferenced."""
+    seen: set[str] = set()
+    queue = list(bases)
+    while queue:
+        base = queue.pop(0)
+        if base in seen:
+            continue
+        seen.add(base)
+        if "." in base or base not in declared:
+            return base
+        queue.extend(declared[base])
+    return ""
+
+
+def _runtime_protocol_names() -> frozenset[str]:
+    """Method names the interpreter or the standard library calls on a duck-typed object.
+
+    `ConsoleStream` declares no base at all — it is a `t.TextIO` wrapper — so no inheritance check
+    can tell that its `writelines` is the file protocol rather than a dead method. The NAMES are read
+    off the real runtime objects rather than typed here, so a method Python adds in a later version
+    is covered without anyone remembering; the three modules are the input, and they are the stable
+    part."""
+    import collections.abc
+    import io
+    import typing
+
+    names: set[str] = set(dir(object))
+    for module in (io, collections.abc, typing):
+        for value in vars(module).values():
+            if isinstance(value, type):
+                names.update(dir(value))
+    return frozenset(names)

@@ -254,3 +254,393 @@ def test_callees_cross_language_drop_is_resolved_per_row_not_by_the_caller_union
     assert env.get("confidence") == "partial"
     gaps = env.get("gaps") or []
     assert any(g.get("kind") == "name-collisions-dropped" for g in gaps), gaps
+
+
+# --------------------------------------------------------------------------------------------- #
+# T9 — a `callees` answer for a name several symbols share is a QUESTION, not a subtraction.
+#
+# `target` is a bare name, so one query can return edges out of several distinct symbols. The rows
+# used to be flattened into one list and the ambiguous ones subtracted, reported as a "N dropped"
+# gap: honest, but the caller still could not get the whole answer. `callees` feeds "is this symbol
+# safe to change?", and for that decision "unknown" and "none" are opposite answers.
+#
+# Resolution comes first: a target may name the symbol it means, by qualified name or by file, using
+# text the previous answer already printed. What genuine ambiguity remains is grouped and stated
+# rather than dropped.
+# --------------------------------------------------------------------------------------------- #
+
+_THREE_HANDLERS = [
+    {  # symbol 1 — the HTTP route
+        "b.name": "parse_body", "b.qualified_name": "api.parse_body",
+        "b.file_path": "src/api/body.py", "type(c)": "CALLS",
+        "a.name": "handle", "a.qualified_name": "proj.api.routes.handle",
+        "a.file_path": "src/api/routes.py",
+    },
+    {
+        "b.name": "audit", "b.qualified_name": "api.audit",
+        "b.file_path": "src/api/audit.py", "type(c)": "CALLS",
+        "a.name": "handle", "a.qualified_name": "proj.api.routes.handle",
+        "a.file_path": "src/api/routes.py",
+    },
+    {  # symbol 2 — the queue worker, a different function that happens to share the name
+        "b.name": "dequeue", "b.qualified_name": "worker.dequeue",
+        "b.file_path": "src/worker/queue.py", "type(c)": "CALLS",
+        "a.name": "handle", "a.qualified_name": "proj.worker.main.handle",
+        "a.file_path": "src/worker/main.py",
+    },
+    {  # symbol 3 — the front-end click handler, in another language entirely
+        "b.name": "render", "b.qualified_name": "ui.render",
+        "b.file_path": "ui/render.ts", "type(c)": "CALLS",
+        "a.name": "handle", "a.qualified_name": "proj.ui.button.handle",
+        "a.file_path": "ui/button.ts",
+    },
+]
+
+
+def _callees(target: str, rows: list[dict]) -> dict:
+    gp = _gp(query_rows=lambda cypher, project, timeout_ms: list(rows))
+    return gp.build_result("callees", target, [], 30000, "/tmp/x")
+
+
+def test_callees_of_a_shared_name_groups_the_symbols_instead_of_merging_them():
+    env = _callees("handle", _THREE_HANDLERS)
+    body = env["result"]
+
+    assert body is not None
+    # Nothing is dropped for being ambiguous: every callee of every `handle` is still here.
+    for callee in ("api.parse_body", "api.audit", "worker.dequeue", "ui.render"):
+        assert callee in body, f"{callee} was lost: {body}"
+    assert "(4)" in body
+    # And each one is attributed to the symbol it actually came from.
+    for owner in ("api.routes.handle", "worker.main.handle", "ui.button.handle"):
+        assert owner in body, f"{owner} is not named as a distinct symbol: {body}"
+    assert "3 distinct symbols" in body
+    # The ambiguity is machine-readable, not only prose.
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "target-ambiguous" for g in env["gaps"]), env["gaps"]
+    # And the body says how to ask about one of them.
+    assert "handle@src/api/routes.py" in body or "api.routes.handle" in body
+
+
+def test_a_qualified_target_answers_for_exactly_one_symbol():
+    env = _callees("worker.main.handle", _THREE_HANDLERS)
+    body = env["result"]
+
+    assert body is not None
+    assert "worker.dequeue" in body                      # the one asked for
+    assert "(1)" in body
+    for other in ("api.parse_body", "api.audit", "ui.render"):
+        assert other not in body, f"{other} belongs to a different `handle`: {body}"
+    assert "Narrowed" in body
+    assert not any(g["kind"] == "target-ambiguous" for g in env.get("gaps") or []), env.get("gaps")
+    assert env["confidence"] == "complete"
+
+
+def test_a_file_hint_answers_for_exactly_one_symbol():
+    env = _callees("handle@src/api/routes.py", _THREE_HANDLERS)
+    body = env["result"]
+
+    assert body is not None
+    assert "api.parse_body" in body and "api.audit" in body
+    assert "(2)" in body
+    for other in ("worker.dequeue", "ui.render"):
+        assert other not in body, f"{other} belongs to a different `handle`: {body}"
+    assert env["confidence"] == "complete"
+
+
+def test_a_bare_filename_hint_is_enough():
+    """The hint is text a human types, so a basename has to work — and if a basename is itself
+    ambiguous, that is reported by the same grouping rather than resolved by guessing."""
+    env = _callees("handle@routes.py", _THREE_HANDLERS)
+    assert "api.parse_body" in env["result"]
+    assert "worker.dequeue" not in env["result"]
+
+
+def test_a_hint_that_matches_nothing_is_not_reported_as_having_no_callees():
+    """The dangerous reading. "I could not find the symbol you named" and "that symbol calls
+    nothing" are opposite answers, and the second is the one that gets code deleted."""
+    env = _callees("handle@src/does/not/exist.py", _THREE_HANDLERS)
+    body = env["result"]
+
+    assert body is not None
+    assert "(0)" not in body, f"a lookup that matched no symbol must not claim zero callees: {body}"
+    assert "No symbol matching" in body and "has callees in this index" in body
+    # It must not claim the symbol is absent from the INDEX — a symbol can be indexed and still have
+    # no edge of this kind (`Group.invoke` has callees but no callers on a real repository).
+    assert "not in this index" not in body
+    # It names the symbols that DO carry the name, which is what makes a second attempt possible.
+    for owner in ("api.routes.handle", "worker.main.handle", "ui.button.handle"):
+        assert owner in body
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "target-hint-unmatched" for g in env["gaps"]), env["gaps"]
+
+
+def test_a_truncated_callee_list_says_it_was_truncated():
+    """The query caps rows. A list cut off at the cap reads exactly like a complete one, which is
+    the same defect as a filtered list reading as complete."""
+    from codeintel.providers.graph import _EDGE_ROW_LIMIT
+
+    rows = [{
+        "b.name": f"callee_{i}", "b.qualified_name": f"pkg.callee_{i}",
+        "b.file_path": f"src/mod_{i}.py", "type(c)": "CALLS",
+        "a.name": "wide", "a.qualified_name": "pkg.wide", "a.file_path": "src/wide.py",
+    } for i in range(_EDGE_ROW_LIMIT)]
+
+    env = _callees("wide", rows)
+    body = env["result"]
+
+    assert body is not None
+    assert "pkg.callee_0" in body and f"pkg.callee_{_EDGE_ROW_LIMIT - 1}" in body   # non-vacuity
+    assert "Truncated" in body
+    assert str(_EDGE_ROW_LIMIT) in body
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "row-cap-reached" for g in env["gaps"]), env["gaps"]
+    # A list one row short of the cap is a complete answer and must not be caveated.
+    short = _callees("wide", rows[:-1])
+    assert "Truncated" not in short["result"]
+    assert short["confidence"] == "complete"
+
+
+def test_callers_narrows_by_the_same_hint_so_impact_stays_coherent():
+    """`impact` is callers + callees on one target. If only one half honoured a hint, a
+    blast-radius answer would pair one symbol's callees with a different symbol's callers — and
+    read as precise while being about two different functions."""
+    callers_rows = [
+        {"a.name": "serve", "a.qualified_name": "proj.api.app.serve",
+         "a.file_path": "src/api/app.py", "type(c)": "CALLS",
+         "b.qualified_name": "proj.api.routes.handle", "b.file_path": "src/api/routes.py"},
+        {"a.name": "loop", "a.qualified_name": "proj.worker.run.loop",
+         "a.file_path": "src/worker/run.py", "type(c)": "CALLS",
+         "b.qualified_name": "proj.worker.main.handle", "b.file_path": "src/worker/main.py"},
+    ]
+    seq = iter([callers_rows, _THREE_HANDLERS])
+    gp = _gp(query_rows=lambda cypher, project, timeout_ms: list(next(seq)))
+
+    env = gp.build_result("impact", "handle@src/api/routes.py", [], 30000, "/tmp/x")
+    body = env["result"]
+
+    assert body is not None
+    assert "api.app.serve" in body, "the caller of the symbol asked about must be there"
+    assert "worker.run.loop" not in body, f"that calls a DIFFERENT `handle`: {body}"
+    assert "api.parse_body" in body
+    assert "worker.dequeue" not in body
+
+
+def test_every_gap_callees_can_report_states_its_numbers_in_the_body_too():
+    """`attach_confidence` says the engine "is expected to have said the same thing in the body
+    text, because that is the field an agent actually reads" — a `gaps` entry alone is a promise
+    kept to the JSON and broken to the reader.
+
+    The gap-kind population is read out of `graph.py`'s AST rather than typed here, because a
+    hand-typed list would keep passing on the day a new gap kind ships with no body text behind it —
+    the defect class this project keeps re-learning (CHANGELOG 0.15.4/0.15.5).
+    """
+    import ast
+    import pathlib
+    import re
+
+    source = pathlib.Path("src/codeintel/providers/graph.py").read_text(encoding="utf-8")
+    declared: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_add_gap" and len(node.args) >= 2):
+            continue
+        section, kind = node.args[0], node.args[1]
+        if not isinstance(kind, ast.Constant):
+            continue
+        # A call whose SECTION is a variable can land on `callees`, and the AST cannot tell whether
+        # it does. Counted in, because requiring body text for a gap that might not be a callees gap
+        # errs toward more disclosure — the safe direction here.
+        if not isinstance(section, ast.Constant) or section.value == "callees":
+            declared.add(str(kind.value))
+    assert declared, "found no gap kinds in the source — the AST walk is broken, not the code"
+
+    collision = [dict(_THREE_HANDLERS[0], **{"b.file_path": "src/api/notes.json"})]
+    wide = [{"b.name": f"c{i}", "b.qualified_name": f"pkg.c{i}", "b.file_path": f"src/m{i}.py",
+             "type(c)": "CALLS", "a.name": "wide", "a.qualified_name": "pkg.wide",
+             "a.file_path": "src/wide.py"} for i in range(60)]
+    scenarios = {
+        "several symbols share the name": ("handle", _THREE_HANDLERS),
+        "a row dropped as a collision": ("handle", _THREE_HANDLERS + collision),
+        "every row dropped": ("handle", collision),
+        "the hint matched nothing": ("handle@nowhere.py", _THREE_HANDLERS),
+        "the row cap was reached": ("wide", wide),
+    }
+
+    seen: set[str] = set()
+    for label, (target, rows) in scenarios.items():
+        env = _callees(target, rows)
+        body = str(env.get("result") or "")
+        assert body, f"{label}: no body to check"
+        for gap in env.get("gaps") or []:
+            seen.add(str(gap["kind"]))
+            assert env["confidence"] == "partial", f"{label}: gap without partial — {env}"
+            for number in re.findall(r"\d+", str(gap["detail"])):
+                assert number in body, (
+                    f"{label}: gap {gap['kind']} reports {number} in `gaps` but not in the body a "
+                    f"reader sees:\n{body}")
+
+    assert declared <= seen, (
+        f"these gap kinds are reachable in graph.py but no scenario here produces one, so nothing "
+        f"checks that they reach the body: {sorted(declared - seen)}")
+
+
+def test_a_filename_is_never_read_as_a_qualified_target():
+    """`use-toast.ts` is a filename. Reading its last segment as the symbol name would send a query
+    for `ts` — a symbol nobody asked about, on a repository where 985 names took exactly this shape
+    (CHANGELOG 0.15.x, `_strip_project_prefix`). The extension population is derived from the
+    source's own set, so a language added there is covered here without anyone remembering."""
+    from codeintel.providers.graph import _FILE_EXTENSIONS, _parse_symbol_target
+
+    for ext in sorted(_FILE_EXTENSIONS):
+        name = f"use-toast.{ext}"
+        parsed = _parse_symbol_target(name)
+        assert parsed.name == name, f"{name} was split into a symbol and a qualifier"
+        assert not parsed.qualified
+
+
+def test_target_parsing_keeps_its_hands_off_what_is_not_a_hint():
+    from codeintel.providers.graph import _parse_symbol_target
+
+    plain = _parse_symbol_target("handle")
+    assert (plain.name, plain.qualified, plain.file_hint) == ("handle", "", "")
+    assert plain.narrowed is False
+
+    # A leading `@` is a decorator, not a file hint, and a trailing one names no file.
+    for odd in ("@app.route", "handle@", "@", ""):
+        assert _parse_symbol_target(odd).file_hint == "", odd
+
+    both = _parse_symbol_target("api.routes.handle@src/api/routes.py")
+    assert (both.name, both.qualified, both.file_hint) == (
+        "handle", "api.routes.handle", "src/api/routes.py")
+    assert both.narrowed is True
+
+
+def test_a_qualified_hint_must_match_whole_segments():
+    """`routes.handle` naming `api.myroutes.handle` would silently answer about the wrong symbol,
+    which is the failure this whole mechanism exists to prevent."""
+    from codeintel.providers.graph import _qualified_name_matches
+
+    assert _qualified_name_matches("proj.api.routes.handle", "routes.handle")
+    assert _qualified_name_matches("proj.api.routes.handle", "api.routes.handle")
+    assert not _qualified_name_matches("proj.api.myroutes.handle", "routes.handle")
+    assert not _qualified_name_matches("", "routes.handle")
+    # The prefix the backend adds is stripped for display, so the stripped form must match too:
+    # that is the text the caller copied off the previous answer.
+    assert _qualified_name_matches("my-repo.src.pkg.fn", "src.pkg.fn")
+
+
+def test_a_file_hint_must_match_whole_path_segments():
+    from codeintel.providers.graph import _file_path_matches
+
+    assert _file_path_matches("src/api/routes.py", "routes.py")
+    assert _file_path_matches("src/api/routes.py", "api/routes.py")
+    assert _file_path_matches("src/api/routes.py", "src/api/routes.py")
+    assert not _file_path_matches("src/api/myroutes.py", "routes.py")
+    assert not _file_path_matches("", "routes.py")
+    assert not _file_path_matches("src/api/routes.py", "")
+
+
+# --------------------------------------------------------------------------------------------- #
+# T10 — `callers` groups by the symbol being CALLED, for the same reason `callees` groups by the
+# symbol doing the calling.
+#
+# `callers` was given the disambiguator but not the grouping, on the argument that a merged caller
+# list over-reports and over-reporting is the safe direction for "is this safe to change?". That
+# argument is about the SET, not about the answer: a reader told "3 callers of `invoke`" cannot tell
+# that one of the three calls a different `invoke`, and believing a caller exists that does not is a
+# wrong fact whichever direction it errs in. It also left `impact` internally inconsistent — one half
+# grouped, the other flat, from one target.
+# --------------------------------------------------------------------------------------------- #
+
+_TWO_HANDLERS_CALLED = [
+    {  # -> the HTTP route's `handle`
+        "a.name": "serve", "a.qualified_name": "proj.api.app.serve",
+        "a.file_path": "src/api/app.py", "type(c)": "CALLS",
+        "b.name": "handle", "b.qualified_name": "proj.api.routes.handle",
+        "b.file_path": "src/api/routes.py",
+    },
+    {  # -> the same `handle`, from somewhere else
+        "a.name": "reload", "a.qualified_name": "proj.api.app.reload",
+        "a.file_path": "src/api/app.py", "type(c)": "CALLS",
+        "b.name": "handle", "b.qualified_name": "proj.api.routes.handle",
+        "b.file_path": "src/api/routes.py",
+    },
+    {  # -> a DIFFERENT `handle` entirely
+        "a.name": "loop", "a.qualified_name": "proj.worker.run.loop",
+        "a.file_path": "src/worker/run.py", "type(c)": "CALLS",
+        "b.name": "handle", "b.qualified_name": "proj.worker.main.handle",
+        "b.file_path": "src/worker/main.py",
+    },
+]
+
+
+def _callers(target: str, rows: list[dict]) -> dict:
+    gp = _gp(query_rows=lambda cypher, project, timeout_ms: list(rows))
+    return gp.build_result("callers", target, [], 30000, "/tmp/x")
+
+
+def test_callers_of_a_shared_name_says_which_symbol_each_caller_calls():
+    env = _callers("handle", _TWO_HANDLERS_CALLED)
+    body = env["result"]
+
+    assert body is not None
+    for caller in ("api.app.serve", "api.app.reload", "worker.run.loop"):
+        assert caller in body, f"{caller} was lost: {body}"      # nothing dropped
+    assert "(3)" in body
+    assert "2 distinct symbols" in body
+    # Each caller is attributed to the symbol it actually calls.
+    assert "api.routes.handle" in body and "worker.main.handle" in body
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "target-ambiguous" for g in env["gaps"]), env["gaps"]
+
+
+def test_callers_of_an_unambiguous_name_is_left_flat():
+    """The un-grouped rendering has to survive for the ordinary case, or every single-symbol answer
+    pays for the ambiguous one with a heading it does not need."""
+    env = _callers("handle", _TWO_HANDLERS_CALLED[:2])
+    body = env["result"]
+
+    assert body is not None
+    assert "(2)" in body
+    assert "###" not in body, f"one matched symbol needs no per-symbol sections: {body}"
+    assert "distinct symbols" not in body
+    assert env["confidence"] == "complete"
+    assert not any(g["kind"] == "target-ambiguous" for g in env.get("gaps") or [])
+
+
+def test_impact_groups_both_of_its_halves_or_neither():
+    """`impact` is callers + callees on one target. Grouping one half and flattening the other is
+    the inconsistency this closes: a reader would see the callees attributed per symbol and read the
+    callers list as belonging to whichever one they were looking at."""
+    seq = iter([_TWO_HANDLERS_CALLED, _THREE_HANDLERS])
+    gp = _gp(query_rows=lambda cypher, project, timeout_ms: list(next(seq)))
+    env = gp.build_result("impact", "handle", [], 30000, "/tmp/x")
+    body = env["result"]
+
+    assert body is not None
+    callers_half, _, callees_half = body.partition("## Callees of")
+    assert "distinct symbols" in callers_half, f"callers half not grouped:\n{callers_half}"
+    assert "distinct symbols" in callees_half, f"callees half not grouped:\n{callees_half}"
+    assert env["confidence"] == "partial"
+
+
+def test_both_edge_ops_render_through_one_renderer():
+    """The two ops must not drift apart on the drift-prone parts — the count in the heading, the
+    ambiguity disclosure, the truncation note. Enumerated from the source rather than trusted: this
+    is the same reasoning that made the repo-scan ops share `_render_scan`."""
+    import ast
+    import pathlib
+
+    source = pathlib.Path("src/codeintel/providers/graph.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {node.name: node for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
+    for op in ("_op_callers", "_op_callees"):
+        assert op in functions, op
+        calls = [n for n in ast.walk(functions[op])
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+        rendered = {n.func.attr for n in calls}
+        assert "_render_edge_answer" in rendered, (
+            f"{op} builds its own answer instead of going through the shared renderer, so the "
+            f"ambiguity and truncation disclosures can drift between the two ops")
