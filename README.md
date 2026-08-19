@@ -486,11 +486,18 @@ back to grep rather than crashing.
 | Unattended automation | Anything that acts on a result without a human reading it deserves a pilot first. |
 
 **On the test numbers.** The suite is large and the coverage floor is enforced, but read the figure
-with its caveat: the graph and LSP backends are external binaries that are **not installed in CI**,
-so those two engines are exercised against hand-authored mocks rather than the real wire contract,
-and the release canary — which does assert on real answer text against a built wheel — currently
-covers the semantic engine only. Line coverage measures how much of the intended behavior runs, not
-how much of reality it has met.
+with its caveat. In the **main test job** the graph and LSP backends are absent, so their live tests
+skip and those engines run against hand-authored mocks rather than the real wire contract. Separate
+jobs cover the contract itself: `graph-contract` installs the pinned `codebase-memory-mcp` and runs
+the live graph tests — and **fails if they skipped**, because a silently-skipped contract test is
+how a total backend outage stayed green here once — while the nightly corpus job runs that same
+real backend against pinned third-party repositories. `lsp-contract` runs the live serena tests but
+is **`continue-on-error`**: serena is fetched from an upstream git HEAD this project does not
+control, so a breakage there must be visible without blocking an unrelated release. Read that as
+the LSP wire contract being *watched* rather than *gated*. The release canary — the only check that
+asserts on real answer text from a built wheel — still covers **the semantic engine only**.
+
+Line coverage measures how much of the intended behavior runs, not how much of reality it has met.
 
 **The honest one-paragraph version.** codeintel has been run on very few repositories its author did
 not write, and that is where its bugs have come from — every fix in `0.15.x` came from pointing it

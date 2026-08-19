@@ -55,6 +55,20 @@ All notable changes to codeintel are documented here. The format is based on
   a day earlier; a new test derives the withdrawn set from `_WITHDRAWN_OPS` by import (never a
   literal op name) and fails if any live doc mentions a withdrawn op without also saying so.
 
+- **The README understated what CI verifies.** It said the graph and LSP backends were "not
+  installed in CI, so those two engines are exercised against hand-authored mocks rather than the
+  real wire contract" — true when written, false since the contract jobs were added. `graph-contract`
+  installs the pinned `codebase-memory-mcp` and fails if its live tests skipped; the nightly corpus
+  job runs that same backend against pinned third-party repositories; `lsp-contract` runs live
+  serena tests but is `continue-on-error`, so the LSP wire contract is watched rather than gated,
+  and the README now says which is which. The release canary remains semantic-only — that half of
+  the claim was checked and is still accurate.
+
+  This is the `deadcode` drift pointing the other way: there the docs promised a capability the
+  product had withdrawn, here they denied assurance the product had gained. A new test derives the
+  contract jobs and their `continue-on-error` flags from `ci.yml` and fails if the README stops
+  matching, rather than trusting the next reader to notice.
+
 ## [0.15.4] — 2026-08-18
 
 ### Fixed
