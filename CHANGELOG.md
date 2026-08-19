@@ -6,6 +6,28 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A symbol whose name is also a file extension kept the backend's project id — the host's absolute
+  path — in rendered output.** `requests.models.Response.json` is a method, the most-called one in
+  that library, and `_strip_project_prefix`'s filename guard read the trailing `json` as an extension
+  and returned the name unstripped: `private-tmp-codeintel-corpus-requests.src.requests.models.Response.json`
+  in a `hotspots` row, where in ordinary use that prefix is the user's home directory. `Renderer.html`,
+  `Config.toml` and `Query.sql` are the same shape.
+
+  The guard exists for a real reason — `use-toast.ts` rendered as `ts` on two repositories — and no
+  rule on the string can separate `my-component.spec.ts` from `Response.json`; they are the same
+  shape. What separates them is the FIELD the value came from: a filename arrives in a row's `name`
+  (which is why the guard was added, for `changed` rows, which carry `name` and no `qualified_name`),
+  while a `qualified_name` is a module path whose last segment is a symbol. So the guard is now the
+  caller's to claim, defaulting to ON so an unexamined call site keeps today's behaviour, and every
+  site handling a qualified name turns it off.
+
+  Found by adding a second repository to the corpus — not by reasoning about the string — which is
+  the same lesson as every other fix in `0.15.x`. The enumeration test that already swept the module
+  for renderers emitting a raw qualified name now has a companion that sweeps for renderers stripping
+  one with the filename guard left on, and both were upgraded to scan logical lines: a line break
+  through the middle of a call had been enough to silence them.
+
 ### Tests
 - **The most destructive path in the product was the least tested.** `reset.py` sat at 60%, the
   lowest in the codebase, and the uncovered lines were not scattered — they were the deletions.

@@ -84,7 +84,7 @@ _FILE_EXTENSIONS = frozenset({
 })
 
 
-def _strip_project_prefix(qualified_name: str) -> str:
+def _strip_project_prefix(qualified_name: str, *, may_be_filename: bool = True) -> str:
     """Drop the backend's project id from the head of a qualified name.
 
     The backend prefixes every qualified name with its own project id, which for a path-slug
@@ -117,16 +117,27 @@ def _strip_project_prefix(qualified_name: str) -> str:
     if "-" not in head or " " in qualified_name or not rest:
         return qualified_name
     # `my-component.spec.ts` also has a dotted remainder, so "has dots" is not enough. What
-    # actually separates a filename from a qualified name is the LAST segment: a module path ends
-    # in a symbol, a filename ends in an extension.
-    if qualified_name.rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS:
+    # separates a filename from a qualified name is the LAST segment: a module path ends in a
+    # symbol, a filename ends in an extension.
+    #
+    # Except that a symbol is allowed to BE that word. `requests.models.Response.json` is a method —
+    # the most-called method in that library — and this guard read it as a `.json` file and returned
+    # the name unstripped, leaking `private-tmp-codeintel-corpus-requests` (in normal use, the
+    # user's home directory) into a rendered hotspots row. `my-component.spec.ts` and
+    # `Response.json` are the same shape; no rule on the string can separate them.
+    #
+    # What separates them is which FIELD the value came from. Filenames arrive in a row's `name` —
+    # that is why this guard exists, for `changed` rows, which carry `name` and no
+    # `qualified_name` — while a `qualified_name` is a module path whose last segment is a symbol.
+    # So the guard is the caller's to claim, defaulting to on so that an unexamined call site keeps
+    # today's behaviour.
+    if may_be_filename and qualified_name.rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS:
         return qualified_name
     # `use-toast.ts` is now only distinguishable from `my-repo.Execute` by that extension check, so
     # a hyphenated head with a single non-extension segment after it is treated as a slug. That is
     # the correct call: a kebab-case FILE whose extension we do not know is rare, while a flat
     # qualified name is the norm for Go, Java, C# and Ruby.
     return rest
-
 
 # Files consulted when verifying dead-code candidates, and the extensions worth reading. Bounded
 # so `deadcode` on a very large monorepo stays a query rather than a second index pass.
@@ -485,7 +496,10 @@ def _label_of(row: dict) -> str:
     and after a test was added asserting "both renderers strip the prefix", `chain` and `pattern`
     turned out to be a third and fourth. The test now enumerates the module rather than a list of
     functions someone remembered to write down."""
-    return _strip_project_prefix(str(row.get("qualified_name") or row.get("name") or "?"))
+    qualified = str(row.get("qualified_name") or "")
+    if qualified:
+        return _strip_project_prefix(qualified, may_be_filename=False)
+    return _strip_project_prefix(str(row.get("name") or "?"))
 
 
 def _repo_display_name(root: str) -> str:
@@ -976,7 +990,7 @@ class GraphProvider:
     @staticmethod
     def _display(row: dict, name_key: str, qn_key: str, file_key: str) -> str:
         name = str(row.get(name_key) or "?")
-        qn = _strip_project_prefix(str(row.get(qn_key) or ""))
+        qn = _strip_project_prefix(str(row.get(qn_key) or ""), may_be_filename=False)
         file = str(row.get(file_key) or "")
         edge = str(row.get("type(c)") or "").strip()
         label = qn or name
@@ -1030,8 +1044,10 @@ class GraphProvider:
         the row format and truncation note (the drift-prone parts) and differ only in their metrics."""
         lines = []
         for r in kept[:cap]:
+            qualified = str(r.get("qualified_name") or "")
             label = _collapse_repeats(
-                _strip_project_prefix(str(r.get("qualified_name") or r.get("name") or "?")))
+                _strip_project_prefix(qualified, may_be_filename=False) if qualified
+                else _strip_project_prefix(str(r.get("name") or "?")))
             fp = str(r.get("file_path") or "")
             meta = meta_fn(r)
             badge = f"  [{', '.join(meta)}]" if meta else ""
@@ -1175,7 +1191,8 @@ class GraphProvider:
                     if not isinstance(it, dict):
                         continue
                     nm = str(it.get("name") or "?")
-                    qn = _strip_project_prefix(str(it.get("qualified_name") or ""))
+                    qn = _strip_project_prefix(str(it.get("qualified_name") or ""),
+                                               may_be_filename=False)
                     hop = it.get("hop")
                     risk = it.get("risk")
                     label = qn or nm

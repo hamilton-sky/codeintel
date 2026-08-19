@@ -336,6 +336,30 @@ def test_stripping_never_eats_a_real_module_path():
         assert _strip_project_prefix(qn) == qn
 
 
+def _logical_lines(source: str) -> list[tuple[int, str]]:
+    """(first line number, whole statement) for each logical line — continuations joined.
+
+    Both source-enumeration checks below broke the moment a call was wrapped across two lines, which
+    is a property of the formatter rather than of the code. A check that a line break can silence is
+    not a check."""
+    out: list[tuple[int, str]] = []
+    depth = 0
+    start = 0
+    buf: list[str] = []
+    for n, line in enumerate(source.splitlines(), 1):
+        if not buf:
+            start = n
+        buf.append(line.strip())
+        depth += line.count("(") + line.count("[") - line.count(")") - line.count("]")
+        if depth <= 0:
+            out.append((start, " ".join(buf)))
+            buf = []
+            depth = 0
+    if buf:
+        out.append((start, " ".join(buf)))
+    return out
+
+
 def test_no_renderer_anywhere_emits_a_raw_qualified_name():
     """Fixing these one at a time did not work. `_display` was fixed first; `_render_scan` was
     missed and shipped; a test was then added asserting "both renderers strip the prefix", and
@@ -344,15 +368,21 @@ def test_no_renderer_anywhere_emits_a_raw_qualified_name():
     import re
 
     source = pathlib.Path("src/codeintel/providers/graph.py").read_text()
+    statements = _logical_lines(source)
     # Every site that READS the field off a backend row. `_display` is a sanctioned renderer that
-    # strips internally, so passing it the key name is fine; anything else must strip on the spot.
-    offenders = [
-        f"{n}: {line.strip()}"
-        for n, line in enumerate(source.splitlines(), 1)
-        if re.search(r'\.get\(\s*["\']qualified_name', line)
-        and "_strip_project_prefix" not in line
-        and "_label_of" not in line
-    ]
+    # strips internally, so passing it the key name is fine; anything else must strip the value —
+    # either in the same statement, or into a local that the next few statements strip.
+    offenders = []
+    for i, (n, stmt) in enumerate(statements):
+        if not re.search(r'\.get\(\s*["\']qualified_name', stmt):
+            continue
+        if "_strip_project_prefix" in stmt or "_label_of" in stmt:
+            continue
+        assigned = re.match(r"(\w+)\s*=", stmt)
+        nearby = " ".join(s for _, s in statements[i + 1:i + 5])
+        if assigned and f"_strip_project_prefix({assigned.group(1)}" in nearby:
+            continue
+        offenders.append(f"{n}: {stmt}")
     assert not offenders, "raw qualified name reaches output:\n" + "\n".join(offenders)
 
 
@@ -799,3 +829,42 @@ def test_a_slow_backend_is_not_reported_as_an_unindexed_project(monkeypatch):
     assert res["reason"] != "project-not-indexed"
     # And a timeout must not be cached as a miss, or a slow moment is remembered as "no index".
     assert "/repo" not in gp._negative_until
+
+
+@pytest.mark.parametrize("qualified", [
+    "private-tmp-codeintel-corpus-requests.src.requests.models.Response.json",
+    "Users-alice-Documents-project-myrepo.src.pkg.Renderer.html",
+    "my-repo.src.pkg.Config.toml",
+])
+def test_a_symbol_named_like_a_file_extension_still_loses_the_project_prefix(qualified):
+    """`Response.json` is a method — the most-called one in `requests` — and the filename guard read
+    it as a `.json` file and returned the name unstripped, leaking the backend's project id (the
+    flattened absolute path, so in normal use the user's home directory) into a rendered hotspots
+    row. Found by adding a second repository to the corpus, not by reasoning about the string:
+    `my-component.spec.ts` and `Response.json` are the same shape, and no rule on the string can
+    separate them. The FIELD separates them — a filename arrives in `name`, a module path in
+    `qualified_name` — so the guard is now the caller's to claim."""
+    from codeintel.providers.graph import _strip_project_prefix
+
+    assert _strip_project_prefix(qualified, may_be_filename=False) == qualified.split(".", 1)[1]
+    # And the guard still protects the case it was added for, on the path that needs it.
+    assert _strip_project_prefix(qualified) == qualified
+
+
+def test_no_renderer_passes_a_qualified_name_through_the_filename_guard():
+    """The population is the module, not a list of renderers someone remembered — the same reasoning
+    as `test_no_renderer_anywhere_emits_a_raw_qualified_name`, which this complements: that one
+    catches a renderer that never strips, this one catches a renderer that strips with the filename
+    guard left on and so silently keeps the prefix for any symbol named `json`, `html` or `toml`."""
+    import re
+
+    source = pathlib.Path("src/codeintel/providers/graph.py").read_text()
+    offenders = [
+        f"{n}: {stmt}"
+        for n, stmt in _logical_lines(source)
+        if re.search(r"_strip_project_prefix\(\s*(?:str\(\s*)?\w+\.get\(\s*[\"']?\w*\.?qualified_name",
+                     stmt)
+        and "may_be_filename=False" not in stmt
+    ]
+    assert not offenders, (
+        "a qualified name is being stripped with the filename guard on:\n" + "\n".join(offenders))
