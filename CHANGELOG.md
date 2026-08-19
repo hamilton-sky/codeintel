@@ -4,6 +4,49 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Tests
+- **The most destructive path in the product was the least tested.** `reset.py` sat at 60%, the
+  lowest in the codebase, and the uncovered lines were not scattered — they were the deletions.
+  The whole of `_reset_graph_cache`, which removes every per-project graph index, and the entire
+  `--all` branch of `run_reset`, the nuke-everything path, had never been executed by a test. On an
+  irreversible command, line coverage is less "how much of the intended behaviour runs" than "how
+  much of this deletion have we ever watched happen", and the one command a user reaches for when
+  things are already broken had the least evidence behind it. Now 100%, with the deleting paths
+  watched deleting.
+
+  The property asserted first is `apply=False`: a dry-run reports what it would remove and removes
+  nothing. Checked against a recursive walk of the whole temp tree with content digests rather than
+  against the files the report happens to name — so a deletion nobody thought to list, or a
+  truncate-in-place, fails it — and paired with a count assertion, because "it deleted nothing" is
+  only evidence if it also found something. Then: `--all` clearing both caches while sparing the
+  backend's `_config.db`, which is registration rather than an index; an unreadable graph directory
+  reported as NOT cleared instead of as clean; a **real** exclusive lock, waited out, proving a busy
+  database comes back as an error rather than being discarded, since deleting it would destroy a
+  healthy index to recover from a lock; sqlite-vec failing to load; a `close()` that raises after
+  the delete has committed; and a graph cache that can be listed but not written to.
+
+  Every path resolves through overrides the product already honours — `CODEINTEL_HOME` and
+  `CODEBASE_MEMORY_HOME` — so these are real deletions of real files. Mocking `os.remove` was
+  rejected: it would have tested the plumbing and watched no deletion at all. Two guards keep them
+  inside `tmp_path`: the resolved paths are checked before anything runs, and `os.remove`/`os.unlink`
+  are wrapped for the duration to refuse — and record — any deletion aimed outside. Wrapped rather
+  than merely asserted because reset's never-raise contract swallows exceptions from its own
+  deletion attempts, so an `AssertionError` raised in there would vanish into an
+  `except Exception: pass`; the recorded list is checked at teardown, where nothing can swallow it.
+  That guard is itself of the "X never happens" shape this project has learned to distrust, so one
+  test aims a deletion outside the sandbox and proves it is refused rather than only noticed.
+
+  These tests pass against correct code, which makes "it passes" no evidence at all. Each was
+  shown to fail against a deliberately broken `reset.py` — `apply` ignored in `_reset_all` and in
+  `_reset_graph_cache`, `_config.db` no longer spared, the graph sweep dropped from `--all`, a lock
+  classified as corruption, `_discard_cache_file` claiming success on a failed unlink — six
+  mutations, six caught, none surviving. One thing deliberately NOT asserted: that a dry-run leaves
+  sqlite's own `-wal`/`-shm` siblings in place. Opening a WAL database checkpoints and clears a
+  stale journal, so the scoped dry-run, which opens the db to COUNT it, legitimately removes one.
+  Measured while writing these, not assumed; the durable cache is what a dry-run must not touch.
+
 ## [0.15.5] — 2026-08-19
 
 ### Added
