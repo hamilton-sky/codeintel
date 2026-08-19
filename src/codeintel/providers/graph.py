@@ -292,6 +292,45 @@ def _is_non_code(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in _NON_CODE_EXTS
 
 
+# The backend has no node for code that runs at MODULE or class-body scope, so it hangs those
+# references off a whole-file container node instead of off a callable symbol: a ``File`` node, whose
+# qualified name it synthesises as ``<module>.__file__``, and/or a ``Module`` node named for the file.
+# Rendered verbatim as an edge endpoint these assert a caller/callee that does not exist —
+# ``src.click.core.__file__`` is not a function anyone can call — which is the defect this set exists
+# to catch. These are the ONLY two labels that stand for a file rather than a symbol inside it; the
+# distinction is derived, not asserted: on the pinned corpus every endpoint of a CALLS/USAGE edge
+# carries exactly one of Function, Method, Class, Variable, Decorator, File or Module, and only File
+# and Module lack a symbol identity. `test_callers_render_module_scope_as_a_location` re-derives the
+# live caller-side label population and fails if the backend ever adds a container label this misses,
+# which is the guard against this becoming a hand-typed list that goes stale.
+_MODULE_SCOPE_LABELS = frozenset({"File", "Module"})
+
+
+def _node_labels(value: Any) -> frozenset[str]:
+    """The set of labels a backend row carries for a node.
+
+    ``labels(a)`` comes back as a JSON-encoded list string (``'["File"]'``) over the real wire and as
+    a plain list from the mocked/legacy backend; normalise both. Anything unparseable is treated as a
+    single bare label so a lone value still classifies rather than silently vanishing."""
+    if isinstance(value, (list, tuple)):
+        return frozenset(str(x) for x in value)
+    text = str(value or "").strip()
+    if not text:
+        return frozenset()
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return frozenset({text})
+    if isinstance(parsed, list):
+        return frozenset(str(x) for x in parsed)
+    return frozenset({str(parsed)})
+
+
+def _is_module_scope_node(label_value: Any) -> bool:
+    """Whether a displayed edge endpoint is the backend's whole-file container, not a callable symbol."""
+    return bool(_node_labels(label_value) & _MODULE_SCOPE_LABELS)
+
+
 def _language_coverage_note(rows: list[dict]) -> str:
     """Warn when a ranking is dominated by one file type.
 
@@ -1041,6 +1080,17 @@ class GraphProvider:
 
     @staticmethod
     def _display(row: dict, name_key: str, qn_key: str, file_key: str) -> str:
+        # A module-scope container row (marked by `_collapse_module_scope`) renders as the LOCATION
+        # it is, never as the synthetic `__file__`/module symbol the backend attached the edge to.
+        # The edge is real — code at that file's module scope references the symbol — so it stays,
+        # but calling it `src.click.core.__file__` asserts a caller/callee that does not exist. No
+        # edge badge: after the File/Module double-representation is collapsed the CALLS-vs-USAGE
+        # distinction is a backend artifact of which node kind carried the edge, not a fact about the
+        # code.
+        scope = row.get("_module_scope")
+        if scope is not None:
+            where = str(scope) or str(row.get(file_key) or "")
+            return f"- module scope of {where}" if where else "- module scope"
         name = str(row.get(name_key) or "?")
         qn = _strip_project_prefix(str(row.get(qn_key) or ""), may_be_filename=False)
         file = str(row.get(file_key) or "")
@@ -1049,6 +1099,52 @@ class GraphProvider:
         tail = f" ({file})" if file and file != qn else ""
         badge = f" [{edge}]" if edge else ""
         return f"- {label}{badge}{tail}"
+
+    @staticmethod
+    def _collapse_module_scope(
+        groups: list[_EdgeGroup], label_key: str, file_key: str
+    ) -> None:
+        """Relabel the DISPLAYED-side module-scope rows in each group, in place.
+
+        Both edge ops render one end of the edge as their rows — the caller for `callers`, the callee
+        for `callees` — so the pseudo-node filter lives here, off the displayed side's label/file
+        keys, and both ops reach it the same way. A row whose displayed node is a whole-file container
+        (`_is_module_scope_node`) is not a symbol; the backend has simply no node for module- or
+        class-body-scope code and hangs the edge off the file. Three choices were weighed on what the
+        backend actually emits:
+
+        * DROP the row. Rejected: it under-counts, and worse it manufactures false absences. The edge
+          is real — `src.click.core.__file__` references `builtins.len` and an exception class from
+          another file, which is module-scope code, not a containment artifact — and on the pinned
+          corpus 147 symbols are referenced ONLY from module scope, so dropping would report a live,
+          referenced function as having zero callers: the "safe to delete" misread this project keeps
+          re-learning to avoid.
+        * RELABEL it as the location it is. Chosen: the edge stays, the count stays honest, and the
+          row stops asserting a caller/callee that does not exist.
+        * Something else — leave it. Rejected: the row reads as a real symbol a reader will try to
+          open.
+
+        A single file can carry BOTH a `File` (`__file__`) and a `Module` representation of the same
+        scope (38 target/file pairs do on the corpus), so collapse them to one row per file — two
+        rows both reading "module scope of core.py" is the double-count relabelling would otherwise
+        introduce. Real callable rows are never touched, so a symbol called from both a function and
+        module scope keeps both.
+        """
+        for group in groups:
+            seen_files: set[str] = set()
+            kept: list[dict] = []
+            for row in group.rows:
+                if not _is_module_scope_node(row.get(label_key)):
+                    kept.append(row)
+                    continue
+                fp = str(row.get(file_key) or "")
+                if fp in seen_files:
+                    continue                      # File+Module double-representation of one file
+                seen_files.add(fp)
+                marked = dict(row)                # don't mutate the shared backend row
+                marked["_module_scope"] = fp
+                kept.append(marked)
+            group.rows = kept
 
     def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> list[dict] | None:
         """``search_graph`` → parsed result dicts. ``None`` = backend failed/malformed (→ safe-null
@@ -1122,8 +1218,8 @@ class GraphProvider:
         wanted = _parse_symbol_target(target)
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
-            "RETURN a.name, a.qualified_name, a.file_path, type(c), b.name, b.qualified_name, "
-            f"b.file_path LIMIT {_EDGE_ROW_LIMIT}"
+            "RETURN a.name, a.qualified_name, a.file_path, labels(a), type(c), b.name, "
+            f"b.qualified_name, b.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
@@ -1134,6 +1230,10 @@ class GraphProvider:
         selected = [g for g in called if wanted.matches(g.qn_raw, g.file)]
         if wanted.narrowed and not selected:
             return self._no_symbol_matched_the_hint("callers", target, wanted, called)
+
+        # The caller is the displayed side here, so a module-scope pseudo-node lands in the rows a
+        # reader sees. Relabel it to the location it is before the renderer counts or prints it.
+        self._collapse_module_scope(selected, "labels(a)", "a.file_path")
 
         notes = self._row_cap_note("callers", target) if truncated else ""
         return self._render_edge_answer(
@@ -1220,8 +1320,8 @@ class GraphProvider:
         wanted = _parse_symbol_target(target)
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
-            "RETURN b.name, b.qualified_name, b.file_path, type(c), a.name, a.qualified_name, "
-            f"a.file_path LIMIT {_EDGE_ROW_LIMIT}"
+            "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), a.name, "
+            f"a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
@@ -1248,6 +1348,13 @@ class GraphProvider:
                     continue
                 keep.append(r)
             group.rows = keep
+
+        # Symmetric with `callers`: relabel any module-scope pseudo-node on the displayed (callee)
+        # side. The backend never emits a File/Module node as a callee today — the callee side of
+        # every edge is a Function/Method/Class/Variable/Decorator — so this is a no-op now, kept so
+        # the two ops treat the pseudo-node population identically and a future callee container is
+        # handled without a second fix.
+        self._collapse_module_scope(selected, "labels(b)", "b.file_path")
 
         answered = [g for g in selected if g.rows]
         kept = sum(len(g.rows) for g in answered)

@@ -122,6 +122,46 @@ All notable changes to codeintel are documented here. The format is based on
   for a different tool.
 
 ### Fixed
+- **`callers` counted the backend's module-scope pseudo-nodes as callers, so half a real count was
+  fiction.** `callers invoke` on the pinned corpus rendered `## Callers of ... (4)` for
+  `src.click.core.Context.invoke` and listed `src.click.core.__file__` and
+  `src.click.decorators.__file__` as two of the four. `__file__` is not a function anyone can call:
+  the backend has no node for code that runs at module or class-body scope, so it hangs those edges
+  off a whole-file container — a `File` node whose qualified name it synthesises as `<module>.__file__`
+  and, for the same file, a `Module` node named after it. Both reached output verbatim as symbols, so
+  a reader trusting "4 callers" was reading two call sites that do not exist. Invisible to 818 unit
+  tests and immediate on the first real repository, which is why the guard is now a corpus invariant.
+
+  Three answers were weighed against what the backend actually emits, not against the description of
+  the bug:
+
+  - **Drop the rows.** Rejected. The edge is real — `core.__file__` references `builtins.len` and
+    `exceptions.BadParameter` from another file, which is module-scope code, not a containment
+    artifact — and dropping manufactures false absences: **147 symbols on this corpus are referenced
+    ONLY from module scope** (`_check_iter`, `Parameter.make_metavar`, `_param_memo`, …), so dropping
+    would report a live, referenced function as having zero callers, the "safe to delete" misread this
+    project retired `deadcode` over.
+  - **Relabel the rows as the location they are.** Chosen. Each pseudo-node now renders as
+    `- module scope of src/click/core.py`; the edge and the count survive, and nothing asserts a
+    symbol that does not exist. `invoke` stays at 4 — two methods plus two files' module scope — with
+    no `__file__` anywhere. Because nothing is dropped, the answer stays `complete` rather than
+    growing a gap.
+  - **Leave `Module` nodes alone** (only `__file__` is an obvious fiction). Rejected. `src.click.core`
+    rendered as a caller is the same class of fiction with a less obvious name, and the label
+    population is DERIVED from the live graph rather than typed — the corpus test asserts every
+    caller-side label that is not a `Function`/`Method` is one this fix handles, so excluding `Module`
+    would have failed the project's own no-hand-typed-population rule.
+
+  A single file can carry BOTH the `File` and the `Module` representation of its one module scope (38
+  target/file pairs do here), so the two collapse to one row rather than double-counting. The filter
+  lives on the displayed side of the shared `_render_edge_answer` path and both edge ops reach it;
+  `callees` is a deliberate no-op today because the backend never emits a container node as a callee,
+  kept symmetric so a future one is handled without a second fix. One limitation left standing and out
+  of scope: a `Module` node can carry a mis-attributed non-code `file_path` (the backend labelled
+  `examples/aliases/aliases.py`'s module scope as `aliases.ini`, a sibling file), so a relabelled row
+  can name a `.ini`; the references there are genuine click-API uses, so relabelling is honest and
+  dropping them as "non-code" — the `callees` collision filter's separate domain — would have lost
+  real edges.
 - **A `callees` answer emptied entirely by the collision filter reported the dropped count in
   `gaps` and nothing in the body.** The gap said `1 row(s) were dropped`; the body said
   `(no callee survived name-collision filtering)` with no number anywhere in it. `attach_confidence`

@@ -644,3 +644,122 @@ def test_both_edge_ops_render_through_one_renderer():
         assert "_render_edge_answer" in rendered, (
             f"{op} builds its own answer instead of going through the shared renderer, so the "
             f"ambiguity and truncation disclosures can drift between the two ops")
+
+
+# --------------------------------------------------------------------------------------------- #
+# T11 — a module-scope pseudo-node is rendered as the LOCATION it is, never as a caller/callee that
+# does not exist.
+#
+# The backend has no node for code that runs at module or class-body scope, so it hangs those edges
+# off a whole-file container: a `File` node whose qualified name it synthesises as `<module>.__file__`,
+# and/or a `Module` node named for the file. Rendered verbatim, `## Callers of invoke (4)` listed
+# `src.click.core.__file__` and `src.click.decorators.__file__` as two of its four callers — half the
+# count a reader trusts was a symbol nobody can open. The edge is real (module-scope code genuinely
+# references the symbol), so it is relabelled to the file location rather than dropped: dropping would
+# report a live, referenced function as uncalled, and on the pinned corpus 147 symbols are referenced
+# ONLY this way.
+# --------------------------------------------------------------------------------------------- #
+
+def test_module_scope_node_classifier_reads_both_wire_shapes():
+    """The label arrives JSON-encoded (`'["File"]'`) over the real wire and as a plain list from the
+    mocked backend; both must classify, and a callable label or a missing one never must."""
+    from codeintel.providers.graph import _is_module_scope_node, _node_labels
+
+    for container in ('["File"]', '["Module"]', ["File"], ["Module"], "File"):
+        assert _is_module_scope_node(container), container
+    for callable_label in ('["Function"]', '["Method"]', '["Class"]', '["Variable"]', ["Function"]):
+        assert not _is_module_scope_node(callable_label), callable_label
+    for absent in (None, "", "[]", []):
+        assert not _is_module_scope_node(absent), absent
+    assert _node_labels('["File","Module"]') == frozenset({"File", "Module"})
+
+
+_INVOKE_WITH_MODULE_SCOPE = [
+    {  # a real method caller — must survive untouched
+        "a.name": "forward", "a.qualified_name": "proj.click.core.Context.forward",
+        "a.file_path": "src/click/core.py", "labels(a)": '["Method"]', "type(c)": "CALLS",
+        "b.name": "invoke", "b.qualified_name": "proj.click.core.Context.invoke",
+        "b.file_path": "src/click/core.py",
+    },
+    {  # the File `__file__` pseudo-node for core.py's module scope
+        "a.name": "core.py", "a.qualified_name": "proj.click.core.__file__",
+        "a.file_path": "src/click/core.py", "labels(a)": '["File"]', "type(c)": "CALLS",
+        "b.name": "invoke", "b.qualified_name": "proj.click.core.Context.invoke",
+        "b.file_path": "src/click/core.py",
+    },
+    {  # the Module pseudo-node for the SAME file — the backend's second representation of one scope,
+        # which must collapse into the File row rather than double-count it
+        "a.name": "src/click/core.py", "a.qualified_name": "proj.click.core",
+        "a.file_path": "src/click/core.py", "labels(a)": '["Module"]', "type(c)": "USAGE",
+        "b.name": "invoke", "b.qualified_name": "proj.click.core.Context.invoke",
+        "b.file_path": "src/click/core.py",
+    },
+    {  # module scope of a DIFFERENT file — a distinct row
+        "a.name": "decorators.py", "a.qualified_name": "proj.click.decorators.__file__",
+        "a.file_path": "src/click/decorators.py", "labels(a)": '["File"]', "type(c)": "CALLS",
+        "b.name": "invoke", "b.qualified_name": "proj.click.core.Context.invoke",
+        "b.file_path": "src/click/core.py",
+    },
+]
+
+
+def test_callers_render_module_scope_nodes_as_locations_not_file_dunders():
+    env = _callers("invoke", _INVOKE_WITH_MODULE_SCOPE)
+    body = env["result"]
+
+    assert body is not None
+    # The fiction is gone: no synthetic `__file__` caller, no bare module rendered as a symbol.
+    assert "__file__" not in body, body
+    assert "proj.click.core [" not in body, f"a Module node rendered as a caller symbol: {body}"
+    # The edges are kept, each rendered as the location it is.
+    assert "module scope of src/click/core.py" in body
+    assert "module scope of src/click/decorators.py" in body
+    # The File and Module representations of core.py's ONE module scope collapse to ONE row.
+    assert body.count("module scope of src/click/core.py") == 1, body
+    # So the count is 1 (core.py) + 1 (decorators.py) + 1 (the real method) = 3, not the raw 4.
+    assert "(3)" in body
+    assert "Context.forward" in body, "the real method caller was lost"
+    # A pure relabel drops nothing, so the answer stays complete — not a partial with a gap.
+    assert env["confidence"] == "complete"
+    assert not (env.get("gaps") or [])
+
+
+def test_a_symbol_referenced_only_from_module_scope_is_not_reported_as_uncalled():
+    """Why DROP was rejected. A symbol whose only reference is at module scope is real and reachable;
+    dropping its one caller row would render `## Callers (0)`, the "safe to delete" answer. 147 symbols
+    on the pinned corpus (`_check_iter`, `make_metavar`, `_param_memo`, …) are referenced only this
+    way."""
+    rows = [{
+        "a.name": "core.py", "a.qualified_name": "proj.click.core.__file__",
+        "a.file_path": "src/click/core.py", "labels(a)": '["File"]', "type(c)": "CALLS",
+        "b.name": "_check_iter", "b.qualified_name": "proj.click.core._check_iter",
+        "b.file_path": "src/click/core.py",
+    }]
+    env = _callers("_check_iter", rows)
+    body = env["result"]
+
+    assert body is not None
+    assert env.get("reason") is None, "a referenced symbol must be answered, not reported as a miss"
+    assert "(1)" in body and "(0)" not in body
+    assert "module scope of src/click/core.py" in body
+    assert "__file__" not in body
+    assert env["confidence"] == "complete"
+
+
+def test_callees_are_untouched_by_the_module_scope_pass():
+    """The backend never emits a File/Module node as a callee — the callee side of every edge is a
+    Function/Method/Class/Variable/Decorator — so the shared pass must be a no-op for `callees` and
+    leave a real callee list exactly as it was."""
+    rows = [{
+        "b.name": "helper", "b.qualified_name": "pkg.helper", "b.file_path": "src/bar.py",
+        "labels(b)": '["Function"]', "type(c)": "CALLS",
+        "a.name": "wide", "a.qualified_name": "pkg.wide", "a.file_path": "src/wide.py",
+    }]
+    env = _callees("wide", rows)
+    body = env["result"]
+
+    assert body is not None
+    assert "pkg.helper" in body
+    assert "module scope of" not in body
+    assert "(1)" in body
+    assert env["confidence"] == "complete"

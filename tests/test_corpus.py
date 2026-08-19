@@ -449,6 +449,75 @@ def test_a_nonsense_target_is_reported_as_absent_not_as_a_failure(corpus_repo):
     )
 
 
+def test_callers_render_module_scope_as_a_location_not_a_pseudo_symbol(corpus_repo):
+    """A module-scope pseudo-node must never reach a `callers` row as a symbol.
+
+    The backend has no node for code that runs at module or class-body scope, so it hangs those edges
+    off a whole-file container: a `File` node whose qualified name it synthesises as
+    `<module>.__file__`, and/or a `Module` node named for the file. Rendered verbatim,
+    `## Callers of invoke (4)` on this corpus listed `src.click.core.__file__` and
+    `src.click.decorators.__file__` as two of the four callers — half the count a reader trusts was a
+    symbol nobody can open. This was invisible to 818 unit tests and immediate on a real repository,
+    which is why the invariant lives here.
+
+    The edge is real — module-scope code genuinely references the symbol (`core.__file__` references
+    `builtins.len` and an exception class from another file) — so it is relabelled to its file
+    location, never dropped: on this corpus 147 symbols are referenced ONLY from module scope, and
+    dropping would report a live, referenced function as uncalled.
+
+    The population of container labels is DERIVED from the live graph, never typed: a caller is by
+    definition a Function or a Method, so any OTHER label on the caller side is a container this fix
+    must handle, and a new one the backend introduces fails here instead of silently rendering as a
+    fiction again.
+    """
+    from codeintel.providers.graph import (
+        _MODULE_SCOPE_LABELS,
+        _is_module_scope_node,
+        _node_labels,
+    )
+
+    p = _indexed_graph(corpus_repo)
+    proj = _project_name(p, corpus_repo)
+
+    edges = p._query_rows(
+        "MATCH (a)-[c:CALLS|USAGE]->(b) RETURN labels(a), a.qualified_name, b.name LIMIT 10000",
+        proj, 120_000)
+    assert edges, "the graph returned no call edges — nothing below would mean anything"  # non-vacuity
+
+    caller_labels: set[str] = set()
+    file_dunder_targets: list[str] = []
+    for e in edges:
+        caller_labels |= set(_node_labels(e.get("labels(a)")))
+        if (_is_module_scope_node(e.get("labels(a)"))
+                and str(e.get("a.qualified_name") or "").endswith(".__file__")
+                and e.get("b.name")):
+            file_dunder_targets.append(str(e["b.name"]))
+
+    # Rule-3 guard, derived not typed. If a release adds a caller-side container label, `noncallable`
+    # grows past `_MODULE_SCOPE_LABELS` and this fails — rather than the container quietly rendering
+    # as a fictional symbol again, which is the exact staleness this project keeps re-learning.
+    noncallable = caller_labels - {"Function", "Method"}
+    assert noncallable, "no non-callable caller labels on a real repo — the fixture cannot show the bug"
+    assert noncallable <= set(_MODULE_SCOPE_LABELS), (
+        f"the backend emits caller-side container labels this fix does not handle: "
+        f"{sorted(noncallable - set(_MODULE_SCOPE_LABELS))}")
+
+    # End to end, over real targets. NO `callers` answer may render the synthetic `__file__` symbol,
+    # and at least one whose caller genuinely includes a `__file__` node must show the relabelled
+    # location — the relabel firing, not merely the fiction being absent for other reasons.
+    assert file_dunder_targets, "no `__file__` caller on a real repo — the specific defect is absent"
+    demonstrated = False
+    for target in dict.fromkeys(file_dunder_targets):          # de-dupe, keep order, cap the work
+        body = str(p.build_result("callers", target, [], 60000, corpus_repo).get("result") or "")
+        assert ".__file__" not in body, (
+            f"a module-scope pseudo-node reached `callers {target}` output as a symbol:\n{body}")
+        if "module scope of" in body:
+            demonstrated = True
+        if demonstrated and len(dict.fromkeys(file_dunder_targets)) > 6:
+            break
+    assert demonstrated, "no callers answer rendered a module-scope location — the relabel is not firing"
+
+
 def test_no_result_leaks_an_absolute_host_path(corpus_repo):
     """The home-path disclosure class. Renderers were swept for it once and a third and fourth site
     turned up later; this asserts the property over real output instead of enumerating sites."""
