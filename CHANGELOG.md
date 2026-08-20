@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-20
+
 ### Changed
 - **`callees` stopped subtracting the ambiguity out of its answer and started reporting it.** The op
   resolves its target by unqualified name, so a repository with four methods called `invoke` returned
@@ -162,6 +164,19 @@ All notable changes to codeintel are documented here. The format is based on
   can name a `.ini`; the references there are genuine click-API uses, so relabelling is honest and
   dropping them as "non-code" — the `callees` collision filter's separate domain — would have lost
   real edges.
+- **`callers` reported cross-language and non-code name collisions as callers; the collision filter
+  `callees` had was never lifted to it.** `callers X` matches by the bare name `X`, and the extractor
+  emits an edge for a bare local name, so a `.ts` function three files over or a node in a `.json`
+  that merely shares the name became a "caller" of a Python symbol. A call edge cannot cross a
+  language family without an FFI/IPC mechanism the extractor does not emit, and a data file defines no
+  caller, so both are collisions — the same ones `callees` has always dropped, resolved per group
+  against the CALLED symbol's language. The two ops now share one `_drop_edge_collisions` and one
+  disclosure path (`_collision_note`, `_empty_edge_answer`), so a filtered or fully-emptied answer
+  discloses its count and reason in the body identically in both directions — a `callers` answer
+  emptied entirely by the filter says "found N, all filtered", never "0 callers", which reads as safe
+  to delete. Module-scope rows are exempt from the drop and left for the relabel above, because the
+  backend mis-attributes their paths (the `aliases.ini` case) and the references behind them are real.
+  On a pure-Python repository the filter is dormant, as it should be — nothing to collide.
 - **A `callees` answer emptied entirely by the collision filter reported the dropped count in
   `gaps` and nothing in the body.** The gap said `1 row(s) were dropped`; the body said
   `(no callee survived name-collision filtering)` with no number anywhere in it. `attach_confidence`
