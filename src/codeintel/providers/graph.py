@@ -1146,6 +1146,49 @@ class GraphProvider:
                 kept.append(marked)
             group.rows = kept
 
+    @staticmethod
+    def _drop_edge_collisions(groups: list[_EdgeGroup], file_key: str, label_key: str) -> int:
+        """Drop the displayed-side rows that are name collisions rather than real edges, in place.
+
+        The extractor emits an edge for a bare local name, so a symbol whose body says `conn`,
+        `tmp_path` or `write` acquires an edge to anything else in the repository carrying that name
+        -- including a function in another language, or a node in a data file. A call edge cannot
+        cross a language family without an FFI/IPC mechanism the extractor does not emit
+        (`_LANG_FAMILIES`), and a `.json`/`.md` file defines no callable at all, so a displayed
+        endpoint in a different family than the OTHER end of the edge, or in a non-code file, is a
+        collision and dropping it costs nothing real.
+
+        This began as `callees`-only. A Python function's CALLERS are polluted the same way -- a `.ts`
+        function three files over that shares the bare name -- so both ops now share the one filter.
+        `anchor` is the family of the far end (the group's own key symbol: the caller for `callees`,
+        the called symbol for `callers`), so the comparison is per-group and cannot be confused by an
+        unrelated same-named symbol elsewhere in the result.
+
+        Module-scope nodes are left untouched, for `_collapse_module_scope` to relabel. The backend
+        mis-attributes their file path -- it labelled `examples/aliases/aliases.py`'s module scope
+        `aliases.ini`, a sibling file -- so a non-code or cross-language path on one is its own
+        artifact, NOT evidence the reference is spurious; the seven click-API references behind that
+        one node are genuine. Returns the number dropped, which the caller must disclose."""
+        dropped = 0
+        for group in groups:
+            anchor_fam = _lang_family(group.file)
+            keep: list[dict] = []
+            for r in group.rows:
+                if _is_module_scope_node(r.get(label_key)):
+                    keep.append(r)              # a location, relabelled later; never a collision
+                    continue
+                path = str(r.get(file_key) or "")
+                if _is_non_code(path):
+                    dropped += 1                # a data/doc file defines no callable
+                    continue
+                fam = _lang_family(path)
+                if fam and anchor_fam and fam != anchor_fam:
+                    dropped += 1                # a cross-language collision, against THIS group's key
+                    continue
+                keep.append(r)
+            group.rows = keep
+        return dropped
+
     def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> list[dict] | None:
         """``search_graph`` → parsed result dicts. ``None`` = backend failed/malformed (→ safe-null
         upstream); ``[]`` = backend answered but nothing matched (→ an informative empty render).
@@ -1231,11 +1274,19 @@ class GraphProvider:
         if wanted.narrowed and not selected:
             return self._no_symbol_matched_the_hint("callers", target, wanted, called)
 
-        # The caller is the displayed side here, so a module-scope pseudo-node lands in the rows a
-        # reader sees. Relabel it to the location it is before the renderer counts or prints it.
+        # The caller is the displayed side here, so both the collision pollution and the module-scope
+        # pseudo-nodes land in the rows a reader sees. Drop the cross-language / non-code collisions
+        # (a `.ts` function three files over sharing the bare name is not a caller), relabel the
+        # module-scope nodes that remain, and disclose anything dropped — all before the renderer
+        # counts or prints a row.
+        dropped = self._drop_edge_collisions(selected, "a.file_path", "labels(a)")
         self._collapse_module_scope(selected, "labels(a)", "a.file_path")
-
-        notes = self._row_cap_note("callers", target) if truncated else ""
+        notes = self._collision_note("callers", dropped)
+        if truncated:
+            notes = self._row_cap_note("callers", target) + notes
+        if not any(g.rows for g in selected):
+            return self._empty_edge_answer(
+                "callers", "caller", target, wanted, selected, notes, truncated, dropped)
         return self._render_edge_answer(
             "callers", "caller", target, wanted, selected,
             ("a.name", "a.qualified_name", "a.file_path"), truncated, notes)
@@ -1283,6 +1334,43 @@ class GraphProvider:
         )
         return (f"\n\n_Truncated: the graph returned the maximum {_EDGE_ROW_LIMIT} rows, so rows "
                 f"beyond that are missing from this list._")
+
+    def _collision_note(self, op: str, dropped: int) -> str:
+        """Disclose rows dropped as name collisions, in the body AND as a machine-readable gap.
+
+        Shared by both edge ops so one cannot end up disclosing while the other stays silent -- the
+        exact drift this project keeps guarding against. The far end named differs by op: a `callees`
+        row is a collision against the CALLER, a `callers` row against the symbol being called."""
+        if not dropped:
+            return ""
+        anchor = "caller" if op == "callees" else "called symbol"
+        self._add_gap(
+            op, "name-collisions-dropped",
+            f"{dropped} row(s) were dropped as name collisions (a different language, or a "
+            f"non-code file, than the {anchor}); resolution is by symbol name, not by type",
+        )
+        return (f"\n\n_{dropped} row(s) dropped as name collisions (a different language, or a "
+                f"non-code file, than the {anchor})._")
+
+    def _empty_edge_answer(
+        self, op: str, unit: str, target: str, wanted: _SymbolTarget,
+        selected: list[_EdgeGroup], notes: str, truncated: bool, dropped: int,
+    ) -> str:
+        """Every row this op found was set aside by its own collision filter.
+
+        `rows` was non-empty (the genuine miss returned None earlier), so this is an answer WE
+        emptied, not an absence in the repository. Routing it into the `not-in-graph` branch would
+        read as "0 {unit}s" -- a statement about the code -- when the honest one is "N found, all
+        filtered for a reason that has nothing to do with it". Shared by both ops for the same
+        anti-drift reason."""
+        if not dropped:                # nothing found and nothing dropped cannot both be true
+            self._add_gap(
+                op, "name-collisions-dropped",
+                "every row returned was set aside, so this may under-report — resolution is "
+                "by symbol name, not by type",
+            )
+        return (f"## {op.capitalize()} of {target} (0)\n(no {unit} survived name-collision filtering)"
+                + notes + self._name_resolution_note(wanted, selected, truncated))
 
     def _op_callees(self, target: str, project: str, timeout_ms: int) -> str | None:
         """What *target* calls or uses.
@@ -1333,59 +1421,19 @@ class GraphProvider:
         if wanted.narrowed and not selected:
             return self._no_symbol_matched_the_hint("callees", target, wanted, callers)
 
-        dropped = 0
-        for group in selected:
-            caller_fam = _lang_family(group.file)
-            keep = []
-            for r in group.rows:
-                path = str(r.get("b.file_path") or "")
-                if _is_non_code(path):
-                    dropped += 1          # a data/doc file cannot be a callee
-                    continue
-                callee_fam = _lang_family(path)
-                if callee_fam and caller_fam and callee_fam != caller_fam:
-                    dropped += 1          # a cross-language collision, against THIS group's caller
-                    continue
-                keep.append(r)
-            group.rows = keep
-
+        dropped = self._drop_edge_collisions(selected, "b.file_path", "labels(b)")
         # Symmetric with `callers`: relabel any module-scope pseudo-node on the displayed (callee)
         # side. The backend never emits a File/Module node as a callee today — the callee side of
         # every edge is a Function/Method/Class/Variable/Decorator — so this is a no-op now, kept so
         # the two ops treat the pseudo-node population identically and a future callee container is
         # handled without a second fix.
         self._collapse_module_scope(selected, "labels(b)", "b.file_path")
-
-        answered = [g for g in selected if g.rows]
-        kept = sum(len(g.rows) for g in answered)
-        notes = ""
-        if dropped:
-            self._add_gap(
-                "callees", "name-collisions-dropped",
-                f"{dropped} row(s) were dropped as name collisions (a different language, or a "
-                f"non-code file, than the caller); resolution is by symbol name, not by type",
-            )
-            notes += (f"\n\n_{dropped} row(s) dropped as name collisions (a different language, or "
-                      f"a non-code file, than the caller)._")
+        notes = self._collision_note("callees", dropped)
         if truncated:
             notes = self._row_cap_note("callees", target) + notes
-
-        if not kept:
-            # `rows` was non-empty (the `if not rows: return None` above already handled the
-            # genuine miss), so every row this op found was dropped by OUR OWN collision filter.
-            # That is an answer WE emptied, not an absence in the repository, and routing it into
-            # the `result_text is None` branch would report it as `not-in-graph` — "0 callees" —
-            # when the honest statement is "N callees, all of them filtered out for a reason that
-            # has nothing to do with the code".
-            if not dropped:              # nothing found and nothing dropped cannot both be true
-                self._add_gap(
-                    "callees", "name-collisions-dropped",
-                    "every row returned was set aside, so this may under-report — resolution is "
-                    "by symbol name, not by type",
-                )
-            return (f"## Callees of {target} (0)\n(no callee survived name-collision filtering)"
-                    + notes + self._name_resolution_note(wanted, selected, truncated))
-
+        if not any(g.rows for g in selected):
+            return self._empty_edge_answer(
+                "callees", "callee", target, wanted, selected, notes, truncated, dropped)
         return self._render_edge_answer(
             "callees", "callee", target, wanted, selected,
             ("b.name", "b.qualified_name", "b.file_path"), truncated, notes)

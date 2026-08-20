@@ -763,3 +763,81 @@ def test_callees_are_untouched_by_the_module_scope_pass():
     assert "module scope of" not in body
     assert "(1)" in body
     assert env["confidence"] == "complete"
+
+
+# --------------------------------------------------------------------------------------------- #
+# T12 — the cross-language / non-code collision filter is now shared, so `callers` drops the same
+# name-collision pollution `callees` always did.
+#
+# `callers X` matches by the bare name `X`, and the extractor emits an edge for a bare local name, so
+# a `.ts` function or a `.json` node three files over that merely shares the name becomes a "caller".
+# A call edge cannot cross a language family (`_LANG_FAMILIES`) and a data file defines no caller, so
+# these are collisions, resolved per group against the CALLED symbol's language — the exact filter
+# `callees` had, lifted to one shared helper both ops use.
+# --------------------------------------------------------------------------------------------- #
+
+_HANDLE_WITH_CALLER_COLLISIONS = [
+    {  # a real Python caller of a Python target — keep
+        "a.name": "serve", "a.qualified_name": "proj.api.app.serve",
+        "a.file_path": "src/api/app.py", "labels(a)": '["Function"]', "type(c)": "CALLS",
+        "b.name": "handle", "b.qualified_name": "proj.api.routes.handle",
+        "b.file_path": "src/api/routes.py",
+    },
+    {  # a `.ts` function sharing the bare name — cross-language collision, drop
+        "a.name": "handle", "a.qualified_name": "ui.button.handle",
+        "a.file_path": "ui/button.ts", "labels(a)": '["Function"]', "type(c)": "USAGE",
+        "b.name": "handle", "b.qualified_name": "proj.api.routes.handle",
+        "b.file_path": "src/api/routes.py",
+    },
+    {  # a node in a data file — a JSON defines no caller, drop
+        "a.name": "handle", "a.qualified_name": "config.handle",
+        "a.file_path": "config/handlers.json", "labels(a)": '["Variable"]', "type(c)": "USAGE",
+        "b.name": "handle", "b.qualified_name": "proj.api.routes.handle",
+        "b.file_path": "src/api/routes.py",
+    },
+]
+
+
+def test_callers_drops_cross_language_and_non_code_collisions():
+    env = _callers("handle", _HANDLE_WITH_CALLER_COLLISIONS)
+    body = env["result"]
+
+    assert body is not None
+    assert "api.app.serve" in body                       # the real caller survives
+    assert "ui/button.ts" not in body, "a cross-language collision was reported as a caller"
+    assert "handlers.json" not in body, "a data file was reported as a caller"
+    assert "(1)" in body
+    # Rule 5: the drop count and reason live in the body a reader sees, not only in `gaps`.
+    assert "2 row(s) dropped" in body
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "name-collisions-dropped" for g in (env.get("gaps") or [])), env
+
+
+def test_callers_emptied_only_by_collisions_is_not_reported_as_uncalled():
+    """The dangerous reading again, on the caller side: a symbol whose only rows are collisions must
+    say "found N, all filtered", never "0 callers" — the latter reads as safe to delete."""
+    env = _callers("handle", _HANDLE_WITH_CALLER_COLLISIONS[1:])   # only the two collisions
+
+    body = env["result"]
+    assert body is not None
+    assert env.get("reason") is None, "an answer WE emptied must not be reported as a repo absence"
+    assert "(0)" in body
+    assert "name-collision" in body.lower()
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "name-collisions-dropped" for g in (env.get("gaps") or [])), env
+
+
+def test_a_genuine_cross_language_caller_is_kept_when_the_target_language_is_unknown():
+    """The filter only drops when BOTH ends have a KNOWN, differing family — a builtin or synthetic
+    target (no file, unknown family) must not cause every caller to be dropped as a collision."""
+    rows = [{
+        "a.name": "use", "a.qualified_name": "proj.ui.app.use", "a.file_path": "ui/app.ts",
+        "labels(a)": '["Function"]', "type(c)": "CALLS",
+        "b.name": "len", "b.qualified_name": "builtins.len", "b.file_path": "",
+    }]
+    env = _callers("len", rows)
+    body = env["result"]
+    assert body is not None
+    assert "ui.app.use" in body, "a caller was dropped though the target's family is unknown"
+    assert "(1)" in body
+    assert env["confidence"] == "complete"
