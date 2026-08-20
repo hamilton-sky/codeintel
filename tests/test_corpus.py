@@ -465,42 +465,56 @@ def test_callers_render_module_scope_as_a_location_not_a_pseudo_symbol(corpus_re
     location, never dropped: on this corpus 147 symbols are referenced ONLY from module scope, and
     dropping would report a live, referenced function as uncalled.
 
-    The population of container labels is DERIVED from the live graph, never typed: a caller is by
-    definition a Function or a Method, so any OTHER label on the caller side is a container this fix
-    must handle, and a new one the backend introduces fails here instead of silently rendering as a
-    fiction again.
+    The container population is DERIVED from the live graph by SHAPE — never a typed label list, and
+    never the false premise that a caller is only ever a Function or Method. Real repositories call
+    from `Class` nodes (a `@Injectable()` decorator references the class's own body) and from
+    `Variable` nodes (a `const` arrow function), and those are real navigable symbols, not containers;
+    asserting "every non-Function/Method caller is a container" fails on the first such repo, and did
+    (`brightsky-ai`, `pathly-adapters`). What makes a node a container is that it renders as a FILE
+    rather than a symbol: a `.__file__` qualified name, or a `name` that is a path or a source
+    filename. Every such node must be caught by the module-scope filter, so a new container label the
+    backend introduces fails here instead of rendering as a fiction again.
     """
     from codeintel.providers.graph import (
-        _MODULE_SCOPE_LABELS,
+        _FILE_EXTENSIONS,
         _is_module_scope_node,
-        _node_labels,
+        _strip_project_prefix,
     )
 
     p = _indexed_graph(corpus_repo)
     proj = _project_name(p, corpus_repo)
 
     edges = p._query_rows(
-        "MATCH (a)-[c:CALLS|USAGE]->(b) RETURN labels(a), a.qualified_name, b.name LIMIT 10000",
+        "MATCH (a)-[c:CALLS|USAGE]->(b) RETURN labels(a), a.name, a.qualified_name, b.name LIMIT 10000",
         proj, 120_000)
     assert edges, "the graph returned no call edges — nothing below would mean anything"  # non-vacuity
 
-    caller_labels: set[str] = set()
-    file_dunder_targets: list[str] = []
-    for e in edges:
-        caller_labels |= set(_node_labels(e.get("labels(a)")))
-        if (_is_module_scope_node(e.get("labels(a)"))
-                and str(e.get("a.qualified_name") or "").endswith(".__file__")
-                and e.get("b.name")):
-            file_dunder_targets.append(str(e["b.name"]))
+    def _renders_as_a_file_container(name: str, qn_raw: str) -> bool:
+        # A container stands for a FILE, not a symbol: the backend synthesises a `.__file__` qualified
+        # name for a `File` node and names a `Module` node after its path/basename. A real symbol —
+        # Function, Method, Class, Variable — has an identifier name and a dotted symbol qn.
+        if _strip_project_prefix(qn_raw, may_be_filename=False).endswith(".__file__"):
+            return True
+        base = name.replace("\\", "/").rsplit("/", 1)[-1]
+        return "/" in name or ("." in base and base.rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS)
 
-    # Rule-3 guard, derived not typed. If a release adds a caller-side container label, `noncallable`
-    # grows past `_MODULE_SCOPE_LABELS` and this fails — rather than the container quietly rendering
-    # as a fictional symbol again, which is the exact staleness this project keeps re-learning.
-    noncallable = caller_labels - {"Function", "Method"}
-    assert noncallable, "no non-callable caller labels on a real repo — the fixture cannot show the bug"
-    assert noncallable <= set(_MODULE_SCOPE_LABELS), (
-        f"the backend emits caller-side container labels this fix does not handle: "
-        f"{sorted(noncallable - set(_MODULE_SCOPE_LABELS))}")
+    file_dunder_targets: list[str] = []
+    container_shaped = 0
+    for e in edges:
+        name, qn = str(e.get("a.name") or ""), str(e.get("a.qualified_name") or "")
+        if not _renders_as_a_file_container(name, qn):
+            continue
+        container_shaped += 1
+        # Derived rule-3 guard: anything that renders as a file/module container MUST be caught by the
+        # module-scope filter, or it reaches output as a fictional symbol. Catches a new container
+        # label without a typed list, and does NOT fire on Class/Variable callers.
+        assert _is_module_scope_node(e.get("labels(a)")), (
+            f"a caller renders as a file/module container but the module-scope filter does not catch "
+            f"it, so it will reach output as a fiction: name={name!r} qn={qn!r} "
+            f"labels={e.get('labels(a)')!r}")
+        if qn.endswith(".__file__") and e.get("b.name"):
+            file_dunder_targets.append(str(e["b.name"]))
+    assert container_shaped, "no file/module container caller nodes on a real repo — cannot show the bug"
 
     # End to end, over real targets. NO `callers` answer may render the synthetic `__file__` symbol,
     # and at least one whose caller genuinely includes a `__file__` node must show the relabelled
