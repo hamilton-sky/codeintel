@@ -663,7 +663,7 @@ def test_both_edge_ops_render_through_one_renderer():
 def test_module_scope_node_classifier_reads_both_wire_shapes():
     """The label arrives JSON-encoded (`'["File"]'`) over the real wire and as a plain list from the
     mocked backend; both must classify, and a callable label or a missing one never must."""
-    from codeintel.providers.graph import _is_module_scope_node, _node_labels
+    from codeintel.graph_render import _is_module_scope_node, _node_labels
 
     for container in ('["File"]', '["Module"]', ["File"], ["Module"], "File"):
         assert _is_module_scope_node(container), container

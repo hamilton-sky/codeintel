@@ -475,11 +475,8 @@ def test_callers_render_module_scope_as_a_location_not_a_pseudo_symbol(corpus_re
     filename. Every such node must be caught by the module-scope filter, so a new container label the
     backend introduces fails here instead of rendering as a fiction again.
     """
-    from codeintel.providers.graph import (
-        _FILE_EXTENSIONS,
-        _is_module_scope_node,
-        _strip_project_prefix,
-    )
+    from codeintel.graph_render import _is_module_scope_node
+    from codeintel.providers.graph import _FILE_EXTENSIONS, _strip_project_prefix
 
     p = _indexed_graph(corpus_repo)
     proj = _project_name(p, corpus_repo)
