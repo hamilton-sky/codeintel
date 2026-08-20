@@ -77,6 +77,40 @@ def console_script(monkeypatch) -> str:
     return resolved
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _reap_leaked_backend_projects():
+    """Delete the backend project registrations that live tests leave behind.
+
+    Several live tests (RBAC scoping, the MCP handshake, `code.query` over a real index, the
+    reindexer) build a repo under pytest's ``tmp_path`` and index it into the real codebase-memory-mcp
+    backend — and nothing ever deleted it. One dev DB had accumulated **572** dead
+    ``pytest-of-<user>`` registrations before this existed, one per indexed tmp repo across every run,
+    which is noise in `list_projects` and a standing source of stale-index confusion the graph engine
+    already fights.
+
+    A pytest tmp dir never outlives its session, so any backend project whose ``root_path`` sits under
+    a ``/pytest-of-`` path is junk by construction — including the backlog from earlier runs, which
+    this also clears. The match is deliberately narrow: it can only ever name an ephemeral pytest
+    directory, never a real project (codeintel, the corpus, or a user's own repo), so it cannot delete
+    anything that matters. Runs once at session end (deletes measured at ~0ms each), best-effort, and
+    a no-op where the backend is not installed (CI)."""
+    yield
+    try:
+        from codeintel.providers.graph import GraphProvider
+
+        p = GraphProvider()
+        if not p.available:
+            return
+        raw = p._run("list_projects", {}, 30000)
+        entries = (raw or {}).get("projects", []) if isinstance(raw, dict) else (raw or [])
+        from tests._backend_reaper import leaked_project_names
+
+        for name in leaked_project_names(entries):
+            p._run("delete_project", {"project": name}, 30000)
+    except Exception:
+        pass  # cleanup is best-effort — it must never turn a green run red
+
+
 @pytest.fixture(autouse=True)
 def _reset_graph_wire_format_cache():
     """Clear GraphProvider's process-wide backend-compatibility verdict between tests.

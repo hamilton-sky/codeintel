@@ -6,6 +6,18 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **The live test suite leaked a backend project registration per indexed tmp repo and never cleaned
+  one up.** Several tests (RBAC scoping, the MCP handshake, `code.query` over a real index, the
+  reindexer) build a repo under pytest's `tmp_path` and index it into the real codebase-memory-mcp
+  backend; nothing deleted it, so `list_projects` on one dev machine had accumulated **572** dead
+  `pytest-of-<user>` registrations, one per test run — noise, and a standing source of the
+  stale-index confusion the graph engine already fights. A session-scoped reaper now deletes them at
+  teardown (which also clears the backlog from earlier runs). It matches only roots containing
+  `/pytest-of-`, a segment a real checkout can never hold, and the selection is unit-tested to prove
+  it can never name codeintel, the corpus, or a user's own repo — the one way this fixture could do
+  harm.
+
 ## [0.16.0] — 2026-08-20
 
 ### Changed
