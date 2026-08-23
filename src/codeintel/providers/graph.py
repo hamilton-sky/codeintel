@@ -12,12 +12,17 @@ import re
 import shutil  # noqa: F401
 import subprocess  # noqa: F401
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any
 
 from codeintel.graph_backend import BackendClient, _parse_query_rows, _parse_search_results
 from codeintel.graph_render import _is_module_scope_node, _is_non_code, _lang_family
+from codeintel.graph_resolution import (
+    _RESOLVE_TIMEOUT_MS,
+    ProjectLookup,
+    ProjectResolution,
+    ProjectResolver,
+)
 from codeintel.outcome import Missing
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.source_kind import is_code_path, looks_generated_path
@@ -228,19 +233,6 @@ def _collapse_repeats(label: str) -> str:
     return ".".join(out)
 
 
-# How long `list_projects` may take before resolution gives up. The old value was 3000ms, chosen
-# against a mocked backend; the real one spawns a native binary that re-initialises its allocator
-# per invocation and measured ~5.8s consistently on an ordinary machine. Every graph query resolves
-# a project first, so a budget below the backend's real latency does not degrade the engine — it
-# disables it. Generous on purpose: a successful lookup is cached for the process's lifetime, so
-# this is paid approximately once, and being slow is enormously better than being silently wrong.
-# Overridable for a machine slower still, or for a test that wants to force the timeout path.
-try:
-    _RESOLVE_TIMEOUT_MS = max(1, int(os.environ.get("CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS", "20000")))
-except ValueError:
-    _RESOLVE_TIMEOUT_MS = 20000
-
-
 # The supported backend range. `codebase-memory-mcp` 0.9.x answers `query_graph`/`search_graph`
 # with `{"columns": [...], "rows": [...]}`, which every renderer here parses. 0.10.x replaced that
 # with a compact human-readable text format; `list_projects` stayed JSON, so project resolution and
@@ -441,38 +433,6 @@ def _same_path(a: str | None, b: str | None) -> bool:
         return str(a) == str(b)
 
 
-@dataclass(frozen=True)
-class ProjectLookup:
-    """A resolution attempt AND why it failed, which the caller must tell apart.
-
-    "The backend did not answer" and "this repository is not indexed" are different facts with
-    different remedies, and collapsing them is what turned a timeout into `project-not-indexed`
-    plus an instruction to re-index a repository that was already indexed."""
-
-    resolution: ProjectResolution | None
-    reason: str  # "ok" | "not-indexed" | "backend-unreachable"
-
-
-@dataclass(frozen=True)
-class ProjectResolution:
-    """How a project_root resolved to a backend project, INCLUDING whether the match was exact.
-
-    `_resolve_project` used to return the project name alone, discarding the one fact that decides
-    whether an answer is about the repository the caller asked about. `probe()` recovered it by
-    re-deriving the matched root a second time; `build_result` did not, so `doctor` warned about an
-    ancestor match while `code.query` answered from it silently — a human running the diagnostic
-    was told, and the agent actually consuming the answers was not. Both now consume this record,
-    so the two cannot drift apart again."""
-
-    name: str
-    matched_root: str | None
-    scope: str  # "exact" | "ancestor"
-
-    @property
-    def is_ancestor(self) -> bool:
-        return self.scope == "ancestor"
-
-
 def _has_own_git_dir(path: str) -> bool:
     """Whether *path* is the root of its own git repository.
 
@@ -485,20 +445,6 @@ def _has_own_git_dir(path: str) -> bool:
         return os.path.exists(os.path.join(path, ".git"))
     except OSError:
         return False
-
-
-def _same_dir(a: str, b: str) -> bool:
-    """Whether two paths name the same directory.
-
-    `os.path.realpath` resolves symlinks but does not canonicalise CASE, and macOS APFS is
-    case-insensitive: `/Users/x/Project/repo` and `/Users/x/project/repo` are one directory that
-    compared as two, so a correctly-indexed repo was reported unindexed. `os.path.samefile` asks
-    the filesystem, which is the only authority on this; fall back to a realpath compare when
-    either path does not exist."""
-    try:
-        return os.path.samefile(a, b)
-    except OSError:
-        return os.path.realpath(a).rstrip(os.sep) == os.path.realpath(b).rstrip(os.sep)
 
 
 def _label_of(row: dict) -> str:
@@ -528,14 +474,6 @@ def _repo_display_name(root: str) -> str:
         return ""
 
 
-def _int_or_zero(value: Any) -> int:
-    """A node count from an untrusted backend payload, or 0 when it is missing/not a number."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
 class GraphProvider:
     """Wraps the codebase-memory-mcp CLI. Never raises.
 
@@ -563,9 +501,7 @@ class GraphProvider:
 
     def __init__(self) -> None:
         self._backend = BackendClient()
-        self._project_cache: dict[str, ProjectResolution] = {}   # resolved projects (stable, kept)
-        self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
-        self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
+        self._resolver = ProjectResolver(self._backend)
 
     # `available`/`_cmd`/`_saw_unparsable`/`_last_failure` live on `self._backend` now (see
     # graph_backend.py) — exposed here as properties so the ~27 internal `self.available` /
@@ -605,6 +541,34 @@ class GraphProvider:
     def _last_failure(self, value: Missing | None) -> None:
         self._backend._last_failure = value
 
+    # `_project_cache`/`_negative_until`/`_project_cache_lock` live on `self._resolver` now (see
+    # graph_resolution.py) — exposed here as properties for the same reason the four backend
+    # attributes above are: tests build a provider with `GraphProvider.__new__(GraphProvider)` and
+    # set these directly, which requires `gp._resolver` to exist first.
+    @property
+    def _project_cache(self) -> dict[str, ProjectResolution]:
+        return self._resolver._project_cache
+
+    @_project_cache.setter
+    def _project_cache(self, value: dict[str, ProjectResolution]) -> None:
+        self._resolver._project_cache = value
+
+    @property
+    def _negative_until(self) -> dict[str, float]:
+        return self._resolver._negative_until
+
+    @_negative_until.setter
+    def _negative_until(self, value: dict[str, float]) -> None:
+        self._resolver._negative_until = value
+
+    @property
+    def _project_cache_lock(self) -> threading.Lock:
+        return self._resolver._project_cache_lock
+
+    @_project_cache_lock.setter
+    def _project_cache_lock(self, value: threading.Lock) -> None:
+        self._resolver._project_cache_lock = value
+
     # Sentinel: distinguishes "the subprocess call failed" from "it succeeded and returned JSON
     # null". Overloading None for both would make a legit null result wrongly trigger the fallback.
     _FAIL = BackendClient._FAIL
@@ -624,116 +588,36 @@ class GraphProvider:
     def _run_rawjson(self, method: str, body: str, timeout_ms: int) -> Any:
         return self._backend._run_rawjson(method, body, timeout_ms)
 
+    # `_match_project` is pure (no backend call), so it can be a genuinely thin delegator with no
+    # stub-seam consequence.
     @staticmethod
     def _match_project(raw: Any, project_root: str) -> ProjectResolution | None:
-        """Resolve a list_projects response to the project for ``project_root``.
+        return ProjectResolver._match_project(raw, project_root)
 
-        The real codebase-memory-mcp returns ``{"projects": [...]}``; a bare list is the
-        older/mocked shape — accept both. Prefer an exact ``root_path`` match; otherwise the
-        LONGEST prefix match (so ``.../project/codeintel`` resolves to codeintel, not its
-        parent ``.../project``). Static so ``_resolve_project`` and ``probe`` share it.
-
-        The backend can hold MORE THAN ONE project for the same root — typically one registered
-        under a short name and one under a path slug — and the two drift apart independently.
-        Returning the first match meant a query could be answered from a months-stale index while
-        a complete one sat beside it: observed on this repo as 1475 nodes vs 2631 for the same
-        path, which is how `callers` reported a function's pre-refactor shape hours after the
-        refactor. Among exact matches, prefer the most complete index."""
-        # Normalize the input to an absolute realpath: the backend stores absolute root_paths, so a
-        # relative ``project_root`` (e.g. `codeintel map .` passing ".") would otherwise never match
-        # — the bug where the map/query silently reported "not indexed" from inside the repo.
-        try:
-            project_root = os.path.realpath(project_root)
-        except Exception:
-            pass
-        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
-        if not isinstance(entries, list):
-            return None
-        exact: list[dict] = []
-        best_prefix_len = -1
-        best_prefix: dict | None = None
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            rp = entry.get("root_path", "")
-            if not rp:
-                continue
-            if rp == project_root:
-                exact.append(entry)
-                continue
-            if project_root.startswith(rp.rstrip("/") + "/") and len(rp) > best_prefix_len:
-                best_prefix_len = len(rp)
-                best_prefix = entry
-
-        if exact:
-            # Node count is the available completeness signal — list_projects carries no indexed-at
-            # timestamp, and head_sha is recorded per registration rather than per index pass, so
-            # duplicates routinely report the same SHA with wildly different graphs. `max` keeps
-            # the FIRST maximal entry, so with no completeness signal to go on (ties, or a backend
-            # that omits `nodes`) this falls back to the original first-listed rule rather than
-            # inventing an ordering.
-            best = max(exact, key=lambda e: _int_or_zero(e.get("nodes")))
-            name = best.get("name")
-            if not name:
-                return None
-            return ProjectResolution(
-                name=str(name), matched_root=str(best.get("root_path") or ""), scope="exact",
-            )
-        if best_prefix is not None:
-            name = best_prefix.get("name")
-            if name:
-                # A prefix hit is only "ancestor" if it is genuinely a DIFFERENT directory. An
-                # exact match that differed by case or a symlink lands here on the filesystems
-                # where realpath cannot canonicalise it, and calling that an ancestor would refuse
-                # scan ops on a correctly-indexed repo.
-                root_path = str(best_prefix.get("root_path") or "")
-                scope = "exact" if _same_dir(root_path, project_root) else "ancestor"
-                return ProjectResolution(name=str(name), matched_root=root_path, scope=scope)
-        return None
-
+    # `_lookup_project` fetches through `self._run` (its own overridable delegator) rather than
+    # `self._resolver._lookup_project(...)` wholesale — the same deviation `_query_rows` makes in
+    # graph_backend.py's module docstring, and for the same reason: a large population of tests
+    # stub the transport at `_run` alone (`monkeypatch.setattr(p, "_run", ...)`) and expect
+    # `_resolve_project`/`build_result` (which read through here) to honour that stub. Routing the
+    # fetch through `self._resolver`'s own `self._backend._run(...)` would silently bypass it. The
+    # caching state (`_project_cache`/`_negative_until`/`_project_cache_lock`) and the matching logic
+    # (`_match_project`) still come from `self._resolver`/its delegator, so there is exactly one
+    # cache and one matcher — only the fetch call is duplicated, matching `_query_rows`'s shape.
     def _lookup_project(self, project_root: str) -> ProjectLookup:
-        """Resolve a root to a backend project, distinguishing "not indexed" from "could not ask".
-
-        The timeout here used to be a hardcoded 3000ms, and the real backend takes appreciably
-        longer than that: `list_projects` spawns a native binary that initialises its own allocator
-        on every invocation, measured at ~5.8s CONSISTENTLY — not just on a cold start. The effect
-        was total. Every graph query timed out during resolution, `_match_project` was handed
-        `None`, and the caller reported `project-not-indexed` with the advice to run
-        `codeintel index` — which cannot help, because the repository was already indexed. The
-        entire graph engine was dead on any machine where the backend is this slow, and it said so
-        in the one way guaranteed to send the user somewhere useless.
-
-        Nothing caught it because the backend is installed in no CI job, and the one live test that
-        would have failed instead SKIPPED — with "project not indexed in this environment", a
-        condition produced by this very bug.
-        """
-        with self._project_cache_lock:
-            if project_root in self._project_cache:
-                return ProjectLookup(self._project_cache[project_root], "ok")
-            neg_until = self._negative_until.get(project_root)
-            if neg_until is not None and time.monotonic() < neg_until:
-                return ProjectLookup(None, "not-indexed")  # recent genuine miss, within its TTL
-        # list_projects shells out — resolve it OUTSIDE the lock so a slow backend can't serialize
-        # every concurrent request. A rare duplicate lookup on first contact is harmless.
-        raw = self._run("list_projects", {}, _RESOLVE_TIMEOUT_MS)
-        if raw is None:
-            # `_run` returns None on timeout/crash. That is NOT evidence the project is unindexed,
-            # and it must not be cached as a miss: a backend having a slow moment would then be
-            # remembered as "this repo has no index" for the next 30 seconds.
-            return ProjectLookup(None, "backend-unreachable")
-        resolution = self._match_project(raw, project_root)
-        with self._project_cache_lock:
-            if resolution is not None:
-                self._project_cache[project_root] = resolution
-                self._negative_until.pop(project_root, None)
-            else:
-                # Cache the MISS only briefly, so a repo indexed into the graph AFTER this failed
-                # lookup is picked up within the TTL rather than staying stuck until a restart.
-                self._negative_until[project_root] = time.monotonic() + 30.0
-        return ProjectLookup(resolution, "ok" if resolution is not None else "not-indexed")
+        """Resolve a root to a backend project — delegated to `ProjectResolver`, which owns the one
+        copy of the lookup body (its docstring carries the ~5.8s-allocator story that shaped the
+        timeout). Passes this provider's OWN `self._run` so a `gp._run` stub gates resolution the way
+        a large population of tests expect. Kept as an overridable method because 6 tests stub
+        `gp._lookup_project` directly."""
+        return self._resolver._lookup_project(project_root, self._run)
 
     def _resolve_project(self, project_root: str) -> ProjectResolution | None:
-        """The resolution alone, for callers that only branch on found/not-found."""
+        """The resolution alone, for callers that only branch on found/not-found.
+
+        Calls `self._lookup_project` — this provider's OWN overridable delegator — rather than
+        `self._resolver._resolve_project(...)`: 6 tests stub `gp._lookup_project` directly, and
+        routing through the resolver's own `_resolve_project` (which calls the resolver's OWN
+        `_lookup_project`) would silently bypass that stub."""
         return self._lookup_project(project_root).resolution
 
     def probe(self, project_root: str, timeout_ms: int = _RESOLVE_TIMEOUT_MS) -> dict:
@@ -852,18 +736,7 @@ class GraphProvider:
 
     @staticmethod
     def _project_root_of(raw: Any, name: str | None) -> str | None:
-        """The ``root_path`` a list_projects response records for *name*."""
-        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
-        if not isinstance(entries, list) or not name:
-            return None
-        # Among entries sharing a name, take the one `_match_project` would have chosen — the most
-        # complete. Returning the first produced a false "not indexed on its own" warning on a
-        # correctly-indexed repo whenever a stale duplicate registration existed.
-        matches = [e for e in entries
-                   if isinstance(e, dict) and e.get("name") == name and e.get("root_path")]
-        if not matches:
-            return None
-        return str(max(matches, key=lambda e: _int_or_zero(e.get("nodes"))).get("root_path"))
+        return ProjectResolver._project_root_of(raw, name)
 
     # ------------------------------------------------------------------ helpers
 

@@ -44,16 +44,24 @@ thin delegators. The cost is in the tests:
    (`BackendClient`, `ProjectResolver`) live top-level for the same reason. Consumers import from the
    new module directly; the handful of tests importing these names are updated in the same commit.
    **This is the first commit, shipped.**
-2. **Backend transport → `BackendClient`.** The hard one, because `available`/`_cmd`/`_saw_unparsable`/
-   `_last_failure` are the exact attributes the `__new__` tests poke. Strategy: `BackendClient` owns
-   them; `GraphProvider` exposes them as properties reading the client; update the two factories
-   (`_gp`, `_run_only_provider` in `test_graph_failure_population.py`) and the `__new__` sites in the
-   other four files to build/stub the client. `BackendClient._run` **returns** its failure for the
-   orchestrator to record, rather than mutating `GraphProvider` state — that is the DIP boundary made
-   honest.
-3. **Project resolution → `ProjectResolver`.** Same delegator pattern; `_lookup_project`/
-   `_resolve_project` stay as overridable delegators so the 6 stubs keep working, logic moves to the
-   resolver.
+2. **Backend transport → `codeintel/graph_backend.py::BackendClient`.** **Shipped.** `BackendClient`
+   owns `available`/`_cmd`/`_saw_unparsable`/`_last_failure` + the transport + wire-format probe;
+   `GraphProvider` exposes those four as get/set properties over it and keeps
+   `_run`/`_run_stdin`/`_run_rawjson`/`_probe_wire_format`/`_clear_failure`/`_reset_wire_format_cache`/
+   `_any_project_name` as thin delegators. The 17 `__new__` test sites each got a `gp._backend = ...`
+   line; `_run_only_provider` and its two tests were repointed at `BackendClient`. Two deviations held
+   the "no behavior change" line: `_query_rows`/`_search_symbols` stay on `GraphProvider`, calling
+   `self._run` (the overridable delegator) + module-level `_parse_query_rows`/`_parse_search_results`,
+   so the `_run` stub-seam is honoured and parse logic isn't duplicated; and `graph.py` keeps
+   `import shutil`/`import subprocess` (`# noqa`) as the anchors out-of-scope tests monkeypatch.
+   Verified by 829 tests + ruff + mypy + corpus 26, and by dogfooding codeintel's own `code.query`.
+3. **Project resolution → `codeintel/graph_resolution.py::ProjectResolver`.** In progress. `ProjectResolver`
+   is constructed with the `BackendClient` (it calls `list_projects`), owns
+   `_lookup_project`/`_resolve_project`/`_match_project`/`_project_root_of` + the caches
+   (`_project_cache`/`_negative_until`/lock) + the `ProjectResolution`/`ProjectLookup` value types.
+   `GraphProvider` keeps `_lookup_project`/`_resolve_project` as overridable delegators (6 test stubs +
+   grapher.py/mapper.py call them) and the caches as properties (tests set them); `probe` stays on
+   `GraphProvider` as the doctor facade, calling into the resolver + backend.
 4. **(Optional) renderer object.** Fold the `_add_gap`-coupled render methods into an
    `EdgeAnswerRenderer` that returns `(text, gaps)` instead of mutating `_pending_gaps`.
 

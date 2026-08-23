@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from codeintel.graph_backend import BackendClient
+from codeintel.graph_resolution import ProjectResolver
 from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
 from codeintel.server import code_status_handler
 
@@ -549,7 +550,7 @@ def test_same_dir_is_case_insensitive_where_the_filesystem_is(tmp_path):
     """`realpath` resolves symlinks but does not canonicalise CASE, and macOS APFS is
     case-insensitive — so one directory under two spellings compared as two, and a correctly
     indexed repo read as unindexed."""
-    from codeintel.providers.graph import _same_dir
+    from codeintel.graph_resolution import _same_dir
 
     assert _same_dir(str(tmp_path), str(tmp_path)) is True
     assert _same_dir(str(tmp_path), str(tmp_path) + "/") is True
@@ -645,6 +646,8 @@ def _provider_speaking(stdout_bytes):
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
+    gp._resolver = ProjectResolver.__new__(ProjectResolver)         # type: ignore[attr-defined]
+    gp._resolver._backend = gp._backend                             # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._cmd = "/fake/codebase-memory-mcp"                          # type: ignore[attr-defined]
     gp._saw_unparsable = False                                     # type: ignore[attr-defined]
@@ -698,6 +701,8 @@ def test_a_slow_backend_is_not_reported_as_an_unindexed_project(monkeypatch):
     backend, not about the repository."""
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
+    gp._resolver = ProjectResolver.__new__(ProjectResolver)         # type: ignore[attr-defined]
+    gp._resolver._backend = gp._backend                             # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._cmd = "/fake/codebase-memory-mcp"                          # type: ignore[attr-defined]
     gp._saw_unparsable = False                                     # type: ignore[attr-defined]

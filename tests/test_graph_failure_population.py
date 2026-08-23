@@ -17,6 +17,7 @@ from __future__ import annotations
 import threading
 
 from codeintel.graph_backend import BackendClient
+from codeintel.graph_resolution import ProjectResolver
 from codeintel.outcome import Missing
 from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
 
@@ -32,6 +33,8 @@ def _gp(*, run=None, query_rows=None) -> GraphProvider:
     """A GraphProvider whose resolution always succeeds, with the backend seam(s) stubbed."""
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)                 # type: ignore[attr-defined]
+    gp._resolver = ProjectResolver.__new__(ProjectResolver)            # type: ignore[attr-defined]
+    gp._resolver._backend = gp._backend                                # type: ignore[attr-defined]
     gp.available = True                                               # type: ignore[attr-defined]
     gp._cmd = "stub"                                                   # type: ignore[attr-defined]
     gp._saw_unparsable = False                                         # type: ignore[attr-defined]

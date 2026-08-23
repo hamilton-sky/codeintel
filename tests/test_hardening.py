@@ -148,8 +148,11 @@ def _bare_graph(monkeypatch, run_result):
 
     import codeintel.providers.graph as gmod
     from codeintel.graph_backend import BackendClient
+    from codeintel.graph_resolution import ProjectResolver
     p = gmod.GraphProvider.__new__(gmod.GraphProvider)  # skip _detect_backend / PATH probing
     p._backend = BackendClient.__new__(BackendClient)
+    p._resolver = ProjectResolver.__new__(ProjectResolver)
+    p._resolver._backend = p._backend
     p._project_cache = {}
     p._negative_until = {}
     p._project_cache_lock = _t.Lock()
