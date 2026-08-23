@@ -428,6 +428,7 @@ def test_hotspots_ranks_across_languages():
     class method is a `Method` node) and the candidate set was capped at 200 rows returned in NAME
     order, so the client-side sort ranked an alphabetical slice. This pins both.
     """
+    from codeintel.graph_backend import BackendClient
     from codeintel.providers.graph import GraphProvider
 
     rows = [
@@ -439,6 +440,7 @@ def test_hotspots_ranks_across_languages():
          "complexity": 20, "in_degree": 1, "out_degree": 4, "lines": 90},
     ]
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)
     gp._pending_gaps = ()
     labels: list[str] = []
     limits: list[int] = []

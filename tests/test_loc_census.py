@@ -14,6 +14,7 @@ from unittest.mock import patch
 import numpy as np
 
 import codeintel.providers
+from codeintel.graph_backend import BackendClient
 from codeintel.loc import LINE_BASES
 from codeintel.outcome import Ok
 from codeintel.providers.graph import GraphProvider
@@ -131,6 +132,7 @@ def test_each_engine_renders_a_known_position_as_the_same_one_based_line(tmp_pat
     # ---- graph ----
     bv_graph = _backend_value("graph")
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)  # type: ignore[attr-defined]
     gp._pending_gaps = ()  # type: ignore[attr-defined]
 
     def _run(method, payload, timeout_ms):
@@ -198,6 +200,7 @@ def test_no_engine_ever_emits_a_position_that_does_not_exist(tmp_path, monkeypat
     # ---- graph: malformed for a 1-based backend — 0 AND -1 ----
     for degenerate in (0, -1):
         gp = GraphProvider.__new__(GraphProvider)
+        gp._backend = BackendClient.__new__(BackendClient)  # type: ignore[attr-defined]
         gp._pending_gaps = ()  # type: ignore[attr-defined]
 
         def _run(method, payload, timeout_ms, _line=degenerate):

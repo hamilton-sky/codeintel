@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-import shutil
-import subprocess
+
+# `shutil`/`subprocess` are no longer called from this module — `BackendClient` (graph_backend.py)
+# owns the transport now — but many tests monkeypatch `codeintel.providers.graph.shutil.which` /
+# `.subprocess.run` by dotted string path, which pytest resolves by walking attributes off THIS
+# module. Since `shutil`/`subprocess` are process-wide singletons, patching either through this
+# module's reference patches the same object `graph_backend.py` calls through, so the imports stay
+# here purely as a resolution anchor for those tests.
+import shutil  # noqa: F401
+import subprocess  # noqa: F401
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from codeintel.graph_backend import BackendClient, _parse_query_rows, _parse_search_results
 from codeintel.graph_render import _is_module_scope_node, _is_non_code, _lang_family
 from codeintel.outcome import Missing
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
@@ -555,113 +562,67 @@ class GraphProvider:
     """
 
     def __init__(self) -> None:
-        # Set once the backend answers something that is not JSON — i.e. it speaks a dialect this
-        # provider cannot read. Sticky for the provider's lifetime: the condition is a version
-        # mismatch, not a transient, and it is the difference between "your symbol is not indexed"
-        # and "your backend and this release do not agree on a wire format".
-        self._saw_unparsable = False
-        # Why the most recent backend call failed, or None if none did. Also declared at class
-        # level (see the attribute below) for callers that bypass __init__ via __new__; set here
-        # too so every entry point that DOES run __init__ starts from a known state rather than
-        # the class-level default it happens to share.
-        self._last_failure: Missing | None = None
+        self._backend = BackendClient()
         self._project_cache: dict[str, ProjectResolution] = {}   # resolved projects (stable, kept)
         self._negative_until: dict[str, float] = {}                 # failed lookups, short TTL only
         self._project_cache_lock = threading.Lock()  # concurrent HTTP requests share one provider
-        self._detect_backend()
 
-    def _detect_backend(self) -> None:
-        path = shutil.which("codebase-memory-mcp")
-        if path:
-            self.available = True
-            self._cmd: str | None = path
-        else:
-            self.available = False
-            self._cmd = None
+    # `available`/`_cmd`/`_saw_unparsable`/`_last_failure` live on `self._backend` now (see
+    # graph_backend.py) — exposed here as properties so the ~27 internal `self.available` /
+    # `self._cmd` / `self._saw_unparsable` / `self._last_failure` references below, the external
+    # consumers (grapher.py, mapper.py, reindexer.py, server.py), and the tests that do
+    # `gp.available = True` on a `GraphProvider.__new__(GraphProvider)` instance all keep working
+    # unchanged, as long as `gp._backend` exists.
+    @property
+    def available(self) -> bool:
+        return self._backend.available
+
+    @available.setter
+    def available(self, value: bool) -> None:
+        self._backend.available = value
+
+    @property
+    def _cmd(self) -> str | None:
+        return self._backend._cmd
+
+    @_cmd.setter
+    def _cmd(self, value: str | None) -> None:
+        self._backend._cmd = value
+
+    @property
+    def _saw_unparsable(self) -> bool:
+        return self._backend._saw_unparsable
+
+    @_saw_unparsable.setter
+    def _saw_unparsable(self, value: bool) -> None:
+        self._backend._saw_unparsable = value
+
+    @property
+    def _last_failure(self) -> Missing | None:
+        return self._backend._last_failure
+
+    @_last_failure.setter
+    def _last_failure(self, value: Missing | None) -> None:
+        self._backend._last_failure = value
 
     # Sentinel: distinguishes "the subprocess call failed" from "it succeeded and returned JSON
     # null". Overloading None for both would make a legit null result wrongly trigger the fallback.
-    _FAIL = object()
+    _FAIL = BackendClient._FAIL
     # Sentinel: the backend ran and exited 0, but did not speak JSON — a protocol/version
     # mismatch rather than a failure. Kept separate from _FAIL so it survives to the caller.
-    _UNPARSABLE = object()
+    _UNPARSABLE = BackendClient._UNPARSABLE
 
+    # Thin delegators: ~a dozen tests stub these on a provider instance (`gp._run = ...`), and the
+    # ops call `self._run(...)` — keeping them as overridable methods here is what lets a stub still
+    # intercept while the real implementation lives on `BackendClient`.
     def _run(self, method: str, payload: dict, timeout_ms: int) -> Any | None:
-        # Prefer PIPED STDIN — the stable, non-deprecated form the backend documents
-        # (`echo '<json>' | codebase-memory-mcp cli <method>`; no deprecation warning). Fall back
-        # to the deprecated raw-JSON positional arg for one release so an older backend still
-        # works. The two attempts SHARE one deadline (the caller's timeout_ms) so total wall time
-        # can't double. Never raises. `_run` stays the single seam existing tests patch.
-        body = json.dumps(payload)
-        deadline = time.monotonic() + max(0.0, timeout_ms / 1000)
-        out = self._run_stdin(method, body, timeout_ms)
-        if out is self._UNPARSABLE:
-            # Retrying the deprecated positional form would only get the same dialect back.
-            self._last_failure = Missing("unparsable", "the graph backend's reply could not be read")
-            return None
-        if out is not self._FAIL:
-            return out  # success (including a legit null) → no fallback
-        remaining_ms = int((deadline - time.monotonic()) * 1000)
-        if remaining_ms <= 0:
-            self._last_failure = Missing(
-                "timeout", "the graph backend did not respond within the time budget")
-            return None
-        out = self._run_rawjson(method, body, remaining_ms)
-        if out is self._UNPARSABLE:
-            self._last_failure = Missing("unparsable", "the graph backend's reply could not be read")
-            return None
-        if out is self._FAIL:
-            self._last_failure = Missing("backend-error", "the graph backend did not answer")
-            return None
-        return out
+        return self._backend._run(method, payload, timeout_ms)
 
     def _run_stdin(self, method: str, body: str, timeout_ms: int) -> Any:
-        if self._cmd is None:                  # backend not on PATH — nothing to exec
-            return self._FAIL
-        try:
-            result = subprocess.run(
-                [self._cmd, "cli", method],
-                input=body.encode(),
-                capture_output=True,
-                timeout=timeout_ms / 1000,
-            )
-            if result.returncode != 0:
-                return self._FAIL  # unsupported / error → let the raw-JSON fallback try
-            try:
-                return json.loads(result.stdout)
-            except ValueError:
-                # The backend RAN and exited 0 — it simply did not answer in JSON. That is a
-                # dialect mismatch, not a failure, and it must not be folded into the same `None`
-                # as a crash: `codebase-memory-mcp` 0.10.x replaced the `{columns, rows}` payload
-                # this provider parses with a compact human-readable text format, so every op that
-                # is not `list_projects` (still JSON) silently returned "not in graph index" — on a
-                # repository that was fully indexed. Distinguishing it is what lets the caller say
-                # so instead of sending the user to re-index for the third time.
-                self._saw_unparsable = True
-                return self._UNPARSABLE
-        except Exception:
-            return self._FAIL
+        return self._backend._run_stdin(method, body, timeout_ms)
 
     def _run_rawjson(self, method: str, body: str, timeout_ms: int) -> Any:
-        if self._cmd is None:
-            return self._FAIL
-        # Deprecated-but-working bridge for older backends; remove once the live stdin test
-        # (tests/test_graph_stdin.py::test_live_stdin_list_projects) is green in CI.
-        try:
-            result = subprocess.run(
-                [self._cmd, "cli", method, body],
-                capture_output=True,
-                timeout=timeout_ms / 1000,
-            )
-            if result.returncode != 0:
-                return self._FAIL
-            try:
-                return json.loads(result.stdout)
-            except ValueError:
-                self._saw_unparsable = True
-                return self._UNPARSABLE
-        except Exception:
-            return self._FAIL
+        return self._backend._run_rawjson(method, body, timeout_ms)
 
     @staticmethod
     def _match_project(raw: Any, project_root: str) -> ProjectResolution | None:
@@ -851,45 +812,15 @@ class GraphProvider:
             "remediation": None,
         }
 
-    # Process-wide, because the answer is a property of the INSTALLED BACKEND, not of a provider
-    # instance — and providers are constructed per call in several paths. Without this, every
-    # `doctor`/`status` paid an extra `query_graph` round trip against a backend that takes
-    # seconds per invocation, which turned a health check into a visible stall.
-    _wire_format_ok: bool | None = None
-    _wire_format_lock = threading.Lock()
-
-    # Declared at class level, not only in __init__: several call sites (and the test helpers)
-    # build a provider with `GraphProvider.__new__(GraphProvider)` to stub the subprocess seam,
-    # which skips __init__ entirely. An instance-only attribute then raises AttributeError deep in
-    # build_result, where the never-raise handler turns it into a generic "error" — a fault
-    # injected by the fix itself.
-    _saw_unparsable: bool = False
     # The root the ANSWERING project is registered under, recorded per query so a renderer can
     # check what it is about to attribute. Class-level default for the same __new__ reason.
     _answered_root: str | None = None
-    # Why the most recent backend call failed, or None if none did. Set at `_run` — the one seam all
-    # nine ops funnel through — so a single check downstream covers the whole op population instead
-    # of each op having to remember. `_run` used to collapse four distinguishable states (binary
-    # absent, non-zero exit, unparsable payload, timeout) into a bare `None`, `_query_rows` turned
-    # that `None` into `[]`, the ops turned `[]` into `None`, and `_op_impact` turned `None` into
-    # "(none found)" — B1's exact bytes, reproduced in the graph engine after it had been fixed in
-    # the LSP engine and declared closed. Fixing it per-op is what produced that miss; this is the
-    # population-level equivalent.
-    _last_failure: Missing | None = None
     # Parts of this answer known to be short of an answer. Graph has two real cases: a symbol-scoped
     # answer served from a CONTAINING project, and callee rows dropped as name collisions.
     _pending_gaps: tuple[dict[str, Any], ...] = ()
 
     def _clear_failure(self) -> None:
-        """Reset the per-query failure record.
-
-        Cleared through a method rather than an inline ``self._last_failure = None`` for the same
-        reason ``lsp.py`` clears its backend error through ``_clear_backend_error`` — a lesson that
-        module learned and this one then repeated. ``_dispatch`` sets the attribute as a SIDE
-        EFFECT, which a type checker cannot see, so an inline assignment narrows it to ``None`` for
-        the rest of the function and makes both "did a backend call fail?" checks below read as
-        unreachable code. The checks are the entire point of the attribute."""
-        self._last_failure = None
+        self._backend._clear_failure()
 
     def _add_gap(self, section: str, kind: str, detail: str) -> None:
         self._pending_gaps = (*self._pending_gaps, {
@@ -910,50 +841,14 @@ class GraphProvider:
 
     @classmethod
     def _reset_wire_format_cache(cls) -> None:
-        """Forget the cached compatibility verdict.
-
-        Process-wide caches need an explicit way back or they leak between callers — in tests, one
-        real backend call would otherwise fix the verdict for every later case in the run. Also the
-        hook to call if the backend is upgraded under a long-lived server."""
-        with cls._wire_format_lock:
-            cls._wire_format_ok = None
+        BackendClient._reset_wire_format_cache()
 
     def _probe_wire_format(self, project: str) -> bool | None:
-        """Whether the backend answers a real QUERY in a shape this release can read.
-
-        `list_projects` alone is not enough to judge compatibility — it is the one call that stayed
-        JSON across the 0.9→0.10 change, so a probe based on it reports a perfectly healthy engine
-        that cannot answer a single question. It must therefore be a genuine `query_graph`, and
-        against a REAL project name: an empty or unknown project is rejected before the backend
-        ever formats a response, so the reply says nothing about which dialect it speaks.
-        ``None`` when the check could not run, so an unrelated hiccup is never called an
-        incompatibility.
-        """
-        if not project:
-            return None
-        with GraphProvider._wire_format_lock:
-            if GraphProvider._wire_format_ok is not None:
-                return GraphProvider._wire_format_ok
-        self._saw_unparsable = False
-        raw = self._run(
-            "query_graph", {"project": project, "query": "MATCH (a) RETURN a.name LIMIT 1"}, 15000,
-        )
-        verdict = False if self._saw_unparsable else (None if raw is None else True)
-        if verdict is not None:                 # don't cache "could not tell"
-            with GraphProvider._wire_format_lock:
-                GraphProvider._wire_format_ok = verdict
-        return verdict
+        return self._backend._probe_wire_format(project)
 
     @staticmethod
     def _any_project_name(raw: Any) -> str:
-        """Any registered project name, to give the wire-format probe something real to ask about."""
-        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
-        if not isinstance(entries, list):
-            return ""
-        for entry in entries:
-            if isinstance(entry, dict) and entry.get("name"):
-                return str(entry["name"])
-        return ""
+        return BackendClient._any_project_name(raw)
 
     @staticmethod
     def _project_root_of(raw: Any, name: str | None) -> str | None:
@@ -972,29 +867,13 @@ class GraphProvider:
 
     # ------------------------------------------------------------------ helpers
 
+    # `_query_rows` fetches through `self._run` (its own overridable delegator) rather than
+    # `self._backend._query_rows(...)` wholesale, then reuses the same parser — see
+    # graph_backend.py's module docstring for why: tests stub the transport at `_run` alone and
+    # expect `callers`/`callees` (which read through here) to honour that stub.
     def _query_rows(self, cypher: str, project: str, timeout_ms: int) -> list[dict]:
-        """Run a Cypher query and return rows as column→value dicts.
-
-        The real backend returns ``{"columns": [...], "rows": [[v, ...], ...]}`` where each row is
-        a value-array aligned to ``columns``. Tolerates the legacy/mocked list-of-dicts shape and
-        any malformed response by returning ``[]`` (never raises)."""
         raw = self._run("query_graph", {"project": project, "query": cypher}, timeout_ms)
-        if isinstance(raw, list):
-            # Legacy/mocked shape: already a list of dicts.
-            return [r for r in raw if isinstance(r, dict)]
-        if not isinstance(raw, dict):
-            return []
-        cols = raw.get("columns")
-        rows = raw.get("rows")
-        if not isinstance(cols, list) or not isinstance(rows, list):
-            return []
-        out: list[dict] = []
-        for row in rows:
-            if isinstance(row, list):
-                out.append({str(cols[i]): row[i] for i in range(min(len(cols), len(row)))})
-            elif isinstance(row, dict):
-                out.append(row)
-        return out
+        return _parse_query_rows(raw)
 
     @staticmethod
     def _display(row: dict, name_key: str, qn_key: str, file_key: str) -> str:
@@ -1107,18 +986,10 @@ class GraphProvider:
             group.rows = keep
         return dropped
 
+    # Same reasoning as `_query_rows` above: fetch via `self._run`, parse via the shared helper.
     def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> list[dict] | None:
-        """``search_graph`` → parsed result dicts. ``None`` = backend failed/malformed (→ safe-null
-        upstream); ``[]`` = backend answered but nothing matched (→ an informative empty render).
-        Preserving that distinction is why the repo-scan ops return a string on empty-success but
-        ``None`` on can't-answer. Never raises."""
         raw = self._run("search_graph", {"project": project, **extra}, timeout_ms)
-        if raw is None:
-            return None
-        results = raw.get("results") if isinstance(raw, dict) else raw
-        if not isinstance(results, list):
-            return None
-        return [r for r in results if isinstance(r, dict)]
+        return _parse_search_results(raw)
 
     @staticmethod
     def _looks_like_test(fp: str, name: str) -> bool:

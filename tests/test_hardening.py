@@ -147,7 +147,9 @@ def _bare_graph(monkeypatch, run_result):
     import threading as _t
 
     import codeintel.providers.graph as gmod
+    from codeintel.graph_backend import BackendClient
     p = gmod.GraphProvider.__new__(gmod.GraphProvider)  # skip _detect_backend / PATH probing
+    p._backend = BackendClient.__new__(BackendClient)
     p._project_cache = {}
     p._negative_until = {}
     p._project_cache_lock = _t.Lock()

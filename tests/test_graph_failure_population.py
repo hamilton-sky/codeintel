@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 
+from codeintel.graph_backend import BackendClient
 from codeintel.outcome import Missing
 from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
 
@@ -30,6 +31,7 @@ _NOT_A_USER_OP = {
 def _gp(*, run=None, query_rows=None) -> GraphProvider:
     """A GraphProvider whose resolution always succeeds, with the backend seam(s) stubbed."""
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)                 # type: ignore[attr-defined]
     gp.available = True                                               # type: ignore[attr-defined]
     gp._cmd = "stub"                                                   # type: ignore[attr-defined]
     gp._saw_unparsable = False                                         # type: ignore[attr-defined]
@@ -162,13 +164,15 @@ def test_a_true_negative_and_a_failure_are_distinguishable():
 # So stub one level LOWER — at the transports `_run` drives — and let the real `_run` run.
 # --------------------------------------------------------------------------------------------- #
 
-def _run_only_provider() -> GraphProvider:
-    gp = GraphProvider.__new__(GraphProvider)
-    gp.available = True                                                # type: ignore[attr-defined]
-    gp._cmd = "stub"                                                   # type: ignore[attr-defined]
-    gp._saw_unparsable = False                                         # type: ignore[attr-defined]
-    gp._last_failure = None                                            # type: ignore[attr-defined]
-    return gp
+def _run_only_provider() -> BackendClient:
+    # `_run`/`_run_stdin`/`_run_rawjson`/`_last_failure` now live on `BackendClient` (graph_backend.py)
+    # — this builds one directly, since it's the true owner of the orchestration under test.
+    backend = BackendClient.__new__(BackendClient)
+    backend.available = True                                           # type: ignore[attr-defined]
+    backend._cmd = "stub"                                               # type: ignore[attr-defined]
+    backend._saw_unparsable = False                                     # type: ignore[attr-defined]
+    backend._last_failure = None                                        # type: ignore[attr-defined]
+    return backend
 
 
 def test_the_real_run_records_why_every_transport_failure_happened():
@@ -182,28 +186,28 @@ def test_the_real_run_records_why_every_transport_failure_happened():
         ("fallback unparsable", "_FAIL", "_UNPARSABLE"),
     ]
     for label, stdin_out, raw_out in cases:
-        gp = _run_only_provider()
-        _S = {"_FAIL": GraphProvider._FAIL, "_UNPARSABLE": GraphProvider._UNPARSABLE}
-        gp._run_stdin = lambda m, b, t, _s=stdin_out, _m=_S: _m[_s]     # type: ignore[method-assign]
+        backend = _run_only_provider()
+        _S = {"_FAIL": BackendClient._FAIL, "_UNPARSABLE": BackendClient._UNPARSABLE}
+        backend._run_stdin = lambda m, b, t, _s=stdin_out, _m=_S: _m[_s]     # type: ignore[method-assign]
         if raw_out is not None:
-            gp._run_rawjson = lambda m, b, t, _s=raw_out, _m=_S: _m[_s]  # type: ignore[method-assign]
-        out = gp._run("query_graph", {"project": "p"}, 5000)
+            backend._run_rawjson = lambda m, b, t, _s=raw_out, _m=_S: _m[_s]  # type: ignore[method-assign]
+        out = backend._run("query_graph", {"project": "p"}, 5000)
         assert out is None, (label, out)
-        assert isinstance(gp._last_failure, Missing), (
+        assert isinstance(backend._last_failure, Missing), (
             f"{label}: the real _run returned None without recording WHY. Every op downstream will "
             f"now render this as an absence in the repository."
         )
-        assert gp._last_failure.describe().strip(), label
+        assert backend._last_failure.describe().strip(), label
 
 
 def test_a_successful_run_records_no_failure():
     """The counterpart: a working backend must not leave a stale Missing behind, or every later
     answer in the same query is wrongly downgraded to partial."""
-    gp = _run_only_provider()
-    gp._run_stdin = lambda m, b, t: {"columns": [], "rows": []}        # type: ignore[method-assign]
-    out = gp._run("query_graph", {"project": "p"}, 5000)
+    backend = _run_only_provider()
+    backend._run_stdin = lambda m, b, t: {"columns": [], "rows": []}        # type: ignore[method-assign]
+    out = backend._run("query_graph", {"project": "p"}, 5000)
     assert out == {"columns": [], "rows": []}
-    assert gp._last_failure is None
+    assert backend._last_failure is None
 
 
 # --------------------------------------------------------------------------------------------- #

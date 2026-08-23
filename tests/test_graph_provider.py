@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+from codeintel.graph_backend import BackendClient
 from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
 from codeintel.server import code_status_handler
 
@@ -266,6 +267,7 @@ def _provider_answering(dispatch_result):
     """A GraphProvider with the backend seam stubbed: available, resolving to a project, and
     dispatching to a fixed result — so the reason-mapping is tested, not the subprocess."""
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._lookup_project = lambda root: ProjectLookup(               # type: ignore[method-assign]
         ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
@@ -300,6 +302,7 @@ def test_overview_titles_with_the_repo_name_not_the_backend_project_id(tmp_path,
     repo = tmp_path / "myrepo"
     repo.mkdir()
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     monkeypatch.setattr(gp, "_run", lambda *a, **k: {
         "project": "Users-alice-Documents-project-myrepo", "total_nodes": 5, "total_edges": 4})
 
@@ -312,6 +315,7 @@ def test_overview_resolves_a_relative_root_before_naming_it(tmp_path, monkeypatc
     """`codeintel map .` passes "." — whose basename is "." — and that titled the committed file
     with a dot."""
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     monkeypatch.setattr(gp, "_run", lambda *a, **k: {
         "project": "backend-id", "total_nodes": 5, "total_edges": 4})
     monkeypatch.chdir(tmp_path)
@@ -322,6 +326,7 @@ def test_overview_resolves_a_relative_root_before_naming_it(tmp_path, monkeypatc
 
 def test_overview_falls_back_to_the_backend_name_without_a_root(monkeypatch):
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     monkeypatch.setattr(gp, "_run", lambda *a, **k: {
         "project": "backend-id", "total_nodes": 5, "total_edges": 4})
 
@@ -469,6 +474,7 @@ def test_probe_discloses_when_the_index_belongs_to_a_containing_project(monkeypa
     from codeintel.providers.graph import GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                        # type: ignore[attr-defined]
     inner = tmp_path / "my-app"
     inner.mkdir()
@@ -487,6 +493,7 @@ def test_probe_stays_quiet_when_the_project_root_matches(monkeypatch, tmp_path):
     from codeintel.providers.graph import GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                        # type: ignore[attr-defined]
     monkeypatch.setattr(gp, "_run", lambda *a, **k: {"projects": [
         {"name": "my-app", "root_path": str(tmp_path), "nodes": 100}]})
@@ -526,6 +533,7 @@ def test_probe_picks_the_same_duplicate_entry_the_resolver_did(monkeypatch, tmp_
     from codeintel.providers.graph import GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                        # type: ignore[attr-defined]
     monkeypatch.setattr(gp, "_run", lambda *a, **k: {"projects": [
         {"name": "myrepo", "root_path": "/elsewhere/myrepo", "nodes": 10},     # stale, listed first
@@ -561,6 +569,7 @@ def test_same_dir_is_case_insensitive_where_the_filesystem_is(tmp_path):
 def _provider_resolving(scope, dispatch_result="## Answer\nrow"):
     """A provider whose resolution lands on `scope` ("exact" or "ancestor")."""
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._lookup_project = lambda root: ProjectLookup(               # type: ignore[method-assign]
         ProjectResolution(name="parent-project", matched_root="/repos", scope=scope), "ok")
@@ -608,6 +617,7 @@ def test_the_not_in_graph_hint_does_not_leak_the_backends_project_id():
     naming it in a hint discloses the server's directory layout. The renderer sweep that fixed the
     home-path leaks grepped for `qualified_name` and never covered this channel."""
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._lookup_project = lambda root: ProjectLookup(               # type: ignore[method-assign]
         ProjectResolution(name="Users-alice-Documents-work-secret-repo", matched_root="/x",
@@ -634,6 +644,7 @@ def _provider_speaking(stdout_bytes):
     import subprocess as _sp
 
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._cmd = "/fake/codebase-memory-mcp"                          # type: ignore[attr-defined]
     gp._saw_unparsable = False                                     # type: ignore[attr-defined]
@@ -686,6 +697,7 @@ def test_a_slow_backend_is_not_reported_as_an_unindexed_project(monkeypatch):
     advice to re-index a repository that was already indexed. A timeout is a fact about the
     backend, not about the repository."""
     gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
     gp.available = True                                            # type: ignore[attr-defined]
     gp._cmd = "/fake/codebase-memory-mcp"                          # type: ignore[attr-defined]
     gp._saw_unparsable = False                                     # type: ignore[attr-defined]
