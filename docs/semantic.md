@@ -9,8 +9,8 @@ files on demand and searches via cosine similarity. Never raises — always retu
 Both are declared in the package's regular dependencies — `pip install -e .` (or the
 published package) installs them automatically. No separate binary or PATH entry is required.
 
-If either import fails, `available` is `False` and every call returns `ok: false` with
-`reason: 'engine-unavailable'`.
+If either import fails, `available` is `False` and every call returns a **safe null** —
+`ok` stays `true`; `result` is `null` and `reason: 'engine-unavailable'` carries the failure.
 
 ## What is not indexed
 
@@ -38,8 +38,9 @@ logic" from an archived markdown file's blank line to `connect(wsUrl, accessToke
 | op | Description |
 |---|---|
 | `search` | Semantic similarity search over the indexed project |
+| `context` | Alias for `search` — semantic's contribution to the `context` fan-out |
 
-Any other `op` returns `ok: false` with `reason: 'op-not-supported'`.
+Any other `op` returns a safe null (`ok` stays `true`) with `reason: 'op-not-supported'`.
 
 ## Indexing
 
@@ -148,8 +149,9 @@ Searcher(db).search(query, project_root, k=10, cosine_floor=0.25,
   good enough — quality can't regress below the pure-cosine path.
 - Each result includes: `path` (relative), `line` (chunk start), `snippet` (5 lines), `score`
   (the **cosine** similarity — the list order reflects the rerank, the score stays interpretable).
-- An empty index (zero rows in `chunk_hashes`) returns an empty list immediately, which is
-  then surfaced as `reason: 'below-floor'`.
+- An empty index (zero rows in `chunk_hashes`) is surfaced as `reason: 'no-index'` — before any
+  search runs. `below-floor` is reserved for a non-empty index that yielded no match above the
+  cosine floor.
 
 ### Hybrid rerank
 
@@ -178,7 +180,8 @@ path.
 | `'op-not-supported'` | `op` is not `'search'` |
 | `'engine-unavailable'` | `fastembed` or `sqlite-vec` not importable |
 | `'no-project-root'` | `project_root` is empty or falsy |
-| `'below-floor'` | No matches meet the cosine floor, or the index is empty |
+| `'no-index'` | The index is empty for this project (zero rows in `chunk_hashes`) |
+| `'below-floor'` | A non-empty index yielded no match above the cosine floor |
 | `'provider-error'` | Unexpected exception during indexing or searching |
 
 ## Envelope shape
@@ -196,4 +199,4 @@ path.
 
 Each line of `result` is `<rel_path>:<line> | <first line of snippet>`.
 
-On failure `ok` is `false` and `result` is `null`.
+On failure `ok` stays `true`; `result` is `null` and `reason` carries the failure.

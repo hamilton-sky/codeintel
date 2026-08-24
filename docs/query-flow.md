@@ -48,7 +48,8 @@ The gateway resolves the `engine` argument before dispatch:
 engine = "auto"  (default)      →  pick ONE engine by op:
     ┌───────────────────────────────────────────────┐
     │ impact · callers · callees · chain             │
-    │ pattern · overview            ──────────►  graph   │
+    │ pattern · overview · changed                   │
+    │ changes · hotspots            ──────────►  graph   │
     │ symbol                        ──────────►  lsp     │
     │ search                        ──────────►  semantic│
     │ context                       ──────────►  both    │

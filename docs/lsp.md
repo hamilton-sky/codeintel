@@ -6,16 +6,17 @@ with `reason: 'warming'` while the server is starting.
 
 ## Install prerequisite
 
-`uvx` (from [uv](https://github.com/astral-sh/uv)) or a directly-installed `serena` must be on
-`PATH` (detected via `shutil.which`, checked in that order). If neither is found, every call
-returns a **safe null** with `reason: 'engine-unavailable'` — `ok` is still `true`; the contract
-never returns `ok: false`.
+A directly-installed `serena` or `uvx` (from [uv](https://github.com/astral-sh/uv)) must be on
+`PATH` (detected via `shutil.which`, checked **serena first, then uvx**). If neither is found,
+every call returns a **safe null** with `reason: 'engine-unavailable'` — `ok` is still `true`; the
+contract never returns `ok: false`.
 
-- Preferred: install `uvx` (`pip install uv`). The provider then fetches and runs serena from
-  source:
-  `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --project <root>`.
+- Preferred: install `serena` on `PATH` directly — the provider runs
+  `serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`.
+- Fallback: install `uvx` (`pip install uv`) — most users land here, since serena isn't
+  pip-installable. The provider then fetches and runs serena from source:
+  `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`.
   The **first** launch pulls serena via `uvx` and can take tens of seconds; later launches are fast.
-- Fallback: install `serena` on `PATH` directly — the provider runs `serena start-mcp-server …`.
 
 ## Supported ops
 
@@ -71,15 +72,16 @@ The cooldown period is **60 seconds** (`_COOLDOWN_SECONDS = 60`).
 ## Budget / timeout
 
 `budget` (milliseconds) is converted to seconds for the async call timeout.
-If `budget` is 0 or absent, the timeout defaults to **5.0 s** (`_DEFAULT_TIMEOUT_S`).
+If `budget` is 0 or absent, the timeout defaults to **30.0 s** (`_DEFAULT_TIMEOUT_S`).
 
 ## Safe-null reasons
 
 | reason | When returned |
 |---|---|
-| `'engine-unavailable'` | Neither `uvx` nor `serena` is on PATH |
+| `'engine-unavailable'` | Neither `serena` nor `uvx` is on PATH |
 | `'warming'` | Session exists but has not finished starting |
 | `'boot-failed'` | Session failed to start (cooldown active) |
+| `'backend-error'` | The session is up, but the language server reported an error for this call |
 | `'unsupported-op'` | `op` is not `symbol`, `overview`, or `context` |
 | `'error'` | Unexpected exception during execution |
 
@@ -96,7 +98,7 @@ If `budget` is 0 or absent, the timeout defaults to **5.0 s** (`_DEFAULT_TIMEOUT
 }
 ```
 
-On failure `ok` is `false` and `result` is `null`.
+On failure `ok` stays `true`; `result` is `null` and `reason` carries the failure.
 
 ## First-call behaviour
 

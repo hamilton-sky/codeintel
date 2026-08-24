@@ -45,10 +45,12 @@ this repo is indexed.
 | `callers` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 callers of the symbol (name + file path) |
 | `callees` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 functions called by the symbol |
 | `impact` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Combined callers + callees section |
+| `context` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Alias for `impact` — the graph's contribution to the `context` fan-out |
 | `chain` | `"A->B"` or symbol | Call path from A (trace_path), each hop risk-labeled when the backend classifies it |
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | (ignored) | Impact of the **uncommitted git worktree**: changed files → impacted symbols (via `detect_changes`) |
+| `changes` | (ignored) | Alias for `changed` |
 | `deadcode` | (ignored) | **Retired.** Always safe-nulls with `reason: "op-withdrawn"` — see below. |
 | `hotspots` | (ignored) | Highest complexity / fan-in symbols — refactor-risk hotspots (via `search_graph`, client-sorted) |
 
@@ -137,9 +139,14 @@ defaults to **5000 ms**.
 | reason | When returned |
 |---|---|
 | `'engine-unavailable'` | `codebase-memory-mcp` not on PATH |
+| `'backend-unreachable'` | The backend did not respond in time while resolving the project |
 | `'project-not-indexed'` | No project found for the given `project_root` |
-| `'unsupported-op'` | `op` is not one of the nine ops above |
+| `'project-not-indexed-standalone'` | The repo isn't indexed on its own — it only resolves via a containing ancestor project, and the op (`overview`/`changed`/`changes`/`hotspots`) is scoped to the repo boundary, so it refuses rather than answer for the wrong tree |
+| `'unsupported-op'` | `op` is not one of the ops listed above |
 | `'op-withdrawn'` | `op` is `deadcode`, which is retired — see [above](#deadcode-is-retired) |
+| `'not-in-graph'` | The op ran, but the target isn't in the graph index for this project — the common "symbol/target not found" case |
+| `'backend-incompatible'` | The backend's reply couldn't be parsed as the expected JSON — usually an unpinned `codebase-memory-mcp` version (pin `0.9.x`, see above) |
+| `'timeout'` / `'backend-error'` / `'unparsable'` | Returned dynamically (as `reason: miss.kind`) when a backend call inside the op itself timed out, errored, or returned something unreadable — distinct from `not-in-graph`, which means the call succeeded and the target genuinely isn't there |
 | `'error'` | Unexpected exception during execution |
 
 ## Envelope shape
@@ -155,7 +162,7 @@ defaults to **5000 ms**.
 }
 ```
 
-On failure `ok` is `false` and `result` is `null`.
+On failure `ok` stays `true`; `result` is `null` and `reason` carries the failure.
 
 ## Example CLI call (direct, bypassing the gateway)
 

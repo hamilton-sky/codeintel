@@ -242,7 +242,7 @@ Then it launches the exact command it registered and drives a real MCP handshake
 ```text
 v claude: registered at /Users/you/.claude.json
 
-v verified: codeintel 0.11.2 — 4 tools (code.query, code.status, code.doctor, code.map)
+v verified: codeintel 0.16.0 — 4 tools (code.query, code.status, code.doctor, code.map)
 ```
 
 If the command is not on `PATH`, or the server fails to start, install says so and exits non-zero
@@ -370,7 +370,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel reset [project_root] [--all] [--yes] [--json]` | Clear the semantic index (this repo, or `--all`) to recover from a corrupt/stale DB |
 | `codeintel gen-token` | Print a secure random bearer token (for `serve-http` / RBAC `auth.toml`) |
 
-Human-facing commands (`doctor`, `status`, `query`, `setup`, `reset`) honor `--no-color` / `NO_COLOR` and `--ascii`, and auto-degrade to plain text when piped.
+Human-facing commands (`doctor`, `setup`, `prompt`, `reset`) honor `--no-color` / `NO_COLOR` and `--ascii`, and auto-degrade to plain text when piped.
 
 **Exit codes**, so a `make` target or CI step can gate on `$?`:
 
@@ -580,7 +580,7 @@ git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
 
-pytest tests/ -q            # ~620 tests, ~30s; fails under 83% coverage
+pytest tests/ -q            # ~740 tests, ~30s; fails under 83% coverage
 ruff check src tests        # lint
 mypy                        # types (src/ only)
 ```

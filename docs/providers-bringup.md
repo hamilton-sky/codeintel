@@ -62,14 +62,14 @@ the call/import-structure ops.
 
 ## Engine 2 — lsp (serena)
 
-**Powers:** precise, compiler-grade symbol definitions and references (the `symbol` op, and LSP-backed
-`callers`/`callees` where available). Live — **there is nothing to index**; it reads the workspace
-through language servers.
+**Powers:** precise, compiler-grade symbol definitions and references — the `symbol` op (plus
+`overview`/`context`). It does not power `callers`/`callees`; those route to the graph engine.
+Live — **there is nothing to index**; it reads the workspace through language servers.
 
 **Bring-up**
 1. **Install `uv`** (provides `uvx`): `pip install uv`. That is the only dependency you install —
    serena itself is fetched on first use straight from git, via
-   `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --project <root>`
+   `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`
    (plain `uvx serena` does NOT work — the package ships no `serena` executable of that name).
 2. **Warm it once:** `codeintel setup --warm`. The first launch pulls serena via uvx and boots a
    language server for the repo's language, which is slow; after that it is cached. Without warming,
@@ -83,7 +83,8 @@ actually boots it.)
 - `installed: false` — no `uv`/`uvx` → `pip install uv`.
 - Slow/failed first query — cold serena boot → warm it ahead of time (`setup --warm`); if it never
   reaches READY, check `uvx --from git+https://github.com/oraios/serena serena start-mcp-server
-  --help` runs and that the network can reach GitHub.
+  --context ide-assistant --enable-web-dashboard false --help` runs and that the network can reach
+  GitHub.
 - No answers for a given language — serena needs a language server for that language; a repo in an
   unsupported language gets no LSP results (graph + semantic still answer).
 

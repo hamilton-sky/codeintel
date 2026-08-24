@@ -47,7 +47,7 @@ MCP tool equivalent:
 ```jsonc
 // tool: code.map
 { "project_root": "/path/to/repo", "budget": 32768, "inject": false }
-// → { "ok": true, "path": ".../CODE_INTEL.md", "size_bytes": 12345, "inject": null }
+// → { "ok": true, "path": ".../CODE_INTEL.md", "size_bytes": 12345, "wrote": true, "inject": null }
 ```
 
 If the graph engine is unavailable, `map` degrades safely (empty/partial map, `note: map-error`) —
