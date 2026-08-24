@@ -24,7 +24,6 @@ _AUTO_ENGINE: dict[str, str] = {
     "overview": "graph",
     "changed": "graph",
     "changes": "graph",
-    "deadcode": "graph",
     "hotspots": "graph",
     "symbol": "lsp",
     "search": "semantic",
@@ -33,8 +32,9 @@ _AUTO_ENGINE: dict[str, str] = {
 
 # Ops whose answer depends on live, unhashable state (the git worktree) rather than the indexed
 # content the cache key is built from — caching them would serve a stale answer within a freshness
-# generation. `changed` reads uncommitted edits; `deadcode`/`hotspots` are pure functions of the
-# index and stay cached (correctly keyed by the freshness generation).
+# generation. `changed` reads uncommitted edits; `hotspots` is a pure function of the index and
+# stays cached (correctly keyed by the freshness generation). A retired/unknown op falls through
+# to the graph engine (the `_AUTO_ENGINE.get(op, "graph")` default), which safe-nulls it.
 _UNCACHED_OPS: frozenset[str] = frozenset({"changed", "changes"})
 
 # Engines whose slot can be filled after construction (see `Gateway.adopt_provider`).

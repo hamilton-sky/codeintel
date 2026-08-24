@@ -5,42 +5,41 @@
 ## Architecture Overview
 
 ## Architecture: codeintel
-2795 nodes, 9423 edges
+3522 nodes, 12329 edges
 ### Node types
-- Section: 968
-- Function: 782
-- Variable: 243
-- Method: 242
-- File: 202
-- Module: 201
-- Class: 78
-- Folder: 45
-- Route: 24
-- Decorator: 7
+- Section: 1170
+- Function: 1054
+- Variable: 336
+- Method: 302
+- File: 239
+- Module: 238
+- Class: 94
+- Folder: 46
+- Route: 26
+- Decorator: 15
 - Branch: 1
-- EnvVar: 1
 - Project: 1
 ### Edge types
-- DEFINES: 3474
-- CALLS: 2261
-- USAGE: 1149
-- TESTS: 941
-- SEMANTICALLY_RELATED: 491
-- DEFINES_METHOD: 237
-- WRITES: 233
-- CONTAINS_FILE: 202
-- IMPORTS: 164
-- HTTP_CALLS: 85
-- FILE_CHANGES_WITH: 65
-- DECORATES: 58
-- CONTAINS_FOLDER: 31
-- SIMILAR_TO: 29
-- CONFIGURES: 1
+- DEFINES: 4430
+- CALLS: 2900
+- USAGE: 1991
+- TESTS: 1163
+- WRITES: 410
+- DEFINES_METHOD: 297
+- SEMANTICALLY_RELATED: 290
+- IMPORTS: 237
+- CONTAINS_FILE: 236
+- DECORATES: 116
+- FILE_CHANGES_WITH: 104
+- HTTP_CALLS: 90
+- CONTAINS_FOLDER: 32
+- SIMILAR_TO: 30
 - HAS_BRANCH: 1
 - INHERITS: 1
+- RAISES: 1
 ### Languages
-- language: Python, file_count: 83
-- language: YAML, file_count: 2
+- language: Python, file_count: 106
+- language: YAML, file_count: 3
 - language: TOML, file_count: 1
 - language: HTML, file_count: 1
 
@@ -48,36 +47,32 @@
 
 | Symbol | File | Callers |
 |--------|------|---------|
-| `get` | src/codeintel/cache.py | 125 |
-| `Indexer` | src/codeintel/indexer.py | 61 |
-| `query` | src/codeintel/gateway.py | 56 |
+| `get` | src/codeintel/cache.py | 177 |
+| `body` | pathly/project/SPEC.md.comments.json | 73 |
+| `query` | src/codeintel/gateway.py | 60 |
+| `SemanticDb` | src/codeintel/semantic_db.py | 54 |
 | `run` | src/codeintel/server.py | 53 |
-| `build_result` | src/codeintel/provider.py | 52 |
-| `SemanticDb` | src/codeintel/semantic_db.py | 47 |
-| `Reindexer` | src/codeintel/reindexer.py | 38 |
+| `build_result` | src/codeintel/provider.py | 46 |
+| `conn` | src/codeintel/semantic_db.py | 45 |
+| `status` | pathly/project/SPEC.md.diagrams.json | 42 |
+| `close` | src/codeintel/semantic_db.py | 42 |
+| `GraphProvider` | src/codeintel/providers/graph.py | 39 |
+| `Reindexer` | src/codeintel/reindexer.py | 39 |
+| `Indexer` | src/codeintel/indexer.py | 37 |
+| `c` | src/codeintel/term.py | 36 |
 | `register` | src/codeintel/installer.py | 36 |
-| `conn` | src/codeintel/semantic_db.py | 35 |
-| `GraphProvider` | src/codeintel/providers/graph.py | 34 |
-| `c` | src/codeintel/term.py | 34 |
-| `_args` | tests/test_cli_commands.py | 34 |
-| `server` | tests/test_http_server.py | 33 |
-| `close` | src/codeintel/semantic_db.py | 32 |
-| `never_raise` | src/codeintel/commands/_common.py | 30 |
-| `available` | src/codeintel/providers/semantic.py | 29 |
-| `Result` | src/codeintel/provider.py | 28 |
-| `_provider` | tests/test_graph_real.py | 26 |
-| `index` | src/codeintel/indexer.py | 26 |
-| `Gateway` | src/codeintel/gateway.py | 24 |
-| `init` | src/codeintel/semantic_db.py | 23 |
-| `Searcher` | src/codeintel/searcher.py | 23 |
-| `write` | src/codeintel/mapper.py | 20 |
-| `search` | src/codeintel/searcher.py | 20 |
-| `SemanticProvider` | src/codeintel/providers/semantic.py | 20 |
-| `build_result` | src/codeintel/providers/lsp.py | 19 |
-| `TieringPolicy` | src/codeintel/policy.py | 18 |
-| `default_db_path` | src/codeintel/semantic_db.py | 18 |
+| `build_result` | src/codeintel/providers/graph.py | 33 |
+| `never_raise` | src/codeintel/commands/_common.py | 33 |
+| `Result` | src/codeintel/provider.py | 31 |
+| `init` | src/codeintel/semantic_db.py | 29 |
+| `Gateway` | src/codeintel/gateway.py | 28 |
+| `index` | src/codeintel/indexer.py | 28 |
+| `probe` | src/codeintel/providers/graph.py | 25 |
+| `available` | src/codeintel/providers/semantic.py | 24 |
+| `default_db_path` | src/codeintel/semantic_db.py | 23 |
 
 ## Entry Points
 
-- `main` (src/codeintel/__main__.py)
 - `main` (scripts/release_canary.py)
+- `main` (scripts/check_release_consistency.py)
+- `main` (src/codeintel/__main__.py)
