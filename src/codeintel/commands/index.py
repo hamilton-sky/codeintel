@@ -1,9 +1,28 @@
 """`codeintel index` — build the semantic index, then best-effort refresh the graph and the map."""
 
+import logging
 import os
 from typing import Any
 
 from codeintel.commands._common import resolve_root
+
+
+class _ProgressLogBridge(logging.Handler):
+    """Routes WARNING+ log records from the indexer to a live progress counter's ``notice()``, so a
+    per-file skip warning prints as a clean permanent line ABOVE the redrawing status line instead
+    of colliding with it (``0 chunksskipping …``). Installed only for a live (TTY) run and removed
+    the moment indexing returns — a non-TTY has no live line to protect, and the warnings keep their
+    normal stderr path there."""
+
+    def __init__(self, counter: Any) -> None:
+        super().__init__(level=logging.WARNING)
+        self._counter = counter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._counter.notice(record.getMessage())
+        except Exception:
+            pass
 
 
 def run(args: Any) -> int:
@@ -51,18 +70,29 @@ def run(args: Any) -> int:
         db_path = default_db_path(str(cfg.get("model") or ""))
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         db = SemanticDb(db_path)
+        # While a live status line is on screen, the indexer's skip WARNINGs must not print raw to
+        # the terminal (they land mid-line). Route them through the counter's notice() for the span
+        # of the index pass only; a non-TTY needs no bridge (its status lines end in \n).
+        bridge = _ProgressLogBridge(counter) if (counter is not None and counter.live) else None
+        idx_logger = logging.getLogger("codeintel")
         try:
             db.init()
-            count = Indexer(
-                db,
-                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
-                window=int(cfg.get("window", 20)),
-                stride=int(cfg.get("stride", 10)),
-                max_chunks=int(cfg.get("max_chunks", 500)),
-                max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
-                chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-                progress=counter,
-            ).index(project_root)
+            if bridge is not None:
+                idx_logger.addHandler(bridge)
+            try:
+                count = Indexer(
+                    db,
+                    model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                    window=int(cfg.get("window", 20)),
+                    stride=int(cfg.get("stride", 10)),
+                    max_chunks=int(cfg.get("max_chunks", 500)),
+                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+                    chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
+                    progress=counter,
+                ).index(project_root)
+            finally:
+                if bridge is not None:
+                    idx_logger.removeHandler(bridge)
             # Seal the live line before the plain summary: commit the ✓ row on real work, else erase
             # it so "Nothing new" / the failure message stands on its own clean line.
             if counter:

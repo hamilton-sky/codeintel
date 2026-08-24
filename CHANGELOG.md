@@ -18,7 +18,9 @@ All notable changes to codeintel are documented here. The format is based on
   strategy (`BAAI/bge-small-en-v1.5 · def-aligned chunks`) — it says the work is local and pre-explains
   the download. On a TTY the active line redraws in place (throttled); piped/CI output prints one clean
   line per phase with **no** carriage-return or ANSI bytes; `--quiet`/`-q` suppresses progress and the
-  header while keeping the result line. The progress is inert to the result: the indexer emits through
+  header while keeping the result line. Skip warnings (a null-byte file, a symlink escape) print as
+  clean permanent lines *above* the redrawing status line — routed through the counter so they never
+  collide with it mid-line. The progress is inert to the result: the indexer emits through
   a null-safe, never-raise sink (`progress.ProgressSink` + `_Guard`), so a broken renderer can never
   change the indexed count — proven by a progress-on-vs-off count-invariance test. `index` also gained
   `--no-color`/`--ascii` (it was the one command missing them).

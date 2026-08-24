@@ -268,6 +268,25 @@ class LiveCounter:
         except Exception:
             pass
 
+    def notice(self, msg: str) -> None:
+        """Print a one-off message (a skip warning, a failed-batch note) as a PERMANENT line without
+        mangling the live status line. On a TTY the redrawing status line has no trailing newline, so
+        anything else written to the terminal lands mid-line (``0 chunksskipping …``); this erases the
+        parked line, writes the notice on its own line, then redraws the status line beneath it — the
+        standard "log above a live bar" pattern. On a non-TTY the status lines are already
+        newline-terminated, so the notice is just one more clean line."""
+        try:
+            text = f"  {self.c.glyph('warn')} {msg}"
+            if self.live:
+                self.c.stream.write("\x1b[2K\r" + text + "\n")
+                if self._phase is not None:
+                    self._draw(self._cur_label, self._cur_detail)   # redraw the status line below it
+            else:
+                self.c.stream.write(text + "\n")
+            self.c.stream.flush()
+        except Exception:
+            pass
+
     def finish(self, *, commit: bool = True) -> None:
         """End the run. ``commit=True`` seals the active phase with its ``✓`` row; ``commit=False``
         (a no-op / failed pass) erases the dangling live line on a TTY and leaves no row, so the

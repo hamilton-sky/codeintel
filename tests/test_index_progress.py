@@ -7,6 +7,7 @@ is proved to leak no carriage-return / ANSI bytes on a non-TTY, the one thing th
 piped or CI log."""
 from __future__ import annotations
 
+import logging
 import time
 from io import StringIO
 from unittest.mock import patch
@@ -148,6 +149,59 @@ def test_livecounter_finish_without_commit_is_safe_and_silent_on_nontty():
     out = buf.getvalue()
     assert "\r" not in out and "\x1b" not in out
     assert "✓" not in out                              # nothing was committed
+
+
+class _TTYStringIO(StringIO):
+    def isatty(self):
+        return True
+
+
+def test_notice_on_nontty_is_a_clean_marked_line():
+    buf = StringIO()
+    lc = LiveCounter(Console(stream=buf))
+    lc.scan(3, 10)
+    lc.notice("skipping foo.py — contains a null byte at line 4")
+    lc.finish(commit=True)
+    out = buf.getvalue()
+    assert "\r" not in out and "\x1b" not in out           # still no control bytes on a pipe
+    assert "skipping foo.py" in out and "▲" in out         # surfaced, and marked as a warning
+
+
+def test_notice_on_a_tty_erases_the_live_line_and_redraws_it_below():
+    buf = _TTYStringIO()
+    con = Console(stream=buf)
+    con.enabled = True                                     # force the live path regardless of env
+    lc = LiveCounter(con)
+    assert lc.live is True
+    lc.scan(3, 42)                                         # draws the live "scan + chunk" line
+    lc.notice("skipping bad.ts — null byte")
+    out = buf.getvalue()
+    assert "\x1b[2K\r" in out                              # the parked live line was erased
+    assert "skipping bad.ts" in out
+    # the status line is redrawn AFTER the notice, so it stays the bottom-most line
+    assert out.rindex("scan + chunk") > out.index("skipping bad.ts")
+
+
+def test_progress_log_bridge_forwards_only_warnings_to_notice():
+    from codeintel.commands.index import _ProgressLogBridge
+
+    class _RecordingCounter:
+        def __init__(self):
+            self.msgs: list[str] = []
+
+        def notice(self, m):
+            self.msgs.append(m)
+
+    counter = _RecordingCounter()
+    lg = logging.getLogger("codeintel.indexer")
+    handler = _ProgressLogBridge(counter)
+    lg.addHandler(handler)
+    try:
+        lg.warning("skipping x — null byte at line 9")
+        lg.info("chunk cap hit")                           # below WARNING → must be ignored
+    finally:
+        lg.removeHandler(handler)
+    assert counter.msgs == ["skipping x — null byte at line 9"]
 
 
 # --------------------------------------------------------------------------- heartbeat (graph phase)
