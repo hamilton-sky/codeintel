@@ -13,7 +13,8 @@ All notable changes to codeintel are documented here. The format is based on
   language as `doctor` (`✓` glyphs, one line per phase): a `scan + chunk` liveness counter, a real
   `embed  3,980/6,381 chunks  62%` bar (the total is known before the batch loop), a distinct
   `loading embedding model…` state so the first-run model download doesn't read as a second hang, and
-  a `graph reindex` heartbeat for the opaque backend step. A dim header names the model and chunk
+  a ticking `graph reindex  12s → 47s` elapsed heartbeat (a background thread; the step is an opaque
+  subprocess, so a moving number is the honest signal and no percentage is fabricated). A dim header names the model and chunk
   strategy (`BAAI/bge-small-en-v1.5 · def-aligned chunks`) — it says the work is local and pre-explains
   the download. On a TTY the active line redraws in place (throttled); piped/CI output prints one clean
   line per phase with **no** carriage-return or ANSI bytes; `--quiet`/`-q` suppresses progress and the

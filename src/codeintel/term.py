@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
@@ -278,5 +279,97 @@ class LiveCounter:
                 self.c.stream.write("\x1b[2K\r")
                 self.c.stream.flush()
             self._phase = None
+        except Exception:
+            pass
+
+
+class LiveHeartbeat:
+    """A ticking elapsed-time heartbeat for one slow, *opaque* op — work with no progress counts to
+    show, like waiting on a subprocess (`codeintel index`'s graph reindex). It answers the only
+    question a heartbeat must ("is it still alive?") with a changing number rather than a spinner
+    glyph, so it speaks the same one-idiom visual language as ``LiveCounter`` (a static dim ``…``,
+    something next to it that moves).
+
+    A background daemon thread does the ticking so the caller can make its blocking call inline:
+
+        beat = LiveHeartbeat(console, "graph reindex").start()
+        try:
+            do_the_blocking_thing()
+            beat.stop("ok")
+        except Exception:
+            beat.stop("warn", "skipped")
+
+    On a TTY it redraws ``  … <label>  <elapsed>`` in place about once a second; on a pipe/CI it
+    prints a plain ``  <label>… <elapsed>`` line every ``heartbeat`` seconds (no carriage returns,
+    so a log stays clean and a silence-timeout never fires). ``stop`` joins the thread *before* it
+    writes the single committed ``  <glyph> <label>  <detail|elapsed>`` line, so the ticker and the
+    commit never interleave. Every method swallows its own errors — a heartbeat can never disturb
+    the work it is timing."""
+
+    def __init__(self, console: Console, label: str, *, tick: float = 1.0, heartbeat: float = 5.0) -> None:
+        self.c = console
+        self.label = label
+        self._tick = tick
+        self._beat = heartbeat
+        try:
+            self.live = console.enabled and console.stream.isatty()
+        except Exception:
+            self.live = False
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._start = 0.0
+
+    def start(self) -> LiveHeartbeat:
+        self._start = time.monotonic()
+        if self.live:
+            try:
+                self.c.stream.write(f"  {self.c.dim(self.c.ellipsis())} {self.label}")
+                self.c.stream.flush()
+            except Exception:
+                self.live = False
+        try:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        except Exception:
+            self._thread = None
+        return self
+
+    def _run(self) -> None:
+        last_sec = -1
+        next_beat = self._beat
+        # Event.wait doubles as the sleep AND the stop signal: it returns True the instant stop()
+        # sets the event, so the loop never ticks once more after being told to stop.
+        while not self._stop.wait(self._tick):
+            try:
+                elapsed = time.monotonic() - self._start
+                if self.live:
+                    sec = int(elapsed)
+                    if sec != last_sec:                       # redraw only when the second changes
+                        last_sec = sec
+                        self.c.stream.write(
+                            f"\x1b[2K\r  {self.c.dim(self.c.ellipsis())} {self.label}  "
+                            f"{self.c.dim(_fmt_elapsed(elapsed))}")
+                        self.c.stream.flush()
+                elif elapsed >= next_beat:                     # non-TTY: one plain line per interval
+                    next_beat += self._beat
+                    self.c.stream.write(f"  {self.label}{self.c.ellipsis()} {_fmt_elapsed(elapsed)}\n")
+                    self.c.stream.flush()
+            except Exception:
+                return
+
+    def stop(self, state: str = "ok", detail: str = "") -> None:
+        self._stop.set()
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=1.0)              # ensure the ticker is done before we write
+            except Exception:
+                pass
+        try:
+            tail = _fmt_elapsed(time.monotonic() - self._start)
+            if detail:
+                tail = f"{detail}  {tail}"
+            line = f"  {self.c.glyph(state)} {self.label}  {self.c.dim(tail)}"
+            self.c.stream.write(("\x1b[2K\r" + line + "\n") if self.live else (line + "\n"))
+            self.c.stream.flush()
         except Exception:
             pass

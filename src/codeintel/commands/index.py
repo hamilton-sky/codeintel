@@ -84,21 +84,22 @@ def run(args: Any) -> int:
         print(f"index failed: {exc}")
         failed = True
 
-    # best-effort graph reindex — an opaque subprocess, so a start/done heartbeat is the honest
-    # fidelity (no counts cross the boundary). Reuses LiveStep, exactly what it is for.
+    # best-effort graph reindex — an opaque subprocess, so a ticking elapsed heartbeat is the honest
+    # fidelity (no counts cross the boundary): the number keeps moving so a minute-long reindex never
+    # reads as a hang, but we never fabricate a percentage we can't see.
     import shutil
 
     if shutil.which("codebase-memory-mcp"):
-        step = None if quiet else term.LiveStep(console, "graph reindex")
+        beat = None if quiet else term.LiveHeartbeat(console, "graph reindex").start()
         try:
             from codeintel.reindexer import Reindexer
 
             Reindexer()._graph_reindex(project_root)
-            if step:
-                step.done("ok")
+            if beat:
+                beat.stop("ok")
         except Exception:
-            if step:
-                step.done("warn", "skipped")
+            if beat:
+                beat.stop("warn", "skipped")
 
     # best-effort map refresh after index (fast, kept silent — not worth a checklist row)
     try:

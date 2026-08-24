@@ -7,6 +7,7 @@ is proved to leak no carriage-return / ANSI bytes on a non-TTY, the one thing th
 piped or CI log."""
 from __future__ import annotations
 
+import time
 from io import StringIO
 from unittest.mock import patch
 
@@ -15,7 +16,7 @@ import numpy as np
 from codeintel.indexer import Indexer
 from codeintel.progress import _Guard
 from codeintel.semantic_db import SemanticDb
-from codeintel.term import Console, LiveCounter, _fmt_elapsed
+from codeintel.term import Console, LiveCounter, LiveHeartbeat, _fmt_elapsed
 
 
 class _FakeTextEmbedding:
@@ -147,6 +148,56 @@ def test_livecounter_finish_without_commit_is_safe_and_silent_on_nontty():
     out = buf.getvalue()
     assert "\r" not in out and "\x1b" not in out
     assert "✓" not in out                              # nothing was committed
+
+
+# --------------------------------------------------------------------------- heartbeat (graph phase)
+
+class _RaisingStream:
+    """A stream whose every write blows up — to prove the heartbeat never propagates."""
+
+    encoding = "utf-8"
+
+    def isatty(self):
+        return False
+
+    def write(self, *a):
+        raise OSError("stream is gone")
+
+    def flush(self):
+        raise OSError("stream is gone")
+
+
+def test_heartbeat_commits_a_clean_line_on_a_nontty():
+    buf = StringIO()
+    hb = LiveHeartbeat(Console(stream=buf), "graph reindex")
+    hb.start()
+    hb.stop("ok")
+    out = buf.getvalue()
+    assert "\r" not in out and "\x1b" not in out       # a pipe/log gets no control bytes
+    assert "graph reindex" in out and "✓" in out
+
+
+def test_heartbeat_tick_thread_never_leaks_control_bytes_on_a_nontty():
+    buf = StringIO()
+    # Tiny intervals so the daemon ticks several times during the sleep; the invariant under test
+    # holds no matter how many ticks land: a non-TTY heartbeat emits zero \r / ANSI, ever.
+    hb = LiveHeartbeat(Console(stream=buf), "graph reindex", tick=0.005, heartbeat=0.01)
+    hb.start()
+    time.sleep(0.08)
+    hb.stop("ok")
+    out = buf.getvalue()
+    assert "\r" not in out and "\x1b" not in out
+    assert "graph reindex" in out                       # at least the committed line
+
+
+def test_heartbeat_reports_skipped_state_and_never_raises_on_a_dead_stream():
+    hb = LiveHeartbeat(Console(stream=StringIO()), "graph reindex")
+    hb.start()
+    hb.stop("warn", "skipped")                          # the failed-backend path
+
+    dead = LiveHeartbeat(Console(stream=_RaisingStream()), "graph reindex")
+    dead.start()                                        # writes raise inside — must be swallowed
+    dead.stop("ok")                                     # must not raise either
 
 
 # --------------------------------------------------------------------------- elapsed formatting
