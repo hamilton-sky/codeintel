@@ -133,6 +133,7 @@ def test_render_diagnose_only_points_to_all(monkeypatch):
     text = onboarding.render_setup_text(report)
     assert "setup --all" in text
     assert "Next:" in text
+    assert "codeintel prompt" in text   # the Next block also points at the paste-to-agent handoff
 
 
 def test_warm_lsp_reprobes_after_install_not_stale_preflight(tmp_path, monkeypatch):

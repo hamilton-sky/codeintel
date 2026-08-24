@@ -63,6 +63,8 @@ def test_setup_tip_footer_only_when_unhealthy():
     unhealthy = doctor.render_doctor_text({**base, "summary": {"ready": 0, "total": 1, "healthy": False}})
     assert "codeintel setup" not in healthy   # no noise when everything is ready
     assert "codeintel setup" in unhealthy      # actionable guidance only when something is missing
+    assert "codeintel prompt" not in healthy   # the agent-handoff pointer is gated the same way
+    assert "codeintel prompt" in unhealthy     # → run doctor when something's off, get pointed to it
 
 
 def test_treesitter_advisory_only_when_missing():

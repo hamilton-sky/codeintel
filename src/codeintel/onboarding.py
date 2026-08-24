@@ -267,6 +267,8 @@ def render_setup_text(report: dict) -> str:
             lines.append("")
             lines.append(c.bold("Next:"))
             lines.extend("  " + c.cyan("→") + " " + step for step in nexts)
+            lines.append("  " + c.dim("or: `codeintel prompt` prints these as a paste-to-your-agent "
+                                      "block (Claude Code / Codex / …)"))
 
         lines.append("")
         lines.append(c.green("setup finished") if report.get("ok") else c.red("setup did not complete cleanly"))

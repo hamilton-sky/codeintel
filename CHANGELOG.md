@@ -60,8 +60,10 @@ All notable changes to codeintel are documented here. The format is based on
   path-agnostic) to send to a friend on a clean machine, and `--agent` targets a specific host
   (default `auto` picks the one you have, and names none it cannot find rather than guessing). The
   prompt is written to stdout so `codeintel prompt --fresh | pbcopy` copies exactly it; the
-  "paste this" note goes to stderr. The step-tailoring is unit-tested against synthetic doctor
-  reports, and the render is a pure function so those tests need no backend.
+  "paste this" note goes to stderr. `doctor` and `setup` point at it whenever a setup step is still
+  outstanding, so it is discoverable without knowing the command name. The step-tailoring is
+  unit-tested against synthetic doctor reports, and the render is a pure function so those tests need
+  no backend.
 - **A target may now say WHICH symbol it means**, so ambiguity can be resolved instead of only
   disclosed: `core.Group.invoke` matches on a segment-aligned qualified-name suffix, and
   `invoke@src/click/testing.py` (or a bare `invoke@testing.py`) matches on file. Both are text the

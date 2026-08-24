@@ -415,6 +415,10 @@ def render_doctor_text(report: dict) -> str:
             "tip: `codeintel setup --all` installs + indexes everything automatable in one command; "
             "each fix: line above has the per-engine command."
         ))
+        out.append("  " + c.dim(
+            "or hand it to your agent: `codeintel prompt` prints a paste-ready block of just these "
+            "steps for Claude Code / Codex / …"
+        ))
     # Backend versions: what codeintel is actually talking to. Printed as one dim line so an
     # integration bug report carries the version boundary without anyone having to ask for it.
     versions = report.get("versions") or {}
