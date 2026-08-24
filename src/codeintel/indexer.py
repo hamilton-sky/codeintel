@@ -170,6 +170,20 @@ def _looks_binary(path) -> bool:
         return True                        # unreadable → treat as unindexable rather than crash
 
 
+def _nul_byte_line(path) -> int | None:
+    """1-based line of the first NUL byte within the sniff window, or None. Turns the bare "looks
+    binary" skip into a message that points at the exact spot — a raw NUL in a source file is almost
+    always a deliberate separator (`.join('\\0')`, a composite key) saved as a byte instead of an
+    escape, and naming the line is the difference between a fixable warning and a puzzle."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_BINARY_SNIFF_BYTES)
+    except OSError:
+        return None
+    i = head.find(b"\x00")
+    return None if i < 0 else head.count(b"\n", 0, i) + 1
+
+
 class Indexer:
     def __init__(
         self,
@@ -356,7 +370,13 @@ class Indexer:
                 # garbage — 196KB of /dev/urandom produced 162 chunks — which then competed for
                 # rank against real code in every search.
                 if _looks_binary(candidate):
-                    logger.warning("skipping %s — looks binary despite its extension", candidate)
+                    line = _nul_byte_line(candidate)
+                    where = f" at line {line}" if line else ""
+                    logger.warning(
+                        "skipping %s — contains a null byte%s, so it reads as binary (the rule git "
+                        "uses too). If that null is intentional (e.g. a key/join separator), write "
+                        "it as the `\\0` escape instead of a raw byte and re-run index.",
+                        candidate, where)
                     continue
                 # Last resort, and the only check that catches a bundle whose directory and
                 # filename both look ordinary. One 6.7MB minified chunk contributes hundreds of

@@ -6,6 +6,14 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **The "looks binary despite its extension" index-skip warning now says WHY and how to fix it.** A
+  source file gets skipped when it carries a raw NUL byte (the same rule git uses), which in a `.ts`
+  or `.py` is almost always a deliberate separator (`.join('\0')`, a composite key) saved as a byte
+  instead of the `\0` escape. The old message left the user to guess; it now reads *"contains a null
+  byte at line N … write it as the `\0` escape instead of a raw byte and re-run index"* — the exact
+  line and the exact fix.
+
 ## [0.16.0] — 2026-08-20
 
 ### Changed
