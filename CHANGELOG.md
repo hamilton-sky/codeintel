@@ -6,6 +6,20 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`codeintel prompt` — a paste-to-your-agent setup prompt, tailored to this machine.** `setup`
+  DOES the bring-up and `install` REGISTERS the MCP server; this hands the same job to a coding agent
+  instead, for people who would rather onboard by pasting one prompt than by reading the docs and
+  running commands. It runs a `doctor` probe and emits ONLY the outstanding steps — a satisfied
+  engine is never named as something to install, and a fully-healthy, already-registered machine
+  reduces to "just restart me" — which is what makes it worth a command rather than a static README
+  block. `--fresh` ignores local state and prints the full sequence from `pip install` (portable,
+  path-agnostic) to send to a friend on a clean machine, and `--agent` targets a specific host
+  (default `auto` picks the one you have, and names none it cannot find rather than guessing). The
+  prompt is written to stdout so `codeintel prompt --fresh | pbcopy` copies exactly it; the
+  "paste this" note goes to stderr. The step-tailoring is unit-tested against synthetic doctor
+  reports, and the render is a pure function so those tests need no backend.
+
 ## [0.16.0] — 2026-08-20
 
 ### Changed

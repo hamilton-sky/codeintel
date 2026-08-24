@@ -18,6 +18,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("setup", "Prepare backends + index this repo (--all does everything automatable)"),
         ("index", "Index a project for semantic search"),
         ("install", "Register codeintel with the AI agents installed on this machine"),
+        ("prompt", "Print a paste-to-your-agent setup prompt, tailored to this machine"),
     ]),
     ("Check health", [
         ("doctor", "Per-engine health + index status, with the fix for each gap"),
@@ -44,6 +45,7 @@ _MODULES = {
     "setup": "setup",
     "index": "index",
     "install": "install",
+    "prompt": "prompt",
     "doctor": "doctor",
     "status": "status",
     "reset": "reset",
@@ -235,6 +237,18 @@ def main() -> None:
                               help="Index this repo now (first run downloads the ~50MB model)")
     setup_parser.add_argument("--warm", action="store_true", help="Boot serena now (first run pulls it via uvx; slow)")
     setup_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
+
+    # prompt subcommand
+    prompt_parser = subparsers.add_parser("prompt", parents=[color_parent],
+                                          help="Print a paste-to-your-agent setup prompt for this repo")
+    prompt_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    prompt_parser.add_argument("--agent", default="auto",
+                               help="Agent the prompt targets: claude|codex|gemini|zed|auto (default: auto)")
+    prompt_parser.add_argument("--fresh", action="store_true",
+                               help="Emit the full sequence from `pip install`, ignoring local state "
+                                    "(a template to paste to a friend on a clean machine)")
+    prompt_parser.add_argument("--deep", action="store_true",
+                               help="Boot-check serena while probing (slower; sharper 'already set up' result)")
 
     # reset subcommand
     reset_parser = subparsers.add_parser("reset", parents=[color_parent],

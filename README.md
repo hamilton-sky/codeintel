@@ -160,6 +160,21 @@ codeintel install            # registers with the agents you actually have insta
 codeintel query --op search --target "authentication middleware"
 ```
 
+### Or: have your agent set it up
+
+Prefer to let your coding agent run the steps? Generate a paste-ready prompt, tailored to this
+machine and agent:
+
+```bash
+codeintel prompt                    # this repo — probes health, emits only the steps still outstanding
+codeintel prompt --fresh | pbcopy   # the full sequence from `pip install`, to send a friend
+```
+
+It runs a `doctor` probe and prints a block you copy into Claude Code / Codex / Gemini / Zed: the
+exact remaining commands (or "just restart me" when everything is already healthy and registered),
+a `doctor --deep` verification, and the reminder to restart the agent so the MCP tools load. The
+prompt goes to stdout (so `| pbcopy` grabs exactly it); the "paste this" note goes to stderr.
+
 ### Enable native Codex integration
 
 `codeintel` is an MCP server, so Codex can call its tools directly rather than invoking the CLI.
@@ -343,6 +358,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel help` | Every command grouped by task, with descriptions and examples (also the bare `codeintel`). A mistyped command suggests what you meant. |
 | `codeintel install [--agent auto\|claude\|codex\|gemini\|zed\|all] [--no-verify] [--relative-command]` | Register codeintel with the agents installed on this machine (`auto`, the default), then prove it by completing a real MCP handshake against the registered command |
 | `codeintel setup [project_root] [--all] [--index] [--warm] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
+| `codeintel prompt [project_root] [--agent auto\|claude\|codex\|gemini\|zed] [--fresh] [--deep]` | Print a paste-to-your-agent setup prompt; probes health and emits only the outstanding steps (or "just restart me" when already healthy). `--fresh` = the full sequence from `pip install`, to send a friend |
 | `codeintel index [project_root]` | Index a project for semantic search |
 | `codeintel serve` | Start the MCP server (stdio transport) |
 | `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote] [--token TOKEN]` | Start the HTTP transport (loopback-only unless `--allow-remote`; `--token` requires a bearer token on every request) |
