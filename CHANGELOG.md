@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-08-24
+
 ### Added
 - **`codeintel index` now shows live progress instead of going silent for minutes.** A large repo
   used to print skip-warnings and then nothing until `Indexed N chunks` — impossible to tell "working"
