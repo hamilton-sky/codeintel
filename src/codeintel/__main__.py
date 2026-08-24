@@ -131,12 +131,18 @@ def main() -> None:
     subparsers.add_parser("serve", help="Start the MCP server")
 
     # index subcommand
-    index_parser = subparsers.add_parser("index", help="Index a project for semantic search")
+    index_parser = subparsers.add_parser(
+        "index", parents=[color_parent],
+        help="Index a project for semantic search")
     index_parser.add_argument(
         "project_root",
         nargs="?",
         default=None,
         help="Project root directory (default: cwd)",
+    )
+    index_parser.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Suppress the live progress display and header; keep only the result line",
     )
 
     # query subcommand

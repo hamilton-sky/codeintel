@@ -692,6 +692,21 @@ def test_index_reports_the_chunk_count(monkeypatch, tmp_path, capsys):
     assert "Indexed 42 chunks" in capsys.readouterr().out
 
 
+def test_index_prints_a_header_naming_the_model_and_strategy(monkeypatch, tmp_path, capsys):
+    _stub_index(monkeypatch, tmp_path, count=5)
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    out = capsys.readouterr().out
+    assert "codeintel index" in out and "def-aligned chunks" in out
+
+
+def test_index_quiet_suppresses_the_header_but_keeps_the_result_line(monkeypatch, tmp_path, capsys):
+    _stub_index(monkeypatch, tmp_path, count=5)
+    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path), quiet=True))
+    out = capsys.readouterr().out
+    assert "codeintel index" not in out          # header gone
+    assert "Indexed 5 chunks" in out             # result line stays
+
+
 def test_index_says_so_when_nothing_changed(monkeypatch, tmp_path, capsys):
     """Incremental runs are the common case; "Indexed 0 chunks" reads like a failure."""
     _stub_index(monkeypatch, tmp_path, count=0)
@@ -752,8 +767,11 @@ def test_index_passes_the_configured_chunking_knobs_through(monkeypatch, tmp_pat
         "max_total_chunks": 99, "chunk_strategy": "line"})
 
     import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
-    assert seen["kwargs"] == {"model_name": "custom/model", "window": 5, "stride": 2,
-                              "max_chunks": 9, "max_total_chunks": 99, "chunk_strategy": "line"}
+    knobs = {k: seen["kwargs"][k] for k in
+             ("model_name", "window", "stride", "max_chunks", "max_total_chunks", "chunk_strategy")}
+    assert knobs == {"model_name": "custom/model", "window": 5, "stride": 2,
+                     "max_chunks": 9, "max_total_chunks": 99, "chunk_strategy": "line"}
+    assert "progress" in seen["kwargs"]      # the live-progress sink is wired through too
 
 
 # --------------------------------------------------------------------------- serve / gen-token

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from codeintel.containment import contained_path, real_root
+from codeintel.progress import ProgressSink, _Guard
 from codeintel.source_kind import (
     CODE_EXTS,
     load_gitattributes_globs,
@@ -195,9 +196,14 @@ class Indexer:
         max_total_chunks: int = 100000,
         chunk_strategy: str = "syntax",
         max_chunk_lines: int | None = None,
+        progress: ProgressSink | None = None,
     ) -> None:
         self.db = db
         self.model_name = model_name
+        # Optional live-progress sink. Wrapped once in _Guard so every emit below is null-safe and
+        # never-raise: with the default None it is a no-op (the MCP server and Reindexer get silence
+        # and pay nothing), and a misbehaving sink can never abort a pass or change the count.
+        self._progress = _Guard(progress)
         # Coerce the numeric knobs defensively: the 4 production call sites pass config-validated
         # values, but a direct caller must not be able to set a stride/window that raises in
         # range() or silently drops regions (mirrors config._coerce's _POSITIVE_INTS clamp).
@@ -668,6 +674,7 @@ class Indexer:
         reconcile each fully-processed file (dropping rows for chunks it no longer produces)."""
         conn = self.db.conn()
         new_chunks: list[tuple[str, str, str, int, str]] = []
+        files_seen = 0
 
         for filepath in self._walk_files(root):
             if len(new_chunks) >= self.max_total_chunks:
@@ -677,6 +684,10 @@ class Indexer:
                     self.max_total_chunks,
                 )
                 break
+            files_seen += 1
+            # A tick per file guarantees liveness even across a run of files that `continue` below
+            # (vanished / unreadable), which is exactly when a lone final tick would look stuck.
+            self._progress.scan(files_seen, len(new_chunks))
             try:
                 with open(filepath, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
@@ -705,17 +716,25 @@ class Indexer:
                 # out of scope for the indexer.
                 self.db.delete_file_orphans(project_root_real, rel_path, keep_ids)
 
+        # One final tick with the true totals so the committed scan line is accurate (the per-file
+        # ticks lag by the current file's chunks). The renderer records this even when throttled.
+        self._progress.scan(files_seen, len(new_chunks))
         return new_chunks
 
     def _embed_and_write(
         self, new_chunks: list[tuple[str, str, str, int, str]], project_root_real: str
     ) -> int:
+        total = len(new_chunks)
+        # Signal the model-load BEFORE materialising the embedder: on a cold cache _get_embedder()
+        # downloads the model (minutes), a distinct stall the scan counter can't cover.
+        self._progress.load_model()
         embedder = self._get_embedder()  # may raise → propagates to index() → returns -1
         conn = self.db.conn()
         embedded_count = 0
         batch_size = 32
+        self._progress.embed(0, total)  # land on 0% the instant the model is ready
 
-        for i in range(0, len(new_chunks), batch_size):
+        for i in range(0, total, batch_size):
             batch = new_chunks[i: i + batch_size]
             texts = [c[1] for c in batch]
 
@@ -763,6 +782,10 @@ class Indexer:
                 conn.commit()
             except Exception as exc:
                 logger.warning("commit failed after batch %d: %s", i // batch_size, exc)
+
+            # Report POSITION, not embedded_count: a skipped/failed batch still advanced the work,
+            # and a bar that stalls on a `continue` is a lie. Always lands on total at the last batch.
+            self._progress.embed(min(i + batch_size, total), total)
 
         return embedded_count
 

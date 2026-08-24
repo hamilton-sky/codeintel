@@ -7,6 +7,9 @@ from codeintel.commands._common import resolve_root
 
 
 def run(args: Any) -> int:
+    import sys
+
+    import codeintel.term as term
     from codeintel.config import load_config
     from codeintel.indexer import Indexer
     from codeintel.semantic_db import SemanticDb, default_db_path
@@ -18,11 +21,33 @@ def run(args: Any) -> int:
     if not os.path.isdir(project_root):
         print(f"index failed: not a directory: {project_root}")
         return 1
+
+    # A console bound to the CURRENT stdout (honouring --no-color/--ascii/NO_COLOR), so progress is
+    # captured under test and routed correctly whether or not main() already ran configure(). The
+    # LiveCounter auto-goes silent on a non-TTY; --quiet suppresses it (and the header) outright.
+    console = term.Console(
+        stream=sys.stdout,
+        no_color=getattr(args, "no_color", False),
+        ascii_mode=(True if getattr(args, "ascii", False) else None),
+    )
+    quiet = getattr(args, "quiet", False)
+    counter = None if quiet else term.LiveCounter(console)
+
     failed = False
     # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
     # Path.home() raising) degrades with a message, like every other subcommand, not a traceback.
     try:
         cfg = load_config(project_root)
+        if not quiet:
+            # One dim header naming the model + chunk strategy: it says WHAT is running (and that it
+            # is all local), and on a cold cache it pre-explains the model-download stall.
+            strat = str(cfg.get("chunk_strategy", "syntax"))
+            strat_label = "def-aligned" if strat == "syntax" else "line-window"
+            model = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
+            sep = "." if console.ascii else "·"
+            print(console.header("index", project_root))
+            print(f"  {console.dim(f'{model} {sep} {strat_label} chunks')}")
+            print()
         db_path = default_db_path(str(cfg.get("model") or ""))
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         db = SemanticDb(db_path)
@@ -36,7 +61,12 @@ def run(args: Any) -> int:
                 max_chunks=int(cfg.get("max_chunks", 500)),
                 max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
                 chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
+                progress=counter,
             ).index(project_root)
+            # Seal the live line before the plain summary: commit the ✓ row on real work, else erase
+            # it so "Nothing new" / the failure message stands on its own clean line.
+            if counter:
+                counter.finish(commit=count > 0)
             if count > 0:
                 print(f"Indexed {count} chunks")
             elif count < 0:
@@ -49,21 +79,28 @@ def run(args: Any) -> int:
         finally:
             db.close()
     except Exception as exc:
+        if counter:
+            counter.finish(commit=False)
         print(f"index failed: {exc}")
         failed = True
 
-    # best-effort graph reindex
+    # best-effort graph reindex — an opaque subprocess, so a start/done heartbeat is the honest
+    # fidelity (no counts cross the boundary). Reuses LiveStep, exactly what it is for.
     import shutil
 
     if shutil.which("codebase-memory-mcp"):
+        step = None if quiet else term.LiveStep(console, "graph reindex")
         try:
             from codeintel.reindexer import Reindexer
 
             Reindexer()._graph_reindex(project_root)
+            if step:
+                step.done("ok")
         except Exception:
-            pass
+            if step:
+                step.done("warn", "skipped")
 
-    # best-effort map refresh after index
+    # best-effort map refresh after index (fast, kept silent — not worth a checklist row)
     try:
         from codeintel.mapper import MapGenerator
         from codeintel.providers.graph import GraphProvider

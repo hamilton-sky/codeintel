@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 
@@ -107,6 +108,10 @@ class Console:
         color = g["color"]
         return self.dim(padded) if color == "dim" else getattr(self, color)(padded)
 
+    def ellipsis(self) -> str:
+        """The in-progress marker, ascii-safe (`...` when the stream can't encode `…`)."""
+        return "..." if self.ascii else "…"
+
     def rule(self, n: int) -> str:
         return self.dim(("-" if self.ascii else "─") * n)
 
@@ -142,7 +147,7 @@ class LiveStep:
             self.live = False
         if self.live:
             try:
-                console.stream.write(f"  {console.dim('…')} {label}\r")
+                console.stream.write(f"  {console.dim(console.ellipsis())} {label}\r")
                 console.stream.flush()
             except Exception:
                 self.live = False
@@ -157,5 +162,121 @@ class LiveStep:
             else:
                 self.c.stream.write(text + "\n")
             self.c.stream.flush()
+        except Exception:
+            pass
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Compact elapsed time: `38s`, then `4m12s` once past a minute (seconds zero-padded so the
+    string width stops jittering while a live line ticks)."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    return f"{m}m{s:02d}s"
+
+
+class LiveCounter:
+    """A multi-phase live-progress line for slow, count-bearing work (`codeintel index`).
+
+    It duck-types ``progress.ProgressSink`` — the indexer drives it through ``scan``/``load_model``/
+    ``embed`` without importing ``term`` — and owns *everything* terminal: TTY detection, redraw
+    throttling, ANSI, and the phase→glyph vocabulary (the same ``✓`` / two-space checklist as
+    ``LiveStep`` and ``doctor``). The indexer owns only *when* to emit and the raw counts.
+
+    On a TTY it redraws the active phase in place (throttled to ``min_interval``) and commits each
+    finished phase as a permanent ``  ✓ <phase>  <detail>  <elapsed>`` row. On a pipe/CI it prints
+    one plain, glyph-less ``<phase>: <detail>`` line per phase (and per ``heartbeat`` while a phase
+    runs long) — never a carriage return, never a spinner, so a log reader can always tell "still
+    going" from a committed ``✓`` line. Every method swallows its own errors: a rendering fault must
+    never disturb indexing (the indexer already routes these through ``progress._Guard`` too — this
+    is defence in depth, and it also protects the CLI-side ``finish()`` call)."""
+
+    def __init__(self, console: Console, *, min_interval: float = 0.1, heartbeat: float = 2.0) -> None:
+        self.c = console
+        try:
+            self.live = console.enabled and console.stream.isatty()
+        except Exception:
+            self.live = False
+        self._min = min_interval
+        self._beat = heartbeat
+        self._phase: str | None = None
+        self._phase_start = 0.0
+        self._last_draw = 0.0
+        self._cur_label = ""
+        self._cur_detail = ""
+
+    # ---- ProgressSink surface (duck-typed) -------------------------------------------------
+    def scan(self, files: int, chunks: int) -> None:
+        self._tick("scan", "scan + chunk", f"{files:,} files, {chunks:,} chunks")
+
+    def load_model(self) -> None:
+        # Pre-roll of the embed phase: a distinct "downloading, not hung" line for a cold cache.
+        self._tick("embed", "embed", f"loading embedding model{self.c.ellipsis()}")
+
+    def embed(self, done: int, total: int) -> None:
+        pct = 0 if total <= 0 else int(done * 100 / total)
+        self._tick("embed", "embed", f"{done:,}/{total:,} chunks  {pct}%",
+                   force=(total > 0 and done >= total))
+
+    # ---- internals -------------------------------------------------------------------------
+    def _tick(self, phase: str, label: str, detail: str, *, force: bool = False) -> None:
+        try:
+            now = time.monotonic()
+            new_phase = phase != self._phase
+            if new_phase:
+                self._commit(now)          # finish the previous phase's row before switching
+                self._phase = phase
+                self._phase_start = now
+                self._last_draw = 0.0
+            # Record the latest text unconditionally so a throttled tick still feeds an accurate
+            # committed row (the indexer's final scan()/embed() counts arrive this way).
+            self._cur_label, self._cur_detail = label, detail
+            gap = self._min if self.live else self._beat
+            if not force and not new_phase and self._last_draw and (now - self._last_draw) < gap:
+                return
+            self._last_draw = now
+            self._draw(label, detail)
+        except Exception:
+            pass
+
+    def _draw(self, label: str, detail: str) -> None:
+        try:
+            if self.live:
+                line = f"\x1b[2K\r  {self.c.dim(self.c.ellipsis())} {label}"
+                if detail:
+                    line += f"  {detail}"
+                self.c.stream.write(line)
+            else:
+                # Glyph-less on purpose: the ✓ is reserved for the committed line, so a mid-run
+                # heartbeat in a log never *looks* finished.
+                self.c.stream.write(f"  {label}: {detail}\n" if detail else f"  {label}\n")
+            self.c.stream.flush()
+        except Exception:
+            pass
+
+    def _commit(self, now: float) -> None:
+        if self._phase is None:
+            return
+        elapsed = _fmt_elapsed(now - self._phase_start)
+        tail = f"{self._cur_detail}  {elapsed}" if self._cur_detail else elapsed
+        line = f"  {self.c.glyph('ok')} {self._cur_label}  {self.c.dim(tail)}"
+        try:
+            self.c.stream.write(("\x1b[2K\r" + line + "\n") if self.live else (line + "\n"))
+            self.c.stream.flush()
+        except Exception:
+            pass
+
+    def finish(self, *, commit: bool = True) -> None:
+        """End the run. ``commit=True`` seals the active phase with its ``✓`` row; ``commit=False``
+        (a no-op / failed pass) erases the dangling live line on a TTY and leaves no row, so the
+        caller's ``Nothing new`` / failure message stands alone."""
+        try:
+            if commit and self._phase is not None:
+                self._commit(time.monotonic())
+            elif self.live and self._phase is not None:
+                self.c.stream.write("\x1b[2K\r")
+                self.c.stream.flush()
+            self._phase = None
         except Exception:
             pass

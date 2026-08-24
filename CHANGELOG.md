@@ -6,6 +6,22 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`codeintel index` now shows live progress instead of going silent for minutes.** A large repo
+  used to print skip-warnings and then nothing until `Indexed N chunks` — impossible to tell "working"
+  from "hung," so people Ctrl-C'd healthy runs. It now renders a phase checklist in the same visual
+  language as `doctor` (`✓` glyphs, one line per phase): a `scan + chunk` liveness counter, a real
+  `embed  3,980/6,381 chunks  62%` bar (the total is known before the batch loop), a distinct
+  `loading embedding model…` state so the first-run model download doesn't read as a second hang, and
+  a `graph reindex` heartbeat for the opaque backend step. A dim header names the model and chunk
+  strategy (`BAAI/bge-small-en-v1.5 · def-aligned chunks`) — it says the work is local and pre-explains
+  the download. On a TTY the active line redraws in place (throttled); piped/CI output prints one clean
+  line per phase with **no** carriage-return or ANSI bytes; `--quiet`/`-q` suppresses progress and the
+  header while keeping the result line. The progress is inert to the result: the indexer emits through
+  a null-safe, never-raise sink (`progress.ProgressSink` + `_Guard`), so a broken renderer can never
+  change the indexed count — proven by a progress-on-vs-off count-invariance test. `index` also gained
+  `--no-color`/`--ascii` (it was the one command missing them).
+
 ### Changed
 - **The "looks binary despite its extension" index-skip warning now says WHY and how to fix it.** A
   source file gets skipped when it carries a raw NUL byte (the same rule git uses), which in a `.ts`
