@@ -182,6 +182,8 @@ def test_a_healthy_reset_still_reports_plainly(tmp_path, monkeypatch):
     from codeintel import reset as _reset
     monkeypatch.setattr(_reset, "_reset_scoped", lambda root, path, apply: {"count": 7})
     monkeypatch.setattr(_reset, "_cache_files", lambda: ["/tmp/whatever.db"])
+    # No graph index for this repo → the message reads exactly as it did before the graph half existed.
+    monkeypatch.setattr(_reset, "_reset_graph_project", lambda root, apply: {"found": 0, "removed": 0})
 
     report = _reset.run_reset(str(tmp_path), apply=True)
     assert report["failed"] is False
@@ -353,6 +355,66 @@ def test_reset_all_clears_both_caches_and_spares_the_backends_config(tmp_path, s
     assert "removed 4 semantic index file(s) across all models" in report["detail"]
     assert "removed 3 graph project file(s)" in report["detail"]
     assert "including 1 previously-corrupt file(s)" in report["detail"]
+
+
+def test_graph_slug_matches_the_backends_real_file_names():
+    """The slug MUST match what codebase-memory-mcp actually writes (verified against live caches).
+    A naive `/`→`-` replace double-dashes any component that starts with a separator-adjacent char
+    and silently misses the file — the exact leak this pins shut."""
+    from codeintel.reset import _graph_slug
+    assert _graph_slug("/Users/me/Documents/aws-resource-tools") == "Users-me-Documents-aws-resource-tools"
+    # a component that begins with '-' (real scratchpad paths do): runs collapse, no double dash
+    assert _graph_slug("/private/tmp/x/-Users-me/scratchpad/mini") == "private-tmp-x-Users-me-scratchpad-mini"
+    assert _graph_slug("/a/b.c/d") == "a-b-c-d"
+
+
+def test_scoped_reset_also_clears_this_projects_graph_index(tmp_path, sandbox):
+    """The gap this closes: `reset <repo>` used to clear only the semantic side, leaving the repo's
+    graph index — and therefore the repo itself, since `list_projects` enumerates these files —
+    fully present. A scoped reset now removes THIS project's graph index, and only this one's."""
+    from codeintel.reset import _graph_slug
+    graph = sandbox.graph
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    repo_real = os.path.realpath(str(repo))
+    _seed(default_db_path(), repo_real, n=2)                     # the semantic side
+
+    slug = _graph_slug(repo_real)                                # the backend's real file stem
+    mine = [graph / f"{slug}.db", graph / f"{slug}.db-wal", graph / f"{slug}.db-shm"]
+    for p in mine:
+        p.write_bytes(b"graph-index")
+    other = graph / "Some-other-repo.db"                         # a DIFFERENT project's graph index
+    other.write_bytes(b"keep me")
+    config = graph / "_config.db"                                # backend config, not an index
+    config.write_bytes(b"registration")
+
+    report = run_reset(str(repo), apply=True)
+
+    assert report["mode"] == "scoped" and report["applied"] is True
+    assert report["count"] == 2                                  # semantic chunks cleared
+    assert report["graph_removed"] == 3                          # this repo's .db + -wal + -shm
+    assert not any(p.exists() for p in mine)                     # this repo's graph index is gone
+    assert other.exists()                                        # another repo's index is untouched
+    assert config.exists()                                       # backend config/registration spared
+    assert "graph index" in report["detail"]
+
+
+def test_scoped_reset_dry_run_finds_the_graph_index_without_removing_it(tmp_path, sandbox):
+    """A scoped dry-run must report the graph index it *would* remove and leave it on disk."""
+    from codeintel.reset import _graph_slug
+    graph = sandbox.graph
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    slug = _graph_slug(os.path.realpath(str(repo)))
+    f = graph / f"{slug}.db"
+    f.write_bytes(b"graph-index")
+
+    report = run_reset(str(repo), apply=False)
+
+    assert report["applied"] is False
+    assert report["graph_found"] == 1 and report["graph_removed"] == 0
+    assert f.exists()                                            # a dry-run removes nothing
+    assert "a graph index" in report["detail"]
 
 
 def test_reset_all_says_so_when_the_graph_cache_cannot_be_read(tmp_path, monkeypatch, sandbox):

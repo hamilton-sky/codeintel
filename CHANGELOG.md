@@ -26,6 +26,15 @@ All notable changes to codeintel are documented here. The format is based on
   `--no-color`/`--ascii` (it was the one command missing them).
 
 ### Changed
+- **`codeintel reset <repo>` now clears BOTH engines, so a single repo is truly "as if never indexed".**
+  It used to drop only the semantic index and leave the repo's graph index behind — still listed by
+  `list_projects` and still answering graph queries — so a real clean slate was only possible with the
+  global `--all`. Scoped reset now also removes that one project's graph index (the backend's
+  per-project `<slug>.db` and its `-wal`/`-shm`/`.corrupt` siblings), matching what `--all` does
+  globally. It stays pure file-removal — no backend spawn, works with the graph engine down — and the
+  slug matches the backend's real naming (runs of non-alphanumerics collapse to one `-`; a naive
+  `/`→`-` replace double-dashed odd paths and silently left the file, leaking the very index the reset
+  was meant to remove). The report now says `removed N chunk(s) and the graph index for this project`.
 - **The "looks binary despite its extension" index-skip warning now says WHY and how to fix it.** A
   source file gets skipped when it carries a raw NUL byte (the same rule git uses), which in a `.ts`
   or `.py` is almost always a deliberate separator (`.join('\0')`, a composite key) saved as a byte

@@ -8,6 +8,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 import sqlite3
 
 import sqlite_vec
@@ -159,6 +160,44 @@ def _reset_graph_cache(apply: bool) -> dict:
     return {"count": count, "corrupt": corrupt}
 
 
+def _graph_slug(canonical_root: str) -> str:
+    """The stem the graph backend gives a project's cache file: every run of non-alphanumeric
+    characters collapses to a single ``-``, with the ends trimmed. So ``/Users/me/aws-resource-tools``
+    → ``Users-me-aws-resource-tools`` and ``/tmp/-Weird/repo`` → ``tmp-Weird-repo`` (NOT
+    ``tmp--Weird-repo`` — a naive ``/``→``-`` replace leaves a double dash and misses the file,
+    silently leaking the graph index a scoped reset was meant to remove). Verified against real
+    on-disk caches. The collapse also flattens away every path separator, so the target can never
+    escape the cache directory."""
+    return re.sub(r"[^A-Za-z0-9]+", "-", canonical_root).strip("-")
+
+
+def _reset_graph_project(project_root: str, apply: bool) -> dict:
+    """Remove ONE project's graph index — the per-project sqlite the backend names ``<slug>.db`` (see
+    :func:`_graph_slug`), plus its ``-wal``/``-shm``/``.corrupt`` siblings.
+
+    This is the graph half of a *scoped* reset. Without it, ``reset <repo>`` cleared only the
+    semantic side and left the repo listed and queryable in the graph engine — so "start as if never
+    indexed" was true only for ``--all``. ``list_projects`` enumerates these files (``_config.db`` is
+    key/value config, not a registry), so deleting them is exactly what makes one project vanish.
+    Pure file removal like ``_reset_graph_cache``: it works with the backend down and never hangs."""
+    directory = _graph_cache_dir()
+    slug = _graph_slug(os.path.realpath(str(project_root)))
+    found = 0
+    removed = 0
+    for suffix in (".db", ".db-wal", ".db-shm", ".db.corrupt"):
+        path = os.path.join(directory, slug + suffix)
+        if not os.path.isfile(path):
+            continue
+        found += 1
+        if apply:
+            try:
+                os.remove(path)
+                removed += 1
+            except Exception:
+                pass
+    return {"slug": slug, "found": found, "removed": removed}
+
+
 def _looks_unreadable(exc: Exception) -> bool:
     """Whether *exc* means "this file is not a usable sqlite cache" (as opposed to e.g. a lock)."""
     text = f"{type(exc).__name__}: {exc}".lower()
@@ -220,15 +259,22 @@ def run_reset(
         real = os.path.realpath(str(project_root))
         results = [_reset_scoped(project_root, p, apply) for p in files]
         count = sum(r["count"] for r in results)
+        # The graph half of a scoped reset — the piece that was missing, so `reset <repo>` now clears
+        # BOTH engines and the repo is genuinely "never indexed", matching what `--all` does globally.
+        graph = _reset_graph_project(project_root, apply)
         verb = "removed" if apply else "found"
         # Surface per-file trouble instead of summing counts and synthesizing a success line —
         # discarding these is what made a failed reset indistinguishable from a clean one.
         problems = [r["detail"] for r in results if r.get("error") or r.get("recovered") is not None]
-        detail = f"{verb} {count} indexed chunk(s) for this project"
+        detail = f"{verb} {count} indexed chunk(s)"
+        if graph["found"]:
+            detail += " and the graph index" if apply else " and a graph index"
+        detail += " for this project"
         if problems:
             detail = "\n".join([*problems, detail])
         return {"ok": True, "mode": "scoped", "target": real, "count": count, "applied": bool(apply),
                 "detail": detail,
+                "graph_found": graph["found"], "graph_removed": graph["removed"],
                 "failed": any(r.get("error") for r in results)}
     except Exception as exc:
         return {"ok": True, "applied": apply, "detail": f"reset-error: {type(exc).__name__}: {exc}"}

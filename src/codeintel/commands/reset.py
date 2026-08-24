@@ -1,4 +1,4 @@
-"""`codeintel reset` — clear the semantic index (recover from a corrupt/stale DB)."""
+"""`codeintel reset` — clear a repo's index (semantic + graph), or the whole cache with --all."""
 
 import sys
 from typing import Any
@@ -18,7 +18,7 @@ def run(args: Any) -> int:
             return 1
         target = "ALL projects" if args.all else project_root
         count = preview.get("count", 0)
-        ans = input(f"Reset semantic index for {target} ({count} entries)? [y/N] ").strip().lower()
+        ans = input(f"Reset index for {target} ({count} entries)? [y/N] ").strip().lower()
         if ans not in ("y", "yes"):
             print("aborted")
             return 0
