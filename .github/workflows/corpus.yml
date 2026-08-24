@@ -40,7 +40,7 @@ jobs:
       # Cloned repos are keyed by the SHAs in tests/test_corpus.py, so the cache is invalidated
       # exactly when the corpus changes.
       - name: Cache the corpus checkouts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/codeintel-corpus
           key: corpus-${{ hashFiles('tests/test_corpus.py') }}

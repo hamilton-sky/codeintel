@@ -226,7 +226,7 @@ jobs:
       # fastembed downloads the embedding model on first use. Cached so the canary costs one
       # network fetch per model change rather than one per run; a miss only makes it slower.
       - name: Cache the embedding model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/fastembed-cache
           key: fastembed-bge-small-en-v1.5
