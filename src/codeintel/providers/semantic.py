@@ -22,6 +22,27 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
+def _preview(match: dict) -> str:
+    """The one line of a hit a reader actually judges it by.
+
+    A def longer than ``max_chunk_lines`` is window-split, so most of its chunks open mid-body and
+    the first meaningful line is whatever the window happened to start on — real, correctly located
+    text that nevertheless says nothing: `continue`, `except Exception as exc:`. Measured with
+    ``ast`` across five indexed repositories, 11-33% of Python chunks start strictly inside a
+    definition rather than at one.
+
+    So when the indexer recorded an enclosing symbol and the line does not already name it, lead
+    with the symbol. `searcher.py:373 | search() … continue` places the reader immediately; the
+    bare `continue` never could. The check is a containment test rather than a start-of-line one
+    because a def's own opening line (`def search(`) and a decorated or multi-line signature should
+    not be prefixed with the name they already carry."""
+    line = _first_meaningful_line(match.get("snippet", ""))
+    symbol = match.get("symbol")
+    if symbol and symbol not in line:
+        return f"{symbol}() … {line}"
+    return line
+
+
 def _first_meaningful_line(snippet: str) -> str:
     """The first line of *snippet* that says something.
 
@@ -236,8 +257,7 @@ class SemanticProvider:
                 ordered = code_hits[:keep_code] + prose_hits[:_display_k - keep_code]
             else:
                 ordered = (code_hits + prose_hits)[:_display_k]
-            lines = [f"{loc(m['path'], m['line'])} | {_first_meaningful_line(m['snippet'])}"
-                     for m in ordered]
+            lines = [f"{loc(m['path'], m['line'])} | {_preview(m)}" for m in ordered]
             result: Result = {
                 "ok": True,
                 "op": op,

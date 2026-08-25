@@ -463,6 +463,77 @@ class Indexer:
                 spans.extend(members)
         return spans
 
+    def _symbol_index_py(self, tree: ast.Module, n: int) -> list[tuple[int, int, str]]:
+        """``(start, end, name)`` for EVERY def/class in the file, nested ones included.
+
+        Deliberately a full ``ast.walk`` rather than reusing ``_primary_spans``: that one emits
+        only the spans worth embedding (top-level defs, class members) and skips nested inner
+        functions, but a chunk can land inside one — and "which symbol am I looking at" should
+        answer with the innermost enclosing def, not the outermost. Separate from the span
+        pipeline on purpose, so chunk boundaries and symbol attribution stay independent."""
+        out: list[tuple[int, int, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                lo, hi = self._node_span(node, n)
+                out.append((lo, hi, node.name))
+        return out
+
+    @staticmethod
+    def _ts_node_name(node) -> str | None:
+        """The declared name of a tree-sitter def node, or None when it has no usable one.
+
+        Most def types carry a ``name`` field. Function-bound `const`/`let` (React components and
+        hooks — how most modern TS is written) instead nest the identifier one level down in a
+        ``variable_declarator``, so an anonymous default export or an IIFE simply yields None and
+        the chunk is attributed to whatever encloses it."""
+        try:
+            named = node.child_by_field_name("name")
+            if named is not None and named.text:
+                return named.text.decode("utf-8", "replace")
+            if node.type in _TS_DECL_TYPES:
+                for child in node.children:
+                    if child.type == "variable_declarator":
+                        ident = child.child_by_field_name("name")
+                        if ident is not None and ident.text:
+                            return ident.text.decode("utf-8", "replace")
+        except Exception as exc:
+            logger.debug("tree-sitter node name extraction failed: %s", exc)
+        return None
+
+    def _symbol_index_ts(self, root, lang: str, n: int) -> list[tuple[int, int, str]]:
+        """``_symbol_index_py`` for tree-sitter languages: every def node anywhere in the tree.
+        Iterative, so deep nesting cannot blow the stack (same reason ``nearest_defs`` is)."""
+        all_types = _TS_FUNC_TYPES.get(lang, set()) | _TS_CONTAINER_TYPES.get(lang, set())
+        if not all_types:
+            return []
+        arrow_ok = lang in _TS_ARROW_LANGS
+        out: list[tuple[int, int, str]] = []
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            is_def = node.type in all_types or (
+                arrow_ok and node.type in _TS_DECL_TYPES and _ts_decl_is_function(node)
+            )
+            if is_def:
+                name = self._ts_node_name(node)
+                if name:
+                    out.append((node.start_point[0], self._ts_end_line(node, n), name))
+            stack.extend(c for c in node.children if c.is_named)
+        return out
+
+    @staticmethod
+    def _enclosing_symbol(index: list[tuple[int, int, str]], start: int) -> str | None:
+        """The INNERMOST definition containing line ``start``, or None at module level.
+
+        Innermost = the latest-starting span that still contains the line, so a method inside a
+        class reports the method (the useful answer) rather than the class."""
+        best_lo = -1
+        best_name = None
+        for lo, hi, name in index:
+            if lo <= start < hi and lo > best_lo:
+                best_lo, best_name = lo, name
+        return best_name
+
     def _cover(self, primary: list[tuple[int, int]], n: int) -> list[tuple[int, int]]:
         """Gapless cover of ``[0, n)`` in file order: window-fill every gap between primary spans
         and window-split any oversized def. The def-aligned *primary* spans are whole and mutually
@@ -485,13 +556,20 @@ class Indexer:
             result.extend(self._window_spans(cursor, n))
         return result
 
+    def _chunk_python_ast_full(
+        self, lines: list[str], source: str
+    ) -> tuple[list[tuple[int, int]], list[tuple[int, int, str]]]:
+        """Spans AND the symbol index from ONE parse. Both derive from the same tree, so they can
+        never describe different versions of the file."""
+        tree = ast.parse(source)
+        n = len(lines)
+        return self._cover(self._primary_spans(tree, n), n), self._symbol_index_py(tree, n)
+
     def _chunk_python_ast(self, lines: list[str], source: str) -> list[tuple[int, int]]:
         """Parse ``source`` → a complete, non-overlapping, def-aligned cover of the file as
         0-based half-open ``(start, end)`` spans. Raises on parse failure (``SyntaxError`` /
         ``ValueError`` on NUL bytes / ``RecursionError`` / …) so the caller falls back to windows."""
-        tree = ast.parse(source)
-        n = len(lines)
-        return self._cover(self._primary_spans(tree, n), n)
+        return self._chunk_python_ast_full(lines, source)[0]
 
     def _get_ts_parser(self, lang: str):
         """Lazily load + cache (per instance) the tree-sitter parser for a language. Returns None
@@ -569,52 +647,67 @@ class Indexer:
             emit(node)
         return spans
 
-    def _chunk_treesitter(self, lines: list[str], source: str, lang: str):
-        """Parse ``source`` with tree-sitter → a complete, def-aligned cover, or ``None`` when the
-        parser is unavailable (caller windows). tree-sitter is error-tolerant, so a syntactically
-        broken file still yields a partial tree (and thus useful spans) rather than raising."""
+    def _chunk_treesitter_full(self, lines: list[str], source: str, lang: str):
+        """Spans AND the symbol index from ONE tree-sitter parse, or ``None`` when the parser is
+        unavailable (caller windows)."""
         parser = self._get_ts_parser(lang)
         if parser is None:
             return None
         tree = parser.parse(source.encode("utf-8", errors="replace"))
         n = len(lines)
-        return self._cover(self._primary_spans_ts(tree.root_node, lang, n), n)
+        root = tree.root_node
+        return (
+            self._cover(self._primary_spans_ts(root, lang, n), n),
+            self._symbol_index_ts(root, lang, n),
+        )
+
+    def _chunk_treesitter(self, lines: list[str], source: str, lang: str):
+        """Parse ``source`` with tree-sitter → a complete, def-aligned cover, or ``None`` when the
+        parser is unavailable (caller windows). tree-sitter is error-tolerant, so a syntactically
+        broken file still yields a partial tree (and thus useful spans) rather than raising."""
+        got = self._chunk_treesitter_full(lines, source, lang)
+        return None if got is None else got[0]
 
     def _spans_for_file(
         self, filepath: Path, lines: list[str], rel_path: str
-    ) -> list[tuple[int, int]]:
+    ) -> tuple[list[tuple[int, int]], list[tuple[int, int, str]]]:
         """Choose spans for one file under the syntax strategy: ``ast`` for ``.py``, tree-sitter for
         the mapped languages (TS/JS/Go/Rust/Java/C/C++), fixed windows for everything else and on
-        any parse/grammar failure or when tree-sitter isn't installed."""
+        any parse/grammar failure or when tree-sitter isn't installed.
+
+        Returns ``(spans, symbol_index)``. The index is empty for the windowed fallbacks — a file
+        we could not parse is a file whose symbols we do not know, and guessing them with a regex
+        is how a preview ends up confidently naming the wrong function."""
         if self.chunk_strategy == "syntax":
             suffix = filepath.suffix.lower()
             if suffix == ".py":
                 try:
-                    return self._chunk_python_ast(lines, "".join(lines))
+                    return self._chunk_python_ast_full(lines, "".join(lines))
                 except Exception as exc:
                     logger.debug("syntax chunking failed for %s (%s) — windowing", rel_path, exc)
             else:
                 lang = _TS_LANG_BY_EXT.get(suffix)
                 if lang is not None:
                     try:
-                        spans = self._chunk_treesitter(lines, "".join(lines), lang)
-                        if spans is not None:
-                            return spans
+                        got = self._chunk_treesitter_full(lines, "".join(lines), lang)
+                        if got is not None:
+                            return got
                     except Exception as exc:
                         logger.debug("tree-sitter chunking failed for %s (%s) — windowing",
                                      rel_path, exc)
-        return self._window_spans(0, len(lines))
+        return self._window_spans(0, len(lines)), []
 
     # ---- materialisation -------------------------------------------------------------------
 
     def _emit_spans(
         self,
         spans: list[tuple[int, int]],
+        symbols: list[tuple[int, int, str]],
         lines: list[str],
         rel_path: str,
         project_key: str,
         conn,
-        new_chunks: list[tuple[str, str, str, int, int, str]],
+        new_chunks: list[tuple[str, str, str, int, int, str, str | None]],
     ) -> tuple[set[str], bool]:
         """Materialise spans into new/changed chunk records — shared by both strategies, so the
         whitespace-skip, hash-dedup, and per-file cap behave identically. Returns
@@ -658,10 +751,12 @@ class Indexer:
                 continue
             chunk_id = f"{project_key}:{rel_path}:{start}"
             content_hash = chunk_content_hash(chunk_text)
+            symbol = self._enclosing_symbol(symbols, start)
             keep_ids.add(chunk_id)  # produced this pass — keep even when dedup skips re-embed
             try:
                 row = conn.execute(
-                    "SELECT content_hash, chunk_end FROM chunk_hashes WHERE chunk_id = ?",
+                    "SELECT content_hash, chunk_end, chunk_symbol FROM chunk_hashes"
+                    " WHERE chunk_id = ?",
                     (chunk_id,),
                 ).fetchone()
                 if row and row[0] == content_hash:
@@ -670,27 +765,30 @@ class Indexer:
                     # the searcher cannot verify staleness without it — so patch the span in
                     # place. This is what lets an existing 85k-chunk cache gain verification from
                     # one ordinary index pass instead of a full re-embed.
-                    if row[1] != end:
+                    if row[1] != end or row[2] != symbol:
                         conn.execute(
-                            "UPDATE chunk_hashes SET chunk_end = ? WHERE chunk_id = ?",
-                            (end, chunk_id),
+                            "UPDATE chunk_hashes SET chunk_end = ?, chunk_symbol = ?"
+                            " WHERE chunk_id = ?",
+                            (end, symbol, chunk_id),
                         )
                         self._backfilled += 1
                     chunk_count += 1
                     continue
             except Exception as exc:
                 logger.debug("hash check failed for %s: %s", chunk_id, exc)
-            new_chunks.append((chunk_id, chunk_text, rel_path, start, end, content_hash))
+            new_chunks.append(
+                (chunk_id, chunk_text, rel_path, start, end, content_hash, symbol)
+            )
             chunk_count += 1
         return keep_ids, True
 
     def _collect_new_chunks(
         self, root: Path, project_key: str, project_root_real: str
-    ) -> list[tuple[str, str, str, int, int, str]]:
-        """Walk files; return (chunk_id, text, rel_path, start, end, hash) for new/changed chunks, and
+    ) -> list[tuple[str, str, str, int, int, str, str | None]]:
+        """Walk files; return (chunk_id, text, rel_path, start, end, hash, symbol) for new/changed chunks, and
         reconcile each fully-processed file (dropping rows for chunks it no longer produces)."""
         conn = self.db.conn()
-        new_chunks: list[tuple[str, str, str, int, int, str]] = []
+        new_chunks: list[tuple[str, str, str, int, int, str, str | None]] = []
         files_seen = 0
 
         for filepath in self._walk_files(root):
@@ -716,9 +814,9 @@ class Indexer:
                 continue
 
             rel_path = str(filepath.relative_to(root))
-            spans = self._spans_for_file(filepath, lines, rel_path)
+            spans, symbols = self._spans_for_file(filepath, lines, rel_path)
             keep_ids, complete = self._emit_spans(
-                spans, lines, rel_path, project_key, conn, new_chunks
+                spans, symbols, lines, rel_path, project_key, conn, new_chunks
             )
             if complete:
                 # Reconcile only a fully-processed file: drop rows for defs/windows it no longer
@@ -750,7 +848,7 @@ class Indexer:
         return new_chunks
 
     def _embed_and_write(
-        self, new_chunks: list[tuple[str, str, str, int, int, str]], project_root_real: str
+        self, new_chunks: list[tuple[str, str, str, int, int, str, str | None]], project_root_real: str
     ) -> int:
         total = len(new_chunks)
         # Signal the model-load BEFORE materialising the embedder: on a cold cache _get_embedder()
@@ -772,9 +870,8 @@ class Indexer:
                 logger.warning("embedding batch %d failed: %s", i // batch_size, exc)
                 continue
 
-            for j, (chunk_id, _, rel_path, chunk_start, chunk_end, content_hash) in enumerate(
-                batch
-            ):
+            for j, (chunk_id, _, rel_path, chunk_start, chunk_end, content_hash,
+                    chunk_symbol) in enumerate(batch):
                 if j >= len(embeddings):
                     break
                 try:
@@ -801,9 +898,9 @@ class Indexer:
                     conn.execute(
                         "INSERT OR REPLACE INTO chunk_hashes"
                         "(chunk_id, project_root, file_path, chunk_start, chunk_end,"
-                        " content_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                        " content_hash, chunk_symbol) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (chunk_id, project_root_real, rel_path, chunk_start, chunk_end,
-                         content_hash),
+                         content_hash, chunk_symbol),
                     )
                     embedded_count += 1
                 except Exception as exc:

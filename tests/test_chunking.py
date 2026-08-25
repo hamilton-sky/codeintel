@@ -183,7 +183,7 @@ def test_syntax_error_file_falls_back_to_windowing():
     with pytest.raises(SyntaxError):
         idx._chunk_python_ast(lines, src)
     # ...and the per-file chooser swallows it and windows instead — never raising.
-    spans = idx._spans_for_file(Path("broken.py"), lines, "broken.py")
+    spans, _ = idx._spans_for_file(Path("broken.py"), lines, "broken.py")
     assert spans == idx._window_spans(0, len(lines))
     assert len(spans) > 0
 
@@ -192,7 +192,7 @@ def test_nul_byte_source_falls_back_without_raising():
     src = "def f():\n    return '\x00'\n"               # NUL → ast.parse raises ValueError
     lines = src.splitlines(keepends=True)
     idx = Indexer(_mem_db())
-    spans = idx._spans_for_file(Path("nul.py"), lines, "nul.py")  # must not raise
+    spans, _ = idx._spans_for_file(Path("nul.py"), lines, "nul.py")  # must not raise
     assert spans == idx._window_spans(0, len(lines))
 
 
@@ -203,10 +203,10 @@ def test_non_code_exts_window_but_treesitter_langs_do_not():
     csv_lines = csv.splitlines(keepends=True)
     idx = Indexer(_mem_db())
     for name in ("data.md", "notes.txt"):
-        assert idx._spans_for_file(Path(name), csv_lines, name) == idx._window_spans(0, len(csv_lines))
+        assert idx._spans_for_file(Path(name), csv_lines, name)[0] == idx._window_spans(0, len(csv_lines))
     # a real .ts file with definitions is def-aligned, NOT windowed
     ts = "function a() {\n  return 1;\n}\nfunction b() {\n  return 2;\n}\n".splitlines(keepends=True)
-    ts_spans = idx._spans_for_file(Path("app.ts"), ts, "app.ts")
+    ts_spans, _ = idx._spans_for_file(Path("app.ts"), ts, "app.ts")
     assert ts_spans != idx._window_spans(0, len(ts))
     assert (0, 3) in ts_spans and (3, 6) in ts_spans  # each function its own chunk
 
@@ -228,9 +228,9 @@ def test_lines_strategy_matches_legacy_window_output():
     # the pre-0.6 windower: range(0, n, stride) with lines[s:s+window]
     legacy = [(s, min(s + 20, n)) for s in range(0, n, 10)]
 
-    assert Indexer(_mem_db(), chunk_strategy="lines")._spans_for_file(fp, lines, "mod.py") == legacy
+    assert Indexer(_mem_db(), chunk_strategy="lines")._spans_for_file(fp, lines, "mod.py")[0] == legacy
 
-    syntax_spans = Indexer(_mem_db(), chunk_strategy="syntax")._spans_for_file(fp, lines, "mod.py")
+    syntax_spans, _ = Indexer(_mem_db(), chunk_strategy="syntax")._spans_for_file(fp, lines, "mod.py")
     assert syntax_spans != legacy                       # syntax genuinely changes chunking
     assert (0, 2) in syntax_spans and (3, 5) in syntax_spans
 

@@ -334,6 +334,7 @@ class Searcher:
                     ce.chunk_id,
                     ch.chunk_start,
                     ch.chunk_end,
+                    ch.chunk_symbol,
                     ch.content_hash,
                     ch.file_path,
                     vec_distance_cosine(ce.embedding, ?) AS dist
@@ -365,6 +366,7 @@ class Searcher:
                     "path": str(row["file_path"]),
                     "line": int(row["chunk_start"]),
                     "end": None if end is None else int(end),
+                    "symbol": row["chunk_symbol"],
                     "hash": row["content_hash"],
                     "score": round(score, 6),
                 })
@@ -412,6 +414,7 @@ class Searcher:
             results.append({
                 "path": c["path"],
                 "line": c["line"],
+                "symbol": c.get("symbol"),
                 "snippet": snippet,
                 "score": c["score"],
             })

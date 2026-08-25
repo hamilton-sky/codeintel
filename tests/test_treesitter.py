@@ -27,7 +27,7 @@ def _idx(**kw) -> Indexer:
 
 def _spans(name: str, src: str, **kw):
     lines = src.splitlines(keepends=True)
-    return _idx(**kw)._spans_for_file(Path(name), lines, name), len(lines)
+    return _idx(**kw)._spans_for_file(Path(name), lines, name)[0], len(lines)
 
 
 def _assert_gapless_cover(spans, n):
@@ -144,7 +144,7 @@ def test_lines_strategy_bypasses_treesitter():
     src = "function foo() {\n  return 1;\n}\n"
     lines = src.splitlines(keepends=True)
     idx = _idx(chunk_strategy="lines")
-    assert idx._spans_for_file(Path("x.ts"), lines, "x.ts") == idx._window_spans(0, len(lines))
+    assert idx._spans_for_file(Path("x.ts"), lines, "x.ts")[0] == idx._window_spans(0, len(lines))
 
 
 def test_unmapped_exts_window():
@@ -152,7 +152,7 @@ def test_unmapped_exts_window():
     lines = src.splitlines(keepends=True)
     idx = _idx()
     for name in ("readme.md", "notes.txt"):
-        assert idx._spans_for_file(Path(name), lines, name) == idx._window_spans(0, len(lines))
+        assert idx._spans_for_file(Path(name), lines, name)[0] == idx._window_spans(0, len(lines))
 
 
 def test_falls_back_to_windowing_when_parser_unavailable():
@@ -160,7 +160,7 @@ def test_falls_back_to_windowing_when_parser_unavailable():
     lines = src.splitlines(keepends=True)
     idx = _idx()
     with patch.object(idx, "_get_ts_parser", return_value=None):   # simulate the dep not installed
-        assert idx._spans_for_file(Path("x.ts"), lines, "x.ts") == idx._window_spans(0, len(lines))
+        assert idx._spans_for_file(Path("x.ts"), lines, "x.ts")[0] == idx._window_spans(0, len(lines))
 
 
 def test_never_raises_on_parser_exception():
@@ -173,7 +173,7 @@ def test_never_raises_on_parser_exception():
             raise RuntimeError("grammar exploded")
 
     with patch.object(idx, "_get_ts_parser", return_value=_Boom()):
-        assert idx._spans_for_file(Path("x.ts"), lines, "x.ts") == idx._window_spans(0, len(lines))
+        assert idx._spans_for_file(Path("x.ts"), lines, "x.ts")[0] == idx._window_spans(0, len(lines))
 
 
 def test_parser_cache_loads_each_language_once():

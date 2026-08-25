@@ -129,7 +129,16 @@ class SemanticDb:
                 -- this column are migrated with ALTER (below) rather than rebuilt; a NULL means
                 -- "end unknown", and the searcher then cannot verify that row for staleness.
                 -- The indexer backfills it in place on the next pass, without re-embedding.
-                chunk_end    INT
+                chunk_end    INT,
+
+                -- Name of the definition this chunk sits inside, when it sits inside one. A def
+                -- longer than `max_chunk_lines` is window-split, so most of its chunks start
+                -- mid-body and their preview shows whatever line the window opened on — a bare
+                -- `continue` or `except Exception as exc:`, which tells a reader nothing about
+                -- where they are. Recording the enclosing symbol at index time (the parser
+                -- already knows it) lets search render `search() … continue` instead. NULL for
+                -- module-level chunks, and for rows written before this column existed.
+                chunk_symbol TEXT
             );
 
             -- Composite (project_root, file_path): serves the project-scoped scans
@@ -164,13 +173,14 @@ class SemanticDb:
         # and the indexer backfills each one in place on the next pass, without re-embedding.
         try:
             cols = [r[1] for r in c.execute("PRAGMA table_info(chunk_hashes)").fetchall()]
-            if cols and "chunk_end" not in cols:
-                c.execute("ALTER TABLE chunk_hashes ADD COLUMN chunk_end INT")
-                logger.info("migrated semantic cache: added chunk_hashes.chunk_end")
+            for col, decl in (("chunk_end", "INT"), ("chunk_symbol", "TEXT")):
+                if cols and col not in cols:
+                    c.execute(f"ALTER TABLE chunk_hashes ADD COLUMN {col} {decl}")
+                    logger.info("migrated semantic cache: added chunk_hashes.%s", col)
         except Exception as exc:
-            # Never fatal: without the column the searcher simply cannot verify staleness, which
-            # is where this code stood before the column existed.
-            logger.warning("adding chunk_hashes.chunk_end failed: %s", exc)
+            # Never fatal: without the columns the searcher simply cannot verify staleness or name
+            # a chunk's enclosing symbol — where this code stood before they existed.
+            logger.warning("migrating chunk_hashes columns failed: %s", exc)
 
         c.commit()
 

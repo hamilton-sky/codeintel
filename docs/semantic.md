@@ -90,6 +90,9 @@ Controlled by `chunk_strategy` (default `"syntax"`; set `"lines"` to force the l
 - **`"lines"`** — every file is cut into fixed overlapping windows (the pre-0.6 behaviour), a
   runtime escape hatch that reverts chunking without touching the schema.
 
+`chunk_symbol` records the definition a chunk sits inside (the innermost one), or `NULL` at module
+level and for files that could not be parsed — see **Result previews** below.
+
 `chunk_start` is always the **0-based** start line and `chunk_end` its exclusive end, so a
 syntax-aware chunk and a line chunk are schema-identical
 (`chunk_id = "<project_key>:<rel_path>:<start_line>"`); a mixed index (some of each) is valid and
@@ -180,6 +183,34 @@ cosine order is returned unchanged. Everything is bounded (≤ `rerank_candidate
 per candidate, shared with verification) and never raises — a missing/edited file scores that candidate 0 rather than failing the query, and
 any rerank fault falls back to the cosine order. `rerank = "off"` restores the exact pure-cosine
 path.
+
+### Result previews
+
+A hit renders as `path:line | <first meaningful line of the chunk>`. That is enough when a chunk
+starts at a definition, but a def longer than `max_chunk_lines` is window-split, so most of its
+chunks open mid-body and the first meaningful line is whatever the window happened to start on:
+
+```
+src/codeintel/searcher.py:373 | continue
+src/codeintel/searcher.py:383 | except Exception as exc:
+```
+
+Correctly located, and useless — nothing says which function that is. Measured with `ast` across
+the indexed repositories, **11–33% of Python chunks start strictly inside a definition** rather
+than at one.
+
+The parser already knows the enclosing definition when the chunk is cut, so it is recorded in
+`chunk_hashes.chunk_symbol` and the preview leads with it when the line does not already name it:
+
+```
+src/codeintel/searcher.py:373 | search() … except Exception as exc:
+```
+
+The symbol index is a full walk of the parse tree (not the chunk spans), so the **innermost**
+enclosing def wins — a method reports the method, not its class. A file that falls back to line
+windowing (unparseable, or a language with no grammar) records no symbols: guessing one by scanning
+backwards for a `def` would confidently name the wrong function. Backfills in place like
+`chunk_end`, with no re-embedding.
 
 ### Staleness verification
 

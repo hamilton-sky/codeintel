@@ -6,6 +6,24 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **A search hit that lands inside a function now says which function.** A hit renders as
+  `path:line | <first meaningful line>`, which works when a chunk starts at a definition — but a
+  def longer than `max_chunk_lines` is window-split, so most of its chunks open mid-body and the
+  preview shows whatever line the window happened to start on. Real queries against this repository
+  returned `searcher.py:373 | continue` and `searcher.py:383 | except Exception as exc:`: correctly
+  located, and useless, because nothing said which function that was. Measured with `ast` across
+  the indexed repositories, 11–33% of Python chunks start strictly inside a definition rather than
+  at one. The parser already knows the enclosing def when the chunk is cut, so it is recorded
+  (`chunk_hashes.chunk_symbol`) and the preview leads with it — `searcher.py:373 | search() …
+  except Exception as exc:`. The symbol index is a full walk of the parse tree rather than the
+  chunk spans, so the **innermost** definition wins (a method reports the method, not its class),
+  and it covers tree-sitter languages including `const X = () => {}` components. A file that falls
+  back to line windowing records no symbol: guessing one by scanning backwards for a `def` would
+  confidently name the wrong function. Migrates and backfills in place exactly like `chunk_end`,
+  with no re-embedding — after one pass, 469 of 469 mid-function chunks in this repository name
+  their function.
+
 ### Fixed
 - **A search hit is now verified to still describe the code it was indexed from.** `chunk_hashes`
   stores a chunk's *line number*, and the snippet has always been re-read from the current file at
