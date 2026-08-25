@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import pathlib
 import re
 import sqlite3
@@ -10,26 +9,37 @@ import time
 
 import sqlite_vec
 
+from codeintel.paths import codeintel_home
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
+# Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
+# minified bundle or generated one-liner is one unsplittable chunk however large: a 20MB one-line
+# .py peaked at 3.4GB RSS through the embedder, on the reindexer's daemon thread inside the
+# long-lived MCP server. The head of a chunk carries its identifying content anyway.
+MAX_CHUNK_CHARS = 200_000
+
+
+def chunk_content_hash(text: str) -> str:
+    """The content hash identifying one chunk's text.
+
+    Lives here, beside the schema, because BOTH the indexer (writing ``chunk_hashes.content_hash``)
+    and the searcher (verifying a hit still describes the code it was indexed from) must compute it
+    identically. Two copies of this rule in two modules is a latent staleness bug: any drift makes
+    every verified hit look stale, or none of them. Applies the same truncation the indexer embeds
+    under, so an oversized chunk hashes consistently on both sides. Idempotent."""
+    if len(text) > MAX_CHUNK_CHARS:
+        text = text[:MAX_CHUNK_CHARS]
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
 
 def _base_dir() -> pathlib.Path:
-    """The per-machine cache directory. A single seam so tests can redirect every model's db
-    file at once (patch this, not each computed path).
-
-    ``CODEINTEL_HOME`` overrides it outright. `Path.home()` raises when the process has no
-    resolvable home directory — a UID with no passwd entry and no ``$HOME`` — which is not exotic
-    for this tool: it is routine for a container, and this is an MCP server whose whole purpose is
-    to be launched by coding agents that often run in one. Without an override the only fix was to
-    change the environment, and the failure surfaced as a `RuntimeError` several layers away from
-    anything that named it.
-    """
-    override = os.environ.get("CODEINTEL_HOME", "").strip()
-    if override:
-        return pathlib.Path(override).expanduser()
-    return pathlib.Path.home() / ".codeintel"
+    """The per-machine cache directory. Kept as a named seam so tests can redirect every model's db
+    file at once (patch this, not each computed path); the resolution itself lives in
+    ``codeintel.paths`` because config and auth need the identical answer."""
+    return codeintel_home()
 
 
 def _model_slug(model: str) -> str:
@@ -114,7 +124,12 @@ class SemanticDb:
                 project_root TEXT NOT NULL,
                 file_path    TEXT NOT NULL,
                 chunk_start  INT  NOT NULL,
-                content_hash TEXT NOT NULL
+                content_hash TEXT NOT NULL,
+                -- Exclusive end line of the chunk's span. Nullable ONLY because caches predating
+                -- this column are migrated with ALTER (below) rather than rebuilt; a NULL means
+                -- "end unknown", and the searcher then cannot verify that row for staleness.
+                -- The indexer backfills it in place on the next pass, without re-embedding.
+                chunk_end    INT
             );
 
             -- Composite (project_root, file_path): serves the project-scoped scans
@@ -139,6 +154,24 @@ class SemanticDb:
                 indexed_at   REAL NOT NULL
             );
         """)
+
+        # Migration: caches created before `chunk_end` lack it. Deliberately an ALTER and NOT the
+        # drop-and-rebuild used above for `project_root`. That column partitions the cache, so a
+        # cache without it is unusable and worth rebuilding; `chunk_end` only enables staleness
+        # verification, and dropping the tables to gain it would force a full re-embed of every
+        # project sharing this file (85k+ chunks on a working machine) to fix a bug that only
+        # affects edited files. Existing rows get NULL — unverifiable, exactly the old behaviour —
+        # and the indexer backfills each one in place on the next pass, without re-embedding.
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(chunk_hashes)").fetchall()]
+            if cols and "chunk_end" not in cols:
+                c.execute("ALTER TABLE chunk_hashes ADD COLUMN chunk_end INT")
+                logger.info("migrated semantic cache: added chunk_hashes.chunk_end")
+        except Exception as exc:
+            # Never fatal: without the column the searcher simply cannot verify staleness, which
+            # is where this code stood before the column existed.
+            logger.warning("adding chunk_hashes.chunk_end failed: %s", exc)
+
         c.commit()
 
     def _table_dim(self) -> int | None:

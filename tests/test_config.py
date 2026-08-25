@@ -38,13 +38,13 @@ def test_chunk_strategy_enum_validation():
 
 def test_rerank_config_validation():
     assert _coerce({})["rerank"] == "on"                                      # default
-    assert _coerce({})["rerank_candidates"] == 30                            # default
+    assert _coerce({})["rerank_candidates"] == 60                            # default
     assert _coerce({"rerank": "off"})["rerank"] == "off"                     # escape hatch kept
     assert _coerce({"rerank": "ON"})["rerank"] == "on"                       # case-normalized
     assert _coerce({"rerank": "maybe"})["rerank"] == "on"                    # unknown → default
     assert _coerce({"rerank_candidates": 50})["rerank_candidates"] == 50     # positive kept
-    assert _coerce({"rerank_candidates": 0})["rerank_candidates"] == 30      # non-positive → default
-    assert _coerce({"rerank_candidates": "x"})["rerank_candidates"] == 30    # non-int → default
+    assert _coerce({"rerank_candidates": 0})["rerank_candidates"] == 60      # non-positive → default
+    assert _coerce({"rerank_candidates": "x"})["rerank_candidates"] == 60    # non-int → default
 
 
 def test_valid_values_are_preserved():
@@ -79,3 +79,63 @@ def test_load_config_reads_and_validates_project_toml(tmp_path):
     cfg = load_config(str(tmp_path))
     assert cfg["cosine_floor"] == _DEFAULTS["cosine_floor"]  # bad value → default, no crash
     assert cfg["backend"] == "semantic"                      # good value → kept
+
+
+# --------------------------------------------------------------- CODEINTEL_HOME as a real seam
+
+def test_codeintel_home_redirects_the_global_config(tmp_path, monkeypatch):
+    """`CODEINTEL_HOME` has to move the machine-wide config, not just the semantic cache.
+
+    `load_config` read `pathlib.Path.home()` inline, so the override reached the cache and nothing
+    else — a container told to keep its state somewhere writable still merged (or failed to find)
+    a config from a home directory it did not have."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('backend = "semantic"\nwindow = 77\n')
+    monkeypatch.setenv("CODEINTEL_HOME", str(home))
+
+    cfg = load_config(str(tmp_path))
+    assert cfg["backend"] == "semantic"
+    assert cfg["window"] == 77
+
+
+def test_project_config_still_overrides_the_redirected_global(tmp_path, monkeypatch):
+    """Precedence is defaults < global < project, and pointing the global elsewhere must not
+    quietly promote it above the repo's own `.codeintel.toml`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text("window = 77\nstride = 5\n")
+    (tmp_path / ".codeintel.toml").write_text("window = 12\n")
+    monkeypatch.setenv("CODEINTEL_HOME", str(home))
+
+    cfg = load_config(str(tmp_path))
+    assert cfg["window"] == 12   # project wins
+    assert cfg["stride"] == 5    # global still applies where the project is silent
+
+
+def test_config_and_auth_survive_a_host_with_no_home_directory(tmp_path, monkeypatch):
+    """The environment `CODEINTEL_HOME` exists for: a container UID with no passwd entry, where
+    `Path.home()` raises. `load_config` used to propagate that `RuntimeError` — every query on such
+    a host died as an opaque `provider-error`, and setting the documented override did not help
+    because config never consulted it. `load_auth` had the same hole against its never-raise
+    promise. Absent config is not an error; it means there is no config."""
+    import pathlib
+
+    from codeintel.auth import load_auth
+
+    def _no_home(cls):
+        raise RuntimeError("Could not determine home directory")
+
+    monkeypatch.delenv("CODEINTEL_HOME", raising=False)
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(_no_home))
+
+    cfg = load_config(str(tmp_path))
+    assert cfg["model"] == _DEFAULTS["model"], "must fall back to defaults, not raise"
+    assert load_auth().enabled is False, "no config to read → RBAC off, not a crash"
+
+    # ...and with the override set it must work properly rather than merely not crash.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text("window = 31\n")
+    monkeypatch.setenv("CODEINTEL_HOME", str(home))
+    assert load_config(str(tmp_path))["window"] == 31

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from codeintel.containment import ContainmentError, open_contained
+from codeintel.semantic_db import chunk_content_hash
 
 if TYPE_CHECKING:
     from codeintel.semantic_db import SemanticDb
@@ -79,6 +80,12 @@ class Searcher:
         self.db = db
         self.model_name = model_name
         self._embedder = None
+        # Outcome of the last search's staleness verification, for callers that must REPORT a
+        # thinned result rather than quietly serve one. `last_stale` counts hits dropped because
+        # the file no longer holds the code they were indexed from; `last_unverifiable` counts
+        # legacy rows with no stored span, which cannot be checked either way.
+        self.last_stale = 0
+        self.last_unverifiable = 0
 
     def _get_embedder(self):
         if self._embedder is None:
@@ -132,14 +139,22 @@ class Searcher:
             logger.debug("snippet read failed for %s:%d: %s", file_path, chunk_start, exc)
             return "[file not found]"
 
-    def _read_chunk(self, root_real: str, file_path: Path, chunk_start: int) -> list[str] | None:
-        """Bounded re-read from ``chunk_start`` for rerank lexical scoring (and the snippet in one
-        read). Uses ``islice`` so a huge multi-line file is not fully materialised just to take a
-        40-line window. ``None`` on any failure — the caller scores that candidate 0 and shows a
-        not-found snippet, never crashing (a missing/edited file must degrade, per never-raise)."""
+    def _read_chunk(
+        self, root_real: str, file_path: Path, chunk_start: int, chunk_end: int | None = None
+    ) -> list[str] | None:
+        """Re-read a chunk's lines for staleness verification, rerank scoring and the snippet — in
+        one read. Uses ``islice`` so a huge multi-line file is not fully materialised.
+
+        With ``chunk_end`` (the stored span) the read is EXACT: the same lines the indexer hashed,
+        which is what makes verification possible. ``None`` falls back to the ``_RERANK_READ_LINES``
+        window used before the span was recorded — a legacy row, unverifiable by definition.
+
+        ``None`` on any failure — the caller scores that candidate 0 and shows a not-found snippet,
+        never crashing (a missing/edited file must degrade, per never-raise)."""
+        stop = chunk_start + _RERANK_READ_LINES if chunk_end is None else chunk_end
         try:
             with open_contained(root_real, file_path, encoding="utf-8", errors="replace") as f:
-                return list(itertools.islice(f, chunk_start, chunk_start + _RERANK_READ_LINES))
+                return list(itertools.islice(f, chunk_start, max(chunk_start, stop)))
         except Exception as exc:
             # `open_contained` logs the escape at WARNING before raising, so a containment refusal
             # is visible even though this handler degrades it to "score this candidate 0" like any
@@ -186,40 +201,81 @@ class Searcher:
             return _SYMBOL_BOOST * 0.5
         return 0.0
 
+    def _verify(
+        self, root: Path, project_root_real: str, candidates: list[dict]
+    ) -> tuple[list[dict], int, int]:
+        """Read each candidate's real span and confirm it still hashes to what was indexed.
+
+        This closes the engine's worst failure mode. A row stores a *line number*, and the snippet
+        was always re-read from the CURRENT file at that line — so once a file was edited, a hit
+        pointed at whatever now occupies those lines. Deleting a `charge_credit_card()` at line 1
+        made "charge the credit card" return `app.py:1 | import logging`, ranked first and marked
+        `confidence: complete`. That is worse than returning nothing: the agent has no signal to
+        doubt it, and the codebase's whole partial/complete contract exists to prevent exactly this.
+
+        Stale candidates are DROPPED rather than annotated — a footnote still puts a wrong
+        `path:line` in front of the agent — and counted, so the provider can report the omission
+        instead of passing off a thinned list as a complete one. A row whose file is unreadable is
+        kept with the not-found sentinel (unchanged behaviour); a row with no stored span is
+        unverifiable and kept as-is.
+
+        Returns ``(kept, stale, unverifiable)``. Each kept candidate carries its ``text``, so
+        rerank and the snippet reuse this read instead of paying for their own.
+        """
+        kept: list[dict] = []
+        stale = unverifiable = 0
+        # Only needed for legacy rows: without a stored end, bound the read at the next chunk start
+        # so lexical text can't bleed into an unrelated def. Rows written since carry a real span.
+        starts_by_file: dict[str, list[int]] = {}
+        for c in candidates:
+            if c["end"] is None and c["path"] not in starts_by_file:
+                starts_by_file[c["path"]] = self._chunk_starts(project_root_real, c["path"])
+
+        for c in candidates:
+            end = c["end"]
+            lines = self._read_chunk(project_root_real, root / c["path"], c["line"], end)
+            if lines is None:
+                c["text"] = None  # unreadable → scored 0, rendered as the not-found sentinel
+                kept.append(c)
+                continue
+            text = "".join(lines)
+            if end is None:
+                nxt = next((s for s in starts_by_file.get(c["path"], ()) if s > c["line"]), None)
+                if nxt is not None:
+                    text = "".join(lines[: max(1, nxt - c["line"])])
+                unverifiable += 1
+            elif chunk_content_hash(text) != c["hash"]:
+                stale += 1
+                continue
+            c["text"] = text
+            kept.append(c)
+        return kept, stale, unverifiable
+
     def _rerank(
         self, query: str, root: Path, project_root_real: str, candidates: list[dict]
     ) -> list[dict]:
-        """Reorder floor-gated candidates (given in cosine order) by Reciprocal Rank Fusion over
-        the semantic rank and a lexical rank, plus a symbol boost. Reads each candidate's chunk
-        once (bounded) — caching its 5-line snippet — so the whole rerank costs ≤ len(candidates)
-        reads. When no candidate has any lexical overlap the lexical rank mirrors the semantic
-        rank, so the cosine order is returned unchanged (rerank only *reorders* on real signal)."""
+        """Reorder verified candidates (given in cosine order) by Reciprocal Rank Fusion over the
+        semantic rank and a lexical rank, plus a symbol boost. Scores from the text ``_verify``
+        already read, so the whole rerank costs ZERO additional reads. When no candidate has any
+        lexical overlap the lexical rank mirrors the semantic rank, so the cosine order is returned
+        unchanged (rerank only *reorders* on real signal)."""
         query_tokens = _tokenize(query)
         n = len(candidates)
-        # Bound each candidate's lexical/boost text at the NEXT stored chunk start in its file — the
-        # chunk's true end for tiling syntax chunks, its owned region for overlapping line windows.
-        # A chunk's end line isn't stored, so a fixed 40-line read would otherwise (a) bleed into an
-        # unrelated later def, handing this chunk a symbol boost that isn't its own, and/or (b) — if
-        # we capped at neighbouring *candidates* — truncate a chunk below its own overlapping span.
-        # Bounding at the next real chunk gives each source line to exactly one chunk: the one whose
-        # 5-line snippet will actually show it.
-        starts_by_file: dict[str, list[int]] = {}
-        for path in {c["path"] for c in candidates}:
-            starts_by_file[path] = self._chunk_starts(project_root_real, path)
 
         lex = [0.0] * n
         boost = [0.0] * n
         for i, c in enumerate(candidates):
-            lines = self._read_chunk(project_root_real, root / c["path"], c["line"])
-            if lines is None:
-                c["snippet"] = "[file not found]"
+            text = c.get("text")
+            if text is None:
+                # Unreadable: re-read through _read_snippet purely to get the RIGHT sentinel. It
+                # separates a containment refusal ("resolves outside the indexed root" — someone
+                # replaced an indexed file with a link out) from ordinary index drift, and
+                # flattening both to "[file not found]" would hide the security-relevant one.
+                # Costs a read only for a candidate that is already broken.
+                c["snippet"] = self._read_snippet(project_root_real, root / c["path"], c["line"])
                 text = ""
             else:
-                # snippet keeps the existing 5-line preview (bleed-tolerant, unchanged); the
-                # lexical/boost text is capped at the next stored chunk start in this file.
-                c["snippet"] = "".join(lines[:_SNIPPET_LINES]).rstrip()
-                nxt = next((s for s in starts_by_file.get(c["path"], ()) if s > c["line"]), None)
-                text = "".join(lines if nxt is None else lines[: max(1, nxt - c["line"])])
+                c["snippet"] = "".join(text.splitlines(keepends=True)[:_SNIPPET_LINES]).rstrip()
             lex[i] = self._lexical_score(query_tokens, text)
             boost[i] = self._symbol_boost(query, text)
 
@@ -277,6 +333,8 @@ class Searcher:
                 SELECT
                     ce.chunk_id,
                     ch.chunk_start,
+                    ch.chunk_end,
+                    ch.content_hash,
                     ch.file_path,
                     vec_distance_cosine(ce.embedding, ?) AS dist
                 FROM code_embeddings ce
@@ -302,9 +360,12 @@ class Searcher:
                 score = 1.0 - float(row["dist"])
                 if score < cosine_floor:
                     continue
+                end = row["chunk_end"]
                 candidates.append({
                     "path": str(row["file_path"]),
                     "line": int(row["chunk_start"]),
+                    "end": None if end is None else int(end),
+                    "hash": row["content_hash"],
                     "score": round(score, 6),
                 })
             except Exception as exc:
@@ -314,8 +375,21 @@ class Searcher:
         if not candidates:
             return []
 
-        # Rerank re-reads chunk text; if anything goes wrong, fall back to the cosine order so a
-        # rerank fault can never do worse than today (and never raises).
+        # Verify BEFORE rerank, so a stale row can neither be ranked nor shown. Never-raise: if
+        # verification itself faults, keep every candidate rather than silently returning nothing —
+        # degrading to the old (unverified) behaviour is bad, returning an empty result is worse.
+        try:
+            candidates, stale, unverifiable = self._verify(root, project_root_real, candidates)
+        except Exception as exc:
+            logger.warning("staleness verification failed, returning unverified: %s", exc)
+            stale, unverifiable = 0, len(candidates)
+        self.last_stale = stale
+        self.last_unverifiable = unverifiable
+        if not candidates:
+            return []
+
+        # Rerank scores the text verification already read; if anything goes wrong, fall back to
+        # the cosine order so a rerank fault can never do worse than today (and never raises).
         if do_rerank and len(candidates) > 1:
             try:
                 candidates = self._rerank(query, root, project_root_real, candidates)
@@ -327,7 +401,14 @@ class Searcher:
             # _rerank caches the snippet on each candidate it read; fill it in otherwise.
             snippet = c.get("snippet")
             if snippet is None:
-                snippet = self._read_snippet(project_root_real, root / c["path"], c["line"])
+                text = c.get("text")
+                snippet = (
+                    # See _rerank: an unreadable candidate goes back through _read_snippet so a
+                    # containment refusal stays distinguishable from a missing file.
+                    self._read_snippet(project_root_real, root / c["path"], c["line"])
+                    if text is None
+                    else "".join(text.splitlines(keepends=True)[:_SNIPPET_LINES]).rstrip()
+                )
             results.append({
                 "path": c["path"],
                 "line": c["line"],

@@ -69,9 +69,24 @@ def open_contained(root_real: str, candidate: str | Path, **kwargs):
     Raises ``ContainmentError`` rather than returning a sentinel, so a caller that wraps reads in a
     broad ``except Exception`` cannot quietly downgrade an escape to "file not found" — the escape
     is logged at WARNING here regardless of what the caller does with the exception.
+
+    A path that simply DOES NOT EXIST is reported as ``FileNotFoundError``, not as an escape.
+    ``contained_path`` answers the single question "may this be read", and a deleted file is a
+    legitimate no — but it is also the most ordinary thing that can happen to an indexed file, and
+    reporting it as a refusal meant every deletion between indexing and a query logged a WARNING
+    asking whether a symlink had been "planted after indexing" and rendered the hit as
+    ``[refused: resolves outside the indexed root]``. That is a false security alarm on a routine
+    event, and it drowns the real ones. The distinction is made HERE rather than by relaxing
+    ``contained_path``, whose ``None`` also drives ``_cleanup_deleted``'s reconciliation of deleted
+    files — loosening it there would leave their rows in the index forever.
     """
     safe = contained_path(root_real, candidate)
     if safe is None:
+        # lexists(), not exists(): a dangling symlink still EXISTS as a link, and a link whose
+        # target vanished is a construct worth refusing loudly rather than calling "not found".
+        if not os.path.lexists(candidate):
+            logger.debug("indexed file no longer exists: %s", candidate)
+            raise FileNotFoundError(str(candidate))
         logger.warning(
             "refusing to read %s — it does not resolve to a file inside %s (symlink or hard link "
             "planted after indexing?)", candidate, root_real,

@@ -39,6 +39,32 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolate_codeintel_home(tmp_path_factory, monkeypatch):
+    """Point ``~/.codeintel`` at a throwaway directory for EVERY test.
+
+    Two problems, one fix.
+
+    *Pollution.* Tests that build a repo and query it write into the real per-machine semantic
+    cache unless they remember to redirect it. Most do; the ones that don't left a row per run
+    behind forever — a working machine had ~90 orphaned ``pytest-of-<user>`` project roots in
+    ``~/.codeintel/semantic.db``. Rows are partitioned by ``project_root`` so results stayed
+    correct, but ``doctor`` reports each dead tmp directory as a healthy indexed project. This is
+    the same class the ``_reap_leaked_backend_projects`` fixture below handles for the graph
+    backend; opting in per test is what failed, so this is not opt-in.
+
+    *Contamination in the other direction.* ``load_config`` merges a machine-wide
+    ``config.toml`` under the project's. A developer with one on disk was silently running the
+    suite against different defaults than CI — a green local run proving nothing about the
+    shipped values. An isolated home means no test can read it.
+
+    Env var rather than patching ``semantic_db._base_dir``: it also covers config and auth, and it
+    survives into the subprocesses ``test_cold_process`` launches. Tests that set the variable
+    themselves still win — ``monkeypatch`` applies theirs after this one.
+    """
+    monkeypatch.setenv("CODEINTEL_HOME", str(tmp_path_factory.mktemp("codeintel-home")))
+
+
+@pytest.fixture(autouse=True)
 def _fresh_gateway():
     from codeintel import server
     server._reset_gateway()

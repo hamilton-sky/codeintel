@@ -15,6 +15,13 @@ except ImportError:
     _DEPS_OK = False
 
 
+def _plural(n: int, noun: str) -> str:
+    """``3 matching chunks`` / ``1 matching chunk`` — these strings are read by a human deciding
+    whether to re-index, and "1 matching chunks were dropped" reads like a formatting bug in the
+    tool rather than a fact about their repo."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _first_meaningful_line(snippet: str) -> str:
     """The first line of *snippet* that says something.
 
@@ -119,7 +126,7 @@ class SemanticProvider:
         try:
             from codeintel.config import load_config
             from codeintel.indexer import Indexer
-            from codeintel.searcher import Searcher
+            from codeintel.searcher import _RERANK_CANDIDATES_CAP, Searcher
             from codeintel.semantic_db import SemanticDb, default_db_path
 
             cfg = load_config(project_root)
@@ -163,14 +170,38 @@ class SemanticProvider:
             # not enough: on a doc-heavy repository all ten candidates were prose, so re-ordering
             # had nothing to promote. The bias is in retrieval, so the widening has to happen there
             # — ask for several times the display budget and let the code corpus claim its share.
+            #
+            # That widening is `rerank_candidates`, NOT a private multiplier. It used to be a
+            # hardcoded `_display_k * 6`, which silently overrode the config key: `Searcher.search`
+            # takes `max(k, rerank_candidates)` (it can never return k results from fewer than k
+            # candidates), so a k of 60 swallowed every configured value at or below it — the
+            # documented default of 30 changed nothing, and the `_RERANK_CANDIDATES_CAP` DoS guard
+            # was bypassed by our own over-retrieval. One knob now owns candidate breadth, clamped
+            # to that cap here so a large configured value can't reintroduce the bypass.
+            #
+            # `_display_k` is a CEILING on what gets shown, never a floor under the knob: flooring
+            # the width at 10 would silently override a configured 7 and reintroduce, in miniature,
+            # the exact override being removed here. Someone who asks for 7 candidates gets at most
+            # 7 results.
             _display_k = 10
+            width = min(int(cfg.get("rerank_candidates", 60)), _RERANK_CANDIDATES_CAP)
             matches = searcher.search(
-                target, project_root, k=_display_k * 6,
+                target, project_root, k=width,
                 cosine_floor=float(cfg.get("cosine_floor", 0.25)),
                 rerank=str(cfg.get("rerank", "on")),
-                rerank_candidates=int(cfg.get("rerank_candidates", 30)),
+                rerank_candidates=width,
             )
             if not matches:
+                # Distinguish "nothing was similar enough" from "everything similar was stale".
+                # Both used to report `below-floor`, which reads as "this code does not exist" —
+                # the single most damaging thing to tell an agent about a repo it just edited.
+                if searcher.last_stale:
+                    return safe_null_result(
+                        op, target, engine="semantic", reason="index-stale",
+                        hint=f"{_plural(searcher.last_stale, 'matching chunk')} could not be "
+                             f"verified against the current source and was withheld; "
+                             f"run: codeintel index {project_root}",
+                    )
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")
 
             # `m['line']` is the chunk's `chunk_start`, which is 0-based by construction in the
@@ -186,9 +217,22 @@ class SemanticProvider:
             # "how does this work", just not to "where is this done".
             code_hits, prose_hits = partition_by_corpus(matches)
             # Code first, but never a pure-code wall: prose genuinely answers "how does this work".
-            # Reserve at least a third of the slots for prose when both corpora have hits.
+            # Reserve up to a third of the slots for prose when both corpora have hits.
+            #
+            # The prose reservation is a CEILING on prose, not a quota that must be met. Capping
+            # code at two thirds unconditionally dropped slots whenever prose couldn't fill the
+            # rest: 58 code hits and 2 prose hits returned 6 + 2 = 8 results, discarding 52
+            # qualifying code hits to leave four slots empty. That fired on 8 of 18 sampled
+            # queries against code-heavy repositories — losing up to 3 of 10 results — and it fired
+            # hardest exactly where code hits are most plentiful, which inverts the intent of
+            # ranking code first. Giving code at least `_display_k - len(prose_hits)` slots keeps
+            # the one-third prose reservation whenever there IS prose to fill it, and hands the
+            # remainder back to code when there isn't.
             if code_hits and prose_hits:
-                keep_code = min(len(code_hits), max(1, (_display_k * 2) // 3))
+                keep_code = min(
+                    len(code_hits),
+                    max(_display_k - len(prose_hits), (_display_k * 2) // 3),
+                )
                 ordered = code_hits[:keep_code] + prose_hits[:_display_k - keep_code]
             else:
                 ordered = (code_hits + prose_hits)[:_display_k]
@@ -206,6 +250,19 @@ class SemanticProvider:
             # asked "where is X done" and received only prose needs to know that no code matched —
             # otherwise an empty code corpus reads as "the implementation does not exist".
             gaps = []
+            # A thinned list must never be passed off as a whole one. These hits were dropped
+            # because the file no longer holds the code they were indexed from, so the answer is
+            # "some of this repo is not currently searchable", not "this is everything".
+            if searcher.last_stale:
+                gaps.append({
+                    "section": "freshness",
+                    "kind": "stale-chunks-dropped",
+                    "detail": f"{_plural(searcher.last_stale, 'matching chunk')} withheld: the "
+                              f"source has changed since indexing, so the recorded location no "
+                              f"longer points at the code that matched. Results here are "
+                              f"incomplete — re-index to restore them "
+                              f"(codeintel index {project_root}).",
+                })
             if not code_hits and prose_hits:
                 gaps.append({
                     "section": "corpus",

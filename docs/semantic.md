@@ -90,9 +90,14 @@ Controlled by `chunk_strategy` (default `"syntax"`; set `"lines"` to force the l
 - **`"lines"`** — every file is cut into fixed overlapping windows (the pre-0.6 behaviour), a
   runtime escape hatch that reverts chunking without touching the schema.
 
-`chunk_start` is always the **0-based** start line, so a syntax-aware chunk and a line chunk are
-schema-identical (`chunk_id = "<project_key>:<rel_path>:<start_line>"`); a mixed index (some of
-each) is valid and converges on the next re-index via orphan reconciliation (below).
+`chunk_start` is always the **0-based** start line and `chunk_end` its exclusive end, so a
+syntax-aware chunk and a line chunk are schema-identical
+(`chunk_id = "<project_key>:<rel_path>:<start_line>"`); a mixed index (some of each) is valid and
+converges on the next re-index via orphan reconciliation (below). `chunk_end` records the span the
+`content_hash` was taken over, which is what lets search verify a hit still describes the code it
+was indexed from (see **Staleness verification**). Caches written before the column existed carry
+`NULL` and are migrated by `ALTER` rather than a rebuild: an ordinary index pass backfills each
+span in place, with no re-embedding.
 
 ### Chunking parameters
 
@@ -138,12 +143,15 @@ reset` sweeps every model file; changing a repo's `model` just switches it to a 
 
 ```python
 Searcher(db).search(query, project_root, k=10, cosine_floor=0.25,
-                    rerank="on", rerank_candidates=30)
+                    rerank="on", rerank_candidates=60)
 ```
 
-- Retrieve a cosine candidate set (`rerank_candidates`, default 30 — but never fewer than `k`, and
-  hard-capped so a misconfigured value can't blow up a query) by cosine distance (via
-  `vec_distance_cosine`), then return the top `k` after reranking.
+- Retrieve a cosine candidate set (`rerank_candidates`, default 60 — but never fewer than `k`, and
+  hard-capped at 200 so a misconfigured value can't blow up a query) by cosine distance (via
+  `vec_distance_cosine`), then return the top `k` after reranking. This key is the single knob for
+  candidate breadth: the provider used to apply its own hardcoded widening on top, which silently
+  swallowed any configured value at or below it (the documented default of 30 changed nothing, and
+  the cap was bypassed).
 - Results with `score = 1.0 - cosine_distance < 0.25` are dropped (below the floor). The floor
   gates the **cosine** candidate set, so reranking only re-orders what pure cosine already judged
   good enough — quality can't regress below the pure-cosine path.
@@ -157,8 +165,8 @@ Searcher(db).search(query, project_root, k=10, cosine_floor=0.25,
 
 Cosine alone under-ranks exact lexical/symbol matches (searching `parse_config` when a
 differently-worded but semantically-near chunk out-scores the literal match). With `rerank = "on"`
-(the default), each candidate's chunk text is re-read (bounded — up to 40 lines from its start,
-capped at the next candidate in the same file) and scored two more ways:
+(the default), each candidate's chunk text — already read by staleness verification, so rerank
+costs no additional reads — is scored two more ways:
 
 - a **lexical** score — the fraction of query (sub)tokens present in the chunk (identifiers are
   split on camelCase/snake_case, so `parse` matches `parse_config`);
@@ -168,10 +176,37 @@ capped at the next candidate in the same file) and scored two more ways:
 The semantic rank and lexical rank are fused with Reciprocal Rank Fusion
 (`1/(60+rank_sem) + 1/(60+rank_lex)`) plus the symbol boost, and the candidates are re-sorted.
 When no candidate has any lexical overlap the lexical rank mirrors the semantic rank, so the
-cosine order is returned unchanged. Everything is bounded (≤ `rerank_candidates` file reads) and
-never raises — a missing/edited file scores that candidate 0 rather than failing the query, and
+cosine order is returned unchanged. Everything is bounded (≤ `rerank_candidates` file reads, one
+per candidate, shared with verification) and never raises — a missing/edited file scores that candidate 0 rather than failing the query, and
 any rerank fault falls back to the cosine order. `rerank = "off"` restores the exact pure-cosine
 path.
+
+### Staleness verification
+
+A row stores a chunk's **line number**, and the snippet is re-read from the file at query time. On
+its own that means an edited file silently reassigns a hit: delete `charge_credit_card()` from line
+1 and a search for "charge the credit card" returned `app.py:1 | import logging` — ranked first and
+reported as `confidence: complete`. That is worse than an empty result, because nothing in the
+answer invites doubt.
+
+Every candidate is therefore verified before it is ranked or shown. Its recorded span
+`[chunk_start, chunk_end)` is re-read and re-hashed with `semantic_db.chunk_content_hash` (the same
+function the indexer wrote it with — one definition, so the two sides cannot drift):
+
+- **Hash matches** → the chunk still describes the code it was indexed from; it is kept, and the
+  text is reused for reranking and the snippet, so verification costs no extra reads.
+- **Hash differs** → the row is stale and is **dropped**, not annotated: a footnote would still put
+  a wrong `path:line` in front of the caller. Dropped hits are counted and reported as a
+  `freshness` / `stale-chunks-dropped` gap, which marks the answer `confidence: partial` — a
+  thinned list is never passed off as a complete one. If *every* match was stale the result is
+  `reason: 'index-stale'`, distinct from `'below-floor'` ("nothing was similar enough"), because
+  telling an agent that code it just edited does not exist is the most damaging failure available.
+- **`chunk_end IS NULL`** (a cache predating the column) → unverifiable, kept as before. An index
+  pass backfills the span in place without re-embedding.
+
+Verification is per-chunk, not per-file: editing one function does not blind the rest of its
+module. It never raises — a fault in verification returns the candidates unverified rather than
+returning nothing.
 
 ## Safe-null reasons
 
@@ -182,6 +217,7 @@ path.
 | `'no-project-root'` | `project_root` is empty or falsy |
 | `'no-index'` | The index is empty for this project (zero rows in `chunk_hashes`) |
 | `'below-floor'` | A non-empty index yielded no match above the cosine floor |
+| `'index-stale'` | Matches were found, but every one failed staleness verification — the files changed since indexing. Distinct from `'below-floor'`: the code may well exist, the index just no longer locates it. Re-index to restore. |
 | `'provider-error'` | Unexpected exception during indexing or searching |
 
 ## Envelope shape

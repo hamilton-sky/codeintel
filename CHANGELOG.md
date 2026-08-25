@@ -6,6 +6,64 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A search hit is now verified to still describe the code it was indexed from.** `chunk_hashes`
+  stores a chunk's *line number*, and the snippet has always been re-read from the current file at
+  that line — so once a file was edited, a hit pointed at whatever now occupied those lines.
+  Deleting a `charge_credit_card()` at line 1 made a search for "charge the credit card" return
+  `app.py:1 | import logging`, ranked first and reported as `confidence: complete`. An agent has no
+  way to doubt that, which makes it worse than an empty result — and it is the exact failure the
+  engine's partial/complete contract exists to prevent. Each chunk's span is now recorded
+  (`chunk_hashes.chunk_end`) and re-hashed at query time; a chunk whose source no longer matches is
+  **withheld** rather than shown, counted, and reported as a `freshness` gap that marks the answer
+  `partial`. When every match is stale the result is `reason: 'index-stale'` with a re-index hint,
+  no longer conflated with `'below-floor'` ("nothing matched"). Verification is per-chunk, so
+  editing one function does not blind the rest of its module, and the text it reads is reused by
+  the reranker — the check costs no extra file reads. Existing caches migrate by `ALTER`, not a
+  rebuild: an ordinary index pass backfills every span in place with **no re-embedding**
+  (measured: 3,971 spans backfilled on a 86k-chunk cache, zero vectors recomputed).
+- **Search no longer silently discards result slots on code-heavy repositories.** The code/prose
+  interleaving capped code at two thirds of the display budget unconditionally, but never handed
+  the remainder back when prose couldn't fill it: 58 code hits and 2 prose hits returned 8 results,
+  dropping 52 qualifying code hits to leave four slots empty. It fired on 8 of 18 sampled queries
+  against real repositories — losing up to 3 of 10 results — and hardest exactly where code hits
+  are most plentiful, inverting the intent of ranking code first. The prose share is now a ceiling
+  rather than a quota (0 of the same 18 queries under-fill).
+- **`rerank_candidates` now does something.** The semantic provider applied its own hardcoded
+  `display_k * 6` widening on top of the config key, and `Searcher.search` takes
+  `max(k, rerank_candidates)` — so every configured value at or below 60 was swallowed. The
+  documented default of 30 changed nothing, every query performed 60 file reads instead of 30, and
+  the `_RERANK_CANDIDATES_CAP` guard was bypassed by the provider's own over-retrieval. Candidate
+  breadth is now this key alone, clamped to the cap. The default moves 30 → **60**, the value that
+  was really in use, so fixing the wiring doesn't silently halve anyone's retrieval.
+- **`CODEINTEL_HOME` now actually redirects everything it claims to.** The variable exists because
+  `Path.home()` raises on a host with no resolvable home directory — a container UID with no passwd
+  entry, which is routine for an MCP server launched by an agent. Only the semantic cache honoured
+  it: `config.py` and `auth.py` each called `Path.home()` inline, so on such a host `load_config()`
+  raised `RuntimeError` **even with `CODEINTEL_HOME` set** — the documented escape hatch did not
+  work in the one environment it was written for, and the failure surfaced several layers away as
+  an opaque `provider-error`. Resolution now lives in one place (`codeintel.paths.codeintel_home`)
+  and covers the cache, the global `config.toml`, and `auth.toml`. A host with nowhere to look
+  falls back to defaults with RBAC off, rather than crashing — absent config is not an error.
+- **A deleted file is no longer reported as a suspected symlink attack.** `contained_path` returns
+  "don't read this" for a missing file (correctly — `_cleanup_deleted` relies on it to reconcile
+  deleted rows away), but `open_contained` attributed *every* refusal to a planted link: each
+  ordinary deletion between indexing and a query logged a WARNING asking whether a symlink had been
+  "planted after indexing". False alarms on the most routine event in the system are how real ones
+  get ignored. A path that does not exist now raises `FileNotFoundError` and logs at debug; genuine
+  escapes (including dangling symlinks) still raise `ContainmentError` and still warn.
+
+### Internal
+- **The test suite no longer reads or writes the real `~/.codeintel`.** Tests that indexed a
+  fixture repo without redirecting the cache left a project root behind on every run — ~90 dead
+  `pytest-of-<user>` entries had accumulated, each of which `doctor` reported as a healthy indexed
+  project. The reverse direction was worse and silent: `load_config` merges a machine-wide
+  `config.toml`, so a developer with one on disk ran the suite against different defaults than CI,
+  and a green local run proved nothing about the shipped values. An autouse fixture now points
+  `CODEINTEL_HOME` at a per-test temporary directory, so isolation is not something an individual
+  test can forget. (Existing orphaned rows are cleared by `codeintel reset --all`, or by re-running
+  against a fresh cache; they are inert either way, since rows are partitioned by `project_root`.)
+
 ## [0.17.0] — 2026-08-24
 
 ### Added

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from codeintel.containment import contained_path, real_root
 from codeintel.progress import ProgressSink, _Guard
+from codeintel.semantic_db import MAX_CHUNK_CHARS, chunk_content_hash
 from codeintel.source_kind import (
     CODE_EXTS,
     load_gitattributes_globs,
@@ -26,8 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Hard ceiling on the characters embedded for ONE chunk. Line-based splitting cannot bound a
 # minified or generated single-line file, and the embedder's memory use scales with input size.
-# Generous enough that no hand-written function is affected.
-_MAX_CHUNK_CHARS = 200_000
+# Generous enough that no hand-written function is affected. Defined beside the schema so the
+# searcher hashes an oversized chunk exactly the way the indexer stored it; re-exported here
+# because this module is where the truncation is actually performed (and warned about).
+_MAX_CHUNK_CHARS = MAX_CHUNK_CHARS
 
 # Bytes examined when deciding whether a file is binary. A NUL in the first block is the classic
 # signal and is what `git` itself uses.
@@ -228,6 +231,9 @@ class Indexer:
         self._ts_parsers: dict = {}  # per-instance tree-sitter parser cache (lang -> parser|None)
         # Why the last index() failed, for callers that must SHOW a reason rather than log one.
         self.last_error: str | None = None
+        # Rows whose content was unchanged but whose `chunk_end` this pass patched in place
+        # (pre-migration NULLs). Counted so the commit can be skipped when there were none.
+        self._backfilled = 0
 
     def _get_embedder(self):
         if self._embedder is None:
@@ -608,7 +614,7 @@ class Indexer:
         rel_path: str,
         project_key: str,
         conn,
-        new_chunks: list[tuple[str, str, str, int, str]],
+        new_chunks: list[tuple[str, str, str, int, int, str]],
     ) -> tuple[set[str], bool]:
         """Materialise spans into new/changed chunk records — shared by both strategies, so the
         whitespace-skip, hash-dedup, and per-file cap behave identically. Returns
@@ -651,29 +657,40 @@ class Indexer:
                 chunk_count += 1
                 continue
             chunk_id = f"{project_key}:{rel_path}:{start}"
-            content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
+            content_hash = chunk_content_hash(chunk_text)
             keep_ids.add(chunk_id)  # produced this pass — keep even when dedup skips re-embed
             try:
                 row = conn.execute(
-                    "SELECT content_hash FROM chunk_hashes WHERE chunk_id = ?",
+                    "SELECT content_hash, chunk_end FROM chunk_hashes WHERE chunk_id = ?",
                     (chunk_id,),
                 ).fetchone()
                 if row and row[0] == content_hash:
+                    # Unchanged content: the stored embedding is still correct and must NOT be
+                    # recomputed. But a row written before `chunk_end` existed carries NULL, and
+                    # the searcher cannot verify staleness without it — so patch the span in
+                    # place. This is what lets an existing 85k-chunk cache gain verification from
+                    # one ordinary index pass instead of a full re-embed.
+                    if row[1] != end:
+                        conn.execute(
+                            "UPDATE chunk_hashes SET chunk_end = ? WHERE chunk_id = ?",
+                            (end, chunk_id),
+                        )
+                        self._backfilled += 1
                     chunk_count += 1
                     continue
             except Exception as exc:
                 logger.debug("hash check failed for %s: %s", chunk_id, exc)
-            new_chunks.append((chunk_id, chunk_text, rel_path, start, content_hash))
+            new_chunks.append((chunk_id, chunk_text, rel_path, start, end, content_hash))
             chunk_count += 1
         return keep_ids, True
 
     def _collect_new_chunks(
         self, root: Path, project_key: str, project_root_real: str
-    ) -> list[tuple[str, str, str, int, str]]:
-        """Walk files; return (chunk_id, text, rel_path, start, hash) for new/changed chunks, and
+    ) -> list[tuple[str, str, str, int, int, str]]:
+        """Walk files; return (chunk_id, text, rel_path, start, end, hash) for new/changed chunks, and
         reconcile each fully-processed file (dropping rows for chunks it no longer produces)."""
         conn = self.db.conn()
-        new_chunks: list[tuple[str, str, str, int, str]] = []
+        new_chunks: list[tuple[str, str, str, int, int, str]] = []
         files_seen = 0
 
         for filepath in self._walk_files(root):
@@ -716,13 +733,24 @@ class Indexer:
                 # out of scope for the indexer.
                 self.db.delete_file_orphans(project_root_real, rel_path, keep_ids)
 
+        # Commit any in-place `chunk_end` backfills. These ride outside `_embed_and_write`'s
+        # per-batch commits, and a pass that finds nothing new to embed returns before reaching
+        # them — so without this the backfill is computed and then dropped on every up-to-date
+        # repo, which is precisely the case it exists to serve.
+        if self._backfilled:
+            try:
+                conn.commit()
+                logger.debug("backfilled chunk_end for %d existing chunks", self._backfilled)
+            except Exception as exc:
+                logger.warning("committing chunk_end backfill failed: %s", exc)
+
         # One final tick with the true totals so the committed scan line is accurate (the per-file
         # ticks lag by the current file's chunks). The renderer records this even when throttled.
         self._progress.scan(files_seen, len(new_chunks))
         return new_chunks
 
     def _embed_and_write(
-        self, new_chunks: list[tuple[str, str, str, int, str]], project_root_real: str
+        self, new_chunks: list[tuple[str, str, str, int, int, str]], project_root_real: str
     ) -> int:
         total = len(new_chunks)
         # Signal the model-load BEFORE materialising the embedder: on a cold cache _get_embedder()
@@ -744,7 +772,9 @@ class Indexer:
                 logger.warning("embedding batch %d failed: %s", i // batch_size, exc)
                 continue
 
-            for j, (chunk_id, _, rel_path, chunk_start, content_hash) in enumerate(batch):
+            for j, (chunk_id, _, rel_path, chunk_start, chunk_end, content_hash) in enumerate(
+                batch
+            ):
                 if j >= len(embeddings):
                     break
                 try:
@@ -770,9 +800,10 @@ class Indexer:
                     )
                     conn.execute(
                         "INSERT OR REPLACE INTO chunk_hashes"
-                        "(chunk_id, project_root, file_path, chunk_start, content_hash)"
-                        " VALUES (?, ?, ?, ?, ?)",
-                        (chunk_id, project_root_real, rel_path, chunk_start, content_hash),
+                        "(chunk_id, project_root, file_path, chunk_start, chunk_end,"
+                        " content_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                        (chunk_id, project_root_real, rel_path, chunk_start, chunk_end,
+                         content_hash),
                     )
                     embedded_count += 1
                 except Exception as exc:
@@ -808,6 +839,7 @@ class Indexer:
             return 0
 
         project_key = _project_key(project_root_real)
+        self._backfilled = 0  # per-pass, so a reused Indexer can't carry a stale count forward
 
         self._cleanup_deleted(root, project_root_real)
 

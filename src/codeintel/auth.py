@@ -26,6 +26,7 @@ import os
 import pathlib
 import tomllib  # stdlib on Python 3.11+ (the project's minimum)
 
+from codeintel.paths import codeintel_home
 from codeintel.policy import TieringPolicy
 
 logger = logging.getLogger("codeintel")
@@ -78,7 +79,13 @@ def _auth_config_path() -> pathlib.Path | None:
     if env:
         p = pathlib.Path(env)
         return p if p.is_file() else None
-    default = pathlib.Path.home() / ".codeintel" / "auth.toml"
+    try:
+        default = codeintel_home() / "auth.toml"
+    except Exception:
+        # No CODEINTEL_HOME and no resolvable home. `load_auth` promises never to raise, and its
+        # whole contract is "absent config → auth disabled"; a host with nowhere to look is the
+        # absent case, not a crash. (Previously this read `Path.home()` inline and raised.)
+        return None
     return default if default.is_file() else None
 
 

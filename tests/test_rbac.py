@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -506,6 +507,78 @@ def test_a_hardlink_planted_after_indexing_cannot_be_read_back(tmp_path):
     assert contained_path(root_real, bait) is None
     s = Searcher.__new__(Searcher)
     assert "CANARY" not in s._read_snippet(root_real, bait, 0)
+
+
+def test_an_ordinary_deletion_is_not_reported_as_a_containment_escape(tmp_path, caplog):
+    """A deleted file must read as "not found", never as a planted-symlink refusal.
+
+    `contained_path` answers one question — may this be read — and correctly says no for a file
+    that is gone (`_cleanup_deleted` depends on that to reconcile deleted rows away). But
+    `open_contained` attributed EVERY no to an attack, so the most ordinary event in the system —
+    a file deleted between indexing and a query — logged a WARNING asking whether a symlink had
+    been planted. False alarms on routine events are how real ones get ignored."""
+    import logging
+
+    from codeintel.containment import ContainmentError, open_contained, real_root
+
+    gone = tmp_path / "gone.py"
+    gone.write_text("def ok():\n    return 1\n")
+    root_real = real_root(str(tmp_path))
+    gone.unlink()
+
+    with caplog.at_level(logging.WARNING, logger="codeintel.containment"):
+        with pytest.raises(FileNotFoundError):
+            open_contained(root_real, gone)
+        # ...and specifically NOT the escape exception, which callers render as a refusal.
+        try:
+            open_contained(root_real, gone)
+        except ContainmentError:  # pragma: no cover - guards against a regression
+            pytest.fail("a deleted file must not raise ContainmentError")
+        except FileNotFoundError:
+            pass
+    assert not caplog.records, f"a deletion must not log a security warning: {caplog.text}"
+
+
+def test_a_swapped_file_is_refused_through_the_real_search_path(tmp_path):
+    """The two tests above call `_read_snippet` directly, which is a helper — they prove the
+    refusal exists, not that a `search()` actually routes through it. Staleness verification
+    changed how snippets are produced, and the containment sentinel is exactly the kind of
+    security-visible detail a refactor flattens into a generic "[file not found]" without any
+    test noticing. Assert it end to end, on the path an agent's query really takes."""
+    import numpy as np
+
+    from codeintel.containment import real_root
+    from codeintel.indexer import Indexer
+    from codeintel.searcher import Searcher
+    from codeintel.semantic_db import SemanticDb
+
+    class _Flat:
+        def __init__(self, model_name=None):
+            pass
+
+        def embed(self, texts):
+            v = np.zeros(384, dtype=np.float32)
+            v[0] = 1.0
+            return [v for _ in texts]
+
+    allowed, outside = tmp_path / "allowed", tmp_path / "outside"
+    allowed.mkdir(); outside.mkdir()
+    (outside / "secret.py").write_text('SECRET = "sk-live-CANARY"\n')
+    bait = allowed / "bait.py"
+    bait.write_text("def ok():\n    return 1\n")
+
+    with patch("fastembed.TextEmbedding", _Flat):
+        db = SemanticDb(":memory:")
+        db.init()
+        Indexer(db).index(str(allowed))
+        bait.unlink()
+        bait.symlink_to(outside / "secret.py")  # swapped AFTER indexing
+        res = Searcher(db).search("ok", str(allowed), cosine_floor=-1.0)
+
+    assert real_root(str(allowed))  # sanity: the root itself resolves
+    assert not any("CANARY" in r["snippet"] for r in res), "the swapped target leaked into a hit"
+    assert any("outside the indexed root" in r["snippet"] for r in res), \
+        "a containment refusal must stay distinguishable from ordinary index drift"
 
 
 def test_the_stale_row_of_a_swapped_file_is_reconciled_away(tmp_path):

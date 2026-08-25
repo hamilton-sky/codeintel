@@ -4,6 +4,8 @@ import logging
 import pathlib
 import tomllib  # stdlib since 3.11, which is this package's floor
 
+from codeintel.paths import codeintel_home
+
 logger = logging.getLogger("codeintel")
 
 _DEFAULTS: dict = {
@@ -18,7 +20,12 @@ _DEFAULTS: dict = {
     "model": "BAAI/bge-small-en-v1.5",
     "chunk_strategy": "syntax",  # syntax-aware (def/class boundaries) vs fixed line windows
     "rerank": "on",              # hybrid lexical+semantic rerank of search results
-    "rerank_candidates": 30,     # cosine candidates fused/re-ranked before returning top-k
+    # Cosine candidates retrieved, fused and re-ranked before the top-k is returned. Was 30, but
+    # the semantic provider hardcoded its own `_display_k * 6` widening that overrode it, so the
+    # effective breadth has always been 60; 30 only ever described behaviour the code didn't have.
+    # The provider now honours this key, so the default is set to the value that was really in use
+    # — otherwise "fixing" the wiring would have silently narrowed everyone's retrieval by half.
+    "rerank_candidates": 60,
 }
 
 # Values restricted to a fixed set — anything else falls back to the default.
@@ -80,12 +87,27 @@ def _coerce(cfg: dict) -> dict:
     return out
 
 
+def _global_config() -> dict:
+    """The machine-wide ``config.toml``, or ``{}`` when there isn't one.
+
+    Resolving the directory can RAISE (no ``CODEINTEL_HOME`` and no resolvable home — a container
+    UID with no passwd entry). That used to propagate straight out of ``load_config``: the call
+    read ``pathlib.Path.home()`` inline, so it blew up before ``_read_toml``'s handler could see
+    it, and every query on such a host died as an opaque ``provider-error``. "There is nowhere to
+    look for a global config" is not an error — it means there is no global config."""
+    try:
+        return _read_toml(codeintel_home() / "config.toml")
+    except Exception as exc:
+        logger.debug("no resolvable config directory (%s) — using defaults + project config", exc)
+        return {}
+
+
 def load_config(project_root: str | None = None) -> dict:
     """Return the merged, validated config: defaults < global < project. Values that fail
     validation fall back to their default (logged), so a bad config file never breaks a query."""
     root = pathlib.Path(project_root) if project_root is not None else pathlib.Path.cwd()
 
-    global_cfg = _read_toml(pathlib.Path.home() / ".codeintel" / "config.toml")
+    global_cfg = _global_config()
     project_cfg = _read_toml(root / ".codeintel.toml")
 
     merged = {**_DEFAULTS, **global_cfg, **project_cfg}
