@@ -15,6 +15,21 @@ field that reaches a caller.
 `~` is used rather than a placeholder because the hints contain runnable commands
 (`codeintel index ~/Documents/project/app`), and a shell expands `~` back to the right thing. The
 path stays actionable for the person who owns it and says nothing about who that is.
+
+**Scope, stated so it is not mistaken for an oversight.** This strips THIS process's own home
+directory prefix. It deliberately does not try to erase the account name everywhere it might
+appear:
+
+* A sibling directory that shares the username (`/Users/alice-backup` next to `/Users/alice`) is a
+  different directory and is left intact. Rewriting it is what the pre-boundary substring match
+  did, and it produced paths that do not exist.
+* Another account's home (`/Users/bob/...`, reachable over the HTTP transport when the server
+  answers for a repo it does not own) cannot be mapped to `~` — `~` would claim it as the reader's.
+  Nor can it be blanket-rewritten: `/home/runner/work/...` on CI is home-shaped, carries nothing
+  sensitive, and mangling it would break the actionability this module exists to preserve.
+
+`looks_like_any_home_path` is the detector for what falls outside that scope; the tests assert on
+it, so a NEW leak channel of either shape fails the suite rather than shipping quietly.
 """
 
 from __future__ import annotations
@@ -133,8 +148,11 @@ def redact(value: object, _depth: int = 0) -> object:
 
 
 def contains_home_path(text: str) -> bool:
-    """Whether *text* still carries the home path in ANY form we have seen it leak in — slashed,
-    /private-prefixed, or flattened into a backend project id. For tests and for `doctor`.
+    """Whether *text* still carries THIS process's home path in any form it has leaked in —
+    slashed, /private-prefixed, or flattened into a backend project id. For tests. (It previously
+    said "and for `doctor`", which no longer calls it — a stale claim about who enforces a privacy
+    check is worse than no claim.) For paths belonging to *another* account, or ones that merely
+    share the username, see `looks_like_any_home_path`.
 
     Uses the SAME boundary rule as ``redact_text``, deliberately. When the two disagree the
     detector reports a leak the redactor has no way to remove, and the only ways out are to
@@ -155,4 +173,15 @@ _ABS_HOME_RE = re.compile(r"/(?:Users|home)/[^/\s\"'`]+/")
 
 
 def looks_like_any_home_path(text: str) -> bool:
+    """Whether *text* still carries an absolute, user-home-shaped path of ANY account.
+
+    Broader than ``contains_home_path``, which only knows this process's own home. That narrowness
+    is the point of having both: ``redact_text`` can only rewrite paths it can recognise as its
+    own, so everything it cannot — another account's home, or a sibling directory that merely
+    shares the username — is invisible to the narrow detector and would ship unnoticed.
+
+    This had no callers at all, which made the "two independent defences" the module claims a
+    defence and a decoration. The tests assert on it now (see ``test_redaction_boundary.py``), so a
+    new leak channel of either shape turns the suite red instead of shipping quietly.
+    """
     return bool(_ABS_HOME_RE.search(text or ""))

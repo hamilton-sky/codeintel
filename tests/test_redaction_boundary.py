@@ -22,7 +22,12 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.redact import contains_home_path, redact, redact_text
+from codeintel.redact import (
+    contains_home_path,
+    looks_like_any_home_path,
+    redact,
+    redact_text,
+)
 
 # Homes chosen to be adversarial in different ways: single-segment (flattens to a common word),
 # short (a prefix of many real paths), deep, and one with a hyphen already in it.
@@ -158,3 +163,55 @@ def test_a_home_that_is_the_filesystem_root_disables_redaction(home):
     """`HOME=/` would otherwise make every absolute path in every answer collapse to `~`."""
     home("/")
     assert redact_text("/etc/passwd:1 | root:x:0:0") == "/etc/passwd:1 | root:x:0:0"
+
+
+# ------------------------------------------------- the second defence, which had no callers at all
+
+def test_no_home_shaped_path_survives_redacting_our_own_answers(home):
+    """`looks_like_any_home_path` was defined and never called — the module claims two independent
+    defences and had one. It is the broad check: `contains_home_path` only knows THIS process's
+    home, so anything redaction cannot recognise as its own is invisible to it and would ship."""
+    h = home("/Users/alice")
+    envelope = {
+        "ok": True,
+        "op": "search",
+        "result": f"{h}/Documents/proj/app.py:12 | def main()\n{h}/p/b.py:3 | x = 1",
+        "hint": f"run: codeintel index {h}/Documents/proj",
+        "gaps": [{"section": "corpus", "detail": f"no code matched under {h}/Documents/proj"}],
+    }
+    out = redact(envelope)
+    blob = repr(out)
+    assert not looks_like_any_home_path(blob), f"a home-shaped path survived redaction: {blob}"
+    assert not contains_home_path(blob)
+
+
+def test_another_accounts_home_is_detected_even_though_it_cannot_be_redacted(home):
+    """The case this detector was written for: an HTTP caller asking about a repo the server does
+    not own. `redact_text` can only rewrite the home it knows, so `/Users/bob/...` passes straight
+    through — and mapping it to `~` would be wrong anyway, since `~` claims it as the reader's."""
+    home("/Users/alice")
+    foreign = "/Users/bob/shared/lib.py:2 | def helper()"
+    assert redact_text(foreign) == foreign, "not this process's home; nothing to rewrite to"
+    assert not contains_home_path(foreign), "the narrow detector cannot see it — that is the gap"
+    assert looks_like_any_home_path(foreign), "the broad detector must see it"
+
+
+def test_a_sibling_sharing_the_username_is_out_of_scope_but_visible(home):
+    """Pinned deliberately. `/Users/alice-backup` is a DIFFERENT directory, so redaction leaves it
+    alone — rewriting it is exactly what the substring bug did, and it produced paths that do not
+    exist. It does still carry the account name, so the broad detector flags it: out of scope for
+    automatic rewriting, not out of sight."""
+    home("/Users/alice")
+    sibling = "/Users/alice-backup/p/a.py:1 | x"
+    assert redact_text(sibling) == sibling
+    assert not contains_home_path(sibling)
+    assert looks_like_any_home_path(sibling)
+
+
+def test_a_ci_path_is_home_shaped_but_must_not_be_rewritten(home):
+    """Why the broad detector is an assertion helper and NOT wired into `redact_text`: blanket
+    rewriting of home-shaped paths would mangle `/home/runner/work/...`, which carries nothing
+    sensitive and whose actionability is the thing this module goes out of its way to preserve."""
+    home("/Users/alice")
+    ci = "/home/runner/work/repo/src/a.py:1 | x"
+    assert redact_text(ci) == ci

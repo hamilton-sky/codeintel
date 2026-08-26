@@ -42,6 +42,17 @@ All notable changes to codeintel are documented here. The format is based on
   to teach the tests to ignore a real one. The boundary is deliberately asymmetric (tail-guarded,
   not head-guarded): a tail guard can never cause a missed redaction, a head guard could, and in
   this module a miss is the worse failure.
+- **The second of redaction's "two independent defences" now actually runs.**
+  `looks_like_any_home_path` — the broad check for a user-home-shaped absolute path belonging to
+  *any* account — was defined with a comment describing its purpose and had **zero callers**, in
+  `src/` or in the tests. It is the check that sees what `contains_home_path` structurally cannot:
+  another account's home reaching an HTTP caller, or a sibling directory that merely shares the
+  username. The tests assert on it now, so a new leak channel of either shape turns the suite red
+  instead of shipping quietly. The module docstring states the scope explicitly rather than leaving
+  it to be inferred: redaction rewrites *this* process's home prefix, and does not attempt to erase
+  the account name elsewhere — a sibling like `/Users/alice-backup` is a different directory (the
+  substring bug above is what rewriting it looks like), and blanket-rewriting anything home-shaped
+  would mangle non-sensitive CI paths such as `/home/runner/work/...`.
 - **A search hit is now verified to still describe the code it was indexed from.** `chunk_hashes`
   stores a chunk's *line number*, and the snippet has always been re-read from the current file at
   that line — so once a file was edited, a hit pointed at whatever now occupied those lines.
