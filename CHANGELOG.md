@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-26
+
 ### Added
 - **A search hit that lands inside a function now says which function.** A hit renders as
   `path:line | <first meaningful line>`, which works when a chunk starts at a definition — but a
