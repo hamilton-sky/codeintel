@@ -25,6 +25,23 @@ All notable changes to codeintel are documented here. The format is based on
   their function.
 
 ### Fixed
+- **Redaction no longer corrupts paths and prose that merely resemble the home directory.** The
+  home path was matched as a bare substring, which broke two ways. A path that only *started* with
+  the home string was mangled into one that does not exist — under `HOME=/root`,
+  `/rootfs/etc/config.py` became `~fs/etc/config.py` and `/root_cause.md` became `~_cause.md`.
+  Nothing about `/root` is special: any home that is a string prefix of a real sibling does it
+  (`HOME=/home/sh` turned `/home/shammai/app.py` into `~ammai/app.py`). The damaged path lands in
+  the field the agent reads as the answer, with nothing marking it as damaged. Separately, the
+  flattened project-id form of a *single-segment* home is a bare English word, so `HOME=/root`
+  rewrote ordinary prose: `"root cause analysis"` became `"<home> cause analysis"`, in comments,
+  docstrings and every snippet printed. Both are routine for a container running as root, which is
+  where this was reported from. Matching is now anchored to a path boundary, and the flattened form
+  is only used when the home has more than one segment (a one-segment home produces no project-id
+  slug to match). `contains_home_path` shares the same rule, so the detector and the redactor
+  cannot disagree — when they do, the only ways out are to corrupt a path that was never a leak or
+  to teach the tests to ignore a real one. The boundary is deliberately asymmetric (tail-guarded,
+  not head-guarded): a tail guard can never cause a missed redaction, a head guard could, and in
+  this module a miss is the worse failure.
 - **A search hit is now verified to still describe the code it was indexed from.** `chunk_hashes`
   stores a chunk's *line number*, and the snippet has always been re-read from the current file at
   that line — so once a file was edited, a hit pointed at whatever now occupied those lines.
