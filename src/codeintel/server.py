@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
+from typing import Annotated, Literal
 
 import anyio
 from mcp.server.mcpserver.server import MCPServer
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
@@ -112,11 +116,33 @@ def code_query_handler(args: dict) -> Result:
     try:
         op = args.get("op", "")
         target = args.get("target", "")
-        project_root = args.get("project_root", "")
+        project_root = str(args.get("project_root", "") or "")
         engine = args.get("engine")
         role = args.get("role", "")
         gw = _get_gateway()
         _refresh_missing_engines(gw)
+        # `project_root` is documented as optional (this tool's description below), but every
+        # provider on the query path hard-fails without one — `semantic.py`'s `build_result`
+        # returns `reason="no-project-root"`, and the graph/lsp providers fail project resolution
+        # on a blank root the same way. There is no cwd default anywhere on this path, unlike
+        # `code.status`/`code.doctor`, which already fall back to `os.getcwd()` inside
+        # `doctor.run_doctor`. Left alone, an agent that trusts "optional" gets a null envelope
+        # that this tool's own instructions teach it to read as "the code doesn't exist".
+        #
+        # RESOLUTION: fall back to the server's cwd, so the doc and the behavior finally agree, and
+        # `code.query` matches `code.status`/`code.doctor` instead of being the one tool that
+        # silently does nothing. The fallback is applied ONLY after `Gateway.allows_root` accepts
+        # the RAW, un-substituted value — never before it. `TieringPolicy.is_root_allowed`
+        # (policy.py) deliberately REJECTS a blank `project_root` rather than resolving it,
+        # specifically because `os.path.realpath("")` is the server's own cwd: substituting cwd
+        # BEFORE that check would reopen exactly the RBAC bypass that guard exists to close.
+        # Checking first reproduces today's RBAC-enabled behavior unchanged (a restricted role with
+        # a blank root still gets `root-not-allowed-for-role` from inside `gw.query`), and only
+        # engages the fallback when RBAC is disabled/absent or the role is unconditionally allowed
+        # (e.g. `roots = ["*"]`) — the same gate `code.status`/`code.doctor` already run before
+        # their own cwd fallback.
+        if not project_root and gw.allows_root(role, project_root):
+            project_root = os.getcwd()
         return gw.query(op=op, target=target, engine=engine, role=role, project_root=project_root)
     except Exception:
         return safe_null_result("", "", reason="handler-error")
@@ -285,7 +311,14 @@ def _code_map_handler_inner(args: dict) -> dict:
         from codeintel.injector import Injector
         from codeintel.mapper import MapGenerator
 
-        project_root = str(args.get("project_root", "") or "")
+        # Same "documented optional, actually required" defect as `code.query` — see
+        # `code_query_handler`'s comment. `code.map` has no HTTP transport (only `code.query`/
+        # `code.status`/`code.doctor` are reachable over HTTP; see http_server.py), so unlike
+        # `code_query_handler` there is no `TieringPolicy.is_root_allowed` blank-rejection guard to
+        # preserve here — the stdio MCP transport always runs unrestricted (role=""), so falling
+        # back to cwd unconditionally is safe and keeps this tool consistent with
+        # `code.status`/`code.doctor`.
+        project_root = str(args.get("project_root", "") or "") or os.getcwd()
         budget = int(args.get("budget", 32768) or 32768)
         inject = bool(args.get("inject", False))
 
@@ -338,6 +371,49 @@ _MCP_INSTRUCTIONS = (
 )
 
 
+# The op vocabulary as a schema-level enum rather than prose. Prose in a tool DESCRIPTION is read
+# once, at connect time, describing fields the model fills in later — the wrong place for the
+# thing that most needs to be right. A
+# `Literal` here means a mistyped/hallucinated op is rejected by MCP's own argument validation
+# with the real choices listed, instead of round-tripping to `graph.py`'s `unsupported-op` — which
+# a skimming agent can misread as "found nothing" — and it gives the description string above room
+# to describe each op's call signature instead of just its name.
+_QueryOp = Literal[
+    "search", "symbol", "callers", "callees", "impact", "chain",
+    "pattern", "overview", "context", "changed", "hotspots",
+]
+_QueryEngine = Literal["auto", "graph", "lsp", "semantic", "both", "all"]
+
+_OP_FIELD_DESCRIPTION = (
+    "search(target) — find code by meaning or name; use instead of grep. "
+    "symbol(target) — definition/signature/docstring (LSP). "
+    "callers(target) / callees(target) — direct in/out call edges. "
+    "impact(target) — callers+callees together; run before changing a symbol. "
+    "context(target) — impact PLUS the LSP definition, merged; the fullest single-symbol view. "
+    "chain(target=\"A->B\") — call path between two symbols, risk-labeled. "
+    "pattern(target) — literal/regex match ranked by graph importance (graph-augmented grep). "
+    "overview() — this repo's architecture; `target` is IGNORED. "
+    "changed() — impact of your uncommitted git edits; `target` is IGNORED. "
+    "hotspots() — highest fan-in/complexity symbols; `target` is IGNORED."
+)
+_TARGET_FIELD_DESCRIPTION = (
+    "The symbol name or natural-language query. Ignored by `overview`/`changed`/`hotspots` — "
+    "those answer for the whole repo, scoped by `project_root` alone."
+)
+_PROJECT_ROOT_FIELD_DESCRIPTION = (
+    "Absolute path to the repo root. Optional: if omitted, this falls back to the server's "
+    "current working directory — the same default `code.status`/`code.doctor` already use. "
+    "Under role-based access control a blank value is rejected rather than defaulted, so a "
+    "caller operating under a restricted role should always pass it explicitly."
+)
+_ENGINE_FIELD_DESCRIPTION = "Which engine answers. Leave as `auto` — it already picks the right engine per op."
+_ROLE_FIELD_DESCRIPTION = (
+    "Reserved for the HTTP transport, which sets it server-side from the caller's auth token and "
+    "overrides anything supplied here (no escalation is possible). Leave unset on this (stdio) "
+    "transport — it has no effect."
+)
+
+
 def run() -> None:
     from codeintel import __version__
     from codeintel.logconfig import configure_logging
@@ -345,11 +421,11 @@ def run() -> None:
     mcp = MCPServer(name="codeintel", version=__version__, instructions=_MCP_INSTRUCTIONS)
 
     async def _code_query(
-        op: str = "",
-        target: str = "",
-        project_root: str = "",
-        engine: str = "",
-        role: str = "",
+        op: Annotated[_QueryOp, Field(description=_OP_FIELD_DESCRIPTION)],
+        target: Annotated[str, Field(description=_TARGET_FIELD_DESCRIPTION)] = "",
+        project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
+        engine: Annotated[_QueryEngine, Field(description=_ENGINE_FIELD_DESCRIPTION)] = "auto",
+        role: Annotated[str, Field(description=_ROLE_FIELD_DESCRIPTION)] = "",
     ) -> dict:
         # MUST stay `dict`, not `Result`. FastMCP derives this tool's output schema from the return
         # annotation, and it validates a TypedDict's NotRequired keys (`reason`, `hint`) as
@@ -359,42 +435,81 @@ def run() -> None:
             {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
         ))
 
-    async def _code_status(project_root: str = "") -> dict:
+    async def _code_status(
+        project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
+    ) -> dict:
         return code_status_handler({"project_root": project_root})
 
-    async def _code_doctor(project_root: str = "", deep: bool = False) -> dict:
+    async def _code_doctor(
+        project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
+        deep: Annotated[bool, Field(description=(
+            "Also boot a live LSP (serena) session to verify it actually runs, not just that it is "
+            "installed on PATH. Read-only, but SLOW (first boot can take several seconds) — leave "
+            "false for a quick check."
+        ))] = False,
+    ) -> dict:
         return code_doctor_handler({"project_root": project_root, "deep": deep})
 
-    async def _code_map(project_root: str = "", budget: int = 32768, inject: bool = False) -> dict:
+    async def _code_map(
+        project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
+        budget: Annotated[int, Field(description=(
+            "Maximum size of the generated CODE_INTEL.md, in BYTES (default 32768). Content beyond "
+            "the budget is dropped, not truncated mid-line, and the file says so."
+        ))] = 32768,
+        inject: Annotated[bool, Field(description=(
+            "When true, ALSO writes a second file: appends a reference block to this repo's "
+            "CLAUDE.md or AGENTS.md, pointing at CODE_INTEL.md. That edits a file which shapes an "
+            "agent's future behavior, so only set this if the user asked for it — default is "
+            "false, which writes CODE_INTEL.md alone."
+        ))] = False,
+    ) -> dict:
         return code_map_handler({"project_root": project_root, "budget": budget, "inject": inject})
 
-    mcp.add_tool(_code_query, name="code.query", description=(
-        "Understand code across graph + LSP + semantic engines — prefer this over grep/file-read "
-        "for locating and relating code. ops: `search` (natural-language or symbol semantic search), "
-        "`symbol` (definition/signature), `callers`, `callees`, `impact`, `chain` (\"A->B\" call "
-        "path, risk-labeled), `pattern` (graph-augmented grep), `overview` (architecture), "
-        "`context` (fan-out), `changed` (impact of your uncommitted git edits — no target needed), "
-        "`hotspots` (highest fan-in/complexity symbols). "
-        "`target` is the symbol/query; optional `engine` (auto|graph|lsp|semantic), `project_root`. "
-        "When several symbols share a name, `callers`/`callees`/`impact` report each one separately "
-        "and say so — narrow to one with a qualified target (`core.Group.invoke`) or a file hint "
-        "(`invoke@src/click/testing.py`). "
-        "Never raises: `ok` is always true; a null `result` + `reason` means not-found/not-indexed. "
-        "A non-null `result` may still be incomplete — check `confidence`/`gaps`."
-    ))
-    mcp.add_tool(_code_status, name="code.status", description=(
-        "Which engines (graph/LSP/semantic) are available and whether this repo is indexed. Check "
-        "this first if code.query keeps returning nothing."
-    ))
-    mcp.add_tool(_code_doctor, name="code.doctor", description=(
-        "Diagnose engine health + this repo's index status, with a concrete fix for each gap (what "
-        "to install or index). Run when code.query results look empty or an engine seems missing."
-    ))
-    mcp.add_tool(_code_map, name="code.map", description=(
-        "Generate/refresh CODE_INTEL.md — a ranked architecture overview (node/edge counts, top "
-        "symbols by caller count, entry points, routes). A great first call to orient on an "
-        "unfamiliar repo."
-    ))
+    mcp.add_tool(
+        _code_query, name="code.query",
+        annotations=ToolAnnotations(read_only_hint=True),
+        description=(
+            "Understand code across graph + LSP + semantic engines — prefer this over grep/file-read "
+            "for locating and relating code. Read-only. See each parameter's own description below "
+            "for the full op list, each op's call signature, and which ops ignore `target`. "
+            "When several symbols share a name, `callers`/`callees`/`impact` report each one "
+            "separately and say so — narrow to one with a qualified target (`core.Group.invoke`) or "
+            "a file hint (`invoke@src/click/testing.py`). "
+            "Never raises: `ok` is always true; a null `result` + `reason` means not-found/not-indexed. "
+            "A non-null `result` may still be incomplete — check `confidence`/`gaps`."
+        ),
+    )
+    mcp.add_tool(
+        _code_status, name="code.status",
+        annotations=ToolAnnotations(read_only_hint=True),
+        description=(
+            "Read-only. Which engines (graph/LSP/semantic) are available and whether this repo is "
+            "indexed. Check this first if code.query keeps returning nothing."
+        ),
+    )
+    mcp.add_tool(
+        _code_doctor, name="code.doctor",
+        annotations=ToolAnnotations(read_only_hint=True),
+        description=(
+            "Read-only (see `deep`'s own description — it boots a live session but writes nothing). "
+            "Diagnose engine health + this repo's index status, with a concrete fix for each gap "
+            "(what to install or index). Run when code.query results look empty or an engine seems "
+            "missing."
+        ),
+    )
+    mcp.add_tool(
+        _code_map, name="code.map",
+        annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False),
+        description=(
+            "WRITES a file: generates/refreshes CODE_INTEL.md at the repo root — a ranked "
+            "architecture overview (node/edge counts, top symbols by caller count, entry points, "
+            "routes), stamped with the generation time and the index counts it was built from. Good "
+            "first call to orient on an unfamiliar repo. To read the same information without "
+            "writing anything, use `code.query` with `op=\"overview\"` instead. Never overwrites a "
+            "populated map with a degraded one. See `inject`'s own description before setting it — "
+            "it writes a SECOND file, your CLAUDE.md/AGENTS.md."
+        ),
+    )
 
     anyio.run(mcp.run_stdio_async)
 
