@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-08-27
+
 ### Added
 - **`codeintel c4` — a LikeC4 architecture model of any indexed repo.** `codeintel graph --html`
   answers *what calls what* at function granularity; this answers *what depends on what* at file
