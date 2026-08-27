@@ -13,6 +13,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("query", "Ask one question — search, callers, callees, impact, chain, symbol, hotspots"),
         ("map", "Write CODE_INTEL.md — a committable architecture overview"),
         ("graph", "Interactive call-graph viewer (--html), or the graph as JSON"),
+        ("c4", "LikeC4 architecture model (.c4) built from this repo's import graph"),
     ]),
     ("Set up", [
         ("setup", "Prepare backends + index this repo (--all does everything automatable)"),
@@ -42,6 +43,7 @@ _MODULES = {
     "query": "query",
     "map": "map",
     "graph": "graph",
+    "c4": "c4",
     "setup": "setup",
     "index": "index",
     "install": "install",
@@ -61,6 +63,14 @@ _EXAMPLES = [
     ("codeintel doctor", "why is a query coming back empty?"),
 ]
 
+# The ordered path out of an empty state. A first-time user's problem is not "which of 15 commands"
+# but "what do I run first" — the command list answers the former and silently assumes the latter.
+_START_HERE = [
+    ("codeintel index .", "index this repo"),
+    ('codeintel query --op search --target "auth check"', "ask it something"),
+    ("codeintel map", "write CODE_INTEL.md for your agent"),
+]
+
 
 def render_help() -> str:
     """The `codeintel` / `codeintel help` screen: grouped, colored, with real examples.
@@ -76,6 +86,17 @@ def render_help() -> str:
         "",
         c.dim("usage: ") + "codeintel <command> [options]",
     ]
+
+    # ONE comment column across both blocks, derived from the widest entry in either. Two blocks
+    # each self-aligning would ragged the screen into two gutters; the numbered prefix ("1. ") is
+    # part of the measured width so the two blocks' comments still line up.
+    gutter = max(max(len(cmd) + 3 for cmd, _why in _START_HERE),
+                 max(len(cmd) for cmd, _why in _EXAMPLES)) + 2
+    out.append("")
+    out.append("  " + c.bold("New here?"))
+    for i, (cmd, why) in enumerate(_START_HERE, 1):
+        out.append("    " + f"{i}. {cmd}".ljust(gutter) + c.dim("# " + why))
+
     for group, items in _COMMAND_GROUPS:
         out.append("")
         out.append("  " + c.bold(group))
@@ -84,11 +105,11 @@ def render_help() -> str:
 
     out.append("")
     out.append("  " + c.bold("Examples"))
-    # Width from the content, not a guess — a hardcoded column silently loses its gutter the moment
-    # one example grows past it, and ljust() will not pad below the string's own length.
-    cmd_width = max(len(cmd) for cmd, _why in _EXAMPLES) + 2
+    # Same `gutter` as the New here? block above — width from the content, not a guess. A hardcoded
+    # column silently loses its gutter the moment one example grows past it, and ljust() will not
+    # pad below the string's own length.
     for cmd, why in _EXAMPLES:
-        out.append("    " + cmd.ljust(cmd_width) + c.dim("# " + why))
+        out.append("    " + cmd.ljust(gutter) + c.dim("# " + why))
 
     out.append("")
     out.append("  " + c.dim("codeintel <command> --help") + "   full options for one command")
@@ -118,7 +139,13 @@ def _unknown_command(name: str) -> int:
     return 2
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the full argparse surface.
+
+    Split out of `main()` so the registered subcommands can be introspected directly. `--help` is
+    routed to `render_help()`, so argparse's own listing is no longer reachable from the CLI — and
+    that listing was how the help-honesty test proved every advertised command is really wired up.
+    Reading the parser is a stronger source of truth than scraping either screen's text."""
     parser = argparse.ArgumentParser(prog="codeintel")
     parser.add_argument("--version", action="version", version=f"codeintel {__version__}")
     subparsers = parser.add_subparsers(dest="command")
@@ -219,6 +246,27 @@ def main() -> None:
     graph_parser.add_argument("--out", default=None, help="Output path for --html (default: codeintel-graph.html)")
     graph_parser.add_argument("--limit", type=int, default=220, help="Max call edges to include (default: 220)")
 
+    # c4 subcommand — a LikeC4 model of the Folder/File + IMPORTS slice
+    c4_parser = subparsers.add_parser(
+        "c4", help="Generate a LikeC4 architecture model (.c4) from the import graph")
+    c4_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
+    c4_parser.add_argument("--out", default=None,
+                           help="Output DIRECTORY (default: codeintel-c4/). LikeC4 merges every "
+                                ".c4 in a directory into one project, so the model gets its own.")
+    c4_parser.add_argument("--depth", type=int, default=None,
+                           help="Directory roll-up depth for elements (default: auto-fit to the "
+                                "100-element view cap; the chosen depth is always reported)")
+    c4_parser.add_argument("--scope", action="append", default=None,
+                           help="Limit the model to this path prefix; repeatable. A scope matching "
+                                "no indexed file is an error, not a silent empty model.")
+    c4_parser.add_argument("--include-tests", action="store_true",
+                           help="Model test directories too (excluded by default — they are not "
+                                "architecture and outnumber source in some repos)")
+    c4_parser.add_argument("--no-index", action="store_true",
+                           help="Fail instead of indexing an un-indexed repo (default: index it "
+                                "first, so one command always produces a model)")
+    c4_parser.add_argument("--json", action="store_true", help="Print the payload; write nothing")
+
     # doctor subcommand
     doctor_parser = subparsers.add_parser("doctor", parents=[color_parent],
                                           help="Diagnose engine health + index status for a repo")
@@ -268,13 +316,23 @@ def main() -> None:
     subparsers.add_parser("gen-token", help="Print a secure random bearer token (for serve-http / RBAC auth.toml)")
     subparsers.add_parser("help", help="Show every command, grouped, with examples")
 
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+
     # Intercept an unrecognized command BEFORE argparse, whose error prints the full choice list and
     # stops — a dead end for a one-character typo. Only a bare word is claimed here; anything
-    # starting with `-` (--version, --help) still goes to argparse.
+    # starting with `-` (--version) still goes to argparse.
     argv = sys.argv[1:]
     if argv and not argv[0].startswith("-") and argv[0] not in [*_COMMANDS, "help"]:
         sys.exit(_unknown_command(argv[0]))
-    if not argv or argv[0] == "help":
+    # `-h`/`--help` only counts as top-level when it is the FIRST token: `codeintel query --help`
+    # has argv[0] == "query", so it still falls through to argparse and gets that command's own
+    # screen. Without this, the command a new user actually types was the ONE path that missed
+    # render_help() and fell back to stock argparse.
+    if not argv or argv[0] in ("help", "-h", "--help"):
         from codeintel import term
         term.configure(no_color=False, ascii_mode=None)
         print(render_help())

@@ -31,3 +31,8 @@ pathly/**/EVENTS.jsonl
 htmlcov/
 .ruff_cache/
 .mypy_cache/
+
+# LikeC4 evaluation scratch: prototypes, parser probes, generated models and the real
+# `likec4` npm install the evaluation ran against (133 MB of node_modules in poc/ alone).
+# Local working material, not part of the shipped package.
+experiments/

@@ -30,11 +30,18 @@ def _run(*args, env_extra=None):
 def test_help_advertises_exactly_the_registered_subcommands():
     """The drift that makes help worse than useless: a command renamed in argparse but not in the
     help table, or advertised here and never wired up."""
-    listed = _run("--help").stdout
-    # argparse's own listing is the source of truth for what is actually registered.
-    registered = {line.split()[0] for line in listed.splitlines()
-                  if line.startswith("    ") and line.strip() and not line.startswith("     ")}
-    registered = {r for r in registered if not r.startswith("-")}
+    # argparse itself is the source of truth for what is actually registered. This used to scrape
+    # `--help`, but `--help` now renders the grouped screen — which is built FROM _COMMAND_GROUPS,
+    # so scraping it would compare the advertised list against itself and pass vacuously. Reading
+    # the parser's registered subcommands keeps the invariant real.
+    import argparse as _argparse
+
+    from codeintel.__main__ import build_parser
+
+    sub = [a for a in build_parser()._actions
+           if isinstance(a, _argparse._SubParsersAction)]
+    assert len(sub) == 1, "expected exactly one subparser group"
+    registered = set(sub[0].choices)
     assert set(_COMMANDS) | {"help"} == registered
 
 

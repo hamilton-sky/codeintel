@@ -821,6 +821,8 @@ def test_index_reports_an_unrecoverable_indexer_failure(monkeypatch, tmp_path, c
     ("status", {"project_root": None}),
     ("map", {"project_root": None, "inject": False, "budget": 32768}),
     ("graph", {"project_root": None, "html": False, "out": None, "limit": 220}),
+    ("c4", {"project_root": None, "out": None, "depth": None, "scope": None,
+            "include_tests": False, "no_index": False, "json": False}),
 ])
 def test_a_nonexistent_project_root_fails_loudly(command, args_, tmp_path, capsys):
     """A mistyped path produced confident, well-formed output about a directory that does not
