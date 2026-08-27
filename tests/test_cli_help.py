@@ -11,6 +11,7 @@ must actually be a registered subcommand, and every registered subcommand must b
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 
@@ -178,3 +179,45 @@ def test_no_epilog_names_a_command_that_does_not_exist():
     subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
     stale = sorted(set(_EPILOGS) - set(subparsers.choices))
     assert not stale, f"epilogs for unregistered commands: {stale}"
+
+
+def _visible(line: str) -> int:
+    """Width as a terminal sees it: ANSI escapes are zero-width, and the rule glyph is 3 bytes
+    per column. Measuring bytes instead reports a 40-column rule as 122 characters."""
+    return len(re.sub(r"\x1b\[[0-9;]*m", "", line))
+
+
+def test_no_help_line_exceeds_the_width_budget():
+    """Every rendered help line must fit 78 columns.
+
+    `RawDescriptionHelpFormatter` is set on each subparser so argparse will NOT rewrap an epilog —
+    which is what protects the hand-aligned example columns, and also what makes an over-long line
+    the terminal's problem instead of argparse's. A hard wrap mid-row destroys the alignment the
+    formatter was chosen to preserve. Measured at the time this was written: 15 lines of the
+    top-level screen and 29 epilog lines were over budget, the worst at 108 and 98.
+    """
+    from codeintel.__main__ import _EPILOGS, HELP_WIDTH, render_help
+
+    over = [(w, line) for line in render_help().splitlines()
+            if (w := _visible(line)) > HELP_WIDTH]
+    assert not over, f"top-level help lines over {HELP_WIDTH}: {over[:4]}"
+
+    for name, epilog in _EPILOGS.items():
+        wide = [(len(line), line) for line in epilog.splitlines() if len(line) > HELP_WIDTH]
+        assert not wide, f"{name} epilog lines over {HELP_WIDTH}: {wide[:3]}"
+
+
+def test_the_comment_gutter_cannot_be_widened_without_bound():
+    """One long invocation must not set the comment column for every short row.
+
+    Unbounded, `codeintel doctor` paid 38 columns of padding and its line reached 96 — so an
+    80-column terminal wrapped the comment onto a ragged row of its own, losing the alignment the
+    gutter exists to create.
+    """
+    from codeintel.__main__ import _EXAMPLES, _START_HERE, HELP_GUTTER_CAP
+
+    derived = max(max(len(cmd) + 3 for cmd, _ in _START_HERE),
+                  max(len(cmd) for cmd, _ in _EXAMPLES)) + 2
+    assert min(derived, HELP_GUTTER_CAP) <= HELP_GUTTER_CAP
+    # and the cap has to leave room for a comment inside the budget
+    assert HELP_GUTTER_CAP < 78

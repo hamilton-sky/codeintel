@@ -10,16 +10,16 @@ from codeintel import __version__
 # wanted. Each entry is (command, one-line description).
 _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Understand your code", [
-        ("query", "Ask one question — search, callers, callees, impact, chain, symbol, hotspots"),
+        ("query", "Ask one question — changed, impact, callers, chain, search"),
         ("map", "Write CODE_INTEL.md — a committable architecture overview"),
-        ("graph", "Interactive call-graph viewer (--html), or the graph as JSON"),
-        ("c4", "LikeC4 architecture model (.c4) built from this repo's import graph"),
+        ("graph", "Call graph of functions — self-contained HTML, no install"),
+        ("c4", "Architecture map of files/folders — LikeC4 source, needs Node"),
     ]),
     ("Set up", [
-        ("setup", "Prepare backends + index this repo (--all does everything automatable)"),
-        ("index", "Index a project for semantic search"),
-        ("install", "Register codeintel with the AI agents installed on this machine"),
-        ("prompt", "Print a paste-to-your-agent setup prompt, tailored to this machine"),
+        ("setup", "Prepare backends + index this repo (--all does it all)"),
+        ("index", "Build the index every other command reads (semantic + graph)"),
+        ("install", "Register codeintel with the AI agents on this machine"),
+        ("prompt", "Print a paste-to-your-agent setup prompt for this machine"),
     ]),
     ("Check health", [
         ("doctor", "Per-engine health + index status, with the fix for each gap"),
@@ -56,20 +56,29 @@ _MODULES = {
     "gen-token": "gen_token",
 }
 
+# Deliberately NOT a second setup path. `_START_HERE` owns onboarding; these show what the tool is
+# FOR once it works. The two blocks used to disagree — one said `index` first, the other
+# `setup --all` — and neither of the numbered steps mentioned `install`, so following the "New
+# here?" list end to end produced a working CLI and an agent that still greps. README's quickstart
+# is `setup --all` -> `install` -> `query`; `_START_HERE` now matches it.
 _EXAMPLES = [
-    ("codeintel setup --all .", "prepare backends and index this repo"),
-    ("codeintel install", "register with the agents you have"),
-    ("codeintel query --op callers --target my_function", "who calls it?"),
-    ("codeintel doctor", "why is a query coming back empty?"),
+    ('codeintel query --op changed --target ""', "what do my edits break?"),
+    ("codeintel query --op callers --target foo", "who calls it?"),
+    ("codeintel graph . --html", "open the call graph"),
+    ("codeintel doctor", "why is a query empty?"),
 ]
 
 # The ordered path out of an empty state. A first-time user's problem is not "which of 15 commands"
 # but "what do I run first" — the command list answers the former and silently assumes the latter.
 _START_HERE = [
-    ("codeintel index .", "index this repo"),
-    ('codeintel query --op search --target "auth check"', "ask it something"),
-    ("codeintel map", "write CODE_INTEL.md for your agent"),
+    ("codeintel setup --all .", "backends + index this repo"),
+    ("codeintel install", "connect it to your AI agent"),
+    ("codeintel doctor", "confirm it works"),
 ]
+
+
+HELP_WIDTH = 78              # the width every rendered help line must fit inside
+HELP_GUTTER_CAP = 44         # ceiling on the derived comment column (see `gutter` below)
 
 
 def render_help() -> str:
@@ -82,7 +91,7 @@ def render_help() -> str:
     width = max(len(name) for name in _COMMANDS)
     out = [
         c.bold("codeintel") + c.dim(f" {__version__}")
-        + c.dim("  —  code intelligence for AI agents: graph + LSP + semantic search"),
+        + c.dim("  —  code intelligence for AI agents: graph, LSP, semantic"),
         "",
         c.dim("usage: ") + "codeintel <command> [options]",
     ]
@@ -90,9 +99,19 @@ def render_help() -> str:
     # ONE comment column across both blocks, derived from the widest entry in either. Two blocks
     # each self-aligning would ragged the screen into two gutters; the numbered prefix ("1. ") is
     # part of the measured width so the two blocks' comments still line up.
-    gutter = max(max(len(cmd) + 3 for cmd, _why in _START_HERE),
-                 max(len(cmd) for cmd, _why in _EXAMPLES)) + 2
+    # Capped. Derived-from-content is right, but an unbounded max lets ONE long invocation set the
+    # column for every short row: `codeintel doctor` was paying 38 blank columns and the line
+    # reached 96 chars, so an 80-column terminal wrapped the comment onto its own ragged row —
+    # losing the alignment the gutter exists to create. Past the cap a row keeps its comment one
+    # space away rather than aligned; a ragged row beats a wrapped screen.
+    gutter = min(max(max(len(cmd) + 3 for cmd, _why in _START_HERE),
+                     max(len(cmd) for cmd, _why in _EXAMPLES)) + 2, HELP_GUTTER_CAP)
     out.append("")
+    # A rule, not a new colour: cyan already means "this is a command name" on this screen, and
+    # diluting that costs more than it buys. The block needed separating from the four command
+    # groups below it — it was bold at the same weight and indent as every group heading, so the
+    # one block a first-time user needs looked like part of the reference list.
+    out.append("  " + c.rule(40))
     out.append("  " + c.bold("New here?"))
     for i, (cmd, why) in enumerate(_START_HERE, 1):
         out.append("    " + f"{i}. {cmd}".ljust(gutter) + c.dim("# " + why))
@@ -152,76 +171,84 @@ _EPILOGS: dict[str, str] = {
   codeintel index .                     index this repo (semantic + graph)
   codeintel index ~/src/other-repo      index a repo elsewhere
 
-Run this first, and again after big changes. `codeintel status` shows index age.""",
+Run this first, and again after big changes. `codeintel status` shows index
+age.""",
     "query": """examples:
-  codeintel query --op search   --target "where is auth checked"   find code by meaning
-  codeintel query --op impact   --target MyClass.method            what breaks if I change it
-  codeintel query --op callers  --target parse_config              who calls it
-  codeintel query --op chain    --target "handler->db_write"       how A reaches B
-  codeintel query --op overview --target ""                        this repo's architecture
+  codeintel query --op changed
+  codeintel query --op search
+  codeintel query --op impact
+  codeintel query --op callers
+  codeintel query --op chain
+  codeintel query --op overview --target ""
 
-`overview`, `changed` and `hotspots` ignore --target. Prefer this over grep: results are ranked
-by graph importance, not by match order.""",
+`overview`, `changed` and `hotspots` ignore --target. Prefer this over grep:
+results are ranked by graph importance, not by match order.""",
     "map": """examples:
   codeintel map .                       write CODE_INTEL.md
   codeintel map . --inject              also point CLAUDE.md / AGENTS.md at it
 
-A committable, readable architecture overview — for agents that do not speak MCP, and for reading
-before grepping. Re-run after `codeintel index`.""",
+A committable, readable architecture overview — for agents that do not speak
+MCP, and for reading before grepping. Re-run after `codeintel index`.""",
     "graph": """examples:
-  codeintel graph . --html              interactive call-graph viewer, one self-contained file
+  codeintel graph . --html
   codeintel graph . > graph.json        the graph as {nodes,edges} JSON
 
-Function-level "what calls what", with nothing to install. For file-level architecture instead,
-see `codeintel c4`.""",
+Function-level "what calls what", with nothing to install. For file-level
+architecture instead, see `codeintel c4`.""",
     "c4": """examples:
   codeintel c4 .                        write codeintel-c4/model.c4
   codeintel c4 . --scope src            model only src/
   codeintel c4 . --depth 2              coarser: fewer, larger boxes
   codeintel c4 . --json                 inspect the payload, write nothing
 
-Then view it:  npx likec4 start codeintel-c4
-
-File/directory-level "what depends on what", emitted as LikeC4 source you can commit, diff and
-hand-edit. Indexes the repo first if needed. For function-level calls, see `codeintel graph`.""",
+File/directory-level "what depends on what". Emits LikeC4 source you can
+commit, diff and hand-edit — viewing it needs Node (`npx likec4 start
+codeintel-c4`). For function-level calls, or if you have no Node, use
+`codeintel graph --html` instead. Indexes the repo first if needed.""",
     "status": """examples:
-  codeintel status                      engine availability + index age for this repo
+  codeintel status
 
-Shows which of the three engines are ready. If one is not, `codeintel doctor` says how to fix it.""",
+Shows which of the three engines are ready. If one is not, `codeintel doctor`
+says how to fix it.""",
     "doctor": """examples:
-  codeintel doctor                      per-engine health + index status, with a fix for each gap
-  codeintel doctor --deep               also boot the LSP to prove it runs (slower)
+  codeintel doctor
+  codeintel doctor --deep
 
-Run this when a query comes back empty — it separates "not indexed" from "engine missing" from
-"nothing to find".""",
+Run this when a query comes back empty — it separates "not indexed" from
+"engine missing" from "nothing to find".""",
     "setup": """examples:
-  codeintel setup --all                 prepare every backend and index this repo
-  codeintel setup                       show what is missing, fix what is safe to fix
+  codeintel setup --all
+  codeintel setup
 
 The one-shot path on a new machine.""",
     "install": """examples:
-  codeintel install                     register with every AI agent found on this machine
+  codeintel install
   codeintel install --dry-run           show what would change, write nothing
 
-Writes MCP server config so an agent can call codeintel without further setup.""",
+Writes the MCP server config so an agent can call codeintel. Then restart the
+agent (or start a new session) — a running host does not reload its MCP
+config. `codeintel doctor` lists what got registered where.""",
     "prompt": """examples:
-  codeintel prompt                      print a paste-to-your-agent setup prompt
+  codeintel prompt
 
-For agents that cannot read an MCP config: paste the output into the conversation.""",
+For agents that cannot read an MCP config: paste the output into the
+conversation.""",
     "reset": """examples:
-  codeintel reset .                     clear this repo's index (semantic AND graph)
+  codeintel reset .
   codeintel reset --all --yes           wipe every repo, no prompt
 
 Recovers from a corrupt or stale index. Re-index afterwards.""",
     "serve": """examples:
   codeintel serve                       start the MCP server on stdio
 
-This is what an AI agent launches; you rarely run it by hand. `codeintel install` wires it up.""",
+This is what an AI agent launches; you rarely run it by hand. `codeintel
+install` wires it up.""",
     "serve-http": """examples:
   codeintel serve-http                  loopback only, no auth
   codeintel serve-http --token "$(codeintel gen-token)"
 
-Loopback-only unless --allow-remote. Use --token whenever the port is reachable by anything else.""",
+Loopback-only unless --allow-remote. Use --token whenever the port is
+reachable by anything else.""",
     "gen-token": """examples:
   codeintel gen-token                   print a random bearer token
 
@@ -250,7 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     # index subcommand
     index_parser = subparsers.add_parser(
         "index", parents=[color_parent],
-        help="Index a project for semantic search")
+        help="Build the index every other command reads (semantic + graph)")
     index_parser.add_argument(
         "project_root",
         nargs="?",

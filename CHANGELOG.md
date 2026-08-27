@@ -20,6 +20,27 @@ All notable changes to codeintel are documented here. The format is based on
   index should fail the step rather than be silently repaired.
 
 ### Changed
+- **Every subcommand's `--help` now says when to reach for it and shows a worked example.** Measured
+  before the change: of ten subcommands exactly one had any example or statement of purpose; the
+  other nine printed a bare argparse flag list. A flag list answers "what can I pass", never
+  "should I be running this at all".
+- **`codeintel index` no longer describes itself as being for semantic search.** It also builds the
+  call graph, and every structural op (`callers`, `impact`, `hotspots`, `changed`, `graph`, `c4`)
+  reads that graph — so a user who wanted structure rather than fuzzy search read the one line
+  describing the one command they needed, and skipped it.
+- **The "New here?" path no longer contradicts the examples below it.** One block said to run
+  `index` first, the other `setup --all`, and neither of the numbered steps mentioned `install` —
+  so following the onboarding list end to end produced a working CLI and an agent that still
+  grepped. `_START_HERE` now matches README's quickstart (`setup --all` → `install` → `doctor`) and
+  the examples show what the tool is for rather than repeating setup.
+- **`graph` and `c4` now route between themselves.** The two facts that decide the choice are
+  granularity (functions vs files) and cost to view (nothing vs Node); neither description carried
+  either, and `c4` led with a format name before saying what question it answers.
+- **`query`'s description leads with `changed`.** It was absent from the one-line summary and
+  appeared in the epilog only inside a caveat about `--target`, despite being the op the MCP
+  instructions tell agents to run before every edit.
+- **`codeintel install` says to restart the agent.** "I ran install, it said verified, my agent
+  still can't see it" was answered in the README and nowhere in the help.
 - **The MCP tool contract moved into the JSON schema.** Parameter docs lived in prose descriptions,
   read once at connect time to describe fields filled in later. `op` is now a `Literal` enum, so a
   mistyped or hallucinated op is rejected by MCP's own argument validation with the real choices
