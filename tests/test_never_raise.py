@@ -84,8 +84,21 @@ def test_gateway_provider_returns_none():
 # Group 7: code_query_handler — empty dict
 # ---------------------------------------------------------------------------
 
-def test_code_query_handler_empty_dict():
-    r = code_query_handler({})
+# Both groups below pass an explicit, EMPTY `project_root`.
+#
+# Not decoration: a blank `project_root` now defaults to the server's cwd (the stdio affordance in
+# `code_query_handler`), which during a test run is this repository — indexed, and large. Omitting
+# it turned two malformed-input assertions into full live queries against the real backend, 20s and
+# 10s of the suite's runtime, and made them fail slowly rather than fast whenever that backend was
+# unhealthy. A tmp_path root exercises the identical never-raise path (resolution finds no project,
+# every layer degrades to a safe-null) without making the invariant depend on how big or how
+# well-indexed the checkout happens to be.
+#
+# The cwd default keeps its own coverage in `test_rbac.py`, where it is the behaviour under test
+# rather than an accident of a missing argument.
+
+def test_code_query_handler_empty_dict(tmp_path):
+    r = code_query_handler({"project_root": str(tmp_path)})
     assert r["ok"] is True
 
 
@@ -93,8 +106,21 @@ def test_code_query_handler_empty_dict():
 # Group 8: code_query_handler — wrong types in args values
 # ---------------------------------------------------------------------------
 
-def test_code_query_handler_wrong_types():
-    r = code_query_handler({"op": 999, "target": ["list", "value"]})
+def test_code_query_handler_wrong_types(tmp_path):
+    r = code_query_handler({"op": 999, "target": ["list", "value"],
+                            "project_root": str(tmp_path)})
+    assert r["ok"] is True
+
+
+def test_code_query_handler_survives_a_genuinely_absent_project_root(tmp_path, monkeypatch):
+    """The no-argument case still has to hold — it is just pinned without a live query.
+
+    `{}` reaching this handler is what an agent sends when it has not read the schema, so the
+    never-raise envelope has to cover it. Pointing cwd at an empty directory keeps that assertion
+    exact while removing the accidental dependency on the checkout being indexed.
+    """
+    monkeypatch.chdir(tmp_path)
+    r = code_query_handler({})
     assert r["ok"] is True
 
 
