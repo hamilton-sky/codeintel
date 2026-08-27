@@ -6,6 +6,55 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`codeintel c4` — a LikeC4 architecture model of any indexed repo.** `codeintel graph --html`
+  answers *what calls what* at function granularity; this answers *what depends on what* at file
+  and directory granularity, and it emits **source rather than a picture**: a `.c4` model you can
+  commit, diff in review, hand-edit to add a component the graph cannot see, and render with the
+  LikeC4 toolchain (interactive site, static build, Mermaid, PNG). Pure Python text generation —
+  no new runtime dependency, no Node, nothing that can fail at query time. Verified end to end
+  against LikeC4 1.59.2: `validate`, JSON export with layout, and Mermaid codegen all succeed.
+- **`c4` indexes an un-indexed repo instead of refusing it**, so one command always produces a
+  model. Graph index only — a `.c4` needs no embeddings, and on a 58-file repo that is 6s against
+  2m35s for the full index. `--no-index` restores the strict behaviour for CI, where a missing
+  index should fail the step rather than be silently repaired.
+
+### Changed
+- **The MCP tool contract moved into the JSON schema.** Parameter docs lived in prose descriptions,
+  read once at connect time to describe fields filled in later. `op` is now a `Literal` enum, so a
+  mistyped or hallucinated op is rejected by MCP's own argument validation with the real choices
+  listed, rather than returning a null envelope that this server's own instructions teach an agent
+  to read as "the code doesn't exist". Every parameter carries a description; `code.map`'s `inject`
+  (it writes to CLAUDE.md/AGENTS.md) and `code.doctor`'s `deep` (it boots a live LSP) are no longer
+  undocumented; read-only hints are declared via `ToolAnnotations`.
+- **`code.query` and `code.map` fall back to the server's cwd when `project_root` is blank**, which
+  `code.status`/`code.doctor` already did. The parameter was documented as optional while every
+  provider on the query path hard-failed without it.
+- **Top-level `-h`/`--help` shows the grouped, coloured help screen.** It was already wired to
+  `codeintel` and `codeintel help`, but the flag most users reach for first got stock argparse.
+- **`CODE_INTEL.md` records when it was generated and from how large an index.** This repo's own
+  committed copy was found 172 nodes and 1,413 edges behind its live index with nothing on the page
+  to reveal it.
+
+### Fixed
+- **Pure-data files no longer rank as load-bearing symbols.** A permissive parser indexes a JSON
+  object's top-level keys as symbols; two untracked JSON blobs ranked as the 2nd and 8th most
+  load-bearing symbols in this project because keys like `body` and `status` carried real USAGE
+  edges between sibling JSON files. `.json` is excluded from the repo-scan ops — a denylist of one
+  unambiguous data extension, not an allowlist of code extensions, which would silently hide real
+  symbols in any language left off the list.
+- **`unsupported-op` now names the close matches and the full op vocabulary.** It was the only
+  safe-null on that path carrying no hint, and a wrong op guess reads like "found nothing".
+
+### Known issues
+- The `project_root` cwd fallback turns a blank-root `code.query` from an instant no-op into real
+  work: on a cold semantic engine the first such call takes ~4 minutes where it previously returned
+  in 0.00s. This fails `test_rbac_reader_allowed_op_is_not_denied` (its fixture is root
+  unrestricted, so the fallback engages and the reader's `search` runs past the client socket
+  timeout) and slows the full suite from ~2.5 to ~10 minutes. The RBAC ordering itself is correct:
+  the fallback is applied only after `Gateway.allows_root` accepts the raw blank value. The fix
+  belongs on the cold-start path.
+
 ## [0.18.0] — 2026-08-26
 
 ### Added

@@ -12,6 +12,7 @@ explain how the system is put together and how each piece behaves.
 | [query-flow.md](query-flow.md) | The request lifecycle — engine selection, fan-out & merge, caching, and why the gateway never throws. Mermaid + ASCII. |
 | [map-file.md](map-file.md) | The static `CODE_INTEL.md` orientation layer (`codeintel map`) — for hosts with no MCP support. |
 | [graph-viewer.md](graph-viewer.md) | `codeintel graph` — the call graph as `{nodes,edges}` JSON, or a **self-contained interactive HTML viewer** for any repo (layouts, metrics, export). |
+| [c4.md](c4.md) | `codeintel c4` — a **LikeC4 architecture model** (`.c4`) of the repo's files/directories and import graph: committable, diffable source rather than a rendered picture. |
 
 ## Engine references
 
