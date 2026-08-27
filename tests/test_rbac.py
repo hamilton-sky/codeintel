@@ -119,6 +119,49 @@ def test_rbac_reader_allowed_op_is_not_denied(rbac_server):
     status, body = _query(rbac_server, {"op": "search", "target": "x"}, token="readertok")
     assert status == 200
     assert body.get("reason") != "op-not-allowed-for-role"
+    # …and it answers IMMEDIATELY. `code_query_handler` defaults a blank `project_root` to the
+    # server's cwd, which is right on stdio (the server runs inside the user's repo) and wrong
+    # here: over HTTP the cwd is an arbitrary server-side directory, and defaulting to it made this
+    # request run a real semantic query — a cold embedding-model load measured at ~4 minutes, well
+    # past this client's 60s socket timeout. Reaching this assertion at all is the regression test;
+    # the reason pins WHY it is fast rather than leaving that to luck.
+    assert body.get("reason") == "no-project-root"
+
+
+def test_the_http_transport_never_answers_from_the_servers_own_cwd(rbac_server, monkeypatch):
+    """A request naming no repo must not be answered from whatever directory the server happens to
+    have been started in — that serves one repo's structure to someone who asked about nothing.
+    """
+    called: list[str] = []
+    import codeintel.server as srv
+    monkeypatch.setattr(srv.os, "getcwd", lambda: called.append("getcwd") or "/should/not/be/used")
+
+    status, body = _query(rbac_server, {"op": "search", "target": "x"}, token="admintok")
+    assert status == 200
+    assert body.get("reason") == "no-project-root"
+    assert called == []          # the default was never even consulted on this transport
+
+
+def test_the_cwd_default_survives_on_the_stdio_path(monkeypatch, tmp_path):
+    """The HTTP restriction must not undo A1: where cwd IS the user's repo, blank still means cwd.
+
+    Pinned at the handler, since only `http_server` sets `allow_cwd_default=False`.
+    """
+    import codeintel.server as srv
+    monkeypatch.setattr(srv.os, "getcwd", lambda: str(tmp_path))
+    seen: dict = {}
+
+    class _Gw:
+        def allows_root(self, role, root):
+            return True
+
+        def query(self, **kw):
+            seen.update(kw)
+            return {"ok": True, "op": kw.get("op"), "result": None, "reason": ""}
+
+    monkeypatch.setattr(srv, "_get_gateway", lambda: _Gw())
+    srv.code_query_handler({"op": "search", "target": "x", "project_root": ""})
+    assert seen.get("project_root") == str(tmp_path)
 
 
 def test_rbac_role_is_server_authoritative_no_body_escalation(rbac_server):

@@ -134,6 +134,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "bad-request"})
             return
         parsed["role"] = role  # server-authoritative — overrides any client-supplied role (no escalation)
+        # Server-authoritative for the same reason `role` is, and set the same way (after the body
+        # is parsed, overriding anything the client sent).
+        #
+        # `code_query_handler` defaults a blank `project_root` to the server's cwd. That is a STDIO
+        # affordance: there, the MCP server is launched by the agent inside the user's own
+        # repository, so "the current directory" is exactly the repo they mean. Over HTTP it is
+        # neither — the cwd is whatever directory this process happens to have been started in,
+        # unrelated to the caller, and answering from it would silently serve one repo's structure
+        # to someone who asked about nothing in particular.
+        #
+        # It is also a latency trap on this transport: a blank-root `search` used to return
+        # `no-project-root` instantly, and with the default it instead runs a real semantic query,
+        # which on a cold engine has to load the embedding model first — measured at ~4 minutes,
+        # long past any sane client socket timeout. A request that names no repo should be answered
+        # immediately and honestly, not by picking one and blocking on it.
+        parsed["allow_cwd_default"] = False
         if self.path == "/code/doctor":
             result = code_doctor_handler(parsed)
             # `registrations` (which agent hosts this machine registered codeintel with, and where)

@@ -141,7 +141,16 @@ def code_query_handler(args: dict) -> Result:
         # engages the fallback when RBAC is disabled/absent or the role is unconditionally allowed
         # (e.g. `roots = ["*"]`) — the same gate `code.status`/`code.doctor` already run before
         # their own cwd fallback.
-        if not project_root and gw.allows_root(role, project_root):
+        #
+        # SCOPED TO STDIO. `allow_cwd_default` is set False by `http_server.py`, server-side, for
+        # every request on that transport: there the cwd is an arbitrary server-side directory
+        # rather than the caller's repo, and defaulting to it both answers the wrong question and
+        # blocks the request behind a cold embedding-model load. Absent (stdio, and the CLI paths
+        # that call this handler directly) it defaults to True, so the doc/behaviour agreement this
+        # fallback exists for is kept exactly where cwd actually means something.
+        if (not project_root
+                and bool(args.get("allow_cwd_default", True))
+                and gw.allows_root(role, project_root)):
             project_root = os.getcwd()
         return gw.query(op=op, target=target, engine=engine, role=role, project_root=project_root)
     except Exception:
@@ -401,10 +410,12 @@ _TARGET_FIELD_DESCRIPTION = (
     "those answer for the whole repo, scoped by `project_root` alone."
 )
 _PROJECT_ROOT_FIELD_DESCRIPTION = (
-    "Absolute path to the repo root. Optional: if omitted, this falls back to the server's "
-    "current working directory — the same default `code.status`/`code.doctor` already use. "
-    "Under role-based access control a blank value is rejected rather than defaulted, so a "
-    "caller operating under a restricted role should always pass it explicitly."
+    "Absolute path to the repo root. Optional on this (stdio) transport: if omitted, it falls back "
+    "to the server's current working directory — the same default `code.status`/`code.doctor` "
+    "already use, and on stdio that is the repo the server was launched in. Over the HTTP "
+    "transport there is no such default (the server's cwd is unrelated to the caller), and under "
+    "role-based access control a blank value is rejected rather than defaulted — so pass it "
+    "explicitly whenever you know it."
 )
 _ENGINE_FIELD_DESCRIPTION = "Which engine answers. Leave as `auto` — it already picks the right engine per op."
 _ROLE_FIELD_DESCRIPTION = (
