@@ -121,6 +121,18 @@ def test_c4_writes_nothing_when_the_model_would_be_empty(monkeypatch, capsys, tm
     assert "no-source-files" in capsys.readouterr().out
 
 
+def _no_wait(monkeypatch, cmd, *, step=None):
+    """Make the settle loop deterministic and instant.
+
+    Stubbing only `sleep` is not enough: with a real `monotonic`, the loop busy-spins for the whole
+    SETTLE_SECONDS budget in wall-clock time. The clock has to advance too.
+    """
+    step = cmd.SETTLE_INTERVAL_SECONDS if step is None else step
+    now = {"t": 0.0}
+    monkeypatch.setattr(cmd.time, "sleep", lambda s: now.__setitem__("t", now["t"] + step))
+    monkeypatch.setattr(cmd.time, "monotonic", lambda: now["t"])
+
+
 def _payload_sequence(monkeypatch, *payloads):
     """Stub `build_c4_payload` to return each payload in turn, and record how many times it ran."""
     calls = {"n": 0}
@@ -145,6 +157,7 @@ def test_an_unindexed_repo_is_indexed_and_the_model_produced_in_one_command(
     monkeypatch.setattr("codeintel.c4.index_repo",
                         lambda root, **kw: (indexed.append(str(root)), {"ok": True, "problem": ""})[1])
     monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    _no_wait(monkeypatch, import_module("codeintel.commands.c4"))
     out_dir = tmp_path / "codeintel-c4"
 
     assert import_module("codeintel.commands.c4").run(
@@ -164,6 +177,7 @@ def test_the_nested_repo_reason_also_auto_indexes(monkeypatch, capsys, tmp_path)
                       _valid_payload())
     monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
     monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    _no_wait(monkeypatch, import_module("codeintel.commands.c4"))
 
     assert import_module("codeintel.commands.c4").run(
         _c4_args(project_root=str(tmp_path), out=str(tmp_path / "o"))) == 0
@@ -179,6 +193,70 @@ def test_no_index_refuses_instead_of_indexing(monkeypatch, capsys, tmp_path):
         _c4_args(project_root=str(tmp_path), no_index=True)) == 1
     assert calls["n"] == 1                     # built once, never retried
     assert "project-not-indexed" in capsys.readouterr().out
+
+
+def test_a_project_the_backend_publishes_late_is_waited_for_not_declared_missing(
+        monkeypatch, capsys, tmp_path):
+    """The backend returns from `index_repository` before the new project is queryable. Measured on
+    a 246-file repo: the index reported success, the immediate rebuild still resolved to nothing,
+    and the next command invocation produced a 62-element model from that same index. A single
+    retry printed "✓ indexed" and "project-not-indexed — run `codeintel index`" one line apart.
+    """
+    cmd = import_module("codeintel.commands.c4")
+    # not-indexed, still not-indexed, THEN it appears — exactly the race, no real sleeping
+    calls = _payload_sequence(monkeypatch,
+                              {**c4._EMPTY, "reason": "project-not-indexed"},
+                              {**c4._EMPTY, "reason": "project-not-indexed"},
+                              _valid_payload())
+    monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    _no_wait(monkeypatch, cmd)
+    out_dir = tmp_path / "o"
+
+    assert cmd.run(_c4_args(project_root=str(tmp_path), out=str(out_dir))) == 0
+    assert calls["n"] == 3                       # it kept asking rather than giving up at 2
+    assert (out_dir / c4.MODEL_FILENAME).exists()
+
+
+def test_a_project_that_never_appears_does_not_tell_you_to_index_again(
+        monkeypatch, capsys, tmp_path):
+    """The old message advised the exact action that had just succeeded. Bounded wait, then an
+    accurate reason — and no advice to re-run the step that already worked."""
+    cmd = import_module("codeintel.commands.c4")
+    _payload_sequence(monkeypatch, {**c4._EMPTY, "reason": "project-not-indexed"})
+    monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    _no_wait(monkeypatch, cmd)
+
+    assert cmd.run(_c4_args(project_root=str(tmp_path))) == 1
+    out = capsys.readouterr().out
+    assert "still reports no project" in out
+    assert "drop --no-index" not in out          # the advice that made no sense here
+    assert "run `codeintel index`" not in out
+
+
+def test_the_settle_wait_is_bounded_by_the_clock_not_the_attempt_count(monkeypatch):
+    """A backend that never publishes must not spin forever: the loop is bounded by wall clock, so
+    it cannot hang a CI step or this test suite."""
+    cmd = import_module("codeintel.commands.c4")
+    ticks = iter([0.0] + [cmd.SETTLE_SECONDS + 1.0] * 50)   # first check inside, then past deadline
+    monkeypatch.setattr(cmd.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(cmd.time, "sleep", lambda s: None)
+    builds = {"n": 0}
+
+    def build():
+        builds["n"] += 1
+        return {**c4._EMPTY, "reason": "project-not-indexed"}
+
+    out = cmd._settle(build, {**c4._EMPTY, "reason": "project-not-indexed"})
+    assert out["reason"] == "project-not-indexed"
+    assert builds["n"] == 0                      # deadline already passed → no extra attempt
+
+
+def test_the_settle_helper_degrades_instead_of_raising(monkeypatch):
+    cmd = import_module("codeintel.commands.c4")
+    original = {**c4._EMPTY, "reason": "project-not-indexed"}
+    monkeypatch.setattr(cmd.time, "sleep", lambda s: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert cmd._settle(lambda: _valid_payload(), original) is original
 
 
 def test_a_failed_auto_index_reports_the_backend_problem_and_does_not_loop(
@@ -211,6 +289,7 @@ def test_json_reports_the_model_from_after_the_auto_index(monkeypatch, capsys, t
                       {**c4._EMPTY, "reason": "project-not-indexed"},
                       _valid_payload())
     monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    _no_wait(monkeypatch, import_module("codeintel.commands.c4"))
 
     assert import_module("codeintel.commands.c4").run(
         _c4_args(project_root=str(tmp_path), json=True)) == 0

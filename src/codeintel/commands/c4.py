@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from typing import Any
 
 from codeintel.commands._common import never_raise, require_dir, resolve_root
@@ -16,6 +17,36 @@ _REASON_FIX = {
     "scope-not-found": "drop --scope, or point it at a directory that actually exists",
     "error": "run `codeintel doctor` to check engine health",
 }
+
+
+# How long to keep re-asking after a successful index before giving up, and how long to wait
+# between attempts. 30s is chosen against the one measurement available: on pathly-adapters (246
+# source files) the project was queryable by the next command invocation, seconds later. Kept
+# deliberately short — this is a foreground CLI, and a wait long enough to cover an arbitrarily
+# large repo would read as a hang. Exceeding it is reported, never silently treated as failure to
+# index.
+SETTLE_SECONDS = 30.0
+SETTLE_INTERVAL_SECONDS = 2.0
+
+
+def _settle(build: Any, payload: dict) -> dict:
+    """Re-run *build* until it stops reporting a not-indexed reason, or the budget runs out.
+
+    Returns the last payload either way; the caller decides what an un-settled result means. Never
+    raises — a clock or provider failure degrades to the payload already in hand.
+    """
+    try:
+        from codeintel import c4
+
+        deadline = time.monotonic() + SETTLE_SECONDS
+        while (payload.get("reason") or "") in c4.INDEXABLE_REASONS:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(SETTLE_INTERVAL_SECONDS)
+            payload = build()
+        return payload
+    except Exception:
+        return payload
 
 
 def _other_c4_files_elsewhere(project_root: str, out_dir: str) -> list[str]:
@@ -66,9 +97,8 @@ def run(args: Any) -> int:
     # One command, one artifact: an un-indexed repo is a prerequisite this command can satisfy
     # itself, so it does — rather than printing "run `codeintel index`" and exiting 1, which makes
     # the user run two commands to get one file. Announced BEFORE it starts (it is the slow part,
-    # and silence here reads as a hang) and retried exactly once, so a repo the backend cannot
-    # index reports that instead of looping. `--no-index` restores the strict behaviour for CI,
-    # where "the index was missing" should fail the step rather than be quietly repaired.
+    # and silence here reads as a hang). `--no-index` restores the strict behaviour for CI, where
+    # "the index was missing" should fail the step rather than be quietly repaired.
     reason = payload.get("reason") or ""
     if reason in c4.INDEXABLE_REASONS and not getattr(args, "no_index", False):
         print(f"{project_root} has no graph index yet — indexing it now "
@@ -79,7 +109,27 @@ def run(args: Any) -> int:
             print("  run `codeintel doctor` to check the graph backend")
             return 1
         print("  ✓ indexed")
-        payload = build()
+
+        # The backend returns from `index_repository` BEFORE the freshly indexed project is
+        # queryable, so a single immediate rebuild loses a race it cannot see. Measured on
+        # pathly-adapters: the index reported success after 82s, the immediate retry still resolved
+        # to nothing, and the very next invocation of this command produced a 62-element model from
+        # that same index. A lone retry therefore printed "✓ indexed" and "project-not-indexed —
+        # run `codeintel index`" one line apart, telling the user to redo what had just succeeded.
+        #
+        # So poll instead, bounded. Each `build()` constructs its own provider and therefore its own
+        # resolution cache, which is what lets a later attempt see a registration an earlier one
+        # missed — no cache-invalidation reach-through required.
+        payload = _settle(build, payload)
+        reason = payload.get("reason") or ""
+        if reason in c4.INDEXABLE_REASONS:
+            # Never re-suggest indexing here: it just succeeded. This is the backend not having
+            # published the project, which is a different problem with a different fix.
+            print(f"c4 failed: indexed this repo, but the graph backend still reports no project "
+                  f"for it after {SETTLE_SECONDS:.0f}s ({reason})")
+            print("  the index may still be building — re-run `codeintel c4` in a moment, "
+                  "or check `codeintel doctor`")
+            return 1
 
     # After the auto-index, so `--json` reports the model this repo actually has rather than the
     # not-indexed envelope it had a moment ago.
