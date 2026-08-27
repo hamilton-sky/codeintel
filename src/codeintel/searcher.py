@@ -299,6 +299,15 @@ class Searcher:
         rerank: str = "on",
         rerank_candidates: int = 30,
     ) -> list[dict]:
+        # Reset FIRST, before any early return. These describe THIS search, and every path out of
+        # this method must leave them describing it — including the ones that never reach
+        # verification (blank query, unindexed project, a query the embedder could not encode).
+        # `_get_embedder` caches the model on the instance precisely so a Searcher can be reused,
+        # so leaving a previous query's counts in place would have a caller report "N chunks
+        # withheld" about a search that never ran.
+        self.last_stale = 0
+        self.last_unverifiable = 0
+
         if not query or not query.strip():
             return []
 

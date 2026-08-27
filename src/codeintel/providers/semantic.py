@@ -219,8 +219,12 @@ class SemanticProvider:
                 if searcher.last_stale:
                     return safe_null_result(
                         op, target, engine="semantic", reason="index-stale",
-                        hint=f"{_plural(searcher.last_stale, 'matching chunk')} could not be "
-                             f"verified against the current source and was withheld; "
+                        # Phrased to avoid subject-verb agreement entirely rather than hardcoding
+                        # one number's verb: `_plural` exists so these strings read as facts about
+                        # the repo, and "3 matching chunks ... was withheld" reads as a bug in the
+                        # tool printing it.
+                        hint=f"withheld {_plural(searcher.last_stale, 'matching chunk')} that "
+                             f"could not be verified against the current source; "
                              f"run: codeintel index {project_root}",
                     )
                 return safe_null_result(op, target, engine="semantic", reason="below-floor")
@@ -281,6 +285,26 @@ class SemanticProvider:
                               f"source has changed since indexing, so the recorded location no "
                               f"longer points at the code that matched. Results here are "
                               f"incomplete — re-index to restore them "
+                              f"(codeintel index {project_root}).",
+                })
+            # An index that CANNOT be checked must not be reported like one that passed. Rows
+            # written before this release carry no chunk span, so verification silently does
+            # nothing for them — and that is not a rare state, it is what every existing cache
+            # looks like on the first query after upgrading, until a pass backfills the spans.
+            # Without this the answer came back `confidence: complete` with no gap while offering
+            # exactly the stale hit the verification was added to withhold, and the enclosing-symbol
+            # preview made it read as MORE authoritative: a deleted `charge_credit_card` rendered
+            # as `app.py:1 | charge_credit_card() … import logging`. Saying "unknown" is the whole
+            # point of the gaps contract; a verification you cannot perform is unknown, not clean.
+            if searcher.last_unverifiable:
+                gaps.append({
+                    "section": "freshness",
+                    "kind": "unverified-chunks",
+                    "detail": f"{_plural(searcher.last_unverifiable, 'hit')} could not be checked "
+                              f"against the current source: this index predates staleness "
+                              f"verification and has no recorded chunk spans, so a hit may point "
+                              f"at code that has since moved or been deleted. Treat these "
+                              f"locations as unconfirmed — one re-index enables checking "
                               f"(codeintel index {project_root}).",
                 })
             if not code_hits and prose_hits:

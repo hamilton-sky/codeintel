@@ -27,6 +27,22 @@ All notable changes to codeintel are documented here. The format is based on
   their function.
 
 ### Fixed
+- **An index that cannot be checked is no longer reported like one that passed.** Staleness
+  verification needs a recorded chunk span, and `chunk_end` arrives by `ALTER` — so it is NULL
+  until an index pass backfills it. That is not a rare state: it is what *every* existing cache
+  looks like on the first query after upgrading. Those hits were served with
+  `confidence: complete` and no gap, which put the original staleness bug straight back with no
+  signal — and the new enclosing-symbol preview made it read as *more* authoritative, rendering a
+  deleted `charge_credit_card` as `app.py:1 | charge_credit_card() … import logging`. The count was
+  already computed (`Searcher.last_unverifiable`) and simply never consumed. Such answers are now
+  marked `partial` with an `unverified-chunks` gap saying the locations are unconfirmed and one
+  re-index enables checking. The hits are kept rather than withheld: dropping them would leave an
+  upgrading user with no results at all until they happened to re-index.
+- **`Searcher` search statistics describe the search that just ran.** `last_stale` /
+  `last_unverifiable` were assigned only after the verification block, so any early return (blank
+  query, unindexed project, un-embeddable query) left the previous query's values in place. The
+  class caches its embedder on the instance precisely so it can be reused, so a caller holding one
+  across queries could report "N chunks withheld" about a search that never ran.
 - **Redaction no longer corrupts paths and prose that merely resemble the home directory.** The
   home path was matched as a bare substring, which broke two ways. A path that only *started* with
   the home string was mangled into one that does not exist — under `HOME=/root`,
