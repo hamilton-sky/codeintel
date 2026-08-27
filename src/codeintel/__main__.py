@@ -139,6 +139,96 @@ def _unknown_command(name: str) -> int:
     return 2
 
 
+# `epilog` text for each subcommand: WHEN to reach for it, and one real invocation. The top-level
+# screen (`render_help`) has grouped output, colour and examples; every `codeintel <cmd> --help`
+# one level down was still stock argparse — flags listed, purpose unexplained, no example. A flag
+# list answers "what can I pass"; it never answers "should I be running this at all".
+#
+# Kept as a table rather than inline `epilog=` kwargs so the wording of every screen is reviewable
+# in one place, and so a command added without an entry degrades to today's behaviour (no epilog)
+# rather than breaking.
+_EPILOGS: dict[str, str] = {
+    "index": """examples:
+  codeintel index .                     index this repo (semantic + graph)
+  codeintel index ~/src/other-repo      index a repo elsewhere
+
+Run this first, and again after big changes. `codeintel status` shows index age.""",
+    "query": """examples:
+  codeintel query --op search   --target "where is auth checked"   find code by meaning
+  codeintel query --op impact   --target MyClass.method            what breaks if I change it
+  codeintel query --op callers  --target parse_config              who calls it
+  codeintel query --op chain    --target "handler->db_write"       how A reaches B
+  codeintel query --op overview --target ""                        this repo's architecture
+
+`overview`, `changed` and `hotspots` ignore --target. Prefer this over grep: results are ranked
+by graph importance, not by match order.""",
+    "map": """examples:
+  codeintel map .                       write CODE_INTEL.md
+  codeintel map . --inject              also point CLAUDE.md / AGENTS.md at it
+
+A committable, readable architecture overview — for agents that do not speak MCP, and for reading
+before grepping. Re-run after `codeintel index`.""",
+    "graph": """examples:
+  codeintel graph . --html              interactive call-graph viewer, one self-contained file
+  codeintel graph . > graph.json        the graph as {nodes,edges} JSON
+
+Function-level "what calls what", with nothing to install. For file-level architecture instead,
+see `codeintel c4`.""",
+    "c4": """examples:
+  codeintel c4 .                        write codeintel-c4/model.c4
+  codeintel c4 . --scope src            model only src/
+  codeintel c4 . --depth 2              coarser: fewer, larger boxes
+  codeintel c4 . --json                 inspect the payload, write nothing
+
+Then view it:  npx likec4 start codeintel-c4
+
+File/directory-level "what depends on what", emitted as LikeC4 source you can commit, diff and
+hand-edit. Indexes the repo first if needed. For function-level calls, see `codeintel graph`.""",
+    "status": """examples:
+  codeintel status                      engine availability + index age for this repo
+
+Shows which of the three engines are ready. If one is not, `codeintel doctor` says how to fix it.""",
+    "doctor": """examples:
+  codeintel doctor                      per-engine health + index status, with a fix for each gap
+  codeintel doctor --deep               also boot the LSP to prove it runs (slower)
+
+Run this when a query comes back empty — it separates "not indexed" from "engine missing" from
+"nothing to find".""",
+    "setup": """examples:
+  codeintel setup --all                 prepare every backend and index this repo
+  codeintel setup                       show what is missing, fix what is safe to fix
+
+The one-shot path on a new machine.""",
+    "install": """examples:
+  codeintel install                     register with every AI agent found on this machine
+  codeintel install --dry-run           show what would change, write nothing
+
+Writes MCP server config so an agent can call codeintel without further setup.""",
+    "prompt": """examples:
+  codeintel prompt                      print a paste-to-your-agent setup prompt
+
+For agents that cannot read an MCP config: paste the output into the conversation.""",
+    "reset": """examples:
+  codeintel reset .                     clear this repo's index (semantic AND graph)
+  codeintel reset --all --yes           wipe every repo, no prompt
+
+Recovers from a corrupt or stale index. Re-index afterwards.""",
+    "serve": """examples:
+  codeintel serve                       start the MCP server on stdio
+
+This is what an AI agent launches; you rarely run it by hand. `codeintel install` wires it up.""",
+    "serve-http": """examples:
+  codeintel serve-http                  loopback only, no auth
+  codeintel serve-http --token "$(codeintel gen-token)"
+
+Loopback-only unless --allow-remote. Use --token whenever the port is reachable by anything else.""",
+    "gen-token": """examples:
+  codeintel gen-token                   print a random bearer token
+
+For `serve-http --token`, or an RBAC auth.toml.""",
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argparse surface.
 
@@ -232,7 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # map subcommand
     map_parser = subparsers.add_parser("map", help="Generate CODE_INTEL.md orientation file")
-    map_parser.add_argument("project_root", nargs="?", default=None)
+    map_parser.add_argument("project_root", nargs="?", default=None,
+                            help="Project root (default: cwd)")
     map_parser.add_argument("--inject", action="store_true", help="Inject reference block into CLAUDE.md/AGENTS.md")
     map_parser.add_argument("--budget", type=int, default=32768, help="Byte budget for CODE_INTEL.md (default: 32768)")
 
@@ -315,6 +406,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("gen-token", help="Print a secure random bearer token (for serve-http / RBAC auth.toml)")
     subparsers.add_parser("help", help="Show every command, grouped, with examples")
+
+    # Applied in one pass over the built parser rather than at each `add_parser` call site: an
+    # epilog is presentation, and threading two extra kwargs through fourteen construction sites
+    # would bury the flags that actually define each command. RawDescriptionHelpFormatter goes with
+    # it — argparse otherwise re-wraps the epilog and destroys the aligned example columns.
+    for _name, _sub in (subparsers.choices or {}).items():
+        _epilog = _EPILOGS.get(_name)
+        if _epilog:
+            _sub.epilog = _epilog
+            _sub.formatter_class = argparse.RawDescriptionHelpFormatter
 
     return parser
 

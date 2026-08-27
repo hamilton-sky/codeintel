@@ -10,6 +10,7 @@ must actually be a registered subcommand, and every registered subcommand must b
 """
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 
@@ -141,3 +142,39 @@ def test_no_color_beats_force_color():
 
 def test_render_help_never_raises_without_a_terminal():
     assert isinstance(render_help(), str) and render_help()
+
+
+def test_every_registered_subcommand_says_when_to_use_it_and_shows_an_example():
+    """A flag list answers "what can I pass"; it never answers "should I run this at all".
+
+    Nine of ten subcommands previously had zero examples and no statement of purpose beyond a
+    one-line `help=`. This pins that a command cannot be added without that text — the gap is
+    invisible otherwise, because argparse happily prints a bare flag list.
+    """
+    from codeintel.__main__ import _EPILOGS, build_parser
+
+    parser = build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    registered = set(subparsers.choices)
+
+    # `help` is the grouped top-level screen itself — it has no flags and no epilog to give.
+    missing = sorted(registered - set(_EPILOGS) - {"help"})
+    assert not missing, f"subcommands with no epilog: {missing}"
+
+    for name in sorted(registered & set(_EPILOGS)):
+        sub = subparsers.choices[name]
+        assert sub.epilog, name
+        assert "examples:" in sub.epilog, f"{name} epilog has no example block"
+        assert f"codeintel {name}" in sub.epilog, f"{name} epilog never shows the command itself"
+        # RawDescriptionHelpFormatter, or argparse re-wraps and destroys the aligned columns
+        assert sub.formatter_class is argparse.RawDescriptionHelpFormatter, name
+
+
+def test_no_epilog_names_a_command_that_does_not_exist():
+    """A renamed or removed command must not leave help text advertising it."""
+    from codeintel.__main__ import _EPILOGS, build_parser
+
+    parser = build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    stale = sorted(set(_EPILOGS) - set(subparsers.choices))
+    assert not stale, f"epilogs for unregistered commands: {stale}"
