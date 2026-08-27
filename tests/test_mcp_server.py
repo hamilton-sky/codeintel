@@ -10,14 +10,19 @@ import codeintel.server as srv
 
 
 def test_server_advertises_instructions_and_rich_tool_descriptions(monkeypatch):
-    captured: dict = {"kwargs": None, "tools": {}}
+    captured: dict = {"kwargs": None, "tools": {}, "annotations": {}}
 
     class _FakeMCP:
         def __init__(self, **kwargs):
             captured["kwargs"] = kwargs
 
-        def add_tool(self, fn, name=None, description=None):
+        # `annotations` is a new call-time kwarg (0.19.0): `run()` now passes a `ToolAnnotations`
+        # to every `add_tool` call (see test_tools_declare_whether_they_write below), which a fake
+        # missing the parameter would reject with a TypeError before this test gets to assert
+        # anything.
+        def add_tool(self, fn, name=None, description=None, annotations=None):
             captured["tools"][name] = description or ""
+            captured["annotations"][name] = annotations
 
         async def run_stdio_async(self):  # pragma: no cover - never awaited (anyio.run stubbed)
             pass
@@ -42,6 +47,39 @@ def test_server_advertises_instructions_and_rich_tool_descriptions(monkeypatch):
     assert "callers" in q and "grep" in q.lower() and len(q) > 100
 
 
+def test_tools_declare_whether_they_write(monkeypatch):
+    """An agent must be able to tell, before calling, that a tool writes to the user's files —
+    `code.map` writes CODE_INTEL.md unconditionally (and, with `inject=True`, the user's own
+    CLAUDE.md/AGENTS.md) while being advertised as a great first call on an unfamiliar repo. MCP's
+    own `ToolAnnotations.read_only_hint` is the standard place to say so."""
+    annotations = _registered_annotations(monkeypatch)
+
+    assert annotations["code.query"].read_only_hint is True
+    assert annotations["code.status"].read_only_hint is True
+    assert annotations["code.doctor"].read_only_hint is True
+    assert annotations["code.map"].read_only_hint is False
+
+
+def _registered_annotations(monkeypatch) -> dict:
+    """Run the real `srv.run()` wiring against a fake MCP server and return {name: ToolAnnotations}."""
+    captured: dict = {}
+
+    class _FakeMCP:
+        def __init__(self, **kwargs):
+            pass
+
+        def add_tool(self, fn, name=None, description=None, annotations=None):
+            captured[name] = annotations
+
+        async def run_stdio_async(self):  # pragma: no cover - never awaited (anyio.run stubbed)
+            pass
+
+    monkeypatch.setattr(srv, "MCPServer", _FakeMCP)
+    monkeypatch.setattr(srv.anyio, "run", lambda *a, **k: None)
+    srv.run()
+    return captured
+
+
 def _registered_tools(monkeypatch) -> dict:
     """Run the real `srv.run()` wiring against a fake MCP server and return {name: function}."""
     tools: dict = {}
@@ -50,7 +88,7 @@ def _registered_tools(monkeypatch) -> dict:
         def __init__(self, **kwargs):
             pass
 
-        def add_tool(self, fn, name=None, description=None):
+        def add_tool(self, fn, name=None, description=None, annotations=None):
             tools[name] = fn
 
         async def run_stdio_async(self):  # pragma: no cover - never awaited (anyio.run stubbed)
@@ -76,3 +114,77 @@ def test_no_tool_advertises_the_optional_envelope_fields_as_required(monkeypatch
         schema = Tool.from_function(fn, name=name).output_schema or {}
         leaked = set(schema.get("required") or ()) & {"reason", "hint"}
         assert not leaked, f"{name} requires {sorted(leaked)}, which a successful result omits"
+
+
+def _query_input_schema(monkeypatch) -> dict:
+    from mcp.server.mcpserver.tools import Tool
+
+    tools = _registered_tools(monkeypatch)
+    return Tool.from_function(tools["code.query"], name="code.query").parameters
+
+
+def test_code_query_op_is_a_schema_enum_not_bare_prose(monkeypatch):
+    """The highest-leverage fix: `op` as a JSON-schema enum, so a mistyped/hallucinated op is
+    rejected by MCP's own argument validation with the real choices listed, instead of round-
+    tripping to graph.py's `unsupported-op` — easily misread as 'found nothing'. Prose read once
+    at connect time is the wrong place to document a field filled in later."""
+    schema = _query_input_schema(monkeypatch)
+    op_schema = schema["properties"]["op"]
+
+    assert set(op_schema["enum"]) == {
+        "search", "symbol", "callers", "callees", "impact", "chain",
+        "pattern", "overview", "context", "changed", "hotspots",
+    }
+    # required — there is no sensible default "operation to run"
+    assert "op" in (schema.get("required") or ())
+
+
+def test_code_query_schema_documents_root_scoped_ops_ignore_target(monkeypatch):
+    """`overview`/`changed`/`hotspots` ignore `target` entirely (`_ROOT_SCOPED_OPS`,
+    providers/graph.py) — that must be visible to the model filling the field, not buried in
+    prose it read once at connect time."""
+    schema = _query_input_schema(monkeypatch)
+
+    op_desc = schema["properties"]["op"]["description"]
+    target_desc = schema["properties"]["target"]["description"]
+    for op in ("overview", "changed", "hotspots"):
+        assert op in op_desc
+    assert "ignored" in target_desc.lower()
+
+
+def test_code_query_schema_documents_project_root_fallback_and_rbac_caveat(monkeypatch):
+    """`project_root` is genuinely optional now (server.py falls back to the server's cwd — see
+    `code_query_handler`), but the schema must say so AND flag the one case where a caller must
+    not rely on the fallback: a restricted RBAC role, where a blank value is rejected rather than
+    defaulted (policy.py's `is_root_allowed`)."""
+    schema = _query_input_schema(monkeypatch)
+    desc = schema["properties"]["project_root"]["description"].lower()
+
+    assert "optional" in desc
+    assert "cwd" in desc or "current working directory" in desc
+    assert "role" in desc  # the RBAC caveat
+
+
+def test_code_map_schema_documents_inject_and_budget(monkeypatch):
+    """`inject` writes to the user's CLAUDE.md/AGENTS.md and `budget`'s units were never stated —
+    both must be visible in the schema, not just guessable from the parameter name."""
+    from mcp.server.mcpserver.tools import Tool
+
+    tools = _registered_tools(monkeypatch)
+    schema = Tool.from_function(tools["code.map"], name="code.map").parameters
+
+    inject_desc = schema["properties"]["inject"]["description"].lower()
+    budget_desc = schema["properties"]["budget"]["description"].lower()
+    assert "claude.md" in inject_desc or "agents.md" in inject_desc
+    assert "bytes" in budget_desc
+
+
+def test_code_doctor_schema_documents_deep(monkeypatch):
+    """`deep` boots a live serena session and is slow — undocumented before this fix."""
+    from mcp.server.mcpserver.tools import Tool
+
+    tools = _registered_tools(monkeypatch)
+    schema = Tool.from_function(tools["code.doctor"], name="code.doctor").parameters
+
+    deep_desc = schema["properties"]["deep"]["description"].lower()
+    assert "slow" in deep_desc or "seconds" in deep_desc

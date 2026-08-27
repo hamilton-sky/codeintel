@@ -124,6 +124,38 @@ def test_graph_provider_unknown_op(monkeypatch):
     assert r["reason"] == "unsupported-op"
 
 
+def test_unsupported_op_hint_lists_valid_ops(monkeypatch):
+    """`unsupported-op` used to carry no hint and no way forward — the only safe-null in this file
+    without one. A wrong op guess is easily misread as "found nothing"."""
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which",
+        lambda x: "/fake/codebase-memory-mcp",
+    )
+    p = GraphProvider()
+    p._project_cache[""] = ProjectResolution(name="myproject", matched_root="", scope="exact")
+    r = p.build_result("nonexistent-op", "x", [], 0, "")
+    assert r["reason"] == "unsupported-op"
+    assert "callers" in r["hint"] and "search" in r["hint"]  # a graph AND a non-graph op
+
+
+def test_unsupported_op_hint_suggests_a_close_match():
+    """A one-character typo of a real op ('callres' -> 'callers') should surface as a suggestion,
+    mirroring __main__.py's `_suggest` (close match, then prefix)."""
+    from codeintel.providers.graph import _suggest_op
+
+    assert "callers" in _suggest_op("callres")
+    assert "overview" in _suggest_op("overviw")
+
+
+def test_unsupported_op_hint_never_suggests_a_retired_op():
+    """Suggesting `deadcode` for a typo would recommend a feature that fails by design — it
+    should never appear in the candidate list."""
+    from codeintel.providers.graph import _suggest_op
+
+    assert "deadcode" not in _suggest_op("deadcod")
+    assert "deadcode" not in _suggest_op("dead")
+
+
 # ---------------------------------------------------------------------------
 # Group 7 — engine field when available
 # ---------------------------------------------------------------------------
@@ -419,6 +451,34 @@ def test_scan_ops_hide_archived_code(tmp_path):
     assert GraphProvider._is_noise({"file_path": "studio/src/components/Editor/index.tsx"}) is False
     # .github holds live workflows, not archives.
     assert GraphProvider._is_noise({"file_path": ".github/workflows/ci.yml"}) is False
+
+
+def test_is_noise_hides_json_data_blobs():
+    """A JSON file's top-level keys can be indexed as `Variable` nodes with real USAGE edges from
+    sibling JSON files reusing the same key names — on this repo's own CODE_INTEL.md, `body`
+    (from `pathly/project/SPEC.md.comments.json`) and `status` (`...diagrams.json`) ranked as the
+    2nd and 8th most load-bearing symbols in the project. `.json` can never contain a callable in
+    any language, so excluding the extension carries no risk of hiding real source."""
+    assert GraphProvider._is_noise(
+        {"file_path": "pathly/project/SPEC.md.comments.json", "name": "body"}) is True
+    assert GraphProvider._is_noise(
+        {"file_path": "pathly/features/03-lsp-engine/STATE.json", "name": "status"}) is True
+    # A real Python method whose FILE happens to end in .json-lookalike text is unaffected — this
+    # only matches an actual `.json` extension.
+    assert GraphProvider._is_noise({"file_path": "src/codeintel/models.py", "name": "to_json"}) is False
+
+
+def test_is_noise_does_not_filter_a_real_symbol_named_get():
+    """The #1 entry in this repo's own CODE_INTEL.md ranking is `get`, 177 callers, attributed to
+    `src/codeintel/cache.py` — a REAL method (`ContentHashCache.get`). Its true caller count is
+    almost certainly inflated by the backend's bare-name call resolution (every `dict.get()`/
+    `config.get()`/... in the repo with no type inference to disambiguate them), but that is a
+    call-resolution precision problem upstream of this filter, not a noise-filtering one — and
+    `_is_noise` must not blacklist by symbol name, or it hides the real method along with the
+    noise. Only the SYNTHETIC builtin node (file_path `<python-builtins>`) is noise here, and it
+    is already caught by `_is_synthetic`."""
+    assert GraphProvider._is_noise({"file_path": "src/codeintel/cache.py", "name": "get"}) is False
+    assert GraphProvider._is_noise({"file_path": "<python-builtins>", "name": "get"}) is True
 
 
 # --------------------------------------------------------------------------- verification limits

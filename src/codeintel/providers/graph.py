@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import os
 import re
 
@@ -106,6 +107,25 @@ _WITHDRAWN_OPS: dict[str, str] = {
         "specific symbol instead — that answers the same question and is verified accurate."
     ),
 }
+
+
+# The full op vocabulary this MCP surface advertises (`server.py`'s `code.query` schema), not just
+# the ones THIS engine implements. `_AUTO_ENGINE.get(op, "graph")` (gateway.py) routes any op string
+# it doesn't recognize here as its fallback, so a typo of `symbol` or `search` — LSP/semantic ops,
+# not graph ops — still lands on `unsupported-op` below and deserves the same "did you mean"
+# treatment as a typo of a graph op, not a hint that only lists half the real vocabulary.
+_NON_GRAPH_OPS: frozenset[str] = frozenset({"symbol", "search"})
+
+
+def _suggest_op(unknown: str) -> list[str]:
+    """Ops a typo probably meant. Close matches first, then prefix matches — mirrors
+    `__main__.py`'s `_suggest` (same approach, not imported: that module is CLI-only and importing
+    from it would pull argparse/CLI wiring into the query path). Retired ops are excluded on
+    purpose: suggesting `deadcode` for a typo would recommend a feature that fails by design."""
+    candidates = sorted((_GRAPH_OPS | _NON_GRAPH_OPS) - set(_WITHDRAWN_OPS))
+    close = difflib.get_close_matches(unknown, candidates, n=3, cutoff=0.5)
+    prefix = [op for op in candidates if op.startswith(unknown) and op not in close]
+    return (close + prefix)[:3]
 
 
 # Trailing segments that mean "this is a filename, not a dotted module path".
@@ -881,14 +901,48 @@ class GraphProvider:
         """Builtins / generated nodes carry an empty or ``<...>`` file_path (e.g. <python-builtins>)."""
         return (not fp) or fp.startswith("<")
 
+    @staticmethod
+    def _is_data_file(fp: str) -> bool:
+        """Whether *fp* is a pure-data serialization format (JSON) that a permissive parser can
+        still emit "symbol"-shaped nodes for — a JSON object's top-level keys, walked as if they
+        were definitions — but that never defines a CALLABLE in any language. On this repo's own
+        committed CODE_INTEL.md, two untracked JSON blobs (`pathly/project/SPEC.md.comments.json`,
+        `...diagrams.json`) ranked as the 2nd and 8th most load-bearing symbols in the project,
+        because their top-level keys (`body`, `status`) were indexed as `Variable` nodes with real
+        USAGE edges from sibling JSON files reusing the same key names.
+
+        Deliberately a DENYLIST of one unambiguous data extension, not an allowlist of code
+        extensions the way `source_kind.is_code_path` is: `_is_noise` is shared by every language
+        the graph backend indexes, so allowlisting would silently hide a real symbol in any
+        language not on that list — the exact over-filtering failure `deadcode` was retired for
+        (see `_WITHDRAWN_OPS` above). `.json` can never contain a callable in any language, so
+        excluding it by extension carries none of that risk.
+
+        Scoped to `.json` alone, not its sibling data formats (`.yaml`/`.toml`/...), because that
+        is the one measured on this repo — `test_scan_ops_hide_archived_code` pins that a `.yml`
+        under `.github/workflows/` is NOT noise (a live workflow, not data-format junk), and a
+        broader denylist would need its own evidence before touching that boundary."""
+        return fp.rsplit(".", 1)[-1].lower() == "json" if "." in fp else False
+
     @classmethod
     def _is_noise(cls, r: dict) -> bool:
-        """Rows a code-quality scan should hide: builtins/generated nodes and test code (the backend's
-        own ``is_test`` is unreliable — see ``_looks_like_test``). Shared by the repo-scan ops."""
+        """Rows a code-quality scan should hide: builtins/generated nodes, test code (the backend's
+        own ``is_test`` is unreliable — see ``_looks_like_test``), and pure-data files a permissive
+        parser mistook for symbols (see ``_is_data_file``). Shared by the repo-scan ops.
+
+        Does NOT filter by symbol NAME, on purpose — not even a name shaped like a builtin/stdlib
+        method (`get`, `keys`, ...). A real project method named `get` (e.g.
+        `ContentHashCache.get` in this very repo) must survive here; a wrong-but-plausible-looking
+        fan-in count on a REAL symbol is a backend call-resolution precision problem (bare-name
+        matching with no type inference), not a noise-filtering one, and blacklisting the name
+        would hide the real symbol along with the noise — the same over-aggressive-filter failure
+        that retired `deadcode` at 25% precision. See
+        `tests/test_graph_provider.py::test_is_noise_does_not_filter_a_real_symbol_named_get`."""
         fp = str(r.get("file_path") or "")
         return (cls._is_synthetic(fp)
                 or cls._looks_like_test(fp, str(r.get("name") or ""))
-                or _is_archived_path(fp))
+                or _is_archived_path(fp)
+                or cls._is_data_file(fp))
 
     def _render_scan(self, kept: list[dict], title: str, cap: int, meta_fn) -> str:
         """Render a repo-scan op's markdown from filtered+sorted rows: ``## title (count)`` + one
@@ -1498,7 +1552,18 @@ class GraphProvider:
                 )
 
             if op_str not in _GRAPH_OPS:
-                return safe_null_result(op_str, target_str, engine="graph", reason="unsupported-op")
+                # The only safe-null in this file that used to carry no hint and no way forward —
+                # a wrong op guess is easily misread as "found nothing". `deadcode` and other WITHDRAWN ops are
+                # handled separately below with their own `op-withdrawn` reason and rationale; this
+                # branch is reached only by a genuinely unrecognized op string.
+                matches = _suggest_op(op_str)
+                known = sorted((_GRAPH_OPS | _NON_GRAPH_OPS) - set(_WITHDRAWN_OPS))
+                hint = f"ops: {', '.join(known)}"
+                if matches:
+                    hint = f"did you mean {' or '.join(matches)}? {hint}"
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="unsupported-op", hint=hint,
+                )
 
             # The repo asked about is not indexed on its own; this answer would come from a project
             # that merely CONTAINS it. For a root-scoped op that is not a weaker answer to the
