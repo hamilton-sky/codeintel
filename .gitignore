@@ -40,3 +40,13 @@ experiments/
 # Generated LikeC4 model from `codeintel c4` (regenerable; the .c4 is source you
 # may instead choose to commit deliberately — see docs/c4.md)
 codeintel-c4/
+
+# Pathly editor sidecars (comments and diagrams live in the DB, same reasoning as
+# BOARD.json / EVENTS.jsonl above)
+pathly/**/*.comments.json
+pathly/**/*.diagrams.json
+
+# Cross-project review and spec working notes. NOT committed: this repo is public,
+# and these hold security review findings for unrelated private codebases plus
+# local absolute paths. Local working material, like experiments/ above.
+reports/
