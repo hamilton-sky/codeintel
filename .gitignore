@@ -36,3 +36,7 @@ htmlcov/
 # `likec4` npm install the evaluation ran against (133 MB of node_modules in poc/ alone).
 # Local working material, not part of the shipped package.
 experiments/
+
+# Generated LikeC4 model from `codeintel c4` (regenerable; the .c4 is source you
+# may instead choose to commit deliberately — see docs/c4.md)
+codeintel-c4/

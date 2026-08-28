@@ -37,7 +37,11 @@ def _build_gateway(oneshot: bool = False) -> Gateway:
             lsp = lp
     except Exception:
         pass
-    semantic = SemanticProvider()
+    # `blocking_index=oneshot`: a one-shot CLI process has no other way to ever build a cold index
+    # and can afford to wait, so it keeps today's synchronous inline pass. The long-lived MCP/HTTP
+    # server must not block a request thread for a multi-minute cold index — see
+    # SemanticProvider.build_result / SemanticProvider.__init__ for the full rationale.
+    semantic = SemanticProvider(blocking_index=oneshot)
     # RBAC: when an auth config defines restricted roles, enforce role→op; otherwise the policy is
     # disabled (full access). The per-request role is authenticated server-side by the HTTP layer;
     # the local MCP agent passes role="" (unrestricted), so RBAC never affects the stdio transport.
@@ -105,7 +109,15 @@ def _refresh_missing_engines(gw: Gateway) -> None:
         builders = {"graph": GraphProvider, "lsp": LspProvider, "semantic": SemanticProvider}
         for name in missing:
             try:
-                gw.adopt_provider(name, builders[name]())
+                provider = builders[name]()
+                # Match the blocking behavior `_build_gateway` gave this gateway's OTHER engines —
+                # a semantic engine adopted mid-session on a long-lived server must never block a
+                # request thread for a cold index any more than one present at boot would. Attribute
+                # set post-construction (rather than passed in) so a caller's own provider stand-in
+                # — real or a test double — need not accept this constructor argument at all.
+                if name == "semantic" and hasattr(provider, "_blocking_index"):
+                    provider._blocking_index = gw.oneshot
+                gw.adopt_provider(name, provider)
             except Exception:
                 continue
     except Exception:
@@ -480,9 +492,13 @@ def run() -> None:
         _code_query, name="code.query",
         annotations=ToolAnnotations(read_only_hint=True),
         description=(
-            "Understand code across graph + LSP + semantic engines — prefer this over grep/file-read "
-            "for locating and relating code. Read-only. See each parameter's own description below "
-            "for the full op list, each op's call signature, and which ops ignore `target`. "
+            "Reach for this BEFORE grep or reading files to: find who calls X (callers), what X "
+            "calls (callees), the impact of changing Y, where Z is defined, how call A reaches B "
+            "(chain), or find the code that does W (search/pattern) — graph+LSP+semantic in one "
+            "read-only call. Caveat: `callers`/`callees`/`impact`/`chain`/`pattern`/`overview`/"
+            "`hotspots` answer from the last index snapshot, stale until the repo is re-indexed. "
+            "See each parameter's own description below for the full op list, each op's call "
+            "signature, and which ops ignore `target`. "
             "When several symbols share a name, `callers`/`callees`/`impact` report each one "
             "separately and say so — narrow to one with a qualified target (`core.Group.invoke`) or "
             "a file hint (`invoke@src/click/testing.py`). "

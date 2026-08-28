@@ -106,7 +106,10 @@ actually boots it.)
 **Failure modes → fix**
 - `fastembed / sqlite-vec not importable` → `pip install fastembed sqlite-vec`.
 - No/empty results on a fresh repo → not indexed yet → `codeintel index <path>`.
-- First query stalls on a fresh machine → the model is downloading; subsequent queries are fast.
+- First query stalls on a fresh machine — the model is downloading — **only on the CLI**
+  (`codeintel query`), which indexes inline; subsequent queries are fast. The long-lived MCP/HTTP
+  server never stalls a query on this: a cold repo instead gets `reason: 'indexing-in-progress'`
+  immediately, while the pass (and the model download) runs in the background — retry shortly.
 - Re-index after large edits so chunks don't go stale (`codeintel index`); the graph engine
   auto-reindexes changed files on `changed`, but semantic chunks are refreshed by re-indexing.
 

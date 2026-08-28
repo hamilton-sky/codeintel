@@ -15,6 +15,53 @@ def _register(installer: Any, agent: str, *, verify: bool, absolute: bool) -> tu
     return installer.register_many([agent], verify=verify, absolute=absolute), []
 
 
+def _agents_for(agent: str, installer_mod: Any) -> tuple[list[str], list[str]]:
+    """(agents, skipped) for the requested `--agent` selection. Mirrors `_register`'s selection
+    logic for `--dry-run`, which never constructs an `Installer` — nothing should be written."""
+    if agent == "auto":
+        detected = installer_mod.detect_agents()
+        return detected, [a for a in installer_mod._AGENTS if a not in detected]
+    if agent == "all":
+        return list(installer_mod._AGENTS), []
+    return [agent], []
+
+
+def _dry_run_line(installer_mod: Any, agent: str, command: str) -> str:
+    """What `--dry-run` would do to one agent's config — read-only, via the same lookup
+    `codeintel doctor` already uses to notice a stale registration."""
+    spec = installer_mod._CONFIG[agent]
+    path, current = installer_mod.registered_command(spec)
+    if current == command:
+        return f"~ {agent}: already registered at {path} (no change)"
+    if current is None:
+        return f"+ {agent}: would register at {path}"
+    return f"+ {agent}: would update {path} (was: {current})"
+
+
+def _run_dry(args: Any) -> int:
+    from codeintel import installer as installer_mod
+
+    command = installer_mod.resolve_command(absolute=not args.relative_command)
+    agents, skipped = _agents_for(args.agent, installer_mod)
+
+    if args.agent == "auto" and not agents:
+        print("No supported agent found on this machine "
+              f"(looked for: {', '.join(skipped)}).")
+        print("  Install one, or force registration with "
+              "`codeintel install --agent <name>`.")
+        return 1
+
+    for agent in agents:
+        print(_dry_run_line(installer_mod, agent, command))
+
+    if skipped:
+        print(f"\n- skipped (not installed here): {', '.join(skipped)}"
+              f"\n  register anyway with `codeintel install --agent <name>`")
+
+    print("\nDry run — nothing was written.")
+    return 0
+
+
 def _report(results: list) -> tuple[bool, list, Any]:
     """Print one line per agent; return (any_ok, legacy_paths, verdict)."""
     any_ok = False
@@ -38,6 +85,9 @@ def _report(results: list) -> tuple[bool, list, Any]:
 
 @never_raise("install failed: {exc}", code=1)
 def run(args: Any) -> int:
+    if getattr(args, "dry_run", False):
+        return _run_dry(args)
+
     from codeintel.installer import Installer
 
     results, skipped = _register(
@@ -72,6 +122,17 @@ def run(args: Any) -> int:
     if skipped:
         print(f"\n- skipped (not installed here): {', '.join(skipped)}"
               f"\n  register anyway with `codeintel install --agent <name>`")
+
+    # An installed, indexed, registered server does nothing until the agent actually knows to
+    # reach for it — and "Start a new agent session" never mentions that. Only offered when at
+    # least one agent came out of this run genuinely usable (registered/already AND, when
+    # verification ran, verified) — `any_ok` is False here after a failed verify above, same
+    # signal the exit code already uses. `offer_injection` is itself consent-gated: it prompts
+    # only on a TTY, and off one it prints the command instead of guessing — never a silent write.
+    if any_ok:
+        from codeintel.injector import offer_injection
+        print()
+        offer_injection()
 
     print("\n  Start a new agent session to pick up the tools.")
     return 0 if any_ok else 1

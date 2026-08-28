@@ -6,10 +6,11 @@ mistake, a missing entry point, a host config file written where nobody reads it
 boots and answers nothing. Those are exactly the failures this project has shipped before, twice,
 with a green CI.
 
-Nor can the CLI catch them: `codeintel status` and `codeintel query` are never-raise and always
-exit 0, and every MCP result is a safe envelope whose `ok` is always True. A smoke test that runs
-those commands and checks the exit code passes against a completely inert build. So this asserts
-on CONTENT — the answer text, and the config bytes on disk — at every step.
+Nor can exit codes alone catch them here: this canary drives `code.query` over MCP (not the
+`codeintel query` CLI subcommand), and every MCP result is a safe envelope whose `ok` is always
+True, whether or not an answer was found — same for `codeintel status`, which is never-raise and
+always exits 0. A smoke test that only checks those passes against a completely inert build. So
+this asserts on CONTENT — the answer text, and the config bytes on disk — at every step.
 
 Run it against a clean-venv install of the wheel, NOT the source checkout:
 
@@ -81,6 +82,11 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 
 
 def run(argv: list, **kw) -> subprocess.CompletedProcess:
+    # `stdin=DEVNULL`: a canary run from an interactive terminal would otherwise hand the child
+    # process that terminal's own stdin, so `codeintel install` — whose `offer_injection()` prompts
+    # only when stdin is a tty — would block on `input()` waiting for an answer nobody is there to
+    # give. Explicit rather than relying on CI's stdin already being non-interactive.
+    kw.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(argv, capture_output=True, text=True, timeout=600, **kw)
 
 

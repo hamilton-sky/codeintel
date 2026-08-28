@@ -6,6 +6,49 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **`codeintel install --dry-run` was advertised in `install --help` but did not exist** — the flag
+  exited 2. It now previews what each agent's config would gain (registered / updated / already
+  current) using the same read-only lookup `codeintel doctor` uses to spot a stale registration,
+  and writes nothing.
+- **Five of `query`'s six epilog examples failed.** `--op changed`, `search`, `impact`, `callers`
+  and `chain` were shown with no `--target`, but `--target` was `required=True` — the parser
+  disagreeing with its own prose. `--target` now defaults to `""`; the ops that ignore it
+  (`overview`, `changed`, `hotspots`) can be run exactly as documented.
+- **`--op` had no `choices=`, and `callees`, `context` and `pattern` were documented nowhere on the
+  CLI** despite being real, working ops. `--op` and `--engine` now validate against the same
+  vocabularies the help text is generated from (`codeintel.query_ops.QUERY_OPS` and
+  `codeintel.gateway._KNOWN_ENGINES`), and the `query` epilog's `operations:` block names all 11.
+- **No subcommand had a `description=`** — `codeintel map --help` opened straight into `usage:`.
+  Every subcommand now gets one, and it is the same one-liner `codeintel help` shows (see next).
+- **Two tables of command descriptions could disagree**, and did: `query`'s `add_parser(help=...)`
+  still said "Query the code intelligence engine" after the grouped `codeintel help` screen had
+  moved on to naming the actual ops. `help=`/`description=` are now both derived from the single
+  `_COMMAND_GROUPS` table; a test pins that nobody reintroduces a second one.
+- **`HELP_WIDTH` was a hardcoded 78, blind to the terminal.** At `COLUMNS=200` argparse's own flags
+  list would render wider than the hand-aligned epilog below it — one screen, two widths. Both now
+  share one value derived from `shutil.get_terminal_size()`, clamped to `[40, 78]`.
+- **`--no-color`/`--ascii` were unreachable before a subcommand**, so `codeintel --no-color help`
+  — the one path that prints help without ever calling `parser.parse_args()` — exited 2. They are
+  now root-parser flags, honored globally.
+- **Any bad flag on any subcommand dumped argparse's flat `{serve,index,query,...}` choice wall**,
+  the exact listing `codeintel help` exists to replace, because an unrecognized argument is always
+  reported by the *root* parser regardless of which subcommand it was meant for. It now prints the
+  specific error and a pointer to `codeintel help`; a subcommand's own usage errors (e.g. an
+  invalid `--op` value) are unaffected and still name that subcommand.
+- **Nothing documented `--version`, `--no-color`, `--ascii`, or exit codes.** `codeintel help` now
+  has a "Global options" block and an "Exit codes" line.
+
+### Breaking
+- **`codeintel query` now exits `1` when there is no result, instead of always `0`.** A script or
+  `&&` chain that ran `codeintel query` and relied on it *never* failing will now see a non-zero
+  exit on an empty answer — check the printed reason/hint, or `codeintel doctor`, instead of
+  assuming success. `--json` follows the same rule (`0` when `result` is non-null, `1` otherwise);
+  the envelope's own `ok` field is unaffected and stays `true`. The default text output also now
+  prints the "No result" reason to **stderr** (it used to go to stdout while the `hint` went to
+  stderr, so `2>/dev/null` kept the unhelpful line and discarded the actionable one) — actual
+  answer content is unaffected and stays on stdout. No other command's exit codes changed.
+
 ## [0.19.0] — 2026-08-27
 
 ### Added

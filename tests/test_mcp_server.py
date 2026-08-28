@@ -139,6 +139,34 @@ def test_code_query_op_is_a_schema_enum_not_bare_prose(monkeypatch):
     assert "op" in (schema.get("required") or ())
 
 
+def test_query_ops_module_matches_the_query_op_literal():
+    """`codeintel.query_ops.QUERY_OPS` is a dependency-free copy of this same op vocabulary, split
+    out because `server.py` pulls in `mcp`/`anyio`/`pydantic` (~4.4s to import) — too heavy for
+    `codeintel --help` or the CLI's `--op` parser to pay for just to know the op names
+    (`test_importing_the_cli_does_not_pull_in_any_engine`). Nothing else keeps the two definitions
+    in sync, which is exactly the class of drift this whole pass exists to catch — this is that
+    guard for `_QueryOp` itself.
+
+    Compared as SETS, not sequences: `QUERY_OPS`'s declaration order drives the CLI's own `--op`
+    choices/help presentation (see test_cli_help.py's op tests, which sort or set-compare rather
+    than pin an order), and `_QueryOp`'s order drives the JSON-schema `enum` this tool exposes to
+    the model — each order is meaningful only to its own surface, and neither is tested against
+    the other's, so cross-module order is not load-bearing. Only membership is."""
+    from typing import get_args
+
+    from codeintel.query_ops import QUERY_OPS
+    from codeintel.server import _QueryOp
+
+    literal_ops = set(get_args(_QueryOp))
+    tuple_ops = set(QUERY_OPS)
+    assert literal_ops == tuple_ops, (
+        "codeintel.server._QueryOp and codeintel.query_ops.QUERY_OPS have drifted apart — "
+        f"only in server._QueryOp: {sorted(literal_ops - tuple_ops)}; "
+        f"only in query_ops.QUERY_OPS: {sorted(tuple_ops - literal_ops)}. "
+        "Update whichever one is missing the other's ops."
+    )
+
+
 def test_code_query_schema_documents_root_scoped_ops_ignore_target(monkeypatch):
     """`overview`/`changed`/`hotspots` ignore `target` entirely (`_ROOT_SCOPED_OPS`,
     providers/graph.py) — that must be visible to the model filling the field, not buried in

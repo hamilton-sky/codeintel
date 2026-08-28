@@ -93,14 +93,26 @@ Every response is the same shape, and `ok` is always `true` at the tool boundary
   "engine": "semantic", "cached": false, "reason": "no-result" }
 ```
 
-- `result: null` never means "crash" — it means *found nothing* or *engine not installed*.
+- `result: null` never means "crash" — it means *found nothing*, *engine not installed*, or
+  *not indexed yet* (see `indexing-in-progress` below — that one is not "nothing found" either).
 - `reason` distinguishes them: `no-result`, `engine-unavailable`, `project-not-indexed`,
   `not-in-graph` (the symbol is absent from the index — in practice, a stale index),
-  `unsupported-op`, `root-not-allowed-for-role` (RBAC), `warming` (the LSP session is booting).
+  `unsupported-op`, `root-not-allowed-for-role` (RBAC), `warming` (the LSP session is booting),
+  `indexing-in-progress` (semantic engine, cold repo — see below).
 - `hint` carries the command that resolves that `reason`, where one exists.
 - `reindexing` marks an answer served while a reindex was in flight: it reflects the last
   *completed* index. Structural targets hash a symbol name rather than file bytes, so nothing else
   in the envelope could reveal it.
+- `indexing-in-progress` means *not "nothing found"* — no semantic index existed for this project
+  yet, and one has just started building in the background; retry shortly, or run
+  `codeintel index <path>` to build it synchronously right now. This is transport-specific and one
+  of the few user-visible differences between the one-shot CLI and the long-lived MCP/HTTP server:
+  the CLI (`codeintel query`) has no other way to ever build a cold index and can afford to wait, so
+  it still indexes **inline, synchronously**, with a live progress display, and never returns this
+  reason. The persistent server would otherwise block a request thread for a multi-minute cold pass
+  (plus a one-time embedding-model download) with nothing to show for it, so it returns this
+  envelope immediately instead and finishes the pass off-thread — see
+  [semantic.md](semantic.md#safe-null-reasons).
 - The invariant is **tested by fault injection**, not just convention (`tests/test_never_raise.py`).
 
 ```mermaid

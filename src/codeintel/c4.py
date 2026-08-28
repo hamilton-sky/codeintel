@@ -79,12 +79,23 @@ _TECH = {".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "Jav
          ".jsx": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".go": "Go",
          ".rs": "Rust", ".java": "Java", ".rb": "Ruby"}
 
+# LikeC4 1.59.2's grammar reserves these bare words at identifier position (verified live: a
+# file named `model.ts`/`style.ts`/`this.ts` etc. produces an id that breaks the parser — see
+# `_ident`). Not exhaustive by construction (extracted from the audit that found the defect, not
+# from the grammar source), but every entry below was confirmed against the installed parser.
+_RESERVED_WORDS: frozenset[str] = frozenset({
+    "model", "specification", "views", "view", "element", "style", "color", "group",
+    "title", "this", "it", "technology", "metadata", "link", "icon", "shape",
+    "relationship", "tag", "include", "exclude", "extend",
+})
+
 _EMPTY_STATS: dict[str, Any] = {
     "files_seen": 0, "files_noise": 0, "files_test": 0, "files_kept": 0,
     "imports_seen": 0, "calls_usage_seen": 0, "edges_kept": 0, "edges_internal": 0,
     "edges_dropped_ancestor": 0, "edges_dropped_out_of_scope": 0,
     "edges_from_imports_only": 0, "edges_from_calls_usage_only": 0, "edges_from_both": 0,
-    "id_collisions": 0, "shadowed_files": 0, "truncated": False,
+    "id_collisions": 0, "shadowed_files": 0, "cross_language_merges": 0,
+    "hotspot_threshold": None, "hotspot_count": 0, "truncated": False,
 }
 
 _EMPTY: dict[str, Any] = {
@@ -116,9 +127,17 @@ _EMPTY: dict[str, Any] = {
 # parse error in 1.59.2 — per-channel control exists only in `likec4.config.json`'s
 # `styles.theme.colors`, and requiring a hand-written config file next to every generated model
 # would defeat the point of generating one.
+#
+# `ci_bad` is declared (not just used inline as `#c0392b`) so the per-instance hotspot override in
+# `_emit_tree` (`style { color ci_bad }`) and the `hotspot` tag below render the IDENTICAL colour —
+# probed and confirmed that `tag { color … }` only accepts a literal hex/rgb, never a declared
+# name, so the tag keeps the literal while the instance override references the name; both resolve
+# to `#c0392b`. Previously the instance override used the named theme colour `red` instead, which
+# is a different hex than the tag's `#c0392b` — two visually different reds on the same signal.
 SPECIFICATION_BLOCK = """specification {
   color ci_accent  #0c8ba6
   color ci_chrome  #586472
+  color ci_bad     #c0392b
 
   element area {
     notation 'Area'
@@ -141,12 +160,19 @@ SPECIFICATION_BLOCK = """specification {
 # --------------------------------------------------------------------------- pure helpers
 
 def _ident(part: str) -> str:
-    """Map every non-alnum character to `_` — LikeC4 identifiers are `[A-Za-z_][A-Za-z0-9_]*`."""
+    """Map every non-alnum character to `_` — LikeC4 identifiers are `[A-Za-z_][A-Za-z0-9_]*` —
+    and escape a bare reserved word with a trailing `_` (defect (c)): `src/model.ts` would
+    otherwise render `model = module 'model' { … }` *inside* `model { }`, which LikeC4 1.59.2
+    cannot parse. The escape only touches the IDENTIFIER; the element's `title`/`path` metadata
+    is built from the unsanitised path elsewhere and is never passed through this function, so the
+    rendered display name is unaffected."""
     out = "".join(c if (c.isalnum() or c == "_") else "_" for c in part)
     if not out:
         out = "x"
     if out[0].isdigit():
         out = "n" + out
+    if out.lower() in _RESERVED_WORDS:
+        out = out + "_"
     return out
 
 
@@ -208,6 +234,22 @@ def element_key(path: str, depth: int) -> str:
     return ".".join(segments[:depth])
 
 
+def _rendered_element_count(paths: list[str], depth: int) -> int:
+    """How many `model {}` nodes *paths* actually render at *depth* — not just the file/directory
+    GROUPS `element_key` produces, but every bare containment `area` `_emit_tree` synthesises
+    above them too (defect (h)). Two elements that share a dotted prefix neither of them IS (e.g.
+    `a.b.leaf` and `a.c.leaf`, with no element literally named `a`) still cost a rendered `a = area
+    { … }` wrapper — `fit_depth`'s cap search must count it, or it can auto-fit a depth whose
+    *real* element count already exceeds `VIEW_ELEMENT_CAP`. Pure."""
+    keys = {element_key(p, depth) for p in paths}
+    rendered: set[str] = set()
+    for key in keys:
+        parts = key.split(".")
+        for i in range(1, len(parts) + 1):
+            rendered.add(".".join(parts[:i]))
+    return len(rendered)
+
+
 def fit_depth(paths: list[str], *, cap: int = VIEW_ELEMENT_CAP, requested: int | None = None) -> dict:
     """The deepest depth whose element count still fits *cap* — or the depth the caller forced.
 
@@ -218,14 +260,14 @@ def fit_depth(paths: list[str], *, cap: int = VIEW_ELEMENT_CAP, requested: int |
     ceiling = min(MAX_DEPTH, max(max_len, 1))
     table: dict[int, int] = {}
     for d in range(1, ceiling + 1):
-        table[d] = len({element_key(p, d) for p in paths})
+        table[d] = _rendered_element_count(paths, d)
         if d >= max_len:
             break
 
     if requested is not None:
         depth = max(1, int(requested))
         if depth not in table:
-            table[depth] = len({element_key(p, depth) for p in paths})
+            table[depth] = _rendered_element_count(paths, depth)
         return {"depth": depth, "how": "requested", "table": table,
                 "over_cap": table[depth] > cap, "cap": cap}
 
@@ -238,13 +280,75 @@ def fit_depth(paths: list[str], *, cap: int = VIEW_ELEMENT_CAP, requested: int |
     return {"depth": 1, "how": "auto-fit", "table": table, "over_cap": True, "cap": cap}
 
 
+def _resolve_element_ids(groups: dict[str, dict]) -> tuple[dict[str, str], int, dict[str, str]]:
+    """Sanitise every raw dotted key in *groups* into a LikeC4 identifier, resolving a
+    sanitisation collision by suffixing only the COLLIDING SEGMENT (defect (e)).
+
+    The old rule appended `__2` to the whole dotted id, so `my-app/core/a.ts` and
+    `my_app/core/b.ts` (both sanitising to `my_app.core`) became `my_app.core` and
+    `my_app.core__2` — falsely claiming both live under one shared `my_app` area, with nothing in
+    the tree representing `my-app` at all. Walking a trie built from the RAW (pre-sanitisation)
+    segments instead means a collision at one path position only disturbs the identifier at that
+    position — `my_app.core` and `my_app__2.core` — so an ancestor that never collided keeps its
+    real name.
+
+    Returns ``(raw_key -> element_id, id_collisions, id_path -> real_segment_name)``. The third
+    dict covers every node in the trie, leaf or bare intermediate, keyed by the RESOLVED dotted id
+    up to that point — it is what lets a synthetic containment `area` (one with no `groups` entry
+    of its own) still show its real, unsanitised directory name (defect (i)). Pure."""
+    root: dict = {"children": {}, "terminal": None, "min_path": ""}
+    for raw_key in groups:
+        node = root
+        for seg in raw_key.split("."):
+            node = node["children"].setdefault(seg, {"children": {}, "terminal": None, "min_path": ""})
+        node["terminal"] = raw_key
+
+    def _fill_min_path(node: dict) -> str:
+        candidates = [min(groups[node["terminal"]]["paths"])] if node["terminal"] is not None else []
+        candidates.extend(_fill_min_path(child) for child in node["children"].values())
+        node["min_path"] = min(candidates)
+        return node["min_path"]
+
+    if root["children"]:
+        _fill_min_path(root)
+
+    resolved: dict[str, str] = {}
+    segment_titles: dict[str, str] = {}
+    id_collisions = 0
+
+    def _walk(node: dict, prefix: tuple[str, ...]) -> None:
+        nonlocal id_collisions
+        if node["terminal"] is not None:
+            resolved[node["terminal"]] = ".".join(prefix)
+        sid_groups: dict[str, list[str]] = {}
+        for raw_seg in node["children"]:
+            sid_groups.setdefault(_ident(raw_seg), []).append(raw_seg)
+        for sid, raw_segs in sid_groups.items():
+            if len(raw_segs) == 1:
+                raw_seg = raw_segs[0]
+                seg_ids = [sid]
+            else:
+                id_collisions += 1
+                raw_segs = sorted(raw_segs, key=lambda s: node["children"][s]["min_path"])
+                seg_ids = [sid if i == 0 else f"{sid}__{i + 1}" for i in range(len(raw_segs))]
+            for raw_seg, seg_id in zip(raw_segs, seg_ids, strict=True):
+                full_id = ".".join((*prefix, seg_id))
+                segment_titles[full_id] = raw_seg
+                _walk(node["children"][raw_seg], (*prefix, seg_id))
+
+    _walk(root, ())
+    return resolved, id_collisions, segment_titles
+
+
 def group_elements(paths: list[str], depth: int) -> dict:
     """Group *paths* into elements at *depth*, merging file/directory shadows and resolving
-    sanitisation collisions with a `__2`/`__3` suffix (design section 3.2). Pure.
+    sanitisation collisions with a `__2`/`__3` suffix on the colliding segment (design section
+    3.2; defect (e)). Pure.
 
-    Returns ``{"groups": {raw_key: {"paths": [...], "dir_prefix": str|None}}, "element_of":
-    {path: element_id}, "shadowed_files": int, "id_collisions": int}``. `element_of` is keyed by
-    the FINAL sanitised element id, ready for edge aggregation to key off directly."""
+    Returns ``{"groups": {element_id: {"paths": [...], "dir_prefix": str|None}}, "element_of":
+    {path: element_id}, "shadowed_files": int, "id_collisions": int, "segment_titles": {id_path:
+    real_name}}``. `element_of` is keyed by the FINAL sanitised element id, ready for edge
+    aggregation to key off directly."""
     groups: dict[str, dict] = {}   # raw key -> {"paths": [...], "dir_prefix": str|None}
     for pth in paths:
         segs = pth.split("/")
@@ -259,22 +363,7 @@ def group_elements(paths: list[str], depth: int) -> dict:
         if g["dir_prefix"] is not None:
             shadowed_files += sum(1 for pth in g["paths"] if len(pth.split("/")) <= depth)
 
-    # sanitisation collisions: distinct raw keys that map to the same LikeC4 identifier
-    id_groups: dict[str, list[str]] = {}
-    for key in groups:
-        sid = ".".join(_ident(seg) for seg in key.split("."))
-        id_groups.setdefault(sid, []).append(key)
-
-    id_collisions = 0
-    key_to_id: dict[str, str] = {}
-    for sid, keys in id_groups.items():
-        if len(keys) == 1:
-            key_to_id[keys[0]] = sid
-            continue
-        id_collisions += 1
-        ordered = sorted(keys, key=lambda k: min(groups[k]["paths"]))
-        for i, k in enumerate(ordered):
-            key_to_id[k] = sid if i == 0 else f"{sid}__{i + 1}"
+    key_to_id, id_collisions, segment_titles = _resolve_element_ids(groups)
 
     element_of: dict[str, str] = {}
     for key, g in groups.items():
@@ -287,6 +376,7 @@ def group_elements(paths: list[str], depth: int) -> dict:
         "element_of": element_of,
         "shadowed_files": shadowed_files,
         "id_collisions": id_collisions,
+        "segment_titles": segment_titles,
     }
 
 
@@ -321,6 +411,26 @@ def _tech_for(paths: list[str]) -> str:
         counts[tech] = counts.get(tech, 0) + 1
     top2 = sorted(counts.items(), key=lambda kv: -kv[1])[:2]
     return ", ".join(t for t, _n in top2)
+
+
+HOTSPOT_PERCENTILE = 90        # top decile of the ranked population, nearest-rank
+MIN_HOTSPOT_FAN_IN = 3         # floor so a small/uniform repo does not get a fifth of it painted red
+
+
+def _hotspot_threshold(fan_in_values: list[int]) -> int | None:
+    """The fan-in an element needs to be flagged `#hotspot` — the `HOTSPOT_PERCENTILE`th of
+    *fan_in_values*, floored at `MIN_HOTSPOT_FAN_IN` so a repo whose busiest element still only has
+    one or two incoming edges is not misleadingly declared to have a hotspot. `None` when
+    *fan_in_values* is empty: there is no population to rank, so nothing is flagged (defect (g)).
+
+    A FIXED `>= 5` cutoff tagged 13 of 60 elements on this repo — over a fifth of the diagram red,
+    regardless of how the other 59 were actually distributed. Ranking against the population's own
+    spread keeps the signal meaningful across repos of very different densities. Pure."""
+    if not fan_in_values:
+        return None
+    values = sorted(fan_in_values)
+    idx = min(len(values) - 1, (len(values) * HOTSPOT_PERCENTILE) // 100)
+    return max(values[idx], MIN_HOTSPOT_FAN_IN)
 
 
 # --------------------------------------------------------------------------- index_repo
@@ -447,6 +557,7 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
         grouped = group_elements(kept, chosen)
         groups, element_of = grouped["groups"], grouped["element_of"]
         shadowed_files, id_collisions = grouped["shadowed_files"], grouped["id_collisions"]
+        segment_titles = grouped["segment_titles"]
 
         # --- edges: hop 1 (File->Symbol collapsed to File->File by q3's count(*)) already done
         # by the backend; hop 2 rolls File->File up to Element->Element, summing weights.
@@ -523,18 +634,44 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
 
         fan_in: dict[str, int] = {}
         fan_out: dict[str, int] = {}
+        # Ranked separately from `fan_in` (defect (g)): CALLS|USAGE matches by bare symbol name, so
+        # e.g. every `dict.get(...)` call in the repo lands on `cache.py`'s `ContentHashCache.get`
+        # — measured live at 54 of 60 rows on this repo's own `cache.py`. Only an `imports`-labelled
+        # relation (a real, file-scoped IMPORTS edge — see the `kind` rule above) is trustworthy
+        # enough to RANK elements against each other for a "this is a hotspot" visual claim; the
+        # union-based `fan_in` above stays as descriptive metadata only, same as before.
+        import_fan_in: dict[str, int] = {}
         for r in relations:
             fan_in[r["to"]] = fan_in.get(r["to"], 0) + 1
             fan_out[r["from"]] = fan_out.get(r["from"], 0) + 1
+            if r["kind"] == "imports":
+                import_fan_in[r["to"]] = import_fan_in.get(r["to"], 0) + 1
+
+        hotspot_threshold = _hotspot_threshold(list(import_fan_in.values()))
 
         elements: list[dict] = []
+        cross_language_merges = 0
         for eid, g in groups.items():
             paths = g["paths"]
             is_dir = g["dir_prefix"] is not None
+            is_cross_language = not is_dir and len(paths) > 1
             if is_dir:
                 path_str = g["dir_prefix"] + "/"
                 title = g["dir_prefix"].rsplit("/", 1)[-1]
                 kind = "area"
+                tech = _tech_for(paths)
+            elif is_cross_language:
+                # `element_key` strips the extension, so two files that share a directory and a
+                # basename but differ only in language (`api/index.ts` + `api/index.js`) collapse
+                # into one group (defect (d)). Kept merged — undoing it would need a second element
+                # identity axis this design does not otherwise have — but reported honestly rather
+                # than silently: every path is named in `metadata.path`, not just the first, `tech`
+                # reflects every language actually present, and `stats.cross_language_merges` (plus
+                # the DSL header) says how many elements this happened to.
+                cross_language_merges += 1
+                path_str = ", ".join(sorted(paths))
+                title = _strip_ext(paths[0].rsplit("/", 1)[-1])
+                kind = "module"
                 tech = _tech_for(paths)
             else:
                 path_str = paths[0]
@@ -546,7 +683,12 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
                 "files": len(paths), "churn": sum(churn_map.get(pth, 0) for pth in paths),
                 "fan_in": fan_in.get(eid, 0), "fan_out": fan_out.get(eid, 0),
                 "internal_imports": internal_by_elem.get(eid, 0),
+                "import_fan_in": import_fan_in.get(eid, 0),
+                "hotspot": bool(hotspot_threshold is not None
+                               and import_fan_in.get(eid, 0) >= hotspot_threshold),
             })
+
+        hotspot_count = sum(1 for e in elements if e["hotspot"])
 
         stats = {
             "files_seen": files_seen, "files_noise": files_noise, "files_test": files_test,
@@ -559,13 +701,15 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
             "edges_from_calls_usage_only": edges_from_calls_usage_only,
             "edges_from_both": edges_from_both,
             "id_collisions": id_collisions, "shadowed_files": shadowed_files,
+            "cross_language_merges": cross_language_merges,
+            "hotspot_threshold": hotspot_threshold, "hotspot_count": hotspot_count,
             "truncated": bool(files_truncated or imports_truncated or calls_truncated),
         }
 
         return {
             "project": display_name, "engine": "graph", "op": "c4",
             "fit": fit, "elements": elements, "relations": relations, "dropped": dropped,
-            "stats": stats, "reason": "",
+            "stats": stats, "segment_titles": segment_titles, "reason": "",
         }
     except Exception as exc:
         log_swallowed("c4.build_c4_payload", exc)
@@ -592,36 +736,164 @@ def _tree(elements: list[dict]) -> dict:
     return root
 
 
-def _emit_tree(node: dict, indent: int, out: list[str]) -> None:
+def _emit_tree(node: dict, indent: int, out: list[str], segment_titles: dict[str, str],
+              prefix: tuple[str, ...] = ()) -> None:
     pad = "  " * indent
     for name, sub in sorted(node.items()):
         e, children = sub["__leaf__"], sub["__children__"]
         ident = _ident(name)
+        full_id = ".".join((*prefix, ident))
         if e is not None:
             kind = e["kind"]
             out.append(f"{pad}{ident} = {kind} '{_q(e['title'])}' {{")
-            if e["fan_in"] >= 5:
+            if e.get("hotspot"):
                 # Both, deliberately. The tag carries the exact risk colour and drives filtering,
                 # but LikeC4 renders a tag as a ~2px corner stripe — measured, and next to invisible.
                 # The viewer signals risk by colouring the WHOLE node, so a per-instance override
-                # reproduces that behaviour. `red` is the nearest of the 11 legal element colours;
-                # fidelity to the signal beats fidelity to the hex when the point is "impossible
-                # to miss".
+                # reproduces that behaviour. `ci_bad` (declared in `SPECIFICATION_BLOCK`, same hex
+                # as the tag's literal `#c0392b`) — not the named theme colour `red`, which is a
+                # different, unrelated hex — so the tag and the override render as ONE red.
                 out.append(f"{pad}  #hotspot")
-                out.append(f"{pad}  style {{ color red }}")
+                out.append(f"{pad}  style {{ color ci_bad }}")
             if e["tech"]:
                 out.append(f"{pad}  technology '{_q(e['tech'])}'")
             meta = (f"path '{_q(e['path'])}'  files '{e['files']}'  churn '{e['churn']}'  "
                     f"fan_in '{e['fan_in']}'  fan_out '{e['fan_out']}'  "
-                    f"internal_imports '{e['internal_imports']}'")
+                    f"internal_imports '{e['internal_imports']}'  "
+                    f"import_fan_in '{e.get('import_fan_in', 0)}'")
             out.append(f"{pad}  metadata {{ {meta} }}")
         else:
-            # An intermediate path segment above the chosen depth with no element of its own —
-            # a bare containment package so the containment tree survives (design section 3.3).
-            out.append(f"{pad}{ident} = area '{_q(name)}' {{")
+            # An intermediate path segment above the chosen depth with no element of its own — a
+            # bare containment package so the containment tree survives (design section 3.3). Its
+            # title comes from `segment_titles` (the REAL, unsanitised directory name) rather than
+            # the sanitised tree-node key `name`, so e.g. a `my-app/` directory renders as `area
+            # 'my-app'`, not `area 'my_app'` (defect (i)).
+            title = segment_titles.get(full_id, name)
+            out.append(f"{pad}{ident} = area '{_q(title)}' {{")
         if children:
-            _emit_tree(children, indent + 1, out)
+            _emit_tree(children, indent + 1, out, segment_titles, (*prefix, ident))
         out.append(f"{pad}}}")
+
+
+# --------------------------------------------------------------------------- view planning
+#
+# THE MAIN FIX. The old renderer emitted exactly one view — `include scripts, scripts.**` +
+# `include src, src.**` — which is `include *` with extra steps: every element, every relation, one
+# `autoLayout`. That is `include *` regardless of how the includes are spelled, and it is the
+# entire visible failure this module shipped with: a diagram nobody can read.
+#
+# Kept as functions separate from `_emit_tree` (which only ever renders the `model {}` block) so
+# view planning is its own reusable seam, not logic threaded through the containment-tree walk.
+
+DRILLDOWN_MIN_CHILDREN = 2      # a 1-child area is a bare pass-through; drilling into it shows
+                                 # nothing the landscape doesn't already show one level up
+MAX_DRILLDOWN_VIEWS = 30        # keep the total view count sane on a very large/branchy repo
+
+# The coarse cut in `_landscape_roots` collapses DEPTH (a chain of single-child directories) but
+# does nothing about BREADTH — a package with no subdirectories at all, just many files, has no
+# hierarchy for that collapse to exploit. Measured live on this repo: `src/codeintel` is 41 direct
+# children (38 flat modules + 3 sub-areas) after collapsing `src` into it, which rendered as one
+# `root, root.*` and put every one of those 41 boxes straight into the landscape — down from the
+# original 66-element hairball, but still a hairball. `LANDSCAPE_CHILD_BUDGET` bounds how many
+# direct children a single landscape box may expand: past it, the landscape shows the root and its
+# child AREAS only (never its flat leaf modules — see `_elided_landscape_roots`), and the elided
+# root gets its own `view of <root> { include * }` drill-down instead (see `_plan_views`).
+LANDSCAPE_CHILD_BUDGET = 12
+
+
+def _landscape_roots(tree: dict) -> list[tuple[str, ...]]:
+    """The coarse top-level boxes for the `index` view: each real top-level path segment, walked
+    DOWN through any chain of bare, single-child containment areas (an area with no element of its
+    own and exactly one child carries no information — `src/` wrapping a lone `codeintel/` says
+    nothing a viewer needs) until a node with either its own element or >=2 children is reached.
+    Pure."""
+    roots: list[tuple[str, ...]] = []
+    for name in sorted(tree):
+        node = tree[name]
+        path: tuple[str, ...] = (name,)
+        while node["__leaf__"] is None and len(node["__children__"]) == 1:
+            (only_name, only_node), = node["__children__"].items()
+            path = (*path, only_name)
+            node = only_node
+        roots.append(path)
+    return roots
+
+
+def _node_at(tree: dict, path: tuple[str, ...]) -> dict:
+    """The tree node reached by following *path* (a dotted id split into segments) from the root."""
+    node = tree[path[0]]
+    for seg in path[1:]:
+        node = node["__children__"][seg]
+    return node
+
+
+def _elided_landscape_roots(tree: dict, roots: list[tuple[str, ...]]) -> set[tuple[str, ...]]:
+    """Which of *roots* have more direct children than `LANDSCAPE_CHILD_BUDGET` — too flat/broad
+    for a single landscape box to expand without becoming the hairball this module exists to
+    avoid. Pure."""
+    return {r for r in roots if len(_node_at(tree, r)["__children__"]) > LANDSCAPE_CHILD_BUDGET}
+
+
+def _walk_areas(node: dict, path: tuple[str, ...], out: list[dict]) -> int:
+    """Post-order walk of the containment tree, appending `{"path", "children", "size"}` to *out*
+    for every node that has at least one child (leaf or bare). Returns the subtree's own rendered
+    size (itself plus every descendant) so a caller can bound a drill-down view by how many
+    elements `include *` would actually pull in. Pure."""
+    size = 1
+    for child_name, child in node["__children__"].items():
+        size += _walk_areas(child, (*path, child_name), out)
+    if node["__children__"]:
+        out.append({"path": path, "children": len(node["__children__"]), "size": size})
+    return size
+
+
+def _plan_views(tree: dict, cap: int) -> dict:
+    """Which areas get their own `view of <area> { include * }` drill-down, on top of the coarse
+    `index` landscape. Judgement calls, stated here rather than left implicit:
+
+    - Skipped: a landscape root that was NOT elided (`_elided_landscape_roots`) — the landscape's
+      `<root>, <root>.*` already shows its direct children in full, so a dedicated view of the same
+      root would duplicate it. An ELIDED root is the opposite case: being the landscape root is
+      exactly why it needs its own view — its direct children were left OUT of the landscape, and
+      `view of <root> { include * }` is the only place they are shown at all.
+    - Skipped: areas with fewer than `DRILLDOWN_MIN_CHILDREN` children — "very small" per the
+      review's own framing; a 1-child view has nothing left to reveal.
+    - Skipped: an area whose OWN subtree already exceeds *cap* — `include *` there would render the
+      same hairball this whole rewrite exists to avoid, just one level down instead of at the top.
+    - Capped at `MAX_DRILLDOWN_VIEWS`, keeping the areas with the most children (the ones a coarse
+      landscape hides the most detail behind) and reporting how many were left out.
+
+    Pure."""
+    roots = _landscape_roots(tree)
+    landscape = set(roots)
+    elided = _elided_landscape_roots(tree, roots)
+    all_areas: list[dict] = []
+    for name, node in tree.items():
+        _walk_areas(node, (name,), all_areas)
+
+    candidates = [a for a in all_areas
+                 if (a["path"] not in landscape or a["path"] in elided)
+                 and a["children"] >= DRILLDOWN_MIN_CHILDREN]
+    fitting = [a for a in candidates if a["size"] <= cap]
+    oversized = len(candidates) - len(fitting)
+
+    fitting.sort(key=lambda a: (-a["children"], a["path"]))
+    kept, overflow = fitting[:MAX_DRILLDOWN_VIEWS], fitting[MAX_DRILLDOWN_VIEWS:]
+    kept.sort(key=lambda a: a["path"])
+
+    return {"landscape_roots": sorted(landscape), "elided_roots": elided, "drilldowns": kept,
+           "skipped_oversized": oversized, "skipped_overflow": len(overflow)}
+
+
+def _display_path(path: tuple[str, ...], segment_titles: dict[str, str]) -> str:
+    """The real, unsanitised directory/file names along *path* — e.g. `commands` rather than
+    whatever `_ident` had to do to make it a legal identifier — joined for a human-readable view
+    title."""
+    names = []
+    for i in range(len(path)):
+        full_id = ".".join(path[: i + 1])
+        names.append(segment_titles.get(full_id, path[i]))
+    return " / ".join(names)
 
 
 def render_c4_dsl(payload: dict) -> str:
@@ -638,6 +910,7 @@ def render_c4_dsl(payload: dict) -> str:
         stats = payload.get("stats") or {}
         fit = payload.get("fit") or {}
         project = payload.get("project") or "repo"
+        segment_titles = payload.get("segment_titles") or {}
 
         table = fit.get("table") or {}
         table_str = " ".join(f"d{d}={table[d]}" for d in sorted(table))
@@ -656,6 +929,18 @@ def render_c4_dsl(payload: dict) -> str:
                    "example an importlib-based command router) can still be invisible to both "
                    "relations, and CALLS|USAGE can attribute an edge to an unrelated same-named "
                    "symbol")
+        # Measured live: on this generator's own repo, 54 of 60 CALLS|USAGE rows into one file
+        # were bare `get` — every `dict.get(...)` call in the codebase, attributed to that file's
+        # own class's `.get` method. Ranking hotspots against the union would rank fabricated data;
+        # IMPORTS is a real, file-scoped static edge, so it is the only source trusted for ranking.
+        out.append("// hotspot ranking uses IMPORTS-only fan-in, never the CALLS|USAGE union: "
+                   "bare-symbol-name matching in CALLS|USAGE fabricates high fan-in on common "
+                   "method names, which would rank fabricated data as an architectural hotspot")
+        if stats.get("hotspot_count"):
+            out.append(f"// {stats['hotspot_count']} element(s) flagged #hotspot: IMPORTS-only "
+                       f"fan-in >= {stats.get('hotspot_threshold')} (this repo's own top "
+                       f"{100 - HOTSPOT_PERCENTILE}th percentile among elements with at least one "
+                       f"IMPORTS-confirmed incoming reference)")
         out.append(f"// depth {depth} chosen ({how}): {table_str}"
                    + (f" — exceeds the {cap}-element view cap" if over_cap else ""))
         out.append(f"// {len(elements)} elements, {len(relations)} relations, "
@@ -688,6 +973,10 @@ def render_c4_dsl(payload: dict) -> str:
         if stats.get("shadowed_files"):
             out.append(f"// {stats['shadowed_files']} file(s) shadow a sibling directory and "
                        f"were merged into it")
+        if stats.get("cross_language_merges"):
+            out.append(f"// {stats['cross_language_merges']} element(s) merge files across "
+                       f"different source languages (same directory + name, different extension) "
+                       f"— every path is listed in that element's metadata, not just one")
         if stats.get("truncated"):
             out.append("// NOTE: the file, import or call/usage scan hit its row cap — this "
                        "model may be INCOMPLETE")
@@ -695,7 +984,8 @@ def render_c4_dsl(payload: dict) -> str:
         out.append(SPECIFICATION_BLOCK)
         out.append("")
         out.append("model {")
-        _emit_tree(_tree(elements), 1, out)
+        tree = _tree(elements)
+        _emit_tree(tree, 1, out, segment_titles)
         if relations:
             out.append("")
             for r in sorted(relations, key=lambda x: (x["from"], x["to"])):
@@ -708,7 +998,6 @@ def render_c4_dsl(payload: dict) -> str:
             out.append(f"  // view index SKIPPED: {len(elements)} elements exceeds the "
                        f"{cap}-element view cap — read --json for the full element list")
         else:
-            roots = sorted({e["id"].split(".")[0] for e in elements})
             out.append("  view index {")
             out.append(f"    title '{_q(project)} — landscape'")
             # The provenance line the header already carries, repeated where a READER of the
@@ -717,9 +1006,51 @@ def render_c4_dsl(payload: dict) -> str:
             # opens the `.c4` source. Without it, a generated diagram is indistinguishable from a
             # hand-drawn one — and the edge caveats that make it honest live only in the comments.
             out.append(f"    description '{_q(VIEW_DESCRIPTION)}'")
-            out.extend(f"    include {r}, {r}.**" for r in roots)
+            # COARSE, deliberately: each root plus its DIRECT children only (`.*`, not `.**`). The
+            # old `include root, root.**` was `include *` with extra steps — every element, every
+            # relation, one `autoLayout`, on this repo 66 elements and 208 relations in a single
+            # diagram. A nested area included this way still renders as a compound box (its own
+            # children stay hidden), which is exactly what a landscape should look like — and any
+            # area with enough hidden detail to be worth opening gets its own drill-down view below.
+            #
+            # DEPTH is not the only way a landscape box can hide a hairball — BREADTH is too: a root
+            # with no subdirectories at all, just many files (`LANDSCAPE_CHILD_BUDGET` children),
+            # has no hierarchy for `.*` to collapse. An elided root's flat modules are left OUT of
+            # `.*` entirely — only its child AREAS are listed explicitly — and the root gets its own
+            # `view of` drill-down below instead, where every one of its modules still gets shown.
+            plan = _plan_views(tree, int(cap or VIEW_ELEMENT_CAP))
+            for root in plan["landscape_roots"]:
+                rid = ".".join(root)
+                if root in plan["elided_roots"]:
+                    out.append(f"    include {rid}")
+                    node = _node_at(tree, root)
+                    area_children = sorted(name for name, sub in node["__children__"].items()
+                                           if sub["__children__"])
+                    out.extend(f"    include {rid}.{name}" for name in area_children)
+                else:
+                    out.append(f"    include {rid}, {rid}.*")
             out.append("    autoLayout TopBottom")
             out.append("  }")
+
+            for area in plan["drilldowns"]:
+                aid = ".".join(area["path"])
+                display = _display_path(area["path"], segment_titles)
+                out.append("")
+                out.append(f"  view of {aid} {{")
+                out.append(f"    title '{_q(project)} — {_q(display)}'")
+                out.append(f"    description '{_q(VIEW_DESCRIPTION)}'")
+                out.append("    include *")
+                out.append("    autoLayout TopBottom")
+                out.append("  }")
+
+            skipped = plan["skipped_oversized"] + plan["skipped_overflow"]
+            if skipped:
+                out.append("")
+                out.append(f"  // {skipped} additional area drill-down view(s) skipped: "
+                           f"{plan['skipped_oversized']} would themselves exceed the "
+                           f"{cap}-element view cap, {plan['skipped_overflow']} beyond the "
+                           f"{MAX_DRILLDOWN_VIEWS}-view sanity cap — read --json for the full "
+                           f"element list")
         out.append("}")
         return "\n".join(out) + "\n"
     except Exception as exc:
@@ -737,7 +1068,7 @@ def plan_output(out_dir: Any) -> dict:
         out_dir = str(out_dir or "")
         if os.path.isfile(out_dir):
             return {"ok": False, "action": "", "path": out_dir,
-                    "problem": f"--out names a directory, not a file: {out_dir}"}
+                    "problem": f"--out names a file, not a directory: {out_dir}"}
         if not os.path.isdir(out_dir):
             return {"ok": True, "action": "create", "path": out_dir, "problem": ""}
 

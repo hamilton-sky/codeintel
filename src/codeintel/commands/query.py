@@ -64,21 +64,28 @@ def _run_json(args: Any) -> int:
         result = safe_null_result(str(getattr(args, "op", "") or ""),
                                   str(getattr(args, "target", "") or ""), reason=str(exc))
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    # `ok` in the envelope is always true (a safe-null result is not an error); the PROCESS exit
+    # code is the separate signal a shell script or `&&` chain actually gates on, so it follows
+    # whether an answer came back, not whether the query mechanism itself raised.
+    return 0 if result.get("result") is not None else 1
 
 
-@never_raise("No result (reason: {exc})")
+@never_raise("No result (reason: {exc})", code=1, stderr=True)
 def _run_text(args: Any) -> int:
     result = _query(args)
     value = result.get("result")
     if value is not None:
         print(value)
-    else:
-        print(f"No result (reason: {result.get('reason', 'unknown')})")
-        hint = result.get("hint")
-        if hint:
-            print(f"  hint: {hint}", file=sys.stderr)
-    return 0
+        return 0
+    # Both on stderr: `reason` used to print to stdout while `hint` went to stderr, so
+    # `codeintel query ... 2>/dev/null` kept the unhelpful line and discarded the actionable one.
+    # A "no result" diagnostic is not the answer the caller asked for — only actual result content
+    # belongs on stdout.
+    print(f"No result (reason: {result.get('reason', 'unknown')})", file=sys.stderr)
+    hint = result.get("hint")
+    if hint:
+        print(f"  hint: {hint}", file=sys.stderr)
+    return 1
 
 
 def _query(args: Any) -> Result:

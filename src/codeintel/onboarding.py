@@ -17,25 +17,20 @@ from codeintel import doctor
 _ENGINES = ("graph", "lsp", "semantic")
 
 
-def _platform_tag() -> str:
-    """Best-effort ``System/arch`` (e.g. ``Darwin/arm64``) for platform-specific guidance."""
-    try:
-        import platform
-        return f"{platform.system() or 'your-OS'}/{platform.machine() or 'your-arch'}"
-    except Exception:
-        return "your platform"
-
-
 def _guidance_for(engine: str, probe: dict) -> str:
     """One-line install instructions for an engine that is not installed."""
     try:
         if engine == "graph":
-            # codebase-memory-mcp is a standalone native binary distributed by its own project —
-            # codeintel can't (and shouldn't) auto-download a third-party binary. Frame it as the
-            # OPTIONAL add-on it is: the tool is fully usable on semantic + LSP without it.
-            return (f"OPTIONAL (adds who-calls / impact / hotspots / changed): install the "
-                    f"codebase-memory-mcp binary for {_platform_tag()} on PATH, then re-run setup — "
-                    f"codeintel works without it")
+            # codebase-memory-mcp IS pip-installable — confirmed against the PyPI JSON API: the
+            # wheel is a thin (~5KB) wrapper whose own README documents `pip install
+            # codebase-memory-mcp`, which then fetches the native runtime from GitHub Releases on
+            # first run. A standalone native binary also exists for people who don't want a Python
+            # launcher, but pip is not a fiction here — it is upstream's own primary install path,
+            # the same shape as `pip install uv`/`fastembed` above. Frame it as the OPTIONAL add-on
+            # it is: the tool is fully usable on semantic + LSP without it.
+            return ("OPTIONAL (adds who-calls / impact / hotspots / changed): "
+                    "pip install 'codebase-memory-mcp==0.9.*' (0.10.x is not yet supported — see "
+                    "docs/graph.md), then re-run setup — codeintel works without it")
         if engine == "lsp":
             return "install uv (provides uvx): pip install uv — serena is fetched on first use"
         if engine == "semantic":
@@ -165,7 +160,13 @@ def run_setup(
         semantic_installed = (engines0.get("semantic") or {}).get("installed") is True
         for flag, pkg_args, step_name, already in (
             (install_uv, ["uv"], "install uv", lsp_installed),
-            (install_deps, ["-e", "."], "install deps (-e .)", semantic_installed),
+            # NOT `["-e", "."]`: that editable-installs whatever project the user happens to be
+            # standing in when they run `codeintel setup --all` — with no `cwd=` on the subprocess,
+            # `_pip_install` inherits wherever the shell was, which in a random repo means
+            # editable-installing THAT repo, not codeintel. Install the actual semantic deps by
+            # name instead, same as the `pip install fastembed sqlite-vec` guidance above.
+            (install_deps, ["fastembed", "sqlite-vec"], "install deps (fastembed + sqlite-vec)",
+             semantic_installed),
         ):
             if flag:
                 if already:
@@ -228,8 +229,8 @@ def _next_steps(doctor_report: dict, root: str) -> list[str]:
         if lsp.get("installed") is not True:
             out.append("LSP engine — pip install uv  (serena auto-fetched on first use)")
         if graph.get("installed") is not True:
-            out.append(f"Graph engine (OPTIONAL — who-calls/impact/hotspots/changed) — put the "
-                       f"codebase-memory-mcp binary for {_platform_tag()} on PATH")
+            out.append("Graph engine (OPTIONAL — who-calls/impact/hotspots/changed) — "
+                       "pip install 'codebase-memory-mcp==0.9.*'")
         # Always the last mile: an installed+indexed tool does nothing until the agent knows about it.
         out.append("Make your AI agent use it — codeintel install")
         return out
@@ -251,7 +252,8 @@ def render_setup_text(report: dict) -> str:
             tail = f"  {c.dim(str(detail))}" if detail else ""
             name = c.bold(str(step.get("name", "")))
             lines.append(f"  [{i}/{n}] {c.glyph(step.get('status', 'na'))} {name}{tail}")
-        _ACTION_STEPS = {"install uv", "install deps (-e .)", "index: semantic", "index: graph", "warm lsp"}
+        _ACTION_STEPS = {"install uv", "install deps (fastembed + sqlite-vec)", "index: semantic",
+                        "index: graph", "warm lsp"}
         if not any(s.get("name") in _ACTION_STEPS for s in steps):
             lines.append(c.dim("  (diagnose only — run `codeintel setup --all` to install + index "
                                "everything automatically)"))

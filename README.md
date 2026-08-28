@@ -24,7 +24,7 @@ Prefer plain text? `codeintel map` writes a **readable architecture overview** t
 
 **What `CODE_INTEL.md` is for.** It's a *static, committable* snapshot of a codebase's shape — meant to be read (by a person or an agent) **first**, instead of reconstructing structure by grepping. It covers the cases the live `code.query` tool doesn't:
 
-- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a pointer into `CLAUDE.md` / `AGENTS.md`, so an agent picks up the codebase's structure automatically at the start of a session.
+- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a short, tool-naming pointer block into `AGENTS.md` (the cross-tool surface read by Codex, Cursor, Zed, and others — created with your consent if it doesn't exist yet) plus a one-line `@AGENTS.md` import into `CLAUDE.md`, and writes the fuller [`USING_CODEINTEL.md`](USING_CODEINTEL.md) guide the block points to — so an agent knows to reach for `code.query` before it reaches for grep, not just that a `CODE_INTEL.md` exists.
 - **A committed, diffable overview.** It lives *in the repo* — reviewable in a PR, browsable on GitHub, available offline. Re-run `codeintel map` after `codeintel index` to refresh it.
 - **The load-bearing code at a glance.** Ranking symbols by caller count surfaces what most of the codebase depends on (the risky-to-change core) plus the entry points — the first things a newcomer, or an agent, should understand before touching anything.
 
@@ -40,6 +40,8 @@ Without structural tools, an agent dropped into unfamiliar code falls back on `g
 - **Always a clean answer.** Every call returns the same JSON envelope. A missing or broken backend degrades to a safe `null` *with a reason* — so the agent falls back to grep instead of crashing on an exception it can't reason its way out of.
 
 Net effect: fewer, sharper tool calls, less re-reading, and an agent that can see *structure* — callers, impact, call chains — that plain search can't.
+
+**The honest framing.** Agentic grep is still the backbone, and codeintel doesn't claim otherwise — Claude Code itself ships grep-only and that is a reasonable default for most of what an agent reads. The defensible claim is narrower: a structural index *where it pays*, degrading to grep the moment an engine is missing or not indexed, which is exactly what the safe-null contract above already does under the hood. Worth saying explicitly rather than leaving it implicit in a failure mode.
 
 ## What your agent can ask
 
@@ -426,7 +428,22 @@ Config is **validated on load** — an out-of-range number, a misspelled enum, o
 
 Not sure what's installed? `codeintel doctor` reports exactly which backends are present, whether this repo is indexed, and the command to fix each gap.
 
-**The only network touch is first-run setup:** `fastembed` downloads the `BAAI/bge-small-en-v1.5` weights once (cached under `~/.cache`, fully offline thereafter); the optional backends also install on first use *if you opt in*. After that, **no code or data leaves your machine** — which is what makes `--engine all` safe to run on a private repo.
+**The only network touch is first-run setup:** `fastembed` downloads the `BAAI/bge-small-en-v1.5`
+weights once — cached under `fastembed`'s own default (`$TMPDIR/fastembed_cache`, **not**
+`~/.cache`; override with `FASTEMBED_CACHE_PATH` for a location that survives a `/tmp` cleanup),
+fully offline thereafter; the optional backends also install on first use *if you opt in*. After
+that, **no code or data leaves your machine** — which is what makes `--engine all` safe to run on
+a private repo. Behind a proxy or fully air-gapped, this download is the one step that can fail —
+see [Offline / air-gapped install](docs/install.md#offline--air-gapped-install) for a documented
+workaround.
+
+**What codeintel writes to disk.** `~/.codeintel/semantic.db` is a **single file shared across
+every repo you've ever indexed** with this machine's default embedding model (rows are
+partitioned internally by repo) — 239 MB was observed here after indexing a handful of repos.
+`codeintel reset <repo>` clears that repo's rows but does not shrink the file (SQLite doesn't
+reclaim space without a `VACUUM`); `codeintel reset --all` removes the file outright. Separately,
+the **LSP** engine's backend (serena) writes a `.serena/` directory *into each project you index*
+— add it to that project's `.gitignore` (codeintel's own repo does).
 
 ## For agents
 
@@ -546,6 +563,16 @@ engine needs `codebase-memory-mcp` and the LSP engine needs `uvx` on `PATH` — 
 engines safe-null and you get a fraction of the capability table above. `codeintel setup --all`
 installs what it can and `codeintel doctor` tells you exactly what is missing and how to fix it.
 Run `doctor` first if the tool seems quieter than the docs suggest.
+
+**The graph backend is the closest competitor, and it should be named as one.**
+`codebase-memory-mcp` already ships semantic vector search, hybrid LSP type resolution, impact
+analysis, and auto-registration with several agents on its own. A user who installs it alone gets
+most of this project's capability table with less setup. The marginal value of codeintel over its
+own backend is the unification, the safe-null contract, and the LSP merge — one call across three
+engines instead of three separate tools to learn, a never-raise contract enforced by
+fault-injection tests rather than convention, and answers that merge graph structure with exact
+LSP locations instead of picking one. That's real and defensible, and considerably narrower than
+"three engines" makes it sound.
 
 **Maintenance.** One maintainer, MIT licensed, issues and PRs welcome. There is no support
 guarantee — factor that into anything load-bearing.

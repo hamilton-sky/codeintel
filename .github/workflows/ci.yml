@@ -200,6 +200,54 @@ jobs:
             exit 1
           fi
 
+  # `c4.py`'s own tests only assert on the DSL TEXT it produces — a substring check, not a parse
+  # (defect (f)). This job is the thing that turns "the emitted model probably parses" into a known
+  # fact: it feeds a real `.c4` file through the real LikeC4 parser, twice — once against this
+  # repo's own generated model, once against a fixture repo whose file names are deliberately every
+  # word LikeC4 1.59.2's grammar reserves at identifier position (`model.ts`, `style.ts`,
+  # `this.ts`, …), so a reserved-word regression in `c4.py`'s identifier escaping shows up here
+  # rather than only in the field.
+  #
+  # `continue-on-error`, same reasoning as `lsp-contract`: `npx` reaching the npm registry is not
+  # fully within this project's control, and an outage there must not block an unrelated release.
+  # It still runs unconditionally and shows red on failure — never a silent skip.
+  c4-validate:
+    name: LikeC4 model validates (live)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      - name: Generate this repo's own model
+        run: python -m codeintel c4 . --out /tmp/c4-self
+
+      - name: Build a reserved-word fixture repo
+        run: |
+          mkdir -p /tmp/c4-fixture/src
+          for w in model style element color group title views view this it technology metadata \
+                   link icon shape specification relationship tag include exclude extend; do
+            printf 'export const %s = 1;\n' "$w" > "/tmp/c4-fixture/src/$w.ts"
+          done
+
+      - name: Generate the reserved-word fixture's model
+        run: python -m codeintel c4 /tmp/c4-fixture --out /tmp/c4-fixture-out
+
+      - name: Validate both models against the real LikeC4 parser
+        run: |
+          npx --yes likec4@1.59.2 validate /tmp/c4-self
+          npx --yes likec4@1.59.2 validate /tmp/c4-fixture-out
+
   build:
     name: Build + verify the package
     runs-on: ubuntu-latest

@@ -108,6 +108,18 @@ def test_an_out_path_that_is_a_file_is_refused(tmp_path):
     assert readme.read_text() == "hello"
 
 
+def test_plan_output_names_the_actual_problem_when_out_is_a_file(tmp_path):
+    """The message used to be inverted: `--out` pointing at a FILE said "names a directory, not a
+    file" — backwards. `--out` needs a directory; what it got was a file."""
+    readme = tmp_path / "README.md"
+    readme.write_text("hello")
+
+    plan = c4.plan_output(str(readme))
+    assert plan["ok"] is False
+    assert "names a file, not a directory" in plan["problem"]
+    assert str(readme) in plan["problem"]
+
+
 # --------------------------------------------------------------------------- commands/c4.py
 
 def test_c4_writes_nothing_when_the_model_would_be_empty(monkeypatch, capsys, tmp_path):

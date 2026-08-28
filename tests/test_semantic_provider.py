@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from codeintel.indexer import Indexer
+from codeintel.providers import semantic as semantic_mod
 from codeintel.providers.semantic import SemanticProvider
 from codeintel.semantic_db import SemanticDb
 
@@ -213,3 +216,130 @@ def test_a_result_preview_shows_a_line_worth_reading(snippet, expected):
     from codeintel.providers.semantic import _first_meaningful_line
 
     assert _first_meaningful_line(snippet) == expected
+
+
+# ---------------------------------------------------------------------------
+# Cold-index stall fix: a non-blocking provider (the MCP/HTTP server) must return promptly on a
+# cold repo instead of running the full inline index pass, and the pass it kicks off in the
+# background must actually land, be de-duplicated per project root, and survive a crash.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_INDEXER_KWARGS = {
+    "model_name": "BAAI/bge-small-en-v1.5", "window": 20, "stride": 10,
+    "max_chunks": 500, "max_total_chunks": 100000, "chunk_strategy": "syntax",
+}
+
+
+def _wait_until_not_indexing(project_root: str, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while semantic_mod._background_index_elapsed_s(project_root) is not None:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"background index for {project_root} never finished")
+        time.sleep(0.02)
+
+
+@pytest.fixture(autouse=True)
+def _clear_background_index_state():
+    """The in-flight registry is module-level (by design — see `_background_index_elapsed_s`'s
+    docstring), so a test that fails mid-poll must not leave a stale entry for the next test."""
+    yield
+    with semantic_mod._BG_INDEX_LOCK:
+        semantic_mod._BG_INDEX_STARTED.clear()
+
+
+def test_cold_repo_non_blocking_returns_fast_then_serves_the_retry(tmp_path, monkeypatch):
+    (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+
+    with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
+        provider = SemanticProvider(blocking_index=False)
+        result = provider.build_result("search", "greet function", [], 0, str(tmp_path))
+
+        # Promptly: no `result`, a reason that says what's happening, and a hint with the fallback.
+        assert result["ok"] is True
+        assert result["result"] is None
+        assert result["reason"] == "indexing-in-progress"
+        assert "codeintel index" in result["hint"]
+
+        _wait_until_not_indexing(str(tmp_path))
+
+        retry = provider.build_result("search", "greet function", [], 0, str(tmp_path))
+
+    assert retry["result"] is not None
+    assert "sample.py" in retry["result"]
+
+
+def test_start_background_index_dedupes_concurrent_calls_for_the_same_root(tmp_path, monkeypatch):
+    started = threading.Event()
+    proceed = threading.Event()
+    calls = {"n": 0}
+
+    def _fake_index(self, project_root):
+        calls["n"] += 1
+        started.set()
+        proceed.wait(timeout=5)
+        return 1
+
+    monkeypatch.setattr("codeintel.indexer.Indexer.index", _fake_index)
+    root = str(tmp_path)
+    db_path = str(tmp_path / "semantic.db")
+
+    first = semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS)
+    assert started.wait(timeout=5), "background thread never ran"
+    second = semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS)
+
+    assert first is True
+    assert second is False, "a second call for a project root already indexing must be a no-op"
+
+    proceed.set()
+    _wait_until_not_indexing(root)
+    assert calls["n"] == 1, "only one background pass should have actually run"
+
+
+def test_background_index_crash_does_not_wedge_the_project_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("codeintel.indexer.Indexer.index",
+                         lambda self, project_root: (_ for _ in ()).throw(RuntimeError("boom")))
+    root = str(tmp_path)
+    db_path = str(tmp_path / "semantic.db")
+
+    assert semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS) is True
+    _wait_until_not_indexing(root)  # the crash must still clear the in-flight marker
+
+    # Wedged state would make this return False forever; a fresh attempt must be allowed to start.
+    monkeypatch.setattr("codeintel.indexer.Indexer.index", lambda self, project_root: 0)
+    assert semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS) is True
+    _wait_until_not_indexing(root)
+
+
+def test_blocking_provider_still_indexes_inline_on_a_cold_repo(tmp_path, monkeypatch):
+    """Default construction (every existing caller, including the CLI) must be unaffected: a cold
+    repo is still indexed synchronously, in the same call, with no background thread involved."""
+    (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+
+    with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
+        result = SemanticProvider(blocking_index=True).build_result(
+            "search", "greet function", [], 0, str(tmp_path)
+        )
+
+    assert result["result"] is not None
+    assert "sample.py" in result["result"]
+    assert semantic_mod._background_index_elapsed_s(str(tmp_path)) is None
+
+
+def test_probe_reports_indexing_in_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path",
+                         lambda *a, **k: str(tmp_path / "missing.db"))
+    root = str(tmp_path)
+
+    with semantic_mod._BG_INDEX_LOCK:
+        semantic_mod._BG_INDEX_STARTED[semantic_mod._index_key(root)] = time.monotonic() - 5
+
+    r = SemanticProvider().probe(root)
+
+    assert r["installed"] is True and r["repo_indexed"] is False
+    assert "indexing in progress" in r["detail"]
+    assert "codeintel index" in r["remediation"]
