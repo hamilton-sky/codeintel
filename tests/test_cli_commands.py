@@ -339,17 +339,19 @@ def test_query_gives_up_when_warming_never_finishes(monkeypatch, capsys):
     monkeypatch.setattr(query.time, "sleep", lambda _s: None)
     monkeypatch.setattr(query.time, "monotonic", lambda: next(clock))
 
-    assert query.run(_query_args()) == 0
-    assert "No result (reason: warming)" in capsys.readouterr().out
+    assert query.run(_query_args()) == 1
+    assert "No result (reason: warming)" in capsys.readouterr().err
 
 
 def test_query_surfaces_the_reason_and_hint_when_empty(monkeypatch, capsys):
     monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Gateway([
         {"result": None, "reason": "not_indexed", "hint": "run `codeintel index`"}]))
 
-    assert import_module("codeintel.commands.query").run(_query_args()) == 0
+    assert import_module("codeintel.commands.query").run(_query_args()) == 1
     captured = capsys.readouterr()
-    assert "No result (reason: not_indexed)" in captured.out
+    # Both on stderr: `reason` used to print to stdout while `hint` went to stderr, so
+    # `2>/dev/null` kept the unhelpful line and discarded the actionable one.
+    assert "No result (reason: not_indexed)" in captured.err
     assert "hint: run `codeintel index`" in captured.err
 
 
@@ -374,8 +376,8 @@ def test_query_auto_engine_becomes_no_engine_preference(monkeypatch):
 def test_query_never_raises(monkeypatch, capsys):
     monkeypatch.setattr("codeintel.server._build_gateway",
                         lambda **_kw: (_ for _ in ()).throw(RuntimeError("no graph backend")))
-    assert import_module("codeintel.commands.query").run(_query_args()) == 0
-    assert "No result (reason: no graph backend)" in capsys.readouterr().out
+    assert import_module("codeintel.commands.query").run(_query_args()) == 1
+    assert "No result (reason: no graph backend)" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- doctor / setup
@@ -863,15 +865,15 @@ def test_query_without_json_still_prints_only_the_answer(monkeypatch, capsys):
 
 
 def test_query_json_stays_parseable_when_the_query_itself_fails(monkeypatch, capsys):
-    """`--json` promises parseable stdout. The shared never-raise handler printed a plain-text
-    line there, handing a `| jq` consumer a parse error alongside exit 0 — the worst combination,
-    because the pipeline reports success."""
+    """`--json` promises parseable stdout. The shared never-raise handler used to print a
+    plain-text line there instead, handing a `| jq` consumer a parse error — this pins stdout to
+    stay valid JSON regardless. Exit code is 1: `result` is null, so there is no answer."""
     import json as _json
 
     monkeypatch.setattr("codeintel.server._build_gateway",
                         lambda **_kw: (_ for _ in ()).throw(RuntimeError("backend exploded")))
 
-    assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 0
+    assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 1
     payload = _json.loads(capsys.readouterr().out)      # must not raise
     assert payload["result"] is None
     assert "backend exploded" in payload["reason"]

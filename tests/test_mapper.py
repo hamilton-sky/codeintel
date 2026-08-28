@@ -343,3 +343,135 @@ def test_inject_writes_through_a_symlinked_rules_file(tmp_path, monkeypatch):
 
     assert (tmp_path / "CLAUDE.md").is_symlink(), "the symlink was replaced by a regular file"
     assert "codeintel" in real.read_text().lower(), "the block did not reach the link target"
+
+
+# --------------------------------------------------------------------------- AGENTS.md / CLAUDE.md
+
+def test_inject_refuses_to_create_agents_md_without_consent(tmp_path):
+    """No CLAUDE.md, no AGENTS.md, and no ``create=True``: nothing is written. Writing into a file
+    that shapes an agent's future behaviour needs consent, not a default."""
+    from codeintel.injector import Injector
+
+    path, action = Injector().inject(str(tmp_path))
+    assert (path, action) == (None, "no-context-file")
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_inject_creates_agents_md_with_consent(tmp_path):
+    from codeintel.injector import Injector
+
+    path, action = Injector().inject(str(tmp_path), create=True)
+    assert path == str(tmp_path / "AGENTS.md")
+    assert action == "created"
+    content = (tmp_path / "AGENTS.md").read_text()
+    assert "<!-- codeintel-map-start -->" in content
+    assert "code.query" in content
+    assert (tmp_path / "USING_CODEINTEL.md").exists()
+
+
+def test_inject_agents_md_is_idempotent(tmp_path):
+    from codeintel.injector import Injector
+
+    Injector().inject(str(tmp_path), create=True)
+    Injector().inject(str(tmp_path), create=True)
+    content = (tmp_path / "AGENTS.md").read_text()
+    assert content.count("<!-- codeintel-map-start -->") == 1
+    assert content.count("<!-- codeintel-map-end -->") == 1
+
+
+def test_inject_preserves_user_prose_in_agents_md(tmp_path):
+    from codeintel.injector import Injector
+
+    (tmp_path / "AGENTS.md").write_text("# Team rules\n\nDo not touch payments/.\n")
+    Injector().inject(str(tmp_path), create=True)
+    content = (tmp_path / "AGENTS.md").read_text()
+    assert "Do not touch payments/." in content
+    assert "code.query" in content
+
+
+def test_inject_gives_claude_md_a_one_line_agents_import_when_both_exist(tmp_path):
+    from codeintel.injector import Injector
+
+    (tmp_path / "CLAUDE.md").write_text("# Project rules\n")
+    Injector().inject(str(tmp_path), create=True)
+    claude = (tmp_path / "CLAUDE.md").read_text()
+    assert "@AGENTS.md" in claude
+    assert "code.query" not in claude   # the full block lives in AGENTS.md only
+
+
+def test_inject_migrates_a_pre_agents_md_claude_block_to_an_import(tmp_path):
+    """A CLAUDE.md that already carries codeintel's OLD full block (written before AGENTS.md
+    existed) gets it replaced with the one-line import once AGENTS.md becomes the canonical
+    target — otherwise the stale block would sit there forever."""
+    from codeintel.injector import Injector
+
+    (tmp_path / "CLAUDE.md").write_text(
+        "# rules\n<!-- codeintel-map-start -->\nold stale block\n<!-- codeintel-map-end -->\n"
+    )
+    Injector().inject(str(tmp_path), create=True)
+    claude = (tmp_path / "CLAUDE.md").read_text()
+    assert "old stale block" not in claude
+    assert "@AGENTS.md" in claude
+
+
+def test_inject_without_consent_falls_back_to_claude_md_full_block(tmp_path):
+    """No AGENTS.md and no consent to create one: CLAUDE.md keeps getting the full block, so an
+    existing CLAUDE.md-only setup is not a silent no-op."""
+    from codeintel.injector import Injector
+
+    (tmp_path / "CLAUDE.md").write_text("# rules\n")
+    path, action = Injector().inject(str(tmp_path))
+    assert path == str(tmp_path / "CLAUDE.md")
+    assert action == "appended"
+    assert "code.query" in (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_using_codeintel_md_names_the_tools_and_confidence_caveat(tmp_path):
+    from codeintel.injector import Injector
+
+    Injector().inject(str(tmp_path), create=True)
+    content = (tmp_path / "USING_CODEINTEL.md").read_text()
+    for needle in ("code.query", "code.map", "code.status", "code.doctor", "confidence", "gaps"):
+        assert needle in content
+
+
+def test_injected_block_names_the_tools_and_trigger_phrases(tmp_path):
+    from codeintel.injector import Injector
+
+    Injector().inject(str(tmp_path), create=True)
+    content = (tmp_path / "AGENTS.md").read_text()
+    for needle in ("code.query", "code.map", "code.status", "code.doctor", "changed",
+                   "who calls X", "confidence", "gaps"):
+        assert needle in content
+
+
+# --------------------------------------------------------------------------- offer_injection
+
+def test_offer_injection_prompts_on_a_tty_and_injects_on_yes(tmp_path, monkeypatch):
+    from codeintel.injector import offer_injection
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    result = offer_injection(str(tmp_path))
+    assert result["action"] == "created"
+    assert (tmp_path / "AGENTS.md").exists()
+
+
+def test_offer_injection_declines_on_no(tmp_path, monkeypatch):
+    from codeintel.injector import offer_injection
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    result = offer_injection(str(tmp_path))
+    assert result["action"] == "declined"
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_offer_injection_prints_command_off_a_tty(tmp_path, monkeypatch, capsys):
+    from codeintel.injector import offer_injection
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    result = offer_injection(str(tmp_path))
+    assert result["action"] == "printed"
+    assert "codeintel map --inject" in capsys.readouterr().out
+    assert not (tmp_path / "AGENTS.md").exists()

@@ -1,9 +1,18 @@
 import argparse
 import difflib
+import shutil
 import sys
 from importlib import import_module
+from typing import NoReturn
 
 from codeintel import __version__
+from codeintel.query_ops import QUERY_OPS
+
+# `--engine`'s canonical values live in `codeintel.gateway._KNOWN_ENGINES` (a set — order is not
+# meaningful there). This fixes a presentation order for help text and `choices=`. Membership is
+# pinned to the gateway's set by test_cli_help.py, which is where the guard belongs: importing
+# gateway here just to assert at module scope would pull it into every CLI startup.
+QUERY_ENGINES: tuple[str, ...] = ("auto", "graph", "lsp", "semantic", "both", "all")
 
 # Commands grouped by what you are trying to DO. argparse lists them in declaration order with no
 # grouping, which turns "what can this thing do?" into reading twelve lines to find the one verb you
@@ -34,6 +43,13 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
 ]
 
 _COMMANDS = [name for _group, items in _COMMAND_GROUPS for name, _desc in items]
+
+# The single source for every subcommand's one-liner: `add_parser(help=..., description=...)`
+# below reads from this dict rather than repeating the text, so `codeintel map --help` and
+# `codeintel help` cannot disagree about what `map` does — they used to, in two separate tables
+# that drifted apart wording-first (`query`'s `help=` still said "Query the code intelligence
+# engine" after `_COMMAND_GROUPS` had moved on to naming the actual ops).
+_DESCRIPTIONS: dict[str, str] = {name: desc for _group, items in _COMMAND_GROUPS for name, desc in items}
 
 # Each command's body lives in codeintel.commands.<module> as `run(args) -> int`. The mapping is
 # spelled out rather than derived from the command name so the target of any command is greppable,
@@ -76,9 +92,43 @@ _START_HERE = [
     ("codeintel doctor", "confirm it works"),
 ]
 
+# Flags with no subcommand of their own — they only make sense on the top-level screen, and
+# nothing else names them. Root-parser flags (see `build_parser`), so they go BEFORE the
+# subcommand: `codeintel --no-color query ...`, not after.
+_GLOBAL_OPTIONS = [
+    ("--version", "Print the version and exit"),
+    ("-h, --help", "This screen; after a command, that command's options"),
+    ("--no-color", "Disable ANSI color (NO_COLOR and a pipe do this too)"),
+    ("--ascii", "ASCII-only glyphs, for terminals without UTF-8"),
+]
 
-HELP_WIDTH = 78              # the width every rendered help line must fit inside
+
+def _terminal_width() -> int:
+    """The width every rendered help screen fits inside — clamped so a wide terminal doesn't
+    stretch a hand-aligned screen past what it was authored for, and a narrow one (COLUMNS=40)
+    doesn't force argparse's own usage/options wrapping down to something unreadable.
+
+    `shutil.get_terminal_size()` already checks `COLUMNS` before the real tty, and falls back to
+    78 when there is no terminal at all (a pipe, a test, most CI) — the same 78 this replaced."""
+    return max(40, min(shutil.get_terminal_size(fallback=(78, 24)).columns, 78))
+
+
+# The width every rendered help line must fit inside — both this screen's own hand-aligned rows
+# (`test_no_help_line_exceeds_the_width_budget` pins that) and, via `_formatter_class` below, every
+# `codeintel <command> --help` screen's argparse-wrapped usage/options block. Previously a fixed
+# 78: argparse's own HelpFormatter reads live COLUMNS on its own, so a wide terminal rendered the
+# flags list at (say) 200 columns while `RawDescriptionHelpFormatter` left the hand-aligned epilog
+# below it at 78 — one screen, two widths. Computed once, at import time: a `--no-color`-style
+# runtime toggle for this would need re-plumbing through every already-built subparser, for a
+# terminal resize that a running CLI invocation will not live to see anyway.
+HELP_WIDTH = _terminal_width()
 HELP_GUTTER_CAP = 44         # ceiling on the derived comment column (see `gutter` below)
+
+
+def _formatter_class(prog: str) -> argparse.RawDescriptionHelpFormatter:
+    """`RawDescriptionHelpFormatter` pinned to `HELP_WIDTH`, used for every subparser (not only
+    those with an epilog) so the flags list and any epilog agree on one width instead of two."""
+    return argparse.RawDescriptionHelpFormatter(prog, width=HELP_WIDTH)
 
 
 def render_help() -> str:
@@ -130,9 +180,29 @@ def render_help() -> str:
     for cmd, why in _EXAMPLES:
         out.append("    " + cmd.ljust(gutter) + c.dim("# " + why))
 
+    # `--no-color`/`--ascii`/`--version` are root-parser flags with no subcommand of their own, so
+    # nothing above ever names them — a first-time reader had no way to learn they exist short of
+    # `argparse`'s own `-h` output, which this screen replaces.
     out.append("")
-    out.append("  " + c.dim("codeintel <command> --help") + "   full options for one command")
-    out.append("  " + c.dim("docs: https://github.com/hamilton-sky/codeintel"))
+    out.append("  " + c.bold("Global options"))
+    opt_width = max(len(opt) for opt, _desc in _GLOBAL_OPTIONS)
+    for opt, desc in _GLOBAL_OPTIONS:
+        out.append("    " + opt.ljust(opt_width) + "  " + desc)
+
+    # Deliberately generic, not `query`'s specific "0 answered / 1 no result" — that framing is
+    # true for `query` (see `codeintel query --help`) but not for e.g. `status`, which always exits
+    # 0 (doctor owns the "is this healthy" exit code), or `serve`, which does not exit at all in
+    # normal use. "success/failure/usage error" is the one claim that holds for every command here.
+    out.append("")
+    out.append("  " + c.bold("Exit codes"))
+    out.append("    0  success        1  failure (see the message)      2  usage error")
+
+    out.append("")
+    out.append("  " + c.bold("Learn more"))
+    out.append("    " + c.dim("codeintel <command> --help") + "   full options for one command")
+    out.append("    " + c.dim("codeintel query --help") + "       all " + str(len(QUERY_OPS))
+               + " query operations")
+    out.append("    " + c.dim("docs: https://github.com/hamilton-sky/codeintel"))
     return "\n".join(out)
 
 
@@ -175,14 +245,33 @@ Run this first, and again after big changes. `codeintel status` shows index
 age.""",
     "query": """examples:
   codeintel query --op changed
-  codeintel query --op search
-  codeintel query --op impact
-  codeintel query --op callers
-  codeintel query --op chain
-  codeintel query --op overview --target ""
+  codeintel query --op callers  --target build_parser
+  codeintel query --op impact   --target Gateway.query
+  codeintel query --op search   --target "where do we validate tokens"
+  codeintel query --op hotspots --json
 
-`overview`, `changed` and `hotspots` ignore --target. Prefer this over grep:
-results are ranked by graph importance, not by match order.""",
+`overview`, `changed` and `hotspots` ignore --target — omit it, or pass "".
+Prefer this over grep: results are ranked by graph importance, not by match
+order.
+
+operations:
+  search      find code by meaning or name — use instead of grep
+  symbol      definition, signature and docstring (LSP)
+  callers     direct callers of a symbol
+  callees     direct callees of a symbol
+  impact      callers + callees — run before you change a symbol
+  chain       how one symbol reaches another
+  context     search + symbol together
+  pattern     structural pattern match over the graph
+  changed     what your uncommitted edits ripple into   --target ignored
+  hotspots    highest fan-in / complexity symbols       --target ignored
+  overview    ranked architecture summary               --target ignored
+
+exit codes:
+  0 answered   1 no result (see the hint)   2 usage error
+
+Empty answer? `codeintel doctor` separates "not indexed" from "engine
+missing" from "nothing to find".""",
     "map": """examples:
   codeintel map .                       write CODE_INTEL.md
   codeintel map . --inject              also point CLAUDE.md / AGENTS.md at it
@@ -256,6 +345,23 @@ For `serve-http --token`, or an RBAC auth.toml.""",
 }
 
 
+class _RootArgumentParser(argparse.ArgumentParser):
+    """`error()` overridden so a bad flag points at `codeintel help` instead of dumping argparse's
+    own flat `{serve,index,query,...}` choice wall — the exact listing the grouped `codeintel help`
+    screen exists to replace, and what any unrecognized-argument error bubbles up to (argparse
+    reports leftover unrecognized args on the ROOT parser, regardless of which subcommand was being
+    parsed when the bad flag showed up). Subparsers stay plain `argparse.ArgumentParser` (see
+    `add_subparsers(parser_class=...)` below), so `codeintel query --op bogus` still gets that
+    subcommand's own short, specific usage line — only the wide top-level wall is replaced."""
+
+    def error(self, message: str) -> NoReturn:
+        from codeintel.term import c_err as e
+
+        print(e.red(f"codeintel: error: {message}"), file=sys.stderr)
+        print("\n  " + e.dim("run `codeintel help` to see every command, grouped"), file=sys.stderr)
+        self.exit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argparse surface.
 
@@ -263,21 +369,27 @@ def build_parser() -> argparse.ArgumentParser:
     routed to `render_help()`, so argparse's own listing is no longer reachable from the CLI — and
     that listing was how the help-honesty test proved every advertised command is really wired up.
     Reading the parser is a stronger source of truth than scraping either screen's text."""
-    parser = argparse.ArgumentParser(prog="codeintel")
+    parser = _RootArgumentParser(prog="codeintel")
     parser.add_argument("--version", action="version", version=f"codeintel {__version__}")
-    subparsers = parser.add_subparsers(dest="command")
+    # Root-level, not per-subcommand: these are read in `main()` even for `codeintel help`, so they
+    # must be parseable no matter which (or no) subcommand follows. A previous per-subcommand
+    # `parents=[color_parent]` on only five commands meant `codeintel --no-color help` — the flag
+    # BEFORE any subcommand — was never reachable: argparse rejected it as unrecognized before a
+    # subcommand's own copy of the flag ever got a chance to see it. Global flags go before the
+    # command: `codeintel --no-color query ...`, not after.
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    parser.add_argument("--ascii", action="store_true", help="Use ASCII-only glyphs")
+    # Plain ArgumentParser for every subcommand, not `_RootArgumentParser` — `add_subparsers`
+    # otherwise defaults `parser_class` to `type(self)`, which would also swap every subcommand's
+    # own (already-good) `error()` for the top-level pointer, losing the specific usage line a
+    # subcommand error already gives.
+    subparsers = parser.add_subparsers(dest="command", parser_class=argparse.ArgumentParser)
 
-    # Shared flags for the human-facing (styled) commands.
-    color_parent = argparse.ArgumentParser(add_help=False)
-    color_parent.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
-    color_parent.add_argument("--ascii", action="store_true", help="Use ASCII-only glyphs")
-
-    subparsers.add_parser("serve", help="Start the MCP server")
+    subparsers.add_parser("serve", help=_DESCRIPTIONS["serve"], description=_DESCRIPTIONS["serve"])
 
     # index subcommand
     index_parser = subparsers.add_parser(
-        "index", parents=[color_parent],
-        help="Build the index every other command reads (semantic + graph)")
+        "index", help=_DESCRIPTIONS["index"], description=_DESCRIPTIONS["index"])
     index_parser.add_argument(
         "project_root",
         nargs="?",
@@ -290,10 +402,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # query subcommand
-    query_parser = subparsers.add_parser("query", help="Query the code intelligence engine")
-    query_parser.add_argument("--op", required=True, help="Query operation (e.g. search, symbol)")
-    query_parser.add_argument("--target", required=True, help="Query target")
-    query_parser.add_argument("--engine", default="auto", help="Engine to use (default: auto)")
+    query_parser = subparsers.add_parser(
+        "query", help=_DESCRIPTIONS["query"], description=_DESCRIPTIONS["query"])
+    query_parser.add_argument(
+        "--op", choices=QUERY_OPS, required=True,
+        help="Which question to ask; see \"operations\" below",
+    )
+    # NOT required — `overview`/`changed`/`hotspots` ignore it, and every epilog example for those
+    # ops used to show `--op changed` etc. with no `--target` at all, which the parser rejected
+    # (`required=True` disagreeing with its own prose). A blank default lets those ops be run
+    # exactly as documented, while `--target` stays available for the ops that read it.
+    query_parser.add_argument(
+        "--target", default="",
+        help="Symbol name, or a natural-language query for `search`. Ignored (and safe to omit) "
+             "by `overview`/`changed`/`hotspots`.",
+    )
+    query_parser.add_argument(
+        "--engine", choices=QUERY_ENGINES, default="auto",
+        help="Which engine answers (default: auto — picks the right engine per op)",
+    )
     query_parser.add_argument(
         "--project-root",
         default=None,
@@ -307,7 +434,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # status subcommand
-    status_parser = subparsers.add_parser("status", help="Show code intelligence engine status")
+    status_parser = subparsers.add_parser(
+        "status", help=_DESCRIPTIONS["status"], description=_DESCRIPTIONS["status"])
     status_parser.add_argument(
         "project_root",
         nargs="?",
@@ -316,7 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # serve-http subcommand
-    http_parser = subparsers.add_parser("serve-http", help="Start the HTTP transport server")
+    http_parser = subparsers.add_parser(
+        "serve-http", help=_DESCRIPTIONS["serve-http"], description=_DESCRIPTIONS["serve-http"])
     http_parser.add_argument("--port", type=int, default=8766, help="Port to listen on (default: 8766)")
     http_parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     http_parser.add_argument("--allow-remote", action="store_true",
@@ -327,7 +456,8 @@ def build_parser() -> argparse.ArgumentParser:
                                   "CODEINTEL_HTTP_TOKEN). Strongly recommended with --allow-remote.")
 
     # install subcommand
-    install_parser = subparsers.add_parser("install", help="Register codeintel with AI agents")
+    install_parser = subparsers.add_parser(
+        "install", help=_DESCRIPTIONS["install"], description=_DESCRIPTIONS["install"])
     install_parser.add_argument(
         "--agent",
         choices=["auto", "claude", "codex", "gemini", "zed", "all"],
@@ -346,9 +476,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Register the bare `codeintel` name instead of its absolute path (the absolute path "
              "is the default because a GUI-launched agent does not inherit your shell's PATH)",
     )
+    install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be registered, and where — write nothing",
+    )
 
     # map subcommand
-    map_parser = subparsers.add_parser("map", help="Generate CODE_INTEL.md orientation file")
+    map_parser = subparsers.add_parser(
+        "map", help=_DESCRIPTIONS["map"], description=_DESCRIPTIONS["map"])
     map_parser.add_argument("project_root", nargs="?", default=None,
                             help="Project root (default: cwd)")
     map_parser.add_argument("--inject", action="store_true", help="Inject reference block into CLAUDE.md/AGENTS.md")
@@ -356,8 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # graph subcommand — interactive call-graph view (HTML) or the raw {nodes,edges} JSON
     graph_parser = subparsers.add_parser(
-        "graph", help="Build an interactive call-graph view (--html) or emit the graph as JSON — "
-                      "works on any indexed repo")
+        "graph", help=_DESCRIPTIONS["graph"], description=_DESCRIPTIONS["graph"])
     graph_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     graph_parser.add_argument("--html", action="store_true",
                               help="Write a self-contained interactive HTML viewer (default: print JSON)")
@@ -366,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # c4 subcommand — a LikeC4 model of the Folder/File + IMPORTS slice
     c4_parser = subparsers.add_parser(
-        "c4", help="Generate a LikeC4 architecture model (.c4) from the import graph")
+        "c4", help=_DESCRIPTIONS["c4"], description=_DESCRIPTIONS["c4"])
     c4_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     c4_parser.add_argument("--out", default=None,
                            help="Output DIRECTORY (default: codeintel-c4/). LikeC4 merges every "
@@ -386,8 +521,8 @@ def build_parser() -> argparse.ArgumentParser:
     c4_parser.add_argument("--json", action="store_true", help="Print the payload; write nothing")
 
     # doctor subcommand
-    doctor_parser = subparsers.add_parser("doctor", parents=[color_parent],
-                                          help="Diagnose engine health + index status for a repo")
+    doctor_parser = subparsers.add_parser(
+        "doctor", help=_DESCRIPTIONS["doctor"], description=_DESCRIPTIONS["doctor"])
     doctor_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     doctor_parser.add_argument("--deep", action="store_true",
                                help="Also boot-check serena (slower; first boot pulls it via uvx)")
@@ -395,8 +530,8 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Emit the structured JSON report instead of the table")
 
     # setup subcommand
-    setup_parser = subparsers.add_parser("setup", parents=[color_parent],
-                                         help="Prepare backends and optionally index this repo")
+    setup_parser = subparsers.add_parser(
+        "setup", help=_DESCRIPTIONS["setup"], description=_DESCRIPTIONS["setup"])
     setup_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     setup_parser.add_argument("--all", action="store_true", dest="all_steps",
                               help="One-command setup: do everything automatable (uv + deps + index + "
@@ -404,15 +539,15 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--install-uv", action="store_true",
                               help="Run `pip install uv` (provides uvx for the LSP engine)")
     setup_parser.add_argument("--install-deps", action="store_true",
-                              help="Run `pip install -e .` (semantic engine deps)")
+                              help="Run `pip install fastembed sqlite-vec` (semantic engine deps)")
     setup_parser.add_argument("--index", action="store_true",
                               help="Index this repo now (first run downloads the ~50MB model)")
     setup_parser.add_argument("--warm", action="store_true", help="Boot serena now (first run pulls it via uvx; slow)")
     setup_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
     # prompt subcommand
-    prompt_parser = subparsers.add_parser("prompt", parents=[color_parent],
-                                          help="Print a paste-to-your-agent setup prompt for this repo")
+    prompt_parser = subparsers.add_parser(
+        "prompt", help=_DESCRIPTIONS["prompt"], description=_DESCRIPTIONS["prompt"])
     prompt_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     prompt_parser.add_argument("--agent", default="auto",
                                help="Agent the prompt targets: claude|codex|gemini|zed|auto (default: auto)")
@@ -423,26 +558,29 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Boot-check serena while probing (slower; sharper 'already set up' result)")
 
     # reset subcommand
-    reset_parser = subparsers.add_parser("reset", parents=[color_parent],
-                                         help="Clear the semantic index (recover from a corrupt/stale DB)")
+    reset_parser = subparsers.add_parser(
+        "reset", help=_DESCRIPTIONS["reset"], description=_DESCRIPTIONS["reset"])
     reset_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     reset_parser.add_argument("--all", action="store_true",
                               help="Clear the ENTIRE index (all projects), not just this repo")
     reset_parser.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
     reset_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
-    subparsers.add_parser("gen-token", help="Print a secure random bearer token (for serve-http / RBAC auth.toml)")
+    subparsers.add_parser(
+        "gen-token", help=_DESCRIPTIONS["gen-token"], description=_DESCRIPTIONS["gen-token"])
     subparsers.add_parser("help", help="Show every command, grouped, with examples")
 
     # Applied in one pass over the built parser rather than at each `add_parser` call site: an
     # epilog is presentation, and threading two extra kwargs through fourteen construction sites
-    # would bury the flags that actually define each command. RawDescriptionHelpFormatter goes with
-    # it — argparse otherwise re-wraps the epilog and destroys the aligned example columns.
+    # would bury the flags that actually define each command. Every subcommand (not only those with
+    # an epilog) gets the same width-pinned formatter, so `codeintel <cmd> --help`'s flags list and
+    # its epilog (if any) render at one width instead of argparse silently picking a different one
+    # for each half.
     for _name, _sub in (subparsers.choices or {}).items():
+        _sub.formatter_class = _formatter_class
         _epilog = _EPILOGS.get(_name)
         if _epilog:
             _sub.epilog = _epilog
-            _sub.formatter_class = argparse.RawDescriptionHelpFormatter
 
     return parser
 
@@ -475,8 +613,9 @@ def main() -> None:
     )
 
     module = _MODULES.get(args.command)
-    if module is None:          # unreachable via argparse; a bare `codeintel` is handled above
-        print(render_help())
+    if module is None:          # `command` is None (bare `codeintel --no-color`/`--ascii`) or
+        print(render_help())    # "help" (`codeintel --no-color help`) — both skip the early-return
+                                 # above because argv[0] is the flag, not the command/"help" itself
         sys.exit(0)
     sys.exit(import_module(f"codeintel.commands.{module}").run(args))
 

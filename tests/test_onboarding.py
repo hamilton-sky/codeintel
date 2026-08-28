@@ -82,11 +82,15 @@ def test_setup_index_real_db(tmp_path, monkeypatch):
 # one-command setup (--all): idempotency, optional-graph framing, next steps
 # --------------------------------------------------------------------------- #
 
-def test_guidance_for_graph_is_optional_and_platform_aware():
+def test_guidance_for_graph_is_optional_and_pip_installable():
     g = onboarding._guidance_for("graph", {"installed": False})
     assert "codebase-memory-mcp" in g   # (kept from the original guidance test)
     assert "OPTIONAL" in g              # framed as the optional add-on it is
-    assert "/" in g                     # carries a platform tag like Darwin/arm64
+    # Confirmed against the PyPI JSON API: codebase-memory-mcp is a real (thin-wrapper) PyPI
+    # package, not an unmanaged third-party binary — pip is the correct guidance, same shape as
+    # the uv/fastembed guidance above it.
+    assert "pip install" in g
+    assert "codebase-memory-mcp==0.9" in g
 
 
 def test_run_setup_skips_install_when_engine_already_installed(tmp_path, monkeypatch):

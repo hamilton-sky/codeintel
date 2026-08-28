@@ -80,6 +80,14 @@ class Gateway:
         self._reindexer = reindexer or Reindexer()
         self._adopt_lock = threading.Lock()
 
+    @property
+    def oneshot(self) -> bool:
+        """Whether this gateway serves a single request then exits (the CLI) rather than a
+        long-lived process (MCP stdio / HTTP). Exposed so a caller re-building a slot-filling
+        provider — e.g. `server._refresh_missing_engines` — can match the blocking behavior the
+        gateway was originally constructed with, instead of guessing or hardcoding it."""
+        return self._oneshot
+
     def adopt_provider(self, engine: str, provider: Any) -> bool:
         """Fill an EMPTY engine slot with a provider that has just been proven installed.
 

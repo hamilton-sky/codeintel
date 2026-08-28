@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import threading
+import time
+from typing import Any
 
 from codeintel.loc import loc
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
@@ -13,6 +16,82 @@ try:
     _DEPS_OK = True
 except ImportError:
     _DEPS_OK = False
+
+# Cold-index background bookkeeping, module-level (not per-instance): `code.status`/`code.doctor`
+# build their own ephemeral `SemanticProvider` to probe, and they must see the SAME in-flight job
+# the query path started, not an empty dict on a throwaway instance. Keyed by the realpath of the
+# project root so a trailing slash or a relative path can't be tracked as a second, independent job.
+_BG_INDEX_LOCK = threading.Lock()
+_BG_INDEX_STARTED: dict[str, float] = {}  # project_root (realpath) -> time.monotonic() at start
+
+
+def _index_key(project_root: str) -> str:
+    try:
+        return os.path.realpath(project_root)
+    except Exception:
+        return project_root
+
+
+def _background_index_elapsed_s(project_root: str) -> float | None:
+    """Seconds since a background cold-index for *project_root* started, or None if none is
+    running. Used to make the in-progress state observable from `probe()` (doctor/status)."""
+    with _BG_INDEX_LOCK:
+        started = _BG_INDEX_STARTED.get(_index_key(project_root))
+    return None if started is None else time.monotonic() - started
+
+
+def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dict) -> bool:
+    """Kick off ONE cold-index pass for *project_root* on a daemon thread, unless one is already
+    running for it. Returns True iff this call actually started a new pass.
+
+    Daemon so it can never block interpreter shutdown. Runs on its OWN `SemanticDb` connection
+    (sqlite3 connections aren't shared across threads) rather than the caller's — and is wrapped in
+    its own try/except so a crash here (a blocked model download, a full disk) can only cost this
+    one background pass, never the request thread or the server process."""
+    key = _index_key(project_root)
+    with _BG_INDEX_LOCK:
+        if key in _BG_INDEX_STARTED:
+            return False
+        _BG_INDEX_STARTED[key] = time.monotonic()
+
+    def _run() -> None:
+        try:
+            from codeintel.indexer import Indexer
+            from codeintel.semantic_db import SemanticDb
+
+            db = SemanticDb(db_path)
+            try:
+                db.init()
+                Indexer(db, **indexer_kwargs).index(project_root)
+            finally:
+                db.close()
+        except Exception as exc:
+            log_swallowed("SemanticProvider._start_background_index", exc)
+        finally:
+            with _BG_INDEX_LOCK:
+                _BG_INDEX_STARTED.pop(key, None)
+
+    threading.Thread(target=_run, daemon=True, name="codeintel-cold-index").start()
+    return True
+
+
+def _not_indexed_probe(project_root: str, detail: str) -> dict:
+    """The `probe()` shape for 'this repo has no usable index yet' — with a distinct message when
+    that gap is because a background cold-index is already filling it in (see
+    `_start_background_index`), so `code.doctor`/`code.status` can say so instead of repeating
+    'not indexed' unremediated on every check while it works."""
+    elapsed = _background_index_elapsed_s(project_root)
+    if elapsed is not None:
+        return {
+            "installed": True, "runnable": True, "repo_indexed": False,
+            "detail": f"indexing in progress (started ~{elapsed:.0f}s ago) — {detail}",
+            "remediation": "wait and retry, or run: "
+                           f"codeintel index {project_root}  (indexes synchronously with progress)",
+        }
+    return {
+        "installed": True, "runnable": True, "repo_indexed": False,
+        "detail": detail, "remediation": f"codeintel index {project_root}",
+    }
 
 
 def _plural(n: int, noun: str) -> str:
@@ -59,6 +138,14 @@ def _first_meaningful_line(snippet: str) -> str:
 class SemanticProvider:
     """Real semantic search provider backed by SemanticDb and Searcher."""
 
+    def __init__(self, blocking_index: bool = True) -> None:
+        # True (the default) preserves today's behavior for every existing caller — the CLI (a
+        # one-shot process that can afford to wait, and has no other mechanism to build a cold
+        # index) and every direct/test construction of this class. The long-lived MCP/HTTP server
+        # is the one caller that passes False: a full cold-index pass can run minutes past any
+        # client tool timeout, so it must return promptly instead of blocking the request thread.
+        self._blocking_index = bool(blocking_index)
+
     @property
     def available(self) -> bool:
         return _DEPS_OK
@@ -96,11 +183,7 @@ class SemanticProvider:
                                "environment has no resolvable home directory",
             }
         if not os.path.exists(db_path):
-            return {
-                "installed": True, "runnable": True, "repo_indexed": False,
-                "detail": "no semantic index database yet",
-                "remediation": f"codeintel index {project_root}",
-            }
+            return _not_indexed_probe(project_root, "no semantic index database yet")
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
@@ -122,11 +205,7 @@ class SemanticProvider:
                 "installed": True, "runnable": True, "repo_indexed": True,
                 "detail": f"{count} indexed chunks for this repo", "remediation": None,
             }
-        return {
-            "installed": True, "runnable": True, "repo_indexed": False,
-            "detail": "semantic.db present but 0 chunks for this repo",
-            "remediation": f"codeintel index {project_root}",
-        }
+        return _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo")
 
     def build_result(
         self,
@@ -166,20 +245,40 @@ class SemanticProvider:
             # The background Reindexer (gated by the CODEINTEL_REINDEX env) already keeps a warm repo
             # fresh, so we only pay the inline pass on a COLD repo (nothing indexed yet). The one
             # exception: when that background reindexer is turned off, the inline pass is the only
-            # thing keeping the index current, so we run it every query to preserve freshness.
+            # thing keeping the index current, so we run it every query to preserve freshness — that
+            # case always blocks, `self._blocking_index` or not, since nothing else will ever build it.
             background_reindex_off = (
                 os.environ.get("CODEINTEL_REINDEX", "on").strip().lower() == "off"
             )
-            if background_reindex_off or not searcher.has_index(project_root):
-                Indexer(
-                    db,
-                    model_name=model,
-                    window=int(cfg.get("window", 20)),
-                    stride=int(cfg.get("stride", 10)),
-                    max_chunks=int(cfg.get("max_chunks", 500)),
-                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
-                    chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-                ).index(project_root)
+            indexer_kwargs: dict[str, Any] = {
+                "model_name": model,
+                "window": int(cfg.get("window", 20)),
+                "stride": int(cfg.get("stride", 10)),
+                "max_chunks": int(cfg.get("max_chunks", 500)),
+                "max_total_chunks": int(cfg.get("max_total_chunks", 100000)),
+                "chunk_strategy": str(cfg.get("chunk_strategy", "syntax")),
+            }
+            no_index = not searcher.has_index(project_root)
+            if background_reindex_off or (no_index and self._blocking_index):
+                Indexer(db, **indexer_kwargs).index(project_root)
+            elif no_index:
+                # Non-blocking caller (the long-lived MCP/HTTP server): a cold pass over a real repo
+                # is minutes long (~500s / 25k chunks per docs/benchmarks.md) plus a one-time ~50MB
+                # model download — running it inline here would stall this request past any client
+                # tool timeout, with zero output, for every op this repo will ever answer first. Kick
+                # it off in the background (deduped per project root — see `_start_background_index`)
+                # and return the safe-null envelope immediately so the caller can retry shortly
+                # instead of hanging with nothing.
+                _start_background_index(project_root, db_path, indexer_kwargs)
+                elapsed = _background_index_elapsed_s(project_root) or 0.0
+                return safe_null_result(
+                    op, target, engine="semantic", reason="indexing-in-progress",
+                    hint=(f"first-time indexing of this repo started in the background "
+                          f"~{elapsed:.0f}s ago (a cold pass can take several minutes on a large "
+                          f"repo, plus a one-time embedding-model download) — retry this query "
+                          f"shortly, or run `codeintel index {project_root}` to index synchronously "
+                          f"with progress output"),
+                )
 
             if not searcher.has_index(project_root):
                 return safe_null_result(

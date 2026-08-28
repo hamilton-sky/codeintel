@@ -6,6 +6,7 @@ half). Fixtures follow `tests/test_grapher.py`: patch `GraphProvider._resolve_pr
 from __future__ import annotations
 
 import json
+import re
 
 from codeintel import c4
 from codeintel.providers.graph import GraphProvider, ProjectResolution
@@ -294,6 +295,123 @@ def test_row_limit_truncation_is_reported(monkeypatch):
     assert "may be" in dsl.lower() or "truncat" in dsl.lower() or "cap" in dsl.lower()
 
 
+# --------------------------------------------------------------------------- cross-language merge
+
+def test_a_cross_language_same_stem_merge_is_reported_not_hidden(monkeypatch):
+    """Defect (d): `element_key` strips the extension, so `api/index.ts` and `api/index.js`
+    collapse into one element. Kept merged (undoing it needs a second identity axis this design
+    does not have), but every path must be named, not just `paths[0]`, and the merge must be
+    counted where a reader can see it."""
+    _wire(monkeypatch, file_rows=_rows(["src/api/index.ts", "src/api/index.js"]))
+    payload = c4.build_c4_payload("/repo")
+    (elem,) = payload["elements"]
+    assert elem["id"] == "src.api.index"
+    assert elem["files"] == 2
+    assert "index.ts" in elem["path"] and "index.js" in elem["path"]
+    assert "TypeScript" in elem["tech"] and "JavaScript" in elem["tech"]
+    assert payload["stats"]["cross_language_merges"] == 1
+
+    dsl = c4.render_c4_dsl(payload)
+    assert "index.ts" in dsl and "index.js" in dsl
+    assert "cross_language_merges" not in dsl        # the stat name is internal; the prose isn't
+    assert "different source languages" in dsl
+
+
+def test_a_single_language_module_is_never_reported_as_a_merge(monkeypatch):
+    _wire(monkeypatch, file_rows=_rows(["src/a.py"]))
+    payload = c4.build_c4_payload("/repo")
+    assert payload["stats"]["cross_language_merges"] == 0
+    dsl = c4.render_c4_dsl(payload)
+    assert "different source languages" not in dsl
+
+
+# --------------------------------------------------------------------------- hotspot ranking
+
+def test_hotspot_ranking_uses_imports_only_fan_in_never_the_contaminated_union(monkeypatch):
+    """Defect (g), reconsidered against a live measurement: CALLS|USAGE matches by bare symbol
+    name, so on this generator's own repo 54 of 60 incoming edges into `cache.py` were fabricated
+    — every `dict.get(...)` call in the codebase attributed to `ContentHashCache.get`. Ranking a
+    "hotspot" visual claim against that union would rank the fabrication. `busycalls` here has a
+    HIGHER union fan-in than `target` (6 vs up to 5) and would have tripped even the old fixed
+    `>= 5` cutoff — but every one of its incoming edges is CALLS|USAGE-only, so it must NOT be
+    flagged; `target`'s 3 real IMPORTS-confirmed edges must be enough to flag it instead."""
+    files = ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "g.py", "h.py", "i.py", "j.py",
+            "k.py", "target.py", "busycalls.py"]
+    imports = [{"a.file_path": src, "b.file_path": "target.py", "count(*)": 1}
+              for src in ("a.py", "b.py", "c.py")]
+    calls = ([{"a.file_path": src, "b.file_path": "target.py", "count(*)": 1}
+             for src in ("d.py", "e.py")]
+            + [{"a.file_path": src, "b.file_path": "busycalls.py", "count(*)": 1}
+              for src in ("f.py", "g.py", "h.py", "i.py", "j.py", "k.py")])
+    _wire(monkeypatch, file_rows=_rows(files), import_rows=imports, calls_rows=calls)
+    payload = c4.build_c4_payload("/repo")
+
+    target = next(e for e in payload["elements"] if e["id"] == "target")
+    busycalls = next(e for e in payload["elements"] if e["id"] == "busycalls")
+    assert target["fan_in"] == 5           # union: 3 imports + 2 calls_usage
+    assert target["import_fan_in"] == 3
+    assert busycalls["fan_in"] == 6        # higher union fan-in than target
+    assert busycalls["import_fan_in"] == 0
+
+    assert target["hotspot"] is True
+    assert busycalls["hotspot"] is False
+    assert payload["stats"]["hotspot_threshold"] == 3
+    assert payload["stats"]["hotspot_count"] == 1
+
+    dsl = c4.render_c4_dsl(payload)
+    target_block = re.search(r"  target = module '[^']*' \{\n(.*?)\n  \}\n", dsl, re.S).group(1)
+    busycalls_block = re.search(r"  busycalls = module '[^']*' \{\n(.*?)\n  \}\n", dsl, re.S).group(1)
+    assert "#hotspot" in target_block
+    assert "#hotspot" not in busycalls_block
+    assert "IMPORTS-only fan-in" in dsl
+
+
+def test_no_hotspot_is_flagged_when_there_is_no_imports_based_fan_in_at_all(monkeypatch):
+    """A repo whose every relation came only from CALLS|USAGE has no trustworthy ranking signal —
+    the honest behaviour is to flag nothing, not to fall back to the contaminated union."""
+    _wire(monkeypatch, file_rows=_rows(["a.py", "b.py", "c.py", "target.py"]),
+         calls_rows=[{"a.file_path": src, "b.file_path": "target.py", "count(*)": 1}
+                    for src in ("a.py", "b.py", "c.py")])
+    payload = c4.build_c4_payload("/repo")
+    assert payload["stats"]["hotspot_threshold"] is None
+    assert payload["stats"]["hotspot_count"] == 0
+    assert all(not e["hotspot"] for e in payload["elements"])
+
+
+def test_hotspot_styling_is_a_single_consistent_red(monkeypatch):
+    """The old override used the named theme colour `red`, a different hex than the tag's literal
+    `#c0392b` — two visually different reds on one signal. The instance override must reference
+    the SAME declared colour the tag uses."""
+    files = ["a.py", "b.py", "c.py", "target.py"]
+    imports = [{"a.file_path": src, "b.file_path": "target.py", "count(*)": 1}
+              for src in ("a.py", "b.py", "c.py")]
+    _wire(monkeypatch, file_rows=_rows(files), import_rows=imports)
+    payload = c4.build_c4_payload("/repo")
+    dsl = c4.render_c4_dsl(payload)
+    assert "#hotspot" in dsl
+    assert "style { color ci_bad }" in dsl
+    assert "color red" not in dsl
+    assert "color ci_bad" in c4.SPECIFICATION_BLOCK
+
+
+# --------------------------------------------------------------------------- reserved words (end-to-end)
+
+def test_a_reserved_word_filename_produces_a_valid_identifier(monkeypatch):
+    """Defect (c): `src/model.py` used to render `model = module 'model' { … }` *inside* the
+    model-scope keyword `model { }` — a LikeC4 1.59.2 parse error. The identifier must be escaped
+    while the displayed title stays the real, unescaped name."""
+    _wire(monkeypatch, file_rows=_rows(["src/model.py", "src/style.py"]))
+    payload = c4.build_c4_payload("/repo", depth=2)
+    ids = sorted(e["id"] for e in payload["elements"])
+    assert ids == ["src.model_", "src.style_"]
+    titles = sorted(e["title"] for e in payload["elements"])
+    assert titles == ["model", "style"]        # the display title is never escaped
+
+    dsl = c4.render_c4_dsl(payload)
+    assert "model_ = module 'model'" in dsl
+    assert "style_ = module 'style'" in dsl
+
+
 # --------------------------------------------------------------------------- render_c4_dsl
 
 def _bare_payload(**overrides):
@@ -354,3 +472,137 @@ def test_the_view_states_that_codeintel_generated_it_and_how_far_to_trust_it():
 
 def test_render_returns_empty_string_on_a_malformed_payload():
     assert c4.render_c4_dsl({"elements": None}) == ""
+
+
+# --------------------------------------------------------------------------- views: coarse landscape + drill-downs
+
+def _branching_elements():
+    """`scripts` branches immediately (2 children — a landscape root as-is). `src` is a bare
+    single-child pass-through into `core`, which itself branches into 3 leaf modules, a 3-file
+    `widgets` area and a 1-file `tiny` area — `src.core` should be the collapsed landscape root,
+    `widgets` should get its own drill-down, and `tiny` (1 child) should not."""
+    def _e(eid):
+        return {"id": eid, "path": eid.replace(".", "/") + ".py", "title": eid.rsplit(".", 1)[-1],
+               "kind": "module", "tech": "Python", "files": 1, "churn": 0, "fan_in": 0,
+               "fan_out": 0, "internal_imports": 0}
+
+    return [
+        _e("scripts.one"), _e("scripts.two"),
+        _e("src.core.m1"), _e("src.core.m2"), _e("src.core.m3"),
+        _e("src.core.widgets.w1"), _e("src.core.widgets.w2"), _e("src.core.widgets.w3"),
+        _e("src.core.tiny.t1"),
+    ]
+
+
+def test_the_landscape_view_is_coarse_not_include_star_with_extra_steps():
+    """THE MAIN FIX. `include root, root.**` was `include *` with extra steps: every element, every
+    relation, one `autoLayout`. The landscape must show each root and its DIRECT children only."""
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_branching_elements()))
+    assert "include scripts, scripts.*" in dsl
+    assert "include src.core, src.core.*" in dsl
+    assert ".**" not in dsl                     # no full-depth include anywhere in the file
+    assert "include src, src.*" not in dsl      # the bare `src` -> `core` pass-through is collapsed
+
+
+def test_an_area_with_enough_hidden_children_gets_its_own_drilldown_view():
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_branching_elements()))
+    assert "view of src.core.widgets {" in dsl
+    view = dsl[dsl.index("view of src.core.widgets {"):]
+    assert "include *" in view
+    assert "autoLayout TopBottom" in view
+
+
+def test_a_landscape_root_does_not_also_get_a_redundant_drilldown_view():
+    """`src.core`'s direct children are already fully shown by the landscape's `include src.core,
+    src.core.*` — a dedicated `view of src.core` would duplicate it."""
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_branching_elements()))
+    assert "view of src.core {" not in dsl
+    assert "view of scripts {" not in dsl
+
+
+def test_a_one_child_area_is_too_small_to_deserve_its_own_view():
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_branching_elements()))
+    assert "view of src.core.tiny {" not in dsl
+
+
+def test_every_view_has_a_title_and_a_description():
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_branching_elements()))
+    view_blocks = re.findall(r"  view (?:index|of \S+) \{\n(.*?)\n  \}\n", dsl, re.S)
+    assert len(view_blocks) >= 2
+    for block in view_blocks:
+        assert "title '" in block
+        assert "description '" in block
+
+
+def test_a_view_over_the_cap_skips_every_view_not_just_the_landscape():
+    payload = _bare_payload(elements=_branching_elements(),
+                            fit={"depth": 1, "how": "requested", "table": {1: 140},
+                                 "over_cap": True, "cap": 100})
+    dsl = c4.render_c4_dsl(payload)
+    assert "SKIPPED" in dsl
+    assert "view index {" not in dsl
+    assert "view of" not in dsl
+
+
+# --------------------------------------------------------------------------- landscape elision for a FLAT root
+
+def _flat_root_elements():
+    """`big` IS the landscape root (no single-child chain above it) and has 15 direct children —
+    13 flat leaf modules plus 2 branching sub-areas — well past `LANDSCAPE_CHILD_BUDGET`. This is
+    this generator's own repo's shape: `src.codeintel` collapsed to 41 direct children (38 flat
+    modules + 3 areas), which the OLD landscape logic dumped straight into `include big, big.*`
+    with nothing to hide behind — coarser than the original hairball, but still one."""
+    def _e(eid):
+        return {"id": eid, "path": eid.replace(".", "/") + ".py", "title": eid.rsplit(".", 1)[-1],
+               "kind": "module", "tech": "Python", "files": 1, "churn": 0, "fan_in": 0,
+               "fan_out": 0, "internal_imports": 0}
+
+    elements = [_e(f"big.m{i}") for i in range(13)]
+    elements += [_e("big.sub1.x1"), _e("big.sub1.x2"), _e("big.sub2.y1"), _e("big.sub2.y2")]
+    return elements
+
+
+def test_a_flat_landscape_root_elides_its_leaf_modules_from_the_landscape():
+    """THE FOLLOW-UP FIX. Depth-collapsing alone does not help a root with no subdirectories to
+    collapse THROUGH — a landscape root that is itself flat and broad must still be cut down."""
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_flat_root_elements()))
+    view = re.search(r"  view index \{\n(.*?)\n  \}\n", dsl, re.S).group(1)
+    assert "include big\n" in view
+    for i in range(13):
+        assert f"include big.m{i}\n" not in view
+    assert "include big.sub1\n" in view
+    assert "include big.sub2\n" in view
+    assert "include big, big.*" not in dsl
+
+
+def test_an_elided_landscape_root_gets_its_own_drilldown_view():
+    """Being the landscape root does not disqualify an area from having a view — for an elided
+    root it is the reason one is required: `view of big { include * }` is the only place its 13
+    flat modules are shown at all."""
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_flat_root_elements()))
+    assert "view of big {" in dsl
+    view = dsl[dsl.index("view of big {"):]
+    assert "include *" in view
+
+
+def test_a_landscape_root_under_the_child_budget_is_not_elided():
+    """`scripts` (2 children) and `src.core` (5 children) in `_branching_elements` both stay well
+    under `LANDSCAPE_CHILD_BUDGET` — the elision path must not fire for an ordinary small repo."""
+    dsl = c4.render_c4_dsl(_bare_payload(elements=_branching_elements()))
+    assert "include scripts, scripts.*" in dsl
+    assert "include src.core, src.core.*" in dsl
+    assert "view of scripts {" not in dsl
+    assert "view of src.core {" not in dsl
+
+
+# --------------------------------------------------------------------------- bare area titles (defect (i))
+
+def test_a_bare_synthetic_area_keeps_the_real_unsanitised_directory_name(monkeypatch):
+    """`my-app` never materialises as its own group (both its children are two directories deeper
+    than the chosen depth), so it only exists as a bare containment `area` `_emit_tree` synthesises
+    — that area's title must still read `my-app`, not the sanitised tree-node key `my_app`."""
+    _wire(monkeypatch, file_rows=_rows(["my-app/sub1/leaf.py", "my-app/sub2/leaf.py"]))
+    payload = c4.build_c4_payload("/repo", depth=2)
+    dsl = c4.render_c4_dsl(payload)
+    assert "my_app = area 'my-app' {" in dsl
+    assert "area 'my_app'" not in dsl

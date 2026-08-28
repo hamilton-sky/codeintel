@@ -122,6 +122,42 @@ Start a **new** agent session — hosts read MCP config at startup. Then confirm
 
 For Claude Code specifically, `claude mcp list` should now show `codeintel`.
 
+## Offline / air-gapped install
+
+The one non-local step in `codeintel setup` is `fastembed` downloading the
+`BAAI/bge-small-en-v1.5` embedding weights (~50 MB) the first time the semantic engine runs.
+Behind a corporate proxy with no route to the model host, that download fails and `codeintel
+setup --all` cannot finish — the [2026-08-23 status doc](eval-2026-08-23-status-and-market.md)
+measured this directly: `ProxyError 403`, empty index, `assert 0 > 0`.
+
+A real workaround exists, based on how `fastembed` resolves its cache directory
+(`fastembed.common.utils.define_cache_dir`): it defaults to `$TMPDIR/fastembed_cache`, but honors
+the `FASTEMBED_CACHE_PATH` environment variable when set. codeintel does not pass its own
+`cache_dir`, so setting that variable is enough to redirect (or pre-seed) the model cache without
+any code change.
+
+**On a machine with network access:**
+
+```bash
+export FASTEMBED_CACHE_PATH=/path/to/a/portable/model-cache
+python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
+# copy /path/to/a/portable/model-cache to the air-gapped machine
+```
+
+**On the air-gapped machine**, point the same variable at the copied directory before running any
+codeintel command that touches the semantic engine:
+
+```bash
+export FASTEMBED_CACHE_PATH=/path/to/a/portable/model-cache   # e.g. in your shell profile
+codeintel setup --all /path/to/your/project
+```
+
+This is a real path derived from `fastembed`'s own cache resolution, not something this project
+ships or tests end-to-end in CI (CI has network access, so the air-gapped case is unexercised
+here). If it does not work for your `fastembed` version, `codeintel doctor` still degrades
+cleanly — the graph and LSP engines are unaffected, and `codeintel` runs with `semantic` reporting
+`installed: false` rather than crashing.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

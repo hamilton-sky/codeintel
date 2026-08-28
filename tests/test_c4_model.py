@@ -51,8 +51,8 @@ def test_generated_declaration_files_are_not_architecture():
 
 
 def test_fit_depth_picks_the_deepest_depth_under_the_cap():
-    # 6 files at d1, growing to 11/15/22/125 as depth increases — engineered so table[d] matches
-    # the design's worked example exactly.
+    # 6 files at d1, growing to 11/15/22/125 raw GROUPS as depth increases — engineered so the
+    # design's worked example's group counts still match exactly.
     paths = []
     # depth 1: 6 top areas
     paths.extend(f"area{i}/leaf.py" for i in range(6))
@@ -64,11 +64,15 @@ def test_fit_depth_picks_the_deepest_depth_under_the_cap():
 
     fit = c4.fit_depth(paths, cap=100)
     table = fit["table"]
+    # `table` counts what actually RENDERS (defect (h)): the raw groups above (6, 11, 15, 22, 125)
+    # plus every bare synthetic containment `area` `_emit_tree` has to synthesise for a shared dot
+    # prefix that is not itself a group — e.g. at d2, `area0.leaf` and `area0.sub0` share `area0`,
+    # which is not a group in its own right but still costs one rendered node.
     assert table[1] == 6
-    assert table[2] == 6 + 5
-    assert table[3] == table[2] + 4
-    assert table[4] == table[3] + 7
-    assert table[5] > 100
+    assert table[2] == 17
+    assert table[3] == 26
+    assert table[4] == 37
+    assert table[5] == 147
     assert fit["depth"] == 4
     assert fit["how"] == "auto-fit"
     assert fit["over_cap"] is False
@@ -125,3 +129,52 @@ def test_sanitisation_collisions_are_suffixed_not_merged():
     ids = sorted(grouped["groups"])
     assert ids == ["foo_bar", "foo_bar__2"]
     assert grouped["id_collisions"] == 1
+
+
+def test_a_collision_deeper_in_the_tree_only_suffixes_the_colliding_segment():
+    """Defect (e): the old rule suffixed the whole dotted id (`my_app.core` /
+    `my_app.core__2`), which falsely claimed both files live under one shared `my_app` area and
+    left nothing representing `my-app` in the tree at all. Only the segment that actually
+    collided (`my-app` vs `my_app`) should be disambiguated — `core`, which never collided, must
+    read identically under both."""
+    paths = ["my-app/core/a.ts", "my_app/core/b.ts"]
+    grouped = c4.group_elements(paths, 2)
+    ids = sorted(grouped["groups"])
+    assert ids == ["my_app.core", "my_app__2.core"]
+    assert grouped["id_collisions"] == 1
+    # the uncontested segment is untouched in both branches
+    assert all(eid.endswith(".core") for eid in ids)
+    # the real (unsanitised) directory names survive for display, keyed by the ambiguous
+    # segment's OWN resolved id path, not by the final leaf id
+    assert grouped["segment_titles"]["my_app"] == "my-app"
+    assert grouped["segment_titles"]["my_app__2"] == "my_app"
+
+
+def test_reserved_words_are_escaped_but_the_display_title_is_untouched():
+    """LikeC4 1.59.2 reserves `model`/`style`/`this` (and others) at identifier position — a file
+    literally named `model.ts` broke the parser before this escape existed (defect (c))."""
+    assert c4._ident("model") == "model_"
+    assert c4._ident("style") == "style_"
+    assert c4._ident("this") == "this_"
+    # a non-reserved word is untouched
+    assert c4._ident("cache") == "cache"
+    # case-insensitive: `Model` still collides with the keyword once lower-cased by a parser
+    assert c4._ident("Model") == "Model_"
+
+    grouped = c4.group_elements(["src/model.py", "src/style.py"], 2)
+    assert sorted(grouped["groups"]) == ["src.model_", "src.style_"]
+
+
+def test_hotspot_threshold_is_relative_to_the_populations_own_spread():
+    # a fixed `>= 5` cutoff would tag half of a population that tops out at 4
+    assert c4._hotspot_threshold([1, 2, 3, 4]) is None or c4._hotspot_threshold([1, 2, 3, 4]) >= 3
+    assert c4._hotspot_threshold([]) is None
+    # floored so a population that never exceeds 1-2 does not get flagged just because it is the
+    # top of its own (trivial) distribution
+    assert c4._hotspot_threshold([1, 1, 1, 2]) >= c4.MIN_HOTSPOT_FAN_IN
+    # the busiest of a spread-out population clears the floor and is at/above the percentile cut
+    values = list(range(1, 21))            # 1..20
+    threshold = c4._hotspot_threshold(values)
+    assert threshold is not None
+    flagged = [v for v in values if v >= threshold]
+    assert 0 < len(flagged) < len(values)  # a real minority, not everything and not nothing

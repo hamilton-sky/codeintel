@@ -44,7 +44,22 @@ Any other `op` returns a safe null (`ok` stays `true`) with `reason: 'op-not-sup
 
 ## Indexing
 
-Indexing is triggered automatically on every `search` call before querying.
+Indexing is triggered automatically on the first `search` call against a cold project (no index
+yet). What happens next depends on the transport:
+
+- **One-shot CLI** (`codeintel query`) — indexes **inline, synchronously**, with a live progress
+  display, and answers the same call from the now-warm index. It has no other mechanism to ever
+  build a cold index, and a human or agent waiting on one CLI invocation can afford to wait for it.
+- **Long-lived MCP stdio / HTTP server** — a full cold pass is minutes long on a real repo (plus a
+  one-time embedding-model download), which would block a request thread past any client tool
+  timeout. Instead the server starts the pass **in the background** and returns immediately with
+  `reason: 'indexing-in-progress'` (see below); a retry a short while later is served from the
+  index once the pass lands. Concurrent queries against the same cold project root only ever start
+  one background pass, not one per query.
+
+Once an index exists, a warm repo is kept current by the debounced background
+[`Reindexer`](architecture.md#freshness--reindex-seam) instead (`CODEINTEL_REINDEX=off` reverts to
+indexing inline on every query, which then applies to both transports the same way).
 
 ### What gets indexed
 
@@ -246,7 +261,8 @@ returning nothing.
 | `'op-not-supported'` | `op` is not `'search'` |
 | `'engine-unavailable'` | `fastembed` or `sqlite-vec` not importable |
 | `'no-project-root'` | `project_root` is empty or falsy |
-| `'no-index'` | The index is empty for this project (zero rows in `chunk_hashes`) |
+| `'no-index'` | The index is empty for this project (zero rows in `chunk_hashes`) after an inline index pass found nothing to embed. The CLI always takes this path on a cold repo; the server does too when `CODEINTEL_REINDEX=off` (see **Indexing** above) — otherwise the server reports `'indexing-in-progress'` instead, below |
+| `'indexing-in-progress'` | **Server transports only** (MCP stdio / HTTP): no index existed for this project, and a cold-index pass just started in the background rather than blocking this request. Not "nothing found" — retry shortly, or run `codeintel index <path>` to build it synchronously now. Never returned by the CLI, which indexes inline instead (see **Indexing** above) |
 | `'below-floor'` | A non-empty index yielded no match above the cosine floor |
 | `'index-stale'` | Matches were found, but every one failed staleness verification — the files changed since indexing. Distinct from `'below-floor'`: the code may well exist, the index just no longer locates it. Re-index to restore. |
 | `'provider-error'` | Unexpected exception during indexing or searching |

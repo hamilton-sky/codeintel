@@ -209,7 +209,12 @@ volumes:
   codeintel-index:
 ```
 
-The image bundles the **semantic** engine only. Index the mounted repo once (`docker exec codeintel codeintel index /repo`), or let the first query index it inline.
+The image bundles the **semantic** engine only. `codeintel serve-http` is a long-lived server, so a
+cold repo's first query does **not** index inline — it returns `reason: 'indexing-in-progress'`
+immediately and finishes the pass in the background (see [semantic.md](semantic.md#safe-null-reasons)).
+Either index the mounted repo once up front (`docker exec codeintel codeintel index /repo`) so the
+first real query already has a warm index, or let that first query trigger the background pass and
+retry shortly after.
 
 ---
 
