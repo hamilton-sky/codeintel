@@ -4,6 +4,7 @@ import os
 import pathlib
 import threading
 import time
+from typing import Any
 
 from codeintel.loc import loc
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
@@ -249,7 +250,7 @@ class SemanticProvider:
             background_reindex_off = (
                 os.environ.get("CODEINTEL_REINDEX", "on").strip().lower() == "off"
             )
-            indexer_kwargs = {
+            indexer_kwargs: dict[str, Any] = {
                 "model_name": model,
                 "window": int(cfg.get("window", 20)),
                 "stride": int(cfg.get("stride", 10)),

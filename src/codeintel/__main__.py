@@ -3,17 +3,16 @@ import difflib
 import shutil
 import sys
 from importlib import import_module
+from typing import NoReturn
 
 from codeintel import __version__
 from codeintel.query_ops import QUERY_OPS
 
 # `--engine`'s canonical values live in `codeintel.gateway._KNOWN_ENGINES` (a set — order is not
-# meaningful there). This fixes a presentation order for help text and `choices=`; a test pins it
-# to the same membership as the gateway's set so the two cannot drift apart.
-from codeintel.gateway import _KNOWN_ENGINES
-
+# meaningful there). This fixes a presentation order for help text and `choices=`. Membership is
+# pinned to the gateway's set by test_cli_help.py, which is where the guard belongs: importing
+# gateway here just to assert at module scope would pull it into every CLI startup.
 QUERY_ENGINES: tuple[str, ...] = ("auto", "graph", "lsp", "semantic", "both", "all")
-assert set(QUERY_ENGINES) == _KNOWN_ENGINES, "QUERY_ENGINES drifted from gateway._KNOWN_ENGINES"
 
 # Commands grouped by what you are trying to DO. argparse lists them in declaration order with no
 # grouping, which turns "what can this thing do?" into reading twelve lines to find the one verb you
@@ -200,10 +199,10 @@ def render_help() -> str:
 
     out.append("")
     out.append("  " + c.bold("Learn more"))
-    out.append("  " + c.dim("codeintel <command> --help") + "   full options for one command")
-    out.append("  " + c.dim("codeintel query --help") + "       all " + str(len(QUERY_OPS))
+    out.append("    " + c.dim("codeintel <command> --help") + "   full options for one command")
+    out.append("    " + c.dim("codeintel query --help") + "       all " + str(len(QUERY_OPS))
                + " query operations")
-    out.append("  " + c.dim("docs: https://github.com/hamilton-sky/codeintel"))
+    out.append("    " + c.dim("docs: https://github.com/hamilton-sky/codeintel"))
     return "\n".join(out)
 
 
@@ -355,7 +354,7 @@ class _RootArgumentParser(argparse.ArgumentParser):
     `add_subparsers(parser_class=...)` below), so `codeintel query --op bogus` still gets that
     subcommand's own short, specific usage line — only the wide top-level wall is replaced."""
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         from codeintel.term import c_err as e
 
         print(e.red(f"codeintel: error: {message}"), file=sys.stderr)
