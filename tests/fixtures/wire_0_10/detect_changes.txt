@@ -1,0 +1,10 @@
+base: main
+merge_base: 71502b896af0eb3057ff11ef55dfa1f7c45074b2
+direction: inbound
+changed_files: 1
+  .serena/
+seed_symbols: 0
+impacted_total: 0
+impacted_shown: 0
+impacted: 0  (rows: name label hop; qn = group prefix + "." + name; nearest hops first)
+

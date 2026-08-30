@@ -1,0 +1,9 @@
+total: 259
+results: 3  (rows: name label lines in out; qn = group prefix + "." + name)
+Users-shammaihamilton-Documents-project-daycap.src.bin.guard (src/bin/guard.js):
+  CONFIG Function 60-60 1 1
+  STATE Function 59-59 1 1
+Users-shammaihamilton-Documents-project-daycap.test.unit.statusline-render.test (test/unit/statusline-render.test.ts):
+  R Function 33-34 1 5
+has_more: true
+

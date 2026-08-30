@@ -1,0 +1,77 @@
+project: Users-shammaihamilton-Documents-project-daycap
+aspects_hint: "Summary view (default). More on request via aspects:[...] — structure, dependencies, routes, hotspots, boundaries, layers, clusters, file_tree — or [\"all\"] for everything."
+total_nodes: 1577
+total_edges: 3440
+node_labels: 14  (cols: label count)
+  Variable 525
+  Section 363
+  Function 259
+  File 133
+  Module 133
+  Type 52
+  Method 39
+  Folder 34
+  Class 15
+  EnvVar 11
+  Route 6
+  Interface 5
+  Branch 1
+  Project 1
+edge_types: 18  (cols: type count)
+  DEFINES 1391
+  USAGE 1023
+  CALLS 432
+  IMPORTS 303
+  CONTAINS_FILE 133
+  DEFINES_METHOD 39
+  CONTAINS_FOLDER 27
+  WRITES 24
+  RAISES 16
+  CONFIGURES 15
+  FILE_CHANGES_WITH 11
+  HTTP_CALLS 7
+  IMPLEMENTS 6
+  INHERITS 3
+  OVERRIDE 3
+  SEMANTICALLY_RELATED 3
+  SIMILAR_TO 3
+  HAS_BRANCH 1
+languages: 3  (cols: language files)
+  TypeScript 70
+  YAML 4
+  JavaScript 2
+packages: 12  (cols: name nodes fan_in fan_out)
+  adapters 89 0 0
+  unit 66 0 0
+  domain 63 0 0
+  bin 43 0 0
+  contract 41 0 0
+  app 30 0 0
+  e2e 15 0 0
+  gates 12 0 0
+  setup 6 0 0
+  stubs 2 0 0
+  integration 2 0 0
+  support 1 0 0
+entry_points: 20  (cols: qn file)
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.notify.notifier.scrub src/adapters/notify/notifier.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.render.config-view.renderConfig src/adapters/render/config-view.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.render.doctor.tildify src/adapters/render/doctor.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.render.doctor.renderDoctor src/adapters/render/doctor.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.render.table.isUnusable src/adapters/render/table.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.render.table.renderToday src/adapters/render/table.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.source.ccusage.shellout.resolutionLadder src/adapters/source/ccusage.shellout.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.source.ccusage.shellout.toolForModel src/adapters/source/ccusage.shellout.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.source.ccusage.shellout.parseDaily src/adapters/source/ccusage.shellout.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.source.resolve.resolveSource src/adapters/source/resolve.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.source.timeout.withTimeout src/adapters/source/timeout.ts
+  Users-shammaihamilton-Documents-project-daycap.src.adapters.store.atomic.defaultStateDir src/adapters/store/atomic.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.alert.isTrusted src/app/alert.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.alert.signalFor src/app/alert.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.alert.runAlerts src/app/alert.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.install.statusLineBlock src/app/install.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.install.hookEntry src/app/install.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.install.planInstall src/app/install.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.install.planCodexInstall src/app/install.ts
+  Users-shammaihamilton-Documents-project-daycap.src.app.install.renderCodexPlan src/app/install.ts
+

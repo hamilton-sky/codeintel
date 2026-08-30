@@ -6,6 +6,31 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **codebase-memory-mcp 0.10.x is now a supported backend.** 0.9.x answered every CLI call in JSON;
+  0.10.x replaced that with a compact human-readable layout for all but `list_projects`, so a
+  release written against `{"columns": [...], "rows": [...]}` returned `backend-incompatible` for
+  every graph op except `pattern` — on a fully indexed repository. `--json` does not undo it: that
+  flag wraps the *same* text in an MCP envelope, so the structured rows are genuinely gone. A new
+  `codeintel.wire_text` module translates the text back into the 0.9.x-shaped dicts at the single
+  transport seam (`BackendClient._decode`), so all nine ops and every renderer above it are
+  unchanged and both dialects are read by one code path.
+
+  Worth upgrading the backend for: measured over the same three repositories, the share of `CALLS`
+  edges below the 0.85 confidence floor falls from **24% / 33% / 43%** to **9% / 18% / 30%**, and
+  Python enclosing-function attribution — the defect this project could previously only *disclose* —
+  goes from ~32% of production caller rows collapsing to `module scope of <file>` to **2.7%**.
+  `hotspots` now passes `fields` so it still receives the complexity metrics it ranks on; those are
+  core columns in 0.9.x and opt-in in 0.10.x, and without them the list is sorted by a column that
+  is uniformly zero.
+
+  The text layout is **not a contract** — it is human-readable output that can change in a patch
+  release — so every parser refuses rather than guesses: an unrecognised shape returns `None` and
+  the existing `backend-incompatible` safe-null still fires, which is the only thing that made the
+  0.9→0.10 break diagnosable instead of indistinguishable from an unindexed repository. A test pins
+  that a third, unknown dialect is still refused.
+
+
 ## [0.20.0] — 2026-08-30
 
 ### Fixed

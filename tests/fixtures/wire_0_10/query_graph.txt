@@ -1,0 +1,5 @@
+rows: 2  (cols: a.name a.qualified_name a.file_path labels(a) type(c) c.confidence)
+  runAlerts Users-shammaihamilton-Documents-project-daycap.src.app.alert.runAlerts src/app/alert.ts "[\"Function\"]" CALLS "0.95"
+  test/unit/budget.test.ts Users-shammaihamilton-Documents-project-daycap.test.unit.budget.test test/unit/budget.test.ts "[\"Module\"]" CALLS "0.95"
+total: 2
+

@@ -1,0 +1,22 @@
+results: 10  (cols: qn label file lines matches in out)
+  Users-shammaihamilton-Documents-project-daycap.src.app.latch.evaluateLatch Function src/app/latch.ts 75-111 "75" 4 2
+  Users-shammaihamilton-Documents-project-daycap.src.app.alert.runAlerts Function src/app/alert.ts 55-126 59;85 3 7
+  Users-shammaihamilton-Documents-project-daycap.src.domain.budget.fractionOf Function src/domain/budget.ts 35-45 "41" 2 0
+  Users-shammaihamilton-Documents-project-daycap.src.domain.budget.evaluate Function src/domain/budget.ts 76-90 "76" 2 1
+  Users-shammaihamilton-Documents-project-daycap.test.unit.latch.test.replay Function test/unit/latch.test.ts 23-44 "30" 1 1
+  Users-shammaihamilton-Documents-project-daycap.test.unit.latch.test.step Function test/unit/latch.test.ts 10-20 "11" 1 1
+  Users-shammaihamilton-Documents-project-daycap.pathly.features.local-usage-meter.IMPLEMENTATION_PLAN Module pathly/features/local-usage-meter/IMPLEMENTATION_PLAN.md 1-547 275;295 0 0
+  Users-shammaihamilton-Documents-project-daycap.pathly.features.local-usage-meter.RESEARCH Module pathly/features/local-usage-meter/RESEARCH.md 1-341 "4" 0 0
+  Users-shammaihamilton-Documents-project-daycap.pathly.features.local-usage-meter.USER_STORIES Module pathly/features/local-usage-meter/USER_STORIES.md 1-452 79;407 0 0
+  Users-shammaihamilton-Documents-project-daycap.pathly.features.local-usage-meter.archive.ARCHITECTURE_PROPOSAL-v1-own-parsers Module pathly/features/local-usage-meter/archive/ARCHITECTURE_PROPOSAL-v1-own-parsers.md 1-972 164;490;518 0 0
+dirs: 5  (cols: dir hits)
+  src/ 7
+  test/ 5
+  pathly/ 12
+  HANDOFF.md 1
+  README.md 1
+total_grep_matches: 62
+total_results: 26
+raw_match_count: 0
+elapsed_ms: 41
+
