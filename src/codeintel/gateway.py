@@ -165,6 +165,112 @@ class Gateway:
                     results[e] = safe_null_result(op_str, target_str, engine=e, reason="provider-error")
         return results
 
+    # Ops whose whole purpose is "what breaks if I change this", and which therefore must not hand
+    # back a list of fabricated callers unchallenged.
+    _CROSS_CHECKED_OPS: frozenset[str] = frozenset({"callers", "impact"})
+    _CROSS_CHECK_REF_CAP = 25
+
+    def _cross_check_name_resolved(
+        self, result: Result, op: str, target: str, budget: Any,
+        project_root: Any, was_auto: bool,
+    ) -> Result:
+        """Ask the LSP when the graph's whole answer was resolved by name rather than by import.
+
+        This closes the routing gap that let the worst failure through. `_AUTO_ENGINE` is a static
+        op→engine map, not a cascade: `callers` goes to the graph and, uniquely among the ops, has
+        no fallback of any kind. So when the graph answered `callers describe` with 32 rows that were
+        every vitest `describe()` call in the repository — bound to the project's own
+        `domain.budget.describe` because it was the only indexed symbol with that name — the LSP,
+        which had the correct answer sitting in its reference index, was never asked. One engine
+        being confidently wrong is a bug; no second engine ever being consulted is the design that
+        let it reach the caller.
+
+        Deliberately narrow. It fires only when the graph itself raised `all-rows-name-resolved` —
+        every row a name guess, across enough rows for the pattern to mean something — which is the
+        collision signature and not the ordinary case of one unverified row among several. It
+        APPENDS rather than replaces: the LSP answers a related but different question (references,
+        not call edges), so presenting its list as the graph's would substitute one over-claim for
+        another. And it never fires for an explicitly pinned `--engine graph`, where the caller has
+        said which engine they want."""
+        try:
+            if not was_auto or op not in self._CROSS_CHECKED_OPS:
+                return result
+            if result.get("result") is None or self.lsp is None:
+                return result
+            gaps = result.get("gaps") or []
+            if not any(g.get("kind") == "all-rows-name-resolved"
+                       for g in gaps if isinstance(g, dict)):
+                return result
+            probe = self._dispatch_single(
+                self.lsp, "symbol", target, budget, project_root, "lsp")
+            body = probe.get("result")
+            if not body:
+                # Silence from the LSP is not agreement. Say which check did not happen — and
+                # separate "not yet booted" from "had nothing", because only the first is fixed by
+                # asking again. A one-shot CLI process meets a cold serena on every invocation; the
+                # long-lived MCP server keeps the session warm and takes this branch once at most.
+                # Waiting here is deliberately NOT done: it would hold back a graph answer that is
+                # already complete, to append a section that is only advisory.
+                warming = probe.get("reason") == "warming"
+                why = ("the language server had not finished booting"
+                       if warming else "the LSP engine reported nothing for this symbol")
+                nxt = (" Ask again once it is warm and this section will be filled in."
+                       if warming else
+                       " Check it yourself with `--engine lsp --op symbol`.")
+                return {**result, "gaps": [*gaps, {
+                    "section": op, "kind": "cross-check-unavailable",
+                    "engine": "lsp",
+                    "reason": probe.get("reason") or "no-result",
+                    "detail": f"every graph row was name-resolved and the LSP could not confirm "
+                              f"them ({why}), so they remain unverified"
+                              + (" — retry" if warming else ""),
+                    **({"retry_after_s": 2} if warming else {}),
+                }], "result": str(result["result"]) + (
+                    f"\n\n> Cross-check unavailable: every row above was resolved by name, and "
+                    f"{why}, so nothing here has been confirmed against a second engine.{nxt}"
+                )}
+            refs = self._reference_lines(str(body))
+            listing = "\n".join(refs[: self._CROSS_CHECK_REF_CAP]) or "(no references reported)"
+            more = (f"\n… (+{len(refs) - self._CROSS_CHECK_REF_CAP} more)"
+                    if len(refs) > self._CROSS_CHECK_REF_CAP else "")
+            merged = (
+                f"{result['result']}\n\n## Cross-check — LSP references to `{target}` "
+                f"({len(refs)})\n"
+                f"_The rows above were all resolved by NAME by the graph engine. These come from the "
+                f"language server, which resolves through the file's imports. A caller listed above "
+                f"but absent here is very likely a name collision; a location here but missing above "
+                f"is a call the graph could not bind._\n" + listing + more
+            )
+            return {**result, "result": merged, "gaps": [*gaps, {
+                "section": op, "kind": "cross-checked-with-lsp",
+                "engine": "lsp",
+                "detail": f"every graph row was name-resolved, so the LSP was consulted "
+                          f"independently and reported {len(refs)} reference location(s); the two "
+                          f"lists answer related but different questions and are shown separately",
+            }]}
+        except Exception as exc:
+            log_swallowed("Gateway._cross_check_name_resolved", exc)
+            return result
+
+    @staticmethod
+    def _reference_lines(lsp_body: str) -> list[str]:
+        """The reference rows out of an LSP `symbol` answer, without its definition body.
+
+        The definition is already one line above in the graph's own answer; repeating a whole
+        function body inside a cross-check section would bury the thing the section is for."""
+        out: list[str] = []
+        in_refs = False
+        for line in lsp_body.splitlines():
+            if line.startswith("## References"):
+                in_refs = True
+                continue
+            if in_refs:
+                if line.startswith("## "):
+                    break
+                if line.startswith("- "):
+                    out.append(line)
+        return out
+
     def _merge(
         self,
         results: dict[str, Result],
@@ -431,6 +537,9 @@ class Gateway:
                 )
                 if lsp_result.get("result") is not None:
                     result = lsp_result
+
+            result = self._cross_check_name_resolved(
+                result, op_str, target_str, budget, project_root, was_auto)
 
             if not uncacheable:
                 self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)

@@ -466,8 +466,23 @@ def test_every_gap_callees_can_report_states_its_numbers_in_the_body_too():
     wide = [{"b.name": f"c{i}", "b.qualified_name": f"pkg.c{i}", "b.file_path": f"src/m{i}.py",
              "type(c)": "CALLS", "a.name": "wide", "a.qualified_name": "pkg.wide",
              "a.file_path": "src/wide.py"} for i in range(60)]
+    # Rows the backend resolved by NAME rather than by import — one in each tier, so a single
+    # scenario exercises both halves of the disclosure. Grouped under one caller so the answer is
+    # a plain list rather than an ambiguous one.
+    guessed = [
+        dict(_THREE_HANDLERS[0], **{"c.confidence": "0.75"}),
+        dict(_THREE_HANDLERS[1], **{"c.confidence": "0.38"}),
+    ]
+    # …and enough of them, all sub-floor, to trip the collision signature the gateway escalates on.
+    all_guessed = [
+        dict(_THREE_HANDLERS[0], **{"b.name": f"c{i}", "b.qualified_name": f"pkg.c{i}",
+                                    "b.file_path": f"src/m{i}.py", "c.confidence": "0.75"})
+        for i in range(6)
+    ]
     scenarios = {
         "several symbols share the name": ("handle", _THREE_HANDLERS),
+        "rows resolved by name, not by import": ("proj.api.routes.handle", guessed),
+        "every row resolved by name": ("proj.api.routes.handle", all_guessed),
         "a row dropped as a collision": ("handle", _THREE_HANDLERS + collision),
         "every row dropped": ("handle", collision),
         "the hint matched nothing": ("handle@nowhere.py", _THREE_HANDLERS),

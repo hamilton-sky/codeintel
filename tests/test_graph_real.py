@@ -327,7 +327,7 @@ def test_changed_renders_files_and_impacted_symbols(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES})
     r = p.build_result("changed", "", [], 0, ROOT)
     assert r["ok"] is True and r["result"] is not None
-    assert "Changes impact (1 files → 1 symbols)" in r["result"]
+    assert "Changes impact (1 files → 1 symbols defined in them" in r["result"]
     assert "src/codeintel/providers/graph.py" in r["result"]
     assert "GraphProvider._dispatch" in r["result"]
 
@@ -344,7 +344,7 @@ def test_changed_dedupes_files_and_drops_module_markers(monkeypatch):
     # dropped, Gateway dedup'd). The header count encodes both fixes.
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES_DUPES})
     r = p.build_result("changed", "", [], 0, ROOT)
-    assert "Changes impact (2 files → 1 symbols)" in r["result"]
+    assert "Changes impact (2 files → 1 symbols defined in them" in r["result"]
     assert "Gateway" in r["result"]
 
 
@@ -371,7 +371,7 @@ def test_changed_drops_root_level_file_markers(monkeypatch):
     ]}
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
     r = p.build_result("changed", "", [], 0, ROOT)
-    assert "Changes impact (1 files → 1 symbols)" in r["result"]   # marker dropped, real symbol kept
+    assert "Changes impact (1 files → 1 symbols defined in them" in r["result"]  # marker dropped, real symbol kept
     assert "main.run" in r["result"]
 
 
@@ -384,7 +384,7 @@ def test_changed_keeps_symbol_with_slash_in_qualified_name(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
     r = p.build_result("changed", "", [], 0, ROOT)
     assert "github.com/org/repo/pkg.Serve" in r["result"]          # kept despite "/" in qualified name
-    assert "Changes impact (1 files → 1 symbols)" in r["result"]
+    assert "Changes impact (1 files → 1 symbols defined in them" in r["result"]
 
 
 def test_changed_payload_ignores_target_and_raises_timeout_floor(monkeypatch):
@@ -543,6 +543,6 @@ def test_changed_counts_only_source_when_mixed(monkeypatch):
             ]}
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
     r = p.build_result("changed", "", [], 0, ROOT)
-    assert "Changes impact (1 files → 1 symbols)" in r["result"]
+    assert "Changes impact (1 files → 1 symbols defined in them" in r["result"]
     assert "src/app.py" in r["result"] and "src.app.serve" in r["result"]
     assert "CODE_INTEL.md" not in r["result"] and ".gitignore" not in r["result"]

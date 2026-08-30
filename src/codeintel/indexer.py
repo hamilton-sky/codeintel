@@ -60,6 +60,16 @@ _DEFAULT_IGNORES = frozenset({
     ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
     ".archive", ".archived", "_archive", "_archived", ".backup", ".backups", ".old",
     ".deprecated", ".trash",
+    # …and the same trees spelled without a prefix. Every entry above assumes a retired directory
+    # announces itself with a `.` or `_`, and the common one does not: on an evaluated repository
+    # `pathly/features/<feature>/archive/ARCHITECTURE_PROPOSAL-v1-own-parsers.md` — a SUPERSEDED
+    # design doc, kept deliberately — ranked in the top ten for two unrelated code queries, which is
+    # the exact defect the block above was written to stop, reached through the spelling it missed.
+    # The trade is stated rather than hidden: a directory genuinely named `archive/` that holds live
+    # code leaves the SEMANTIC corpus. It stays fully visible to the graph and LSP engines, which
+    # are the ones asked about structure, and searching prose written to be obsolete is a cost paid
+    # on every query while this is a cost paid only by an unusual layout.
+    "archive", "archived",
 })
 
 
