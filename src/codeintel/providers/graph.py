@@ -304,6 +304,42 @@ def _language_coverage_note(rows: list[dict]) -> str:
 # answers.
 _EDGE_ROW_LIMIT = 50
 
+# How much the backend trusts an edge's target resolution — and the line below which it is a GUESS.
+#
+# The graph backend resolves each call target through a prioritised cascade and stamps the edge with
+# a confidence: 0.95 when it followed the file's import map, 0.90 same-module, 0.85 import-suffix —
+# and then 0.75 for "the only symbol in the whole repository carrying this bare name", 0.55 for a
+# suffix match among several candidates, and 0.30-0.40 for raw string similarity. Only the first
+# three consult the imports of the file the call is written in. Everything below them is name
+# matching, and name matching is exactly how a call to a framework global (`describe` from vitest,
+# `dict.get`) or to a local callback (`onClose`, `setScope`) acquires an edge to whichever project
+# symbol happens to share its name.
+#
+# These are not rare. Measured over the CALLS edges of three real repositories: 24%, 33% and 43% of
+# every edge sat below this floor. codeintel selected these rows and then dropped the confidence
+# column on the floor, so a fabricated caller rendered identically to a real one and the envelope
+# still said `confidence: "complete"` — the one combination the safe-null contract exists to make
+# impossible.
+#
+# The rows are KEPT, not filtered: dropping a 0.75 row would trade a false positive for a false
+# negative, and "no callers" is the more dangerous of the two when the next action is a delete.
+# They are labelled in the body, counted in a note, and raised as a gap so the envelope goes
+# `partial`.
+_EDGE_CONFIDENCE_FLOOR = 0.85
+# Below the floor the cascade stops consulting imports, but it does not become uniformly wrong, and
+# a check that treats it as such is its own precision bug. Two tiers, because they fail differently:
+#
+#   0.55 < c < 0.85  — `unique_name`. The call resolved here because this is the ONLY symbol in the
+#                      index carrying that bare name. That is right whenever the call really does
+#                      target a project symbol (measured by hand: `runAlerts -> evaluate` and
+#                      `buildSnapshot -> usageDayFor` are both genuine, and both stamped 0.75), and
+#                      wrong whenever it targets a same-named symbol the index never saw. Suspicion,
+#                      not a verdict.
+#   c <= 0.55        — suffix match among several candidates, or raw string similarity. These are
+#                      the rows that put an archived UI component in one tree "calling" a hook in
+#                      another because both mention `setScope`.
+_EDGE_CONFIDENCE_WEAK = 0.55
+
 # How many same-named candidates to name when the answer has to ask "which one?". A list long enough
 # to be unreadable is not a choice offered, and the count always states the full total.
 _CANDIDATE_CAP = 12
@@ -420,6 +456,37 @@ class _EdgeGroup:
         if self.label:
             return f"`{self.label}`"
         return self.file or "(a symbol the index does not name)"
+
+
+def _edge_confidence(row: dict) -> float | None:
+    """How much the backend vouches for THIS edge's target resolution, or None if it never said.
+
+    An unstamped edge is not a confident one: older index generations wrote no confidence at all,
+    and on one evaluated repository 409 of 8,969 CALLS edges came back blank. Returning None rather
+    than a default keeps "the backend did not say" distinguishable from "the backend said 0.95",
+    which is the same distinction the envelope's `confidence` field exists to preserve one level up.
+    """
+    raw = row.get("c.confidence")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _confidence_badge(row: dict) -> str:
+    """The per-row mark for an edge the backend did not resolve through an import.
+
+    Two glyphs rather than one because the tiers mean different things and a reader scanning a list
+    should be able to tell "unverified" from "probably junk" without consulting the note: `?` is a
+    unique-name binding, `!` a suffix or string-similarity one."""
+    conf = row.get("_low_confidence")
+    if conf is None:
+        return ""
+    conf = float(conf)
+    glyph = "!" if conf <= _EDGE_CONFIDENCE_WEAK else "?"
+    return f" [{glyph}{conf:.2f}]"
 
 
 def _group_edges(rows: list[dict], name_key: str, qn_key: str, file_key: str) -> list[_EdgeGroup]:
@@ -764,6 +831,45 @@ class GraphProvider:
     # `self._backend._query_rows(...)` wholesale, then reuses the same parser — see
     # graph_backend.py's module docstring for why: tests stub the transport at `_run` alone and
     # expect `callers`/`callees` (which read through here) to honour that stub.
+    _EDGE_OPS_WITH_A_SYMBOL_TARGET = ("callers", "callees", "impact", "chain", "context")
+
+    def _node_locations(self, target: str, project: str, timeout_ms: int) -> list[str]:
+        """Where a symbol with this bare name is DEFINED, independent of whether it has edges.
+
+        The distinction this exists to draw is the one that decides whether deleting a symbol is
+        safe. `not-in-graph` used to be returned for two situations that are opposites:
+
+          * the symbol genuinely is not indexed — a stale index, a typo, a rename; and
+          * the symbol is indexed perfectly well and simply has no incoming CALLS edge.
+
+        The second is the normal state of every framework-dispatched handler (a Flask route, an
+        ASGI entrypoint) and of every method passed as a value rather than called — on one evaluated
+        repository `forward_released_item` is defined at proxy.py:392, is registered through
+        `set_forward_fn(app.forward_released_item)`, and `pattern` finds it immediately, yet
+        `callers` reported it "not in the graph index" and advised a re-index that cannot change the
+        answer. An agent that reads that and concludes the method is unused deletes a live one.
+
+        The sibling checks above this one already refuse to let a backend outage masquerade as a
+        fact about the repository. This closes the remaining path to the same misreading, which is
+        the one that arrives through a perfectly healthy backend."""
+        wanted = _parse_symbol_target(target)
+        if not wanted.name:
+            return []
+        cypher = (
+            f'MATCH (n) WHERE n.name="{_cypher_literal(wanted.name)}" '
+            "RETURN n.qualified_name, n.file_path LIMIT 10"
+        )
+        out: list[str] = []
+        for r in self._query_rows(cypher, project, timeout_ms):
+            qn = _strip_project_prefix(str(r.get("n.qualified_name") or ""), may_be_filename=False)
+            fp = str(r.get("n.file_path") or "")
+            if wanted.narrowed and not wanted.matches(str(r.get("n.qualified_name") or ""), fp):
+                continue
+            label = f"{qn} ({fp})" if qn and fp and qn != fp else (qn or fp)
+            if label and label not in out:
+                out.append(label)
+        return out
+
     def _query_rows(self, cypher: str, project: str, timeout_ms: int) -> list[dict]:
         raw = self._run("query_graph", {"project": project, "query": cypher}, timeout_ms)
         return _parse_query_rows(raw)
@@ -780,7 +886,12 @@ class GraphProvider:
         scope = row.get("_module_scope")
         if scope is not None:
             where = str(scope) or str(row.get(file_key) or "")
-            return f"- module scope of {where}" if where else "- module scope"
+            # The name-match badge has to be reachable from this branch too. On the repository that
+            # motivated the floor, 31 of the 32 fabricated rows were module-scope ones, so a badge
+            # applied only to the named-symbol branch below would have marked exactly one of them
+            # and left the summary count looking unsupported by the list it summarises.
+            mark = _confidence_badge(row)
+            return f"- module scope of {where}{mark}" if where else f"- module scope{mark}"
         name = str(row.get(name_key) or "?")
         qn = _strip_project_prefix(str(row.get(qn_key) or ""), may_be_filename=False)
         file = str(row.get(file_key) or "")
@@ -788,6 +899,10 @@ class GraphProvider:
         label = qn or name
         tail = f" ({file})" if file and file != qn else ""
         badge = f" [{edge}]" if edge else ""
+        # A row the backend resolved by bare name rather than by import carries its score into the
+        # line itself. The summary note says how many there are; only the badge says WHICH, and a
+        # reader scanning for "is my symbol in here" reads rows, not notes.
+        badge += _confidence_badge(row)
         return f"- {label}{badge}{tail}"
 
     @staticmethod
@@ -977,8 +1092,8 @@ class GraphProvider:
         wanted = _parse_symbol_target(target)
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
-            "RETURN a.name, a.qualified_name, a.file_path, labels(a), type(c), b.name, "
-            f"b.qualified_name, b.file_path LIMIT {_EDGE_ROW_LIMIT}"
+            "RETURN a.name, a.qualified_name, a.file_path, labels(a), type(c), c.confidence, "
+            f"b.name, b.qualified_name, b.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
@@ -997,7 +1112,7 @@ class GraphProvider:
         # counts or prints a row.
         dropped = self._drop_edge_collisions(selected, "a.file_path", "labels(a)")
         self._collapse_module_scope(selected, "labels(a)", "a.file_path")
-        notes = self._collision_note("callers", dropped)
+        notes = self._confidence_note("callers", selected) + self._collision_note("callers", dropped)
         if truncated:
             notes = self._row_cap_note("callers", target) + notes
         if not any(g.rows for g in selected):
@@ -1050,6 +1165,117 @@ class GraphProvider:
         )
         return (f"\n\n_Truncated: the graph returned the maximum {_EDGE_ROW_LIMIT} rows, so rows "
                 f"beyond that are missing from this list._")
+
+    def _confidence_note(self, op: str, groups: list[_EdgeGroup]) -> str:
+        """Mark every row the backend resolved by NAME rather than by import, and disclose the count.
+
+        This is the fix for the failure that motivated the floor. Asking `callers describe` on a
+        TypeScript repo returned 32 rows — every one a call to vitest's global `describe`, imported
+        from "vitest" in the very file it appears in — all bound to the project's own
+        `domain.budget.describe` because that was the only indexed symbol with the name. The backend
+        had stamped 31 of them 0.75 and one 0.38; codeintel dropped the column and rendered all 32
+        as plain callers under `confidence: "complete"`, while the one REAL caller (reached through
+        an aliased import) was missing entirely.
+
+        What this does NOT do is call every sub-floor row wrong. `runAlerts -> evaluate` is a real,
+        hand-verified caller and the backend stamped it 0.75, so a note reading "these may not be
+        callers at all" over a two-row answer would replace a false positive with a false alarm —
+        the same defect facing the other way. The two tiers are reported as what they are: a
+        `unique_name` binding is unverified, a suffix/fuzzy binding is probably junk.
+
+        The one signal that separates the two cases cheaply is the SHARE. A project symbol with a
+        genuinely unique name picks up an unverified row here and there; a name the index does not
+        own — a framework global, a builtin method — collects nothing else, because every call in
+        the repository lands on it. So an answer that is entirely unverified is called out as the
+        collision signature it almost always is.
+
+        Rows are marked in place so the badge travels with the row into whichever section the
+        renderer puts it, including the per-symbol sections of an ambiguous answer that a note alone
+        would never reach. Unstamped rows are counted apart and never badged: silence from the
+        backend is not a low score, and flattening the two is the same error one level down.
+        """
+        weak = unverified = unstamped = no_column = total = 0
+        for g in groups:
+            for r in g.rows:
+                total += 1
+                conf = _edge_confidence(r)
+                if conf is None:
+                    # Two different silences, and only one of them is about the code. A row with NO
+                    # `c.confidence` key came from a backend (or a generation) that does not return
+                    # the column at all; a row whose key is present but empty is an edge that
+                    # backend declined to score. The first says nothing about this answer, the
+                    # second says this specific edge's provenance is unknown.
+                    if "c.confidence" in r:
+                        unstamped += 1
+                    else:
+                        no_column += 1
+                elif conf <= _EDGE_CONFIDENCE_WEAK:
+                    r["_low_confidence"] = conf
+                    weak += 1
+                elif conf < _EDGE_CONFIDENCE_FLOOR:
+                    r["_low_confidence"] = conf
+                    unverified += 1
+        if not (weak or unverified or unstamped):
+            return ""
+        # A backend that never returns the column at all is not producing partial answers — it is a
+        # generation that does not report confidence. Marking every such answer `partial` would
+        # repeat, one level up, the defect `attach_confidence` exists to fix: a field that fires
+        # everywhere tells a reader nothing, and "partial" has to keep meaning "a named part of THIS
+        # answer could not be retrieved". An edge the backend returned UNSCORED is the opposite case
+        # and stays a gap, even when every row in one answer happens to be unscored — that is how a
+        # symbol the repository never defines (`get`, resolved onto `dict.get`) is caught.
+        if no_column == total:
+            return ""
+
+        details, parts = [], []
+        if weak:
+            details.append(
+                f"{weak} of {total} row(s) were resolved by suffix or string-similarity match "
+                f"(confidence <= {_EDGE_CONFIDENCE_WEAK}) and are likely spurious")
+            parts.append(
+                f"**{weak} of {total} row(s) are LIKELY SPURIOUS** — resolved by suffix or "
+                f"string-similarity match (confidence <= {_EDGE_CONFIDENCE_WEAK}), not by any "
+                f"import.")
+        if unverified:
+            details.append(
+                f"{unverified} of {total} row(s) were resolved by bare symbol name because this is "
+                f"the only symbol of that name in the index (confidence < {_EDGE_CONFIDENCE_FLOOR}), "
+                f"not by following the calling file's imports")
+            parts.append(
+                f"**{unverified} of {total} row(s) are UNVERIFIED** — bound because this is the only "
+                f"symbol of that name in the index (confidence < {_EDGE_CONFIDENCE_FLOOR}), not by "
+                f"following the calling file's imports. Correct when the call really targets this "
+                f"symbol; wrong when it targets a same-named symbol the index never saw.")
+        if unstamped:
+            details.append(
+                f"{unstamped} of {total} row(s) carry no confidence from the backend at all, so how "
+                f"they were resolved is unknown")
+            parts.append(
+                f"{unstamped} of {total} row(s) carry no confidence from the backend, so how they "
+                f"were resolved is unknown — re-index to have them scored.")
+        # The collision signature: nothing here was resolved through an import, across enough rows
+        # that the pattern means something. A project symbol collects the occasional unverified
+        # caller; a name the index does not own collects every call in the repository.
+        if total >= 5 and (weak + unverified) == total:
+            # Raised as its OWN kind, not folded into the one above, because this is the condition
+            # the gateway escalates on: it is machine-checkable, and matching on a phrase inside a
+            # prose `detail` would be a string-matching contract between two modules — the kind that
+            # breaks silently the first time the wording is improved.
+            self._add_gap(
+                op, "all-rows-name-resolved",
+                "no row in this answer was resolved through an import, which is the signature of a "
+                "name the index does not own (a library function, a framework global, a builtin "
+                "method) collecting every call site that mentions it",
+            )
+            parts.append(
+                "**Not one row here was resolved through an import.** That is the signature of a "
+                "name this index does not own — a library function, a framework global, a builtin "
+                "method — collecting every call site in the repository that mentions it. Treat the "
+                "whole answer as unconfirmed until `--engine lsp` agrees.")
+        self._add_gap(op, "low-confidence-edges", "; ".join(details))
+        marked = "Marked `[?…]` (unverified) and `[!…]` (likely spurious) below. " if (
+            weak or unverified) else ""
+        return "\n\n_" + marked + " ".join(parts) + "_"
 
     def _collision_note(self, op: str, dropped: int) -> str:
         """Disclose rows dropped as name collisions, in the body AND as a machine-readable gap.
@@ -1124,8 +1350,8 @@ class GraphProvider:
         wanted = _parse_symbol_target(target)
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
-            "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), a.name, "
-            f"a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
+            "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), c.confidence, "
+            f"a.name, a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         if not rows:
@@ -1144,7 +1370,7 @@ class GraphProvider:
         # the two ops treat the pseudo-node population identically and a future callee container is
         # handled without a second fix.
         self._collapse_module_scope(selected, "labels(b)", "b.file_path")
-        notes = self._collision_note("callees", dropped)
+        notes = self._confidence_note("callees", selected) + self._collision_note("callees", dropped)
         if truncated:
             notes = self._row_cap_note("callees", target) + notes
         if not any(g.rows for g in selected):
@@ -1216,8 +1442,24 @@ class GraphProvider:
             return (f"\n\n_Narrowed by the {wanted.describe()} in the target to {named}. Other "
                     f"symbols named `{wanted.name}` are not included._")
         if len(groups) == 1 and groups[0].label and not truncated:
+            # Being the only indexed holder of a name is not only a reassurance — it is the exact
+            # precondition for the backend's `unique_name` strategy, which binds ANY unresolved call
+            # to that bare name here, including calls to symbols this index never saw (an npm or pip
+            # package, a test-framework global, a builtin method). So the sentence that used to end
+            # in "the only symbol …" now says what that implies, because on the evaluated repository
+            # it was the whole cause of a 32-row answer in which no row was a caller.
+            # The consequence clause is only true of an answer that HAS such rows. Printing it over
+            # a fully import-resolved answer would point at badges that are not there, which is the
+            # cry-wolf failure the tiering above exists to avoid, arriving through the legend.
+            badged = any(r.get("_low_confidence") is not None
+                         for g in groups for r in g.rows)
+            because = (
+                f" — which is also why any unresolved call to a `{wanted.name}` the index does not "
+                f"contain (a library function, a framework global, a builtin method) binds here. "
+                f"Rows badged `[?…]` or `[!…]` are those bindings."
+            ) if badged else "."
             return (f"\n\n_Resolved by symbol NAME, not by type: {groups[0].describe()} is the "
-                    f"only symbol named `{wanted.name}` with edges in this index._")
+                    f"only symbol named `{wanted.name}` with edges in this index{because}_")
         return (f"\n\n_Resolved by symbol NAME, not by type: if more than one symbol in this "
                 f"repository is called `{wanted.name}`, their edges are reported together here. "
                 f"Verify before relying on a row you did not expect._")
@@ -1448,22 +1690,118 @@ class GraphProvider:
                     return ("## Changes impact\n(no source changes — the working tree's "
                             f"{dropped} uncommitted change(s) are all non-source files)")
                 return "## Changes impact\n(working tree clean — no uncommitted changes)"
-            parts = [f"## Changes impact ({len(files)} files → {len(syms)} symbols)"]
+            ripple, ripple_truncated = self._changed_ripple(files, project, timeout_ms)
+            parts = [f"## Changes impact ({len(files)} files → {len(syms)} symbols defined in them "
+                     f"→ {len(ripple)} callers elsewhere)"]
             if files:
                 parts.append(f"### Changed files ({len(files)})")
                 parts.extend(f"- {f}" for f in files[:40])
                 if len(files) > 40:
                     parts.append(f"… (+{len(files) - 40} more)")
             if syms:
-                parts.append(f"### Impacted symbols ({len(syms)})")
+                # Named for what they are. These are the symbols the edit CONTAINS — everything
+                # defined in a touched file, whether or not the edit came near it — which is a
+                # different and much weaker claim than "impacted", the word that used to head this
+                # list and the reason it read as a blast radius.
+                parts.append(f"### Symbols defined in the changed files ({len(syms)})")
                 for label, fp in syms[:40]:
                     tail = f"  ({fp})" if fp and fp != label else ""
                     parts.append(f"- {label}{tail}")
                 if len(syms) > 40:
                     parts.append(f"… (+{len(syms) - 40} more)")
+            if ripple:
+                parts.append(f"### Callers elsewhere that reach into them ({len(ripple)})")
+                parts.append("_This is the blast radius: symbols outside the changed files whose "
+                             "behaviour can move because of this edit._")
+                for label, fp, conf in ripple[:40]:
+                    tail = f"  ({fp})" if fp and fp != label else ""
+                    if conf is None:
+                        mark = " [unscored]"
+                    elif conf <= _EDGE_CONFIDENCE_WEAK:
+                        mark = f" [!{conf:.2f}]"
+                    elif conf < _EDGE_CONFIDENCE_FLOOR:
+                        mark = f" [?{conf:.2f}]"
+                    else:
+                        mark = ""
+                    parts.append(f"- {label or fp}{mark}{tail}")
+                if len(ripple) > 40:
+                    parts.append(f"… (+{len(ripple) - 40} more)")
+                weak = sum(1 for _, _, c in ripple
+                           if c is not None and c < _EDGE_CONFIDENCE_FLOOR)
+                if weak:
+                    parts.append(f"\n_{weak} of {len(ripple)} caller(s) were resolved by symbol "
+                                 f"name rather than by import (`?`/`!` above) and may not reach "
+                                 f"this code at all._")
+            elif files:
+                # An empty ripple is a real and useful answer — but only if it cannot be confused
+                # with one that was never computed.
+                parts.append("### Callers elsewhere that reach into them (0)")
+                parts.append("_No symbol outside the changed files calls into them, by the graph's "
+                             "CALLS edges. Framework dispatch and calls through a value are not "
+                             "edges, so this is not proof that nothing else is affected._")
+            if ripple_truncated:
+                self._add_gap(
+                    "changed", "ripple-truncated",
+                    "the downstream caller list hit its own cap, so the blast radius shown is a "
+                    "lower bound, not the whole of it",
+                )
+                parts.append("\n_Downstream list truncated at its cap — this is a lower bound._")
             return "\n".join(parts)
         except Exception:
             return None
+
+    _RIPPLE_FILE_CAP = 40
+    _RIPPLE_ROW_CAP = 60
+
+    def _changed_ripple(
+        self, files: list[str], project: str, timeout_ms: int
+    ) -> tuple[list[tuple[str, str, float | None]], bool]:
+        """Symbols OUTSIDE the changed files that call into them — the actual blast radius.
+
+        `changed` used to stop at containment and call it impact. Editing one function in
+        `src/domain/budget.ts` reported "1 file -> 7 symbols", and all seven were the symbols DEFINED
+        in that file; `runAlerts`, which calls into it from another file and is the one thing a
+        reviewer needed to look at, appeared nowhere. The tool's own instructions promise the symbols
+        an edit "ripples into", so the op was answering a different question than the one it
+        advertised — and the containment answer is the one an agent is least likely to notice is
+        wrong, because it is never empty.
+
+        Deliberately NOT filtered by the confidence floor. A pre-commit checklist errs toward
+        over-inclusion: `runAlerts -> evaluate` is a genuine ripple edge stamped 0.75, so a floor
+        here would drop the very row that motivated the fix. Instead every caller is collapsed to its
+        best-scored edge and carries that score, so a name-collision flood (every test file in the
+        repo, reached through a framework global) is visible as the low-confidence block it is rather
+        than swamping the list.
+        """
+        if not files:
+            return [], False
+        listed = files[: self._RIPPLE_FILE_CAP]
+        in_list = ", ".join(f'"{_cypher_literal(f)}"' for f in listed)
+        cypher = (
+            f"MATCH (a)-[c:CALLS]->(b) WHERE b.file_path IN [{in_list}] "
+            f"AND NOT a.file_path IN [{in_list}] "
+            "RETURN a.qualified_name, a.file_path, c.confidence "
+            f"LIMIT {self._RIPPLE_ROW_CAP}"
+        )
+        rows = self._query_rows(cypher, project, timeout_ms)
+        truncated = len(rows) >= self._RIPPLE_ROW_CAP or len(files) > self._RIPPLE_FILE_CAP
+        # One entry per calling symbol, keeping its best-scored edge: a caller that reaches three
+        # changed symbols is one thing to review, not three.
+        best: dict[tuple[str, str], float | None] = {}
+        for r in rows:
+            label = _strip_project_prefix(
+                str(r.get("a.qualified_name") or ""), may_be_filename=False)
+            fp = str(r.get("a.file_path") or "")
+            if not label and not fp:
+                continue
+            conf = _edge_confidence(r)
+            key = (label, fp)
+            prev = best.get(key, -1.0)
+            if key not in best or (conf is not None and (prev is None or conf > prev)):
+                best[key] = conf
+        out = [(lbl, fp, c) for (lbl, fp), c in best.items()]
+        out.sort(key=lambda t: (-(t[2] if t[2] is not None else -1.0), t[0]))
+        return out, truncated
 
     def _op_hotspots(self, project: str, timeout_ms: int) -> str | None:
         """Highest complexity / fan-in symbols (refactor-risk hotspots). search_graph returns rows
@@ -1645,6 +1983,20 @@ class GraphProvider:
                         hint=f"{miss.describe()} — this is not a statement about your code: the "
                              f"query did not return. Re-ask, or run `codeintel doctor`.",
                     )
+                # Before claiming the symbol is absent, ask whether it is merely unreferenced.
+                # These are different facts and they license opposite actions.
+                if op_str in self._EDGE_OPS_WITH_A_SYMBOL_TARGET:
+                    where = self._node_locations(target_str, project, timeout_ms)
+                    if where:
+                        return safe_null_result(
+                            op_str, target_str, engine="graph", reason="no-edges",
+                            hint=f"`{target_str}` IS indexed ({'; '.join(where[:3])}) — it has no "
+                                 f"{op_str} edge in the graph, which is not the same as being "
+                                 f"absent. Framework-dispatched handlers (routes, ASGI apps) and "
+                                 f"symbols passed as a value rather than called look exactly like "
+                                 f"this, so do NOT read it as dead code. Re-indexing will not "
+                                 f"change it; confirm with `--engine lsp` or `--op pattern`.",
+                        )
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",
                     hint=f"`{target_str}` is not in the graph index for this project — if "

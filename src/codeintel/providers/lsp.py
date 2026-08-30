@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from concurrent.futures import TimeoutError as FuturesTimeout
-from typing import Any
+from typing import Any, ClassVar
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
@@ -238,6 +238,96 @@ class LspProvider:
             self._sessions[root] = session
             return session
 
+    # Serena serves the language servers named in the project's own config and nothing else. The
+    # extensions that decide whether a repo NEEDS one, keyed by serena's language identifiers.
+    _LANG_EXTS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "python": (".py", ".pyi"),
+        "typescript": (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"),
+        "go": (".go",),
+        "rust": (".rs",),
+        "java": (".java",),
+        "csharp": (".cs",),
+        "ruby": (".rb",),
+        "php": (".php",),
+        "cpp": (".cpp", ".cc", ".hpp", ".hh", ".cxx"),
+        "c": (".c", ".h"),
+        "kotlin": (".kt", ".kts"),
+        "swift": (".swift",),
+    }
+    _SKIP_DIRS: ClassVar[frozenset[str]] = frozenset({
+        ".git", "node_modules", ".venv", "venv", "dist", "build", "coverage",
+        "__pycache__", ".mypy_cache", ".pytest_cache", "vendor", "target", ".next",
+    })
+    _UNSERVED_FILE_FLOOR = 5      # below this, a stray file is not a language the repo is written in
+
+    def _language_coverage(self, project_root: str) -> tuple[list[str], dict[str, int]]:
+        """Which languages serena is configured to serve here, and which the repo actually contains.
+
+        A polyglot repository gets ONE serena config, and that config names a fixed list of language
+        servers. On an evaluated monorepo it read `language_servers: [typescript]` while the tree
+        held 69 Python files under `services/*/src`, so every Python `symbol` query returned an empty
+        body — and the doctor reported the engine "ok / reached READY", which was true about the
+        process and false about the answers. That is the worst shape a health check can take: green
+        while the thing it certifies is silently serving nothing.
+
+        Only the config is authoritative about what is served; the file census is a plain walk,
+        bounded by the vendored-directory skip list, because an unserved language matters in
+        proportion to how much of the repo is written in it."""
+        configured: list[str] = []
+        cfg = os.path.join(project_root, ".serena", "project.yml")
+        try:
+            with open(cfg, encoding="utf-8") as fh:
+                in_block = False
+                for line in fh:
+                    stripped = line.strip()
+                    if stripped.startswith("language_servers:"):
+                        in_block = True
+                        continue
+                    if in_block:
+                        if stripped.startswith("- "):
+                            configured.append(stripped[2:].strip().strip('"\''))
+                            continue
+                        if stripped and not stripped.startswith("#"):
+                            break
+        except OSError:
+            return [], {}
+        if not configured:
+            return [], {}
+        ext_to_lang = {e: lang for lang, exts in self._LANG_EXTS.items() for e in exts}
+        census: dict[str, int] = {}
+        for _dirpath, dirnames, filenames in os.walk(project_root):
+            dirnames[:] = [d for d in dirnames if d not in self._SKIP_DIRS and not d.startswith(".")]
+            for fn in filenames:
+                lang = ext_to_lang.get(os.path.splitext(fn)[1].lower())
+                if lang:
+                    census[lang] = census.get(lang, 0) + 1
+        return configured, census
+
+    def _unserved_note(self, project_root: str) -> tuple[str, str] | None:
+        """`(detail_suffix, remediation)` when the repo holds a language serena will not answer for."""
+        try:
+            configured, census = self._language_coverage(project_root)
+        except Exception as exc:
+            log_swallowed("LspProvider._unserved_note", exc)
+            return None
+        if not configured or not census:
+            return None
+        missing = sorted(
+            ((lang, n) for lang, n in census.items()
+             if lang not in configured and n >= self._UNSERVED_FILE_FLOOR),
+            key=lambda t: -t[1],
+        )
+        if not missing:
+            return None
+        named = ", ".join(f"{lang} ({n} files)" for lang, n in missing[:4])
+        return (
+            f" — but .serena/project.yml serves only {', '.join(configured)}, so {named} "
+            f"get NO answer from this engine (empty `symbol` results, not errors)",
+            f"add the missing language(s) to `language_servers:` in "
+            f"{os.path.join('.serena', 'project.yml')} and re-run, or use `--engine graph` for "
+            f"{missing[0][0]} symbols",
+        )
+
     def probe(self, project_root: str, deep: bool = False, timeout_s: float = 20.0) -> dict:
         """Never-raise health check for the doctor. Shallow (default) is FREE — PATH presence
         plus any existing session's live state. Deep boots serena and polls until READY/FAILED,
@@ -263,8 +353,11 @@ class LspProvider:
             with existing._lock:
                 st = existing.state
             if st == _State.READY:
-                return {"installed": True, "runnable": True, "repo_indexed": None,
-                        "detail": "serena session is READY for this repo", "remediation": None}
+                unserved = self._unserved_note(project_root)
+                return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
+                        "detail": "serena session is READY for this repo" + (
+                            unserved[0] if unserved else ""),
+                        "remediation": unserved[1] if unserved else None}
             if st == _State.FAILED:
                 return {"installed": True, "runnable": False, "repo_indexed": None,
                         "detail": "serena session failed to boot for this repo",
@@ -279,8 +372,13 @@ class LspProvider:
             with session._lock:
                 st = session.state
             if st == _State.READY:
-                return {"installed": True, "runnable": True, "repo_indexed": None,
-                        "detail": f"serena booted via `{cmd}` and reached READY", "remediation": None}
+                # READY is a fact about the PROCESS. Whether it will answer for this repo's code is
+                # a separate question, and the one the caller is actually asking.
+                unserved = self._unserved_note(project_root)
+                return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
+                        "detail": f"serena booted via `{cmd}` and reached READY" + (
+                            unserved[0] if unserved else ""),
+                        "remediation": unserved[1] if unserved else None}
             if st == _State.FAILED:
                 return {"installed": True, "runnable": False, "repo_indexed": None,
                         "detail": "serena failed to boot",
