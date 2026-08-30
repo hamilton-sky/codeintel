@@ -7,6 +7,62 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **The graph engine scores every call edge, and codeintel threw the score away.**
+  `codebase-memory-mcp` resolves each call target through a prioritised cascade and stamps the edge
+  with how much it trusts the binding — 0.95 import map, 0.90 same-module, 0.85 import-suffix, then
+  0.75 for "the only symbol in the repository with this bare name", 0.55 for a suffix match, and
+  0.30–0.40 for raw string similarity. Neither edge query selected the column, so a fabricated
+  caller rendered identically to a real one. Measured across three unrelated repositories, **24%,
+  33% and 43% of all CALLS edges sat below 0.85.** What that produced: `callers describe` on a
+  TypeScript repo returned **32 rows — every `describe()` call in the repository, each imported from
+  `"vitest"` in the file it appears in** — all bound to the project's own `domain.budget.describe`
+  because it was the only indexed symbol with that name, under `confidence: "complete"`, with the
+  one genuine caller absent. Both queries now select `c.confidence`; sub-floor rows are badged per
+  row in two tiers (`[?0.75]` unique-name, `[!0.38]` suffix/fuzzy), counted in the body, and raised
+  as a `low-confidence-edges` gap, so the envelope goes `partial`. Rows are **kept, not filtered** —
+  `runAlerts → evaluate` is a hand-verified caller stamped 0.75, and a floor that deleted it would
+  trade a false positive for a false negative, the worse of the two when the next action is a delete.
+- **Nothing ever checked one engine against another.** `_AUTO_ENGINE` is a static op→engine map, and
+  `callers` had no fallback of any kind, so when the graph answered entirely with name guesses the
+  LSP — which held the correct answer — was never asked. An answer whose every row is sub-floor now
+  raises `all-rows-name-resolved`, and the gateway escalates on exactly that condition, appending the
+  language server's reference list. On the case above it surfaces `src/app/alert.ts:121`, the caller
+  reached through an aliased import that the graph could not bind at all. It never fires on a pinned
+  `--engine`, never on a healthy answer, and a warming language server is reported as retryable
+  rather than as agreement.
+- **`not-in-graph` was returned for a symbol that is indexed and simply has no callers**, with a hint
+  advising a re-index that cannot change the answer. Those are opposite facts and they license
+  opposite actions: `forward_released_item` is defined at `proxy.py:392` and registered as a callback,
+  `pattern` found it immediately, and `callers` called it absent — an agent reading that deletes a
+  live method. Now a distinct `no-edges` reason that names where the symbol *is* defined and why
+  framework dispatch and callbacks look exactly like this.
+- **`changed` reported containment and called it impact.** It listed the symbols *defined in* a
+  touched file: editing one function in `budget.ts` named all seven symbols of that file and never
+  mentioned `runAlerts`, the caller in another file the edit actually reaches — while the tool's own
+  instructions promise the symbols an edit "ripples into". Callers outside the changed files are now
+  their own section, one row per calling symbol at its best-scored edge, and a genuinely empty ripple
+  says so out loud instead of being omitted.
+- **`doctor` reported a language server that serves nothing as healthy.** serena takes one config per
+  project naming a fixed list of language servers; on one monorepo `.serena/project.yml` read
+  `language_servers: [typescript]` beside 69 Python files, so every Python `symbol` query returned an
+  empty body under `lsp: ok / reached READY`. The probe now compares that list against a census of
+  the repo's own files and marks the engine not-runnable, naming the unserved language, its file
+  count, the symptom (empty results, not errors) and the fix.
+- **The semantic corpus kept retired trees whose name had no `.`/`_` prefix.** The ignore list
+  assumed `.archive`/`_archive`; a superseded design doc under a plain `archive/` ranked in the top
+  ten for two unrelated code queries — the exact defect that list was written to prevent, reached
+  through the spelling it missed.
+
+### Known limitations (now disclosed rather than silent)
+- **Aliased imports drop the call edge** (`import { describe as describeSignal }` → `callers
+  describeSignal` finds nothing), and **Python loses enclosing-function attribution** — roughly 32%
+  of production caller rows collapse to `module scope of <file>` where TypeScript loses 0%. Both are
+  in the upstream extractor, which has the same defect class open for Go
+  ([#1906](https://github.com/DeusData/codebase-memory-mcp/issues/1906)) and Swift
+  ([#1893](https://github.com/DeusData/codebase-memory-mcp/issues/1893)). Neither is fixed here, but
+  neither is silent any more: the first surfaces through the LSP cross-check, the second through the
+  confidence badge on the rows it produces.
+
 - **`codeintel install --dry-run` was advertised in `install --help` but did not exist** — the flag
   exited 2. It now previews what each agent's config would gain (registered / updated / already
   current) using the same read-only lookup `codeintel doctor` uses to spot a stale registration,
