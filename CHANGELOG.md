@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-08-30
+
 ### Fixed
 - **The graph engine scores every call edge, and codeintel threw the score away.**
   `codebase-memory-mcp` resolves each call target through a prioritised cascade and stamps the edge
