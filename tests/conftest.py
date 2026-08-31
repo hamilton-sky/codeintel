@@ -104,6 +104,51 @@ def console_script(monkeypatch) -> str:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _release_embedding_runtimes():
+    """Destroy every fastembed/onnxruntime session while the interpreter is still healthy.
+
+    `Searcher` and `Indexer` each cache a `TextEmbedding` on the instance, lazily, and this suite
+    builds them from ~100 construction sites. Each one owns an onnxruntime `InferenceSession` with
+    native threads. Nothing released them, so they were all finalised together during interpreter
+    shutdown — and on one CI runner (3.12, ubuntu) that ended in
+    ``terminate called without an active exception`` and a core dump AFTER the last test had already
+    passed. The suite was green; the process exit code was 134, which fails the job just the same
+    and points at nothing.
+
+    Freeing them here makes the teardown deterministic and moves it inside Python's lifetime, where
+    a failure would be a normal exception rather than a C++ abort in a finalising interpreter. It is
+    a mitigation of a native-teardown race, not a proof that no such race exists: it removes the
+    pile-up that made it likely, and it cannot make things worse, because dropping a reference at
+    session end is exactly what the interpreter was about to do less carefully.
+    """
+    yield
+    try:
+        import gc
+
+        from fastembed import TextEmbedding
+    except Exception:
+        return                          # fastembed absent — nothing to release
+    try:
+        gc.collect()
+        # Drop the provider-side caches first, so the only remaining references are the ones the
+        # collector below is about to clear.
+        for obj in list(gc.get_objects()):
+            try:
+                if isinstance(obj, TextEmbedding):
+                    for attr in ("model", "_model"):
+                        if hasattr(obj, attr):
+                            try:
+                                setattr(obj, attr, None)
+                            except Exception:
+                                pass
+            except ReferenceError:
+                continue
+        gc.collect()
+    except Exception:
+        pass                            # best-effort: never turn a green run red
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _reap_leaked_backend_projects():
     """Delete the backend project registrations that live tests leave behind.
 

@@ -104,8 +104,16 @@ jobs:
   # fully indexed repository. The one live test that would have caught it skipped instead — on a
   # condition that same bug produced.
   graph-contract:
-    name: Graph backend contract (live)
+    name: Graph backend contract (live, ${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # BOTH supported dialects, because supporting two and testing one is how the first outage
+      # shipped. 0.9.x answers in JSON; 0.10.x answers in the text layout `wire_text` reads. The
+      # unit fixtures pin the parser against captured bytes, but only this job proves the parser is
+      # actually reached — through the real argv, the real subprocess and a real index.
+      matrix:
+        backend: ["0.9.*", "0.10.*"]
     steps:
       - uses: actions/checkout@v7
 
@@ -116,11 +124,12 @@ jobs:
       - name: Install dependencies
         run: pip install -e .[dev]
 
-      # PINNED, and pinned narrowly. This backend self-updates and has changed its response format
-      # within a minor release; an unpinned install silently re-breaks every graph op. When raising
-      # this, run the live tests locally first — they are the only thing that checks the format.
+      # PINNED, and pinned narrowly per matrix leg. This backend self-updates and has changed its
+      # response format within a minor release; an unpinned install silently re-breaks every graph
+      # op. When adding a leg, run the live tests locally against it first — they are the only
+      # thing that checks the format.
       - name: Install the pinned graph backend
-        run: pip install 'codebase-memory-mcp==0.9.*'
+        run: pip install 'codebase-memory-mcp==${{ matrix.backend }}'
 
       # First invocation downloads a platform-specific native runtime and verifies its checksum.
       # Doing it as its own step keeps that cost (and any failure) out of the test output.
@@ -228,6 +237,19 @@ jobs:
 
       - name: Install dependencies
         run: pip install -e .[dev]
+
+      # `codeintel c4` reads the GRAPH — Folder/File/Module plus IMPORTS/HTTP_CALLS — so without a
+      # backend it exits 1 with `engine-unavailable`, which is how this job came to be permanently
+      # red: it validated nothing and had never once passed. Installing and indexing is what makes
+      # the LikeC4 assertions below actually assert something.
+      - name: Install the pinned graph backend
+        run: pip install 'codebase-memory-mcp==0.10.*'
+
+      # `codeintel c4` indexes the target itself when it is not already indexed, so no explicit
+      # index step is needed — only a backend that exists. Warming it here keeps the native-runtime
+      # download (and any failure in it) out of the generator's output.
+      - name: Warm the backend runtime
+        run: codebase-memory-mcp --version
 
       - name: Generate this repo's own model
         run: python -m codeintel c4 . --out /tmp/c4-self
