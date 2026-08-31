@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-08-31
+
 ### Added
 - **codebase-memory-mcp 0.10.x is now a supported backend.** 0.9.x answered every CLI call in JSON;
   0.10.x replaced that with a compact human-readable layout for all but `list_projects`, so a
