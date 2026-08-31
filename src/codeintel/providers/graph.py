@@ -305,6 +305,24 @@ def _language_coverage_note(rows: list[dict]) -> str:
 # answers.
 _EDGE_ROW_LIMIT = 50
 
+# What each relationship kind ASSERTS, in the words a reader needs.
+#
+# These are different facts, not different confidences in one fact, and conflating them is a
+# category error this engine used to commit twice over. `callers` matched `[:CALLS|USAGE]` and
+# printed every row under one "Callers" heading — so a module-scope mention was reported as a
+# caller — while `CALL_REFERENCE`, the kind that records a function being PASSED somewhere rather
+# than invoked, was never queried at all. The visible cost: `forward_released_item` is registered
+# via `set_forward_fn(app.forward_released_item)` at two sites, the backend had both of them
+# correctly stored as CALL_REFERENCE, and codeintel answered "no callers" — the exact reading that
+# gets a live method deleted. No confidence threshold could have recovered that; only asking for
+# the right relationship can.
+_EDGE_KINDS: dict[str, str] = {
+    "CALLS": "called directly",
+    "USAGE": "referenced, not called (module scope, or a mention that is not a call site)",
+    "CALL_REFERENCE": "passed as a value or registered as a callback — never invoked here",
+}
+_DIRECT_KIND = "CALLS"
+
 # How much the backend trusts an edge's target resolution — and the line below which it is a GUESS.
 #
 # The graph backend resolves each call target through a prioritised cascade and stamps the edge with
@@ -833,6 +851,44 @@ class GraphProvider:
     # expect `callers`/`callees` (which read through here) to honour that stub.
     _EDGE_OPS_WITH_A_SYMBOL_TARGET = ("callers", "callees", "impact", "chain", "context")
 
+    # Structural edges say where a symbol LIVES, not what depends on it. Naming them in a
+    # "nothing references this" message would answer a question nobody asked.
+    _STRUCTURAL_EDGES = frozenset({
+        "DEFINES", "DEFINES_METHOD", "CONTAINS_FILE", "CONTAINS_FOLDER", "HAS_BRANCH",
+        "FILE_CHANGES_WITH", "SIMILAR_TO", "SEMANTICALLY_RELATED",
+    })
+
+    def _dependency_kinds(self, target: str, project: str, timeout_ms: int) -> dict[str, int]:
+        """Every non-structural relationship touching *target*, by kind.
+
+        The point is to stop "no callers" from being the end of the sentence. A symbol reached only
+        by `INHERITS`, `DECORATES`, `HANDLES` or `TESTS` is not unreferenced — it is referenced in a
+        way this op does not cover, and saying which way is the difference between a usable answer
+        and one that reads as "unused"."""
+        wanted = _parse_symbol_target(target)
+        if not wanted.name:
+            return {}
+        # ALIASED. Unaliased, the backend names the column `COUNT(*)` — uppercased — while the
+        # query says `count(*)`, so a lookup by the written name silently missed and every kind
+        # rendered as "0 x KIND". An alias makes the column name ours rather than a formatting
+        # detail of whichever backend answered.
+        cypher = (
+            f'MATCH (a)-[c]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
+            "RETURN type(c) AS kind, count(*) AS n LIMIT 30"
+        )
+        out: dict[str, int] = {}
+        for r in self._query_rows(cypher, project, timeout_ms):
+            kind = str(r.get("kind") or "").strip()
+            if not kind or kind in self._STRUCTURAL_EDGES:
+                continue
+            try:
+                count = int(str(r.get("n") or 0))
+            except (TypeError, ValueError):
+                continue
+            if count > 0:            # a zero is a parse miss, never a fact worth printing
+                out[kind] = count
+        return out
+
     def _node_locations(self, target: str, project: str, timeout_ms: int) -> list[str]:
         """Where a symbol with this bare name is DEFINED, independent of whether it has edges.
 
@@ -890,7 +946,15 @@ class GraphProvider:
             # motivated the floor, 31 of the 32 fabricated rows were module-scope ones, so a badge
             # applied only to the named-symbol branch below would have marked exactly one of them
             # and left the summary count looking unsupported by the list it summarises.
-            mark = _confidence_badge(row)
+            # The suppressed badge above is about CALLS-vs-USAGE only — at module scope that
+            # distinction reflects which node kind carried the edge, not a fact about the code, so
+            # printing it would assert something the backend did not mean. `CALL_REFERENCE` is a
+            # different claim: it says the symbol was PASSED rather than invoked, which is true of
+            # the code regardless of which node holds the edge. It is shown, so a header reading
+            # "N other reference(s)" is always supported by the rows beneath it.
+            kind = str(row.get("type(c)") or "").strip()
+            kind_badge = f" [{kind}]" if kind and kind not in ("CALLS", "USAGE") else ""
+            mark = kind_badge + _confidence_badge(row)
             return f"- module scope of {where}{mark}" if where else f"- module scope{mark}"
         name = str(row.get(name_key) or "?")
         qn = _strip_project_prefix(str(row.get(qn_key) or ""), may_be_filename=False)
@@ -1091,7 +1155,7 @@ class GraphProvider:
         the same name is worse than an un-narrowed one: it reads as precise."""
         wanted = _parse_symbol_target(target)
         cypher = (
-            f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
+            f'MATCH (a)-[c:CALLS|USAGE|CALL_REFERENCE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
             "RETURN a.name, a.qualified_name, a.file_path, labels(a), type(c), c.confidence, "
             f"b.name, b.qualified_name, b.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
@@ -1165,6 +1229,43 @@ class GraphProvider:
         )
         return (f"\n\n_Truncated: the graph returned the maximum {_EDGE_ROW_LIMIT} rows, so rows "
                 f"beyond that are missing from this list._")
+
+    @staticmethod
+    def _kind_counts(groups: list[_EdgeGroup]) -> dict[str, int]:
+        """How many rows of each relationship kind this answer holds."""
+        out: dict[str, int] = {}
+        for g in groups:
+            for r in g.rows:
+                kind = str(r.get("type(c)") or "").strip() or "?"
+                # A module-scope row's CALLS/USAGE label is an artifact of which node kind carried
+                # the edge (see `_display`), so it is counted as a direct row rather than split out
+                # as a distinct KIND of fact. Anything else — notably CALL_REFERENCE — is a real
+                # claim about the code and is counted as itself.
+                if r.get("_module_scope") is not None and kind in ("CALLS", "USAGE"):
+                    kind = _DIRECT_KIND
+                out[kind] = out.get(kind, 0) + 1
+        return out
+
+    def _kind_note(self, op: str, counts: dict[str, int]) -> str:
+        """Name every non-call relationship in the answer, and what it actually asserts.
+
+        The count in the heading is the direct calls. Everything else is real — the edges exist and
+        an agent asking "what depends on this" needs them — but it is not a call, and printing it
+        under a caller count is the category error that made a registered callback look unused."""
+        others = {k: n for k, n in counts.items() if k != _DIRECT_KIND}
+        if not others:
+            return ""
+        total = sum(others.values())
+        parts = [f"{n} `{k}` row(s) ({_EDGE_KINDS.get(k, 'relationship kind not described here')})"
+                 for k, n in sorted(others.items(), key=lambda kv: -kv[1])]
+        self._add_gap(
+            op, "non-call-relationships",
+            f"{total} of the rows are not direct calls: " + "; ".join(
+                f"{n} {k}" for k, n in sorted(others.items(), key=lambda kv: -kv[1])),
+        )
+        return ("\n\n_Not calls — " + "; ".join(parts) + ". Each row is badged with its kind. "
+                "For \"what would break if this changed\" you want all of them; for \"what calls "
+                "this\" you want only the `CALLS` rows._")
 
     def _confidence_note(self, op: str, groups: list[_EdgeGroup]) -> str:
         """Mark every row the backend resolved by NAME rather than by import, and disclose the count.
@@ -1349,7 +1450,7 @@ class GraphProvider:
         """
         wanted = _parse_symbol_target(target)
         cypher = (
-            f'MATCH (a)-[c:CALLS|USAGE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
+            f'MATCH (a)-[c:CALLS|USAGE|CALL_REFERENCE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
             "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), c.confidence, "
             f"a.name, a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
@@ -1395,7 +1496,17 @@ class GraphProvider:
         name_key, qn_key, file_key = row_keys
         answered = [g for g in groups if g.rows]
         kept = sum(len(g.rows) for g in answered)
-        head = f"## {op.capitalize()} of {target} ({kept})\n"
+        # Rows are ordered so the direct calls come first: they are the answer to the question that
+        # was asked, and the rest is context beneath it.
+        for g in answered:
+            g.rows.sort(key=lambda r: str(r.get("type(c)") or "") != _DIRECT_KIND)
+        counts = self._kind_counts(answered)
+        direct = counts.get(_DIRECT_KIND, 0)
+        others = kept - direct
+        # A single count is honest only when every row is the same kind of fact.
+        head = (f"## {op.capitalize()} of {target} ({kept})\n" if not others
+                else f"## {op.capitalize()} of {target} "
+                     f"({direct} direct, {others} other reference(s))\n")
 
         if len(answered) == 1:
             body = head + "\n".join(self._display(r, name_key, qn_key, file_key)
@@ -1424,7 +1535,8 @@ class GraphProvider:
                       f"`{answered[0].label or wanted.name}` or "
                       f"`{wanted.name}@{answered[0].file or '<file>'}` for a single symbol.\n"
                     + "\n" + "\n\n".join(sections))
-        return body + extra_notes + self._name_resolution_note(wanted, answered, truncated)
+        return (body + self._kind_note(op, counts) + extra_notes
+                + self._name_resolution_note(wanted, answered, truncated))
 
     def _name_resolution_note(
         self, wanted: _SymbolTarget, groups: list[_EdgeGroup], truncated: bool
@@ -1994,6 +2106,14 @@ class GraphProvider:
                 if op_str in self._EDGE_OPS_WITH_A_SYMBOL_TARGET:
                     where = self._node_locations(target_str, project, timeout_ms)
                     if where:
+                        # …and say what DOES point at it. "No callers" plus silence reads as
+                        # "unused"; "no callers, but 3 DECORATES and 2 TESTS" is an answer.
+                        kinds = self._dependency_kinds(target_str, project, timeout_ms)
+                        other = (" Other relationships DO point at it: "
+                                 + ", ".join(f"{n} {k}" for k, n in
+                                             sorted(kinds.items(), key=lambda kv: -kv[1])[:5])
+                                 + " — query those before concluding anything about it."
+                                 ) if kinds else ""
                         return safe_null_result(
                             op_str, target_str, engine="graph", reason="no-edges",
                             hint=f"`{target_str}` IS indexed ({'; '.join(where[:3])}) — it has no "
@@ -2001,7 +2121,8 @@ class GraphProvider:
                                  f"absent. Framework-dispatched handlers (routes, ASGI apps) and "
                                  f"symbols passed as a value rather than called look exactly like "
                                  f"this, so do NOT read it as dead code. Re-indexing will not "
-                                 f"change it; confirm with `--engine lsp` or `--op pattern`.",
+                                 f"change it; confirm with `--engine lsp` or `--op pattern`."
+                                 + other,
                         )
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",

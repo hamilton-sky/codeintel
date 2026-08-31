@@ -6,6 +6,35 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A registered callback was reported as having no callers.** `callers` matched `[:CALLS|USAGE]`
+  and never asked for `CALL_REFERENCE` — the relationship the backend uses when a function is
+  *passed* somewhere rather than invoked. `forward_released_item` is registered at two real sites
+  (`set_forward_fn(app.forward_released_item)`), the backend had both correctly stored as
+  `CALL_REFERENCE`, and codeintel answered "no callers": the exact reading that deletes a live
+  method. It now reports `0 direct, 2 other reference(s)` and names both sites. No confidence
+  threshold could have recovered this — the edge was never queried.
+- **Non-calls were counted as callers.** Every row went under one `Callers of X (N)` heading, so a
+  module-scope mention and a callback registration were both reported as calls. The heading now
+  splits direct calls from other references whenever the answer mixes kinds, calls are listed
+  first, each row is badged with its relationship, and a note says what each kind actually asserts:
+  *for "what would break if this changed" you want all of them; for "what calls this" you want only
+  the `CALLS` rows.* An answer made entirely of calls keeps its plain count — the common case reads
+  exactly as before.
+- **"No callers" no longer ends the sentence.** The `no-edges` reason now censuses the
+  non-structural relationships that *do* point at the symbol (`3 DECORATES`, `2 TESTS`, …), because
+  silence after "no callers" reads as "unused". Structural edges (`DEFINES`, `CONTAINS_FILE`) are
+  excluded — they say where a symbol lives, not what depends on it.
+- **A parse miss could invent a relationship.** The backend names an unaliased aggregate column
+  `COUNT(*)`, uppercased, so a lookup by the written `count(*)` silently missed and every kind
+  rendered as `0 x KIND`. The census query is aliased, and a zero can no longer reach the text.
+
+  Together these separate two axes that were being conflated: *how sure are we this edge exists*
+  (confidence, added in 0.20.0) and *what kind of relationship is it* (this change). Using the
+  first to express the second is a category error — it is why a high-confidence registration looked
+  like a low-confidence call, and why the honest-looking "no callers" answer was the dangerous one.
+
+
 ## [0.21.0] — 2026-08-31
 
 ### Added

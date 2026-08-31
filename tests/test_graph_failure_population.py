@@ -479,8 +479,11 @@ def test_every_gap_callees_can_report_states_its_numbers_in_the_body_too():
                                     "b.file_path": f"src/m{i}.py", "c.confidence": "0.75"})
         for i in range(6)
     ]
+    # A row that is not a call at all — the kind that used to be counted as a caller.
+    not_a_call = [dict(_THREE_HANDLERS[0], **{"type(c)": "CALL_REFERENCE"})]
     scenarios = {
         "several symbols share the name": ("handle", _THREE_HANDLERS),
+        "a row that is not a call": ("proj.api.routes.handle", not_a_call),
         "rows resolved by name, not by import": ("proj.api.routes.handle", guessed),
         "every row resolved by name": ("proj.api.routes.handle", all_guessed),
         "a row dropped as a collision": ("handle", _THREE_HANDLERS + collision),

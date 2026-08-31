@@ -183,9 +183,12 @@ def test_callers_parses_columns_rows(monkeypatch):
     assert r["ok"] is True
     assert r["engine"] == "graph"
     assert r["result"] is not None
-    assert "Callers of safe_null_result (3)" in r["result"]
+    # Every row in this captured reply is a USAGE edge, not a call. The heading used to flatten
+    # them into "(3)" — a caller count made of three non-calls — and now says which is which.
+    assert "Callers of safe_null_result (0 direct, 3 other reference(s))" in r["result"]
     assert "codeintel.src.codeintel.gateway" in r["result"]
     assert "[USAGE]" in r["result"]
+    assert "Not calls" in r["result"]
 
 
 def test_callees_parses_columns_rows(monkeypatch):

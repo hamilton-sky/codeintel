@@ -192,3 +192,114 @@ def test_a_warming_language_server_is_reported_as_retryable_not_as_agreement():
     assert gap["reason"] == "warming"
     assert gap.get("retry_after_s")
     assert "had not finished booting" in env["result"]
+
+
+# --------------------------------------------------------------------------- #
+# relationship KIND, which is a different axis from confidence
+# --------------------------------------------------------------------------- #
+
+def _kinded(monkeypatch, rows, target="target"):
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        LIST_PROJECTS if method == "list_projects" else None))
+    monkeypatch.setattr(p, "_query_rows", lambda cypher, project, timeout_ms: list(rows))
+    return p.build_result("callers", target, [], 30000, ROOT)
+
+
+def _row(kind: str, i: int = 0) -> dict:
+    return {"a.name": f"c{i}", "a.qualified_name": f"pkg.c{i}", "a.file_path": f"src/c{i}.py",
+            "labels(a)": "Function", "type(c)": kind,
+            "b.name": "target", "b.qualified_name": "pkg.target", "b.file_path": "src/t.py"}
+
+
+def test_the_query_asks_for_the_relationship_that_records_a_callback(monkeypatch):
+    """The whole defect in one assertion. `set_forward_fn(app.forward_released_item)` is stored by
+    the backend as CALL_REFERENCE; codeintel matched `[:CALLS|USAGE]` only, so a method registered
+    at two real sites came back as having no callers — the reading that deletes live code."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    monkeypatch.setattr(p, "_run", lambda m, pay, t: LIST_PROJECTS if m == "list_projects" else None)
+    monkeypatch.setattr(p, "_query_rows",
+                        lambda cypher, project, t: (seen.append(cypher), [_row("CALLS")])[1])
+    p.build_result("callers", "target", [], 30000, ROOT)
+    assert seen and "CALL_REFERENCE" in seen[0], seen[0]
+
+
+def test_a_registration_is_not_counted_as_a_caller(monkeypatch):
+    env = _kinded(monkeypatch, [_row("CALL_REFERENCE", 0), _row("CALL_REFERENCE", 1)])
+    body = env["result"]
+    # The count that matters: zero things call it.
+    assert "(0 direct, 2 other reference(s))" in body, body
+    assert "[CALL_REFERENCE]" in body
+    assert "passed as a value or registered as a callback" in body
+    assert any(g["kind"] == "non-call-relationships" for g in env["gaps"]), env["gaps"]
+
+
+def test_calls_are_listed_before_the_rows_that_are_not_calls(monkeypatch):
+    """An agent reads top-down. The answer to the question asked goes first."""
+    body = _kinded(monkeypatch, [_row("CALL_REFERENCE", 0), _row("CALLS", 1)])["result"]
+    lines = [ln for ln in body.splitlines() if ln.startswith("- ")]
+    assert "[CALLS]" in lines[0] and "[CALL_REFERENCE]" in lines[1], lines
+
+
+def test_an_all_calls_answer_keeps_its_plain_count(monkeypatch):
+    """The counterweight: splitting a heading that has nothing to split is noise, and the common
+    case must read exactly as it did before."""
+    env = _kinded(monkeypatch, [_row("CALLS", 0), _row("CALLS", 1)])
+    assert "Callers of target (2)" in env["result"]
+    assert "Not calls" not in env["result"]
+    # No gaps at all — `attach_confidence` omits the key entirely when nothing is missing, which is
+    # the shape a fully-answered query has to keep.
+    assert env["confidence"] == "complete"
+    assert not any(g["kind"] == "non-call-relationships" for g in env.get("gaps", []))
+
+
+def test_no_edges_names_the_relationships_that_do_point_at_the_symbol(monkeypatch):
+    """"No callers" plus silence reads as "unused". Naming what DOES reference it is the difference
+    between an answer and a dead end."""
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    monkeypatch.setattr(p, "_run", lambda m, pay, t: LIST_PROJECTS if m == "list_projects" else None)
+
+    def rows(cypher, project, timeout_ms):
+        if "type(c) AS kind" in cypher:                       # the dependency census
+            return [{"kind": "DECORATES", "n": "3"}, {"kind": "DEFINES", "n": "1"},
+                    {"kind": "TESTS", "n": "2"}]
+        if "-[" not in cypher:                                # the node-existence probe
+            return [{"n.qualified_name": "pkg.route", "n.file_path": "src/api.py"}]
+        return []                                             # no CALLS/USAGE/CALL_REFERENCE
+    monkeypatch.setattr(p, "_query_rows", rows)
+
+    env = p.build_result("callers", "route", [], 30000, ROOT)
+    assert env["reason"] == "no-edges"
+    hint = env["hint"]
+    assert "3 DECORATES" in hint and "2 TESTS" in hint, hint
+    # Structural edges say where a symbol lives, not what depends on it.
+    assert "DEFINES" not in hint, hint
+
+
+def test_a_zero_count_is_never_rendered_as_a_relationship(monkeypatch):
+    """The backend names an unaliased aggregate column `COUNT(*)`, uppercased, so a lookup by the
+    written `count(*)` missed and every kind printed as "0 x KIND" — a fact invented by a parse
+    miss. The query is aliased now; this pins that a zero can never reach the text."""
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    monkeypatch.setattr(p, "_run", lambda m, pay, t: LIST_PROJECTS if m == "list_projects" else None)
+
+    def rows(cypher, project, timeout_ms):
+        if "type(c) AS kind" in cypher:
+            return [{"kind": "DATA_FLOWS", "n": "0"}, {"kind": "HANDLES"}]   # zero, and missing
+        if "-[" not in cypher:
+            return [{"n.qualified_name": "pkg.x", "n.file_path": "src/x.py"}]
+        return []
+    monkeypatch.setattr(p, "_query_rows", rows)
+
+    hint = p.build_result("callers", "x", [], 30000, ROOT)["hint"]
+    assert "0 DATA_FLOWS" not in hint, hint
+    assert "Other relationships DO point at it" not in hint, hint
