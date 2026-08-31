@@ -38,6 +38,9 @@ to `tests/test_never_raise.py`. If you must swallow an error, route it through
 3. Add a `CHANGELOG.md` entry under a new `Unreleased` section.
 4. Open the PR with a clear description of the behavior change and how you verified it.
 
+`main` is protected: changes land through a PR whose required CI checks are green. The exact
+rules — and which checks gate the merge — are in [docs/branch-protection.md](docs/branch-protection.md).
+
 ## Cutting a release
 
 Releases are cut by pushing a `vX.Y.Z` tag, which triggers the PyPI publish workflow (PyPI Trusted
@@ -50,7 +53,8 @@ below existed.
    section (the newest entry must equal `__version__`).
 2. `python scripts/check_release_consistency.py` — green, and it prints the exact tag command.
 3. Merge to `main` and wait for CI.
-4. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`. Tags matching `v*` are protected: the name must be
+   `vX.Y.Z`, and once pushed the tag cannot be moved or deleted — a publish is not reversible.
 5. Confirm the release actually landed: the publish workflow is green and the new version appears
    on [PyPI](https://pypi.org/project/codecortex/). The publish job re-runs the release canary
    against the built wheel, so a broken artifact fails here rather than on a user's machine.

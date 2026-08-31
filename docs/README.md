@@ -35,4 +35,7 @@ explain how the system is put together and how each piece behaves.
 - **"My agent doesn't see the tools."** → [install.md](install.md)
 - **"I have no MCP host."** → [map-file.md](map-file.md)
 
+Repository operations: **[branch-protection.md](branch-protection.md)** — the committed rulesets for
+`main` and the `v*` release tags, which CI checks gate a merge, and which two deliberately don't.
+
 See the top-level [README](../README.md) for install, CLI, config, and the agent HTTP snippet.
