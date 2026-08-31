@@ -117,6 +117,15 @@ Cost of this choice: layer granularity is `--depth`-dependent. See §7.
 
 ### 2.2 Ranking
 
+> **Phase 0 note — isolated elements.** Longest-path ranking assigns an element with no `IMPORTS`
+> edges the maximum depth, which places it in the BOTTOM layer — read by any reader as "the
+> foundation everything rests on". Measured on brightsky-ai, that put `frontend/vite.config`,
+> `eslint.config`, `backend/scripts` and `frontend/docs` — 18 of 29 elements, 62% — into the
+> foundation band. pathly-adapters had the same defect at 21 of 81 (25.9%). These elements are not
+> low-level; they are *unrelated*, and the ranking has no way to say so. Decide explicitly whether
+> inference excludes zero-degree elements from the layering, reports them as an `unassigned` set
+> beside it, or keeps them — but it must not keep silently calling them the foundation.
+
 ```
 1. Tarjan SCC over G                       →  components
 2. Condense: C = G / SCC                   →  always a DAG, by construction
@@ -825,6 +834,43 @@ labour the feature actually needs.
 It also means a *declared* layer violation will visibly bend the diagram rather than hide in it,
 because that is exactly the case where the edges disagree with the bands. That is a feature, and
 the violation view should not try to straighten it out.
+
+**Correction, from testing the above at real scale — the claim as first written was too strong.**
+The toy model that produced it had 4 elements and every element on an edge. Repeating it on two
+real repositories, with layers actually inferred from their own `IMPORTS` graphs:
+
+| repo | elements | import edges | isolated | density | band order |
+|---|---|---|---|---|---|
+| pathly-adapters | 81 | 99 | 21 (25.9%) | 1.22 | **correct** — L0…L5 top to bottom |
+| brightsky-ai | 29 | 22 | 18 (62.1%) | 0.76 | **WRONG** — L1 rendered above L0 |
+
+Both validated, both laid out, neither errored. The brightsky view simply came out with its top two
+bands swapped, silently.
+
+The cause is the Q1 finding biting for real: because `group` carries no rank, band order is
+*emergent* from the edges rather than *specified*. Where the import graph is dense enough to
+constrain the layout it emerges correctly; where it is sparse — brightsky is 62% isolated elements,
+mostly configs, scripts and docs with no imports at all — dot has nothing to constrain those nodes
+with and places the clusters wherever it likes.
+
+So the honest statement is: **layout supplies the order only when the graph is dense enough to
+force it, and nothing detects when it hasn't.** A silently mis-ordered layer diagram is worse than
+no diagram, because the whole claim of the view is that vertical position means something.
+
+**This lands on Phase 3, and option A does not escape it** — tags plus enumeration have no more
+ranking power than `group` does. Phase 3 must therefore pick one of:
+
+1. **Synthetic ordering edges** between one representative per band, styled invisible, purely to
+   give dot the rank constraint it is missing. Most likely to work; needs a probe of its own to
+   confirm LikeC4 permits an invisible relation.
+2. **Verify and report.** Emit the view, read back the exported band coordinates, and warn when the
+   rendered order disagrees with the computed ranks. Cheap, honest, and does not fix the picture.
+3. **Drop isolated elements from the layer view entirely.** They are not part of the dependency
+   structure and are the direct cause here — 62% of brightsky's elements carry no import at all.
+   This is worth doing on its own merits (see the note in §2.2 below) and may be sufficient alone.
+
+Option 3 is the one to try first: it is the smallest change, it addresses the measured cause rather
+than the symptom, and it improves the view even where ordering already works.
 
 **Probe (b) results — element-level `IMPORTS` cycle survey, four indexed repos.**
 
