@@ -1,5 +1,13 @@
 # Semantic engine roadmap
 
+> **Status: both phases shipped.** This reads as a forward plan and is no longer one. Phase 1
+> (syntax-aware chunking) is the **default** — `chunk_strategy = "syntax"` in `config.py`, with
+> `"lines"` kept as the escape hatch. Phase 2 (hybrid reranking) is `Searcher._rerank`, on by
+> default. Kept for the reasoning behind both, and for the "explicitly out of scope" decision, which
+> still holds. Details in it have drifted from the code — it specifies `rerank_candidates` default 30
+> where the shipped default is 60 — so where it disagrees with [semantic.md](semantic.md) or the
+> source, they win.
+
 The **semantic** engine is the only fully in-house engine (graph and LSP wrap external backends).
 It's a competent MVP — fixed line-window chunking + `bge-small` cosine KNN + a floor — so it's also
 where owning more of the intelligence pays off most. This doc sequences two increments that raise
