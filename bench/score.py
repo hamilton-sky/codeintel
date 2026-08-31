@@ -23,6 +23,13 @@ would hide that:
 `safe_to_delete` is reported as its own count: how often an engine returns NOTHING for a symbol that
 truth says has callers. It is the single most consequential error an engine of this kind can make,
 and averaging it into precision would bury it.
+
+Scoring is restricted to sites the oracle was willing to judge, which now includes the ones it judged
+to be NOT the target. That third population is load-bearing. While truth held only positives, a
+claimed caller on an unjudged site was dropped rather than charged, so the fabrication failure mode —
+matching a bare name across files that never import the symbol — cost an engine exactly nothing.
+Every arm scored 100% precision against 32 invented callers, because the symbol left the population
+altogether. Proven negatives are what turn that back into a measurement.
 """
 from __future__ import annotations
 
@@ -233,8 +240,11 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel") -> No
         qn = target_from_definition(root, def_file, symbol)
         t: Truth = truth_for(root, qn)
         covered.append(t.coverage)
-        # Decidable population, and the two truths drawn from it.
-        decidable = t.calls | t.references | t.imports
+        # Decidable population, and the two truths drawn from it. `negatives` are sites the oracle
+        # proved are NOT the target; including them is what lets a fabricated caller cost an engine
+        # anything. Without them a claim on such a site was silently dropped, and the failure this
+        # project has seen at its worst — 32 invented callers for `describe` — scored 100%.
+        decidable = t.calls | t.references | t.imports | t.negatives
         true_calls = t.calls
         true_impact = t.calls | t.references        # an import alone does not break when a body moves
 
@@ -246,7 +256,8 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel") -> No
             impact[a].add(got[a].everything, true_impact, decidable, got[a].unavailable)
 
         print(f"  {symbol:<34} truth: {len(true_calls)} call(s), "
-              f"{len(t.references)} ref(s), coverage {t.coverage:.0%}"
+              f"{len(t.references)} ref(s), {len(t.negatives)} proven non-caller(s), "
+              f"coverage {t.coverage:.0%}"
               + (f"  [oracle abstained on {len(t.undecidable)}]" if t.undecidable else ""))
         for a in arms:
             if got[a].unavailable:

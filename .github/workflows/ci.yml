@@ -46,7 +46,11 @@ jobs:
         run: pip install -e .[dev]
 
       - name: ruff
-        run: ruff check src tests
+        # `bench` is included: it holds the oracle every accuracy claim in this project is scored
+        # against, and it was linted by nothing. Its fixture corpus is deliberately full of
+        # findings — an unused import, a star import, an undefined name — because those ARE the
+        # cases under test, so pyproject ignores that directory as a group.
+        run: ruff check src tests bench
 
   types:
     name: Types (mypy)

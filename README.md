@@ -609,7 +609,7 @@ cd codeintel
 pip install -e .[dev]
 
 pytest tests/ -q            # ~740 tests, ~30s; fails under 83% coverage
-ruff check src tests        # lint
+ruff check src tests bench  # lint
 mypy                        # types (src/ only)
 ```
 

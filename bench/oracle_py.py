@@ -25,18 +25,37 @@ under test kept getting wrong:
     reference    the bound name appears, but not as a callee: passed  -> CALL_REFERENCE / USAGE
                  as an argument, assigned, decorated with, annotated
     import       the binding site itself                              -> not a caller at all
+    not-target   the name appears, but this file's own syntax binds   -> a claimed caller here
+                 it to something else                                    is a FABRICATION
     undecidable  the site mentions the name but the syntax does not
                  settle what it binds to                             -> excluded from scoring
+
+Why `not-target` exists, and why abstention alone was not enough. Scoring restricts every engine's
+claim to the sites this oracle decided, so a site labelled `undecidable` costs an engine nothing to
+claim. That is correct for `self.thing.run()` — but the first version of this file also filed the
+*bare name that nothing binds* under `undecidable`, and that is the exact shape of this project's
+worst observed failure: 32 fabricated callers for `describe`, a name matched across files that never
+imported it. Measured under the old labels, those 32 rows cost precisely nothing, and the symbol
+dropped out of the table entirely (coverage 0%, decidable population empty).
+
+So a NEGATIVE has to be decidable too, or the benchmark is blind in exactly the direction that
+matters. The rule is conservative, and deliberately narrower than "not imported here": a bare name is
+labelled `not-target` only when the file's own syntax ACCOUNTS for it — a parameter, an assignment, a
+`def`/`class` in scope, an import of something else, or a builtin. Then it provably denotes that
+other binding. A name nothing in the file accounts for is a true injected global, which in Python
+could conceivably have been installed by another module, so it stays `undecidable`.
 """
 from __future__ import annotations
 
 import ast
+import builtins
 import os
 from dataclasses import dataclass, field
 
 CALL = "call"
 REFERENCE = "reference"
 IMPORT = "import"
+NOT_TARGET = "not-target"
 UNDECIDABLE = "undecidable"
 
 _SKIP_DIRS = frozenset({
@@ -257,6 +276,100 @@ def _enclosing_map(tree: ast.AST) -> dict[int, str]:
     return out
 
 
+_MODULE_SCOPE_KEY = "<module>"
+
+
+def _scope_binds(tree: ast.AST) -> dict[str, set[str]]:
+    """`scope path -> names that scope binds`, keyed the same way `_enclosing_map` names a line.
+
+    This is what makes a NEGATIVE decidable. To say "the `describe` on line 40 is not the target" you
+    have to show what it IS, and that means knowing which names this file's own syntax binds where.
+    Every binding form Python has at statement level is collected; a name reached through none of
+    them is a global the file does not explain, and the caller abstains on it.
+
+    Scope paths match `_enclosing_map` exactly — including its choice to attribute a lambda or a
+    comprehension to the function containing it rather than to a scope of its own. That is not how
+    Python resolves names, and it is still the right key here, because of where this table is
+    consulted: only for a name the binder has already established this file does NOT bind to the
+    target. So the imprecision can move a site between `not-target` and `undecidable` — never onto a
+    positive, and never into a charge against an engine that was right.
+    """
+    binds: dict[str, set[str]] = {}
+
+    def add(path: str, name: str) -> None:
+        binds.setdefault(path, set()).add(name)
+
+    def path_of(parts: list[str]) -> str:
+        return ".".join(parts) if parts else _MODULE_SCOPE_KEY
+
+    def bind_target(path: str, node: ast.AST | None) -> None:
+        """Every `Name` in an assignment/loop/with/except target, tuples and stars included."""
+        if node is None:
+            return
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name):
+                add(path, n.id)
+
+    def bind_args(path: str, args: ast.arguments) -> None:
+        for a in (*args.posonlyargs, *args.args, *args.kwonlyargs,
+                  args.vararg, args.kwarg):
+            if a is not None:
+                add(path, a.arg)
+
+    def walk(node: ast.AST, parts: list[str]) -> None:
+        here = path_of(parts)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                add(here, child.name)                     # the def binds its name in THIS scope
+                inner = [*parts, child.name]
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    bind_args(path_of(inner), child.args)
+                walk(child, inner)
+                continue
+            if isinstance(child, ast.Lambda):
+                bind_args(here, child.args)               # attributed to the enclosing function
+            elif isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for t in (child.targets if isinstance(child, ast.Assign) else [child.target]):
+                    bind_target(here, t)
+            elif isinstance(child, (ast.NamedExpr, ast.For, ast.AsyncFor)):
+                bind_target(here, child.target)
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    bind_target(here, item.optional_vars)
+            elif isinstance(child, ast.ExceptHandler) and child.name:
+                add(here, child.name)
+            elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                for alias in child.names:
+                    if alias.name != "*":
+                        add(here, alias.asname or alias.name.split(".")[0])
+            elif isinstance(child, (ast.Global, ast.Nonlocal)):
+                for name in child.names:
+                    add(here, name)
+            elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                for gen in child.generators:
+                    bind_target(here, gen.target)
+            walk(child, parts)
+
+    walk(tree, [])
+    return binds
+
+
+def _accounted_by(name: str, scope: str, binds: dict[str, set[str]]) -> str | None:
+    """Where *name* is bound, looking outward from *scope*. None when the file never binds it.
+
+    `None` is the abstention case, not the negative case: a name this file does not bind is a global
+    it does not explain, and Python lets another module install one.
+    """
+    parts = [] if scope == _MODULE_SCOPE_KEY else scope.split(".")
+    while True:
+        key = ".".join(parts) if parts else _MODULE_SCOPE_KEY
+        if name in binds.get(key, frozenset()):
+            return key
+        if not parts:
+            return None
+        parts.pop()
+
+
 def _callee_name(func: ast.expr, binder: _Binder) -> tuple[bool, str]:
     """Whether this Call's callee provably IS the target, and the evidence for saying so."""
     if isinstance(func, ast.Name):
@@ -293,6 +406,7 @@ def label_file(path: str, root: str, target: str,
     binder.visit(tree)
     rel = os.path.relpath(path, root)
     enclosing = _enclosing_map(tree)
+    scopes = _scope_binds(tree)
 
     def where(ln: int) -> str:
         return enclosing.get(ln, "<module>")
@@ -331,9 +445,25 @@ def label_file(path: str, root: str, target: str,
                     Site(rel, ln, where(ln), REFERENCE,
                          "bound name used without calling it (passed, assigned, or annotated)"))
             else:
-                verdict.sites.append(
-                    Site(rel, ln, where(ln), UNDECIDABLE,
-                         "bare name matches but nothing in this file binds it to the target"))
+                # Nothing here binds the name to the TARGET. That is not yet a negative: it is one
+                # only if the file says what the name is instead. `describe(...)` in a file that
+                # imports no `describe` and declares none is an injected global, and Python permits
+                # another module to have installed the target itself under that name.
+                bound_at = _accounted_by(tname, where(ln), scopes)
+                if bound_at is not None:
+                    verdict.sites.append(
+                        Site(rel, ln, where(ln), NOT_TARGET,
+                             f"a different `{tname}` — bound by "
+                             + ("this module" if bound_at == _MODULE_SCOPE_KEY
+                                else f"`{bound_at}`")))
+                elif hasattr(builtins, tname):
+                    verdict.sites.append(
+                        Site(rel, ln, where(ln), NOT_TARGET, f"the builtin `{tname}`"))
+                else:
+                    verdict.sites.append(
+                        Site(rel, ln, where(ln), UNDECIDABLE,
+                             "bare name matches, and nothing in this file binds it at all — "
+                             "an injected global, which the syntax cannot resolve either way"))
 
     # An attribute access spelled `<something>.<target name>` where the receiver is not a known
     # module alias — `self.handler.run()`, `obj.run` — is the single largest undecidable class, and
@@ -359,13 +489,17 @@ class Truth:
     calls: set[tuple[str, str]] = field(default_factory=set)
     references: set[tuple[str, str]] = field(default_factory=set)
     imports: set[tuple[str, str]] = field(default_factory=set)
+    # Sites that provably do NOT denote the target. Scored, and the reason this benchmark can
+    # charge a fabricated caller anything at all.
+    negatives: set[tuple[str, str]] = field(default_factory=set)
     undecidable: set[tuple[str, str]] = field(default_factory=set)
     sites: list[Site] = field(default_factory=list)
     parse_failures: int = 0
 
     @property
     def decided(self) -> int:
-        return len(self.calls) + len(self.references) + len(self.imports)
+        return (len(self.calls) + len(self.references) + len(self.imports)
+                + len(self.negatives))
 
     @property
     def coverage(self) -> float:
@@ -396,12 +530,17 @@ def truth_for(root: str, target: str, files: list[str] | None = None) -> Truth:
             continue
         for s in v.sites:
             t.sites.append(s)
-            bucket = {CALL: t.calls, REFERENCE: t.references,
-                      IMPORT: t.imports, UNDECIDABLE: t.undecidable}[s.kind]
+            bucket = {CALL: t.calls, REFERENCE: t.references, IMPORT: t.imports,
+                      NOT_TARGET: t.negatives, UNDECIDABLE: t.undecidable}[s.kind]
             bucket.add(s.key())
     # A site both called and merely referenced from the same enclosing symbol is a CALLER; the
     # weaker label would otherwise mask the stronger one during scoring.
     t.references -= t.calls
     t.imports -= t.calls | t.references
     t.undecidable -= t.calls | t.references | t.imports
+    # UNDECIDABLE outranks NOT_TARGET, and the order matters more than it looks. A function that
+    # both uses an unrelated `run` and calls `self.thing.run()` has one readable site and one
+    # unreadable one; calling that key a proven negative would charge an engine a false positive
+    # for a claim that might be correct. A key is only a negative when NOTHING in it is in doubt.
+    t.negatives -= t.calls | t.references | t.imports | t.undecidable
     return t

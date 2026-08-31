@@ -100,6 +100,17 @@ ignore = [
 # manager is a bad trade in code whose whole contract is degrading quietly.
 
 [tool.ruff.lint.per-file-ignores]
+# The oracle's fixture corpus is a micro-repository whose SOURCE is the test input. Every finding
+# ruff has here is the property under test: an import that is never used is the `IMPORT` case, a
+# star import is the abstention case, an undefined name is the injected-global case. Fixing them
+# would delete the fixtures. They are ignored as a group rather than with inline `noqa`s, so the
+# corpus keeps looking like the ordinary code it is standing in for.
+"bench/fixtures/corpus/**" = [
+    "F401",     # imported and never used -> `imports_only.py`, and both re-export links
+    "F403",     # `import *` -> the star-import abstention
+    "F405",     # name may be undefined from a star import -> the same file
+    "F821",     # undefined name -> `injected.py`, the `describe` shape
+]
 # Tests stand up fake servers on loopback, assert on hardcoded fixture tokens, and shell out to
 # the CLI under test. Flagging that as a security finding is noise.
 "tests/*" = [

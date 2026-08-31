@@ -13,14 +13,28 @@ is to choose between engines rather than to produce a flattering headline.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 
 from score import run
 
-PATHLY = "/Users/shammaihamilton/Documents/project/pathly-adapters"
-SNITCH = "/Users/shammaihamilton/Documents/snitch-simulator"
+# Repository locations are read from the environment, with the author's own paths as the default.
+# They were hardcoded, which made the one artifact that turns this project's accuracy arguments into
+# arithmetic runnable on exactly one machine — so nobody else could reproduce a number, and nobody
+# could re-run the table after a backend release to see whether it had moved.
+#
+#     CODEINTEL_BENCH_PATHLY=~/src/pathly-adapters python bench/run.py pathly-adapters
+#
+# `bench/fixtures/corpus` needs none of this: it is checked in, and `tests/test_bench_oracle.py`
+# pins the oracle against it on every CI run.
+PATHLY = os.path.expanduser(
+    os.environ.get("CODEINTEL_BENCH_PATHLY",
+                   "/Users/shammaihamilton/Documents/project/pathly-adapters"))
+SNITCH = os.path.expanduser(
+    os.environ.get("CODEINTEL_BENCH_SNITCH",
+                   "/Users/shammaihamilton/Documents/snitch-simulator"))
 
 # (file where it is DEFINED, symbol) — never a dotted string, because `src.pkg.mod.f` and
 # `pkg.mod.f` name the same function and only one of them appears in any import statement. The
@@ -70,6 +84,14 @@ def main() -> int:
         print(f"unknown repo '{key}'; known: {', '.join(REPOS)}")
         return 2
     root, targets = REPOS[key]
+    if not os.path.isdir(root):
+        # Say so, rather than scoring every arm against an empty repository. A silent run of zeros
+        # is the failure mode this benchmark keeps finding in the tools it measures.
+        env = "CODEINTEL_BENCH_PATHLY" if key == "pathly-adapters" else "CODEINTEL_BENCH_SNITCH"
+        print(f"'{key}' is not checked out at {root}.\n"
+              f"Point {env} at your clone, or run the checked-in corpus instead:\n"
+              f"    pytest tests/test_bench_oracle.py")
+        return 2
     run(root, targets)
     return 0
 
