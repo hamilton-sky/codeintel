@@ -6,6 +6,22 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Internal
+- **`main` and the `v*` release tags are protected, and the configuration is committed** rather than
+  living only in whoever clicked the toggles — two importable rulesets in `.github/rulesets/` plus
+  [docs/branch-protection.md](docs/branch-protection.md), which records the two non-obvious choices:
+  required approvals is 0 (GitHub does not let you approve your own PR, so any higher count means
+  every merge on a single-maintainer repo needs a bypass), and the two `continue-on-error` contract
+  jobs are *not* required checks (they fetch serena from a git HEAD and LikeC4 from npm, so gating
+  on them would turn an upstream outage into an unmergeable `main` — the exact failure those jobs
+  were written to avoid). The tag rules matter more than the branch rules: `publish.yml` fires on
+  `v*` and a PyPI upload cannot be undone, so `v*` tags are now undeletable, unmovable, and must
+  match `vX.Y.Z` — `v0.22` previously started a real publish run before failing inside it.
+- **CI no longer runs twice per pull request.** `ci.yml` triggered on a bare `on: push:`, so every
+  PR ran all 11 job runs for the branch push and again for the `pull_request` event. `push` is now
+  limited to `main`. The trade is that a branch pushed without a PR gets no CI, so open the PR early
+  — a draft triggers the same checks.
+
 ## [0.22.0] — 2026-08-31
 
 ### Fixed

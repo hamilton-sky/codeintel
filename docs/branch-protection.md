@@ -12,19 +12,34 @@ clicked.
 - [`.github/rulesets/main.json`](../.github/rulesets/main.json) — the `main` branch
 - [`.github/rulesets/release-tags.json`](../.github/rulesets/release-tags.json) — `v*` tags
 
-## Apply them
+## What you actually have to do
 
-**Settings → Rules → Rulesets → New ruleset → Import a ruleset**, then upload each file. Review
-what the form shows and **Create**. Repeat for the second file.
+Five steps, all in the GitHub UI, roughly five minutes. Nothing here happens by merging a PR.
+
+- [ ] **Import the branch ruleset.** Settings → Rules → Rulesets → New ruleset → *Import a ruleset*
+      → `main.json` → Create.
+- [ ] **Import the tag ruleset.** Same path, `release-tags.json`.
+- [ ] **Gate the `pypi` environment.** Settings → Environments → `pypi` → add yourself under
+      *Required reviewers*, and set *Deployment branches and tags* to the tag pattern `v*`.
+- [ ] **Lock down Actions.** Settings → Actions → General → *Workflow permissions* = **Read
+      repository contents and packages**; *Fork pull request workflows* → require approval for
+      **all external contributors**.
+- [ ] **Prove it.** `git commit --allow-empty -m x && git push origin main` — expect a rejection.
+      Then `git reset --hard origin/main` to drop the local commit.
+
+The rest of this document is why each of those is set the way it is, and what to change when the
+project stops having exactly one maintainer.
+
+## Two notes on the import
 
 Rulesets are free on public repositories (this one is public). On a *private* repo they need Pro or
-Team — that is the only plan gate that applies.
+Team — that is the only plan gate that applies here.
 
 Both files ship with an **empty bypass list**, which means the rules apply to you too. If you want
-to keep an escape hatch, add one in the UI after import: *Bypass list → Add bypass → Repository
-admin*, and set it to **Always** (bypasses silently) or **For pull requests only** (must still open
-a PR, but can merge it without the checks). Adding it in the UI rather than in JSON avoids pinning
-a numeric role ID in a file that nobody will re-check.
+an escape hatch, add one in the UI after importing: *Bypass list → Add bypass → Repository admin*,
+set to **Always** (bypasses silently) or **For pull requests only** (must still open a PR, but can
+merge it without waiting on the checks). Adding it in the UI rather than in the JSON avoids pinning
+a numeric role ID into a file nobody will ever re-check.
 
 ## What `main.json` does, and why each rule is there
 
@@ -76,9 +91,11 @@ jobs after every merge into `main`. With one maintainer merging serially, the se
 guards against — two PRs that are each green alone but broken together — is small, and the cost is
 a full re-run per merge. Turn it on if concurrent PRs become normal.
 
-> **Related CI cost.** `ci.yml` triggers on a bare `on: push:` with no branch filter, so once you
-> are pushing feature branches for every change, each one runs the full matrix twice: once for the
-> push, once for the `pull_request`. Narrowing the push trigger to `main` (and tags) halves it.
+> **Related CI cost.** `ci.yml` used to trigger on a bare `on: push:`, which ran all 11 job runs
+> twice per pull request — once for the branch push, once for the `pull_request` event. Its `push`
+> trigger is now limited to `main`, so a PR gets one run and a merge gets one. The consequence to
+> know: **a branch pushed without a PR gets no CI at all.** Open the PR early; a draft triggers the
+> same checks.
 
 ## What `release-tags.json` does
 

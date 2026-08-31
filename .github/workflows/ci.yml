@@ -1,7 +1,24 @@
 name: CI
 
+# `push` is limited to `main`; every other branch is covered by `pull_request`. A bare `on: push:`
+# ran this whole file TWICE for every pull request — once for the push that updated the branch, once
+# for the `pull_request` event — turning 11 job runs into 22 per change, with the two sets
+# indistinguishable in the Checks tab. Now that `main` is protected and changes arrive through a PR,
+# the push run on a feature branch is the redundant one: the `pull_request` run tests the same commit
+# against the same matrix, and it is the run whose job names the required-status-check list in
+# `.github/rulesets/main.json` is written against.
+#
+# `main` itself is kept, because a squash merge produces a commit that has never existed on the
+# branch CI just tested, and that commit is what a release tag points at. Tags are deliberately NOT
+# listed: `publish.yml` already runs the version check, the build and the release canary on `v*`, and
+# duplicating them here would double the slowest work at the moment it matters most.
+#
+# The trade: a branch pushed WITHOUT a pull request now gets no CI at all. Open the PR early — a
+# draft is enough, it triggers the same checks — rather than pushing for an hour and assuming the
+# gates have been running.
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
