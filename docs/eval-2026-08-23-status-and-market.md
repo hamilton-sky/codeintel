@@ -2,6 +2,21 @@
 
 > **Status: historical record.** A point-in-time snapshot, kept because the reasoning is worth having and correcting it would falsify the record. Numbers and version claims below were true when written and are NOT current — codeintel is at 0.22.0. Where it disagrees with a reference doc, the reference doc wins.
 >
+> **What became of the two defects in §2.**
+>
+> * **D1 — redaction corrupting answers under `HOME=/root`: fixed.** Both substitutions are now
+>   boundary-anchored, so `/rootfs/etc/config.py` survives intact, and `_flattened_home` refuses to
+>   redact a *single-segment* home at all — flattened, `/root` is a bare English word, and replacing
+>   it rewrote ordinary prose ("root cause analysis" → "`<home>` cause analysis"). `tests/test_redaction_boundary.py` pins both. The report's other suggestion — exempting `reason` outright — was not
+>   taken and is no longer needed, since anchoring stops a reason code from matching.
+> * **D2 — `no-index` sitting outside the could-not-ask family: still open.** `no-index` is still
+>   not in `_COULD_NOT_ASK`, so an agent can still read "this project was never indexed" as a real
+>   negative about the code. This is the finding in §2 that has not moved.
+>
+> The three source references in §6 have drifted with the code and no longer point at what they
+> named — `semantic.py:158` and `gateway.py:181` in particular. Grep for the symbols rather than
+> trusting the line numbers.
+>
 > Superseded in two ways worth naming: the graph backend's guessed-edge problem described here is now **disclosed** rather than silent (see [graph.md](graph.md#relationship-kind-and-how-an-edge-was-resolved)), and it is **measured** rather than argued about (see [../bench/README.md](../bench/README.md)).
 
 **Subject:** codeintel / `codecortex` 0.15.5 (released 2026-08-19)

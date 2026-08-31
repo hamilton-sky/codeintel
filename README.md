@@ -24,7 +24,7 @@ Prefer plain text? `codeintel map` writes a **readable architecture overview** t
 
 **What `CODE_INTEL.md` is for.** It's a *static, committable* snapshot of a codebase's shape — meant to be read (by a person or an agent) **first**, instead of reconstructing structure by grepping. It covers the cases the live `code.query` tool doesn't:
 
-- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a short, tool-naming pointer block into `AGENTS.md` (the cross-tool surface read by Codex, Cursor, Zed, and others — created with your consent if it doesn't exist yet) plus a one-line `@AGENTS.md` import into `CLAUDE.md`, and writes the fuller [`USING_CODEINTEL.md`](USING_CODEINTEL.md) guide the block points to — so an agent knows to reach for `code.query` before it reaches for grep, not just that a `CODE_INTEL.md` exists.
+- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a short, tool-naming pointer block into `AGENTS.md` (the cross-tool surface read by Codex, Cursor, Zed, and others — created with your consent if it doesn't exist yet) plus a one-line `@AGENTS.md` import into `CLAUDE.md`, and writes the fuller `USING_CODEINTEL.md` guide the block points to — into **your** repo, which is why there is no such file to click here — so an agent knows to reach for `code.query` before it reaches for grep, not just that a `CODE_INTEL.md` exists.
 - **A committed, diffable overview.** It lives *in the repo* — reviewable in a PR, browsable on GitHub, available offline. Re-run `codeintel map` after `codeintel index` to refresh it.
 - **The load-bearing code at a glance.** Ranking symbols by caller count surfaces what most of the codebase depends on (the risky-to-change core) plus the entry points — the first things a newcomer, or an agent, should understand before touching anything.
 
@@ -609,7 +609,7 @@ cd codeintel
 pip install -e .[dev]
 
 pytest tests/ -q            # ~740 tests, ~30s; fails under 83% coverage
-ruff check src tests        # lint
+ruff check src tests bench  # lint
 mypy                        # types (src/ only)
 ```
 

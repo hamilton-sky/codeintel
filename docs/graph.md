@@ -165,7 +165,10 @@ for comparison. It is the difference between `callers describe` returning 32 fab
 `confidence: "complete"` and returning them badged, counted, and next to the one real caller the
 graph could not bind.
 
-Measured accuracy for these answers is in [../bench/README.md](../bench/README.md).
+Measured accuracy for these answers is in [../bench/README.md](../bench/README.md) — with the
+caveat that its numbers are **Python**. The `describe` failure above is TypeScript, and while a
+TypeScript arm now exists, it has not been pointed at a real TypeScript repository, so no
+measurement in that table speaks to the case this section describes.
 
 ### The repo-scan ops
 

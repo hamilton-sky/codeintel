@@ -1,6 +1,17 @@
 # codeintel — fix architecture after eval-2026-08-17
 
 > **Status: historical record.** A point-in-time snapshot, kept because the reasoning is worth having and correcting it would falsify the record. Numbers and version claims below were true when written and are NOT current — codeintel is at 0.22.0. Where it disagrees with a reference doc, the reference doc wins.
+>
+> **What became of the core design.** §2 proposes three modules. One shipped and two did not:
+>
+> | Proposed | Status |
+> |---|---|
+> | `outcome.py` — a typed result for every internal seam that returned `X \| None` | **Shipped**, and it is load-bearing. Its docstring carries this evaluation's own worst bug as the rationale: a cold language server timed out, `_call_tool` returned `None`, and four conversions later the caller rendered `## References (none)` — a confident false statement byte-identical to a true one. |
+> | `answer.py` | **Not built.** |
+> | `envelope.py` — "the only constructor of `Result` in the codebase" | **Not built.** Envelope construction is still distributed. |
+>
+> So the diagnosis in §1 was adopted and the single-constructor consolidation was not. Read §2 as
+> the reasoning behind `outcome.py`, not as a description of the tree.
 
 Read: the eval doc, and `src/codeintel/{gateway,provider,cache,containment,reindexer,indexer,searcher,semantic_db,server,reset,doctor,source_kind}.py`,
 `src/codeintel/providers/{graph,lsp,semantic}.py`, `src/codeintel/commands/{query,index,_common,reset}.py`,
