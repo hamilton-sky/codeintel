@@ -541,21 +541,27 @@ def test_an_all_prose_answer_says_no_code_matched():
     assert "NOT evidence" in body
 
 
-def test_the_home_path_is_redacted_in_its_flattened_form_too():
+def test_the_home_path_is_redacted_in_its_flattened_form_too(monkeypatch):
     """The graph backend's project id for a path-slug registration IS the flattened absolute path —
     separators turned into dashes. Redaction matched only the slash form, so it passed straight
     through, and on a Go repository (flat qualified names, so the project prefix was not stripped
     either) every result row carried the username mid-identifier. Two independent defences both
-    missed the same leak, which is the argument for keeping both."""
-    import os
+    missed the same leak, which is the argument for keeping both.
 
-    from codeintel.redact import contains_home_path, redact_text
+    The home is monkeypatched rather than read from the environment, for the reason the test below
+    gives in its own docstring: the host stops deciding what gets verified. Reading the ambient
+    `HOME` made this test assert the OPPOSITE of `tests/test_redaction_boundary.py` whenever it ran
+    under `HOME=/root` — a single-segment home flattens to a bare English word, which
+    `_flattened_home` now declines to redact on purpose, so the detector correctly returns False and
+    this assertion correctly failed. Two tests in one suite disagreeing, with the machine casting
+    the deciding vote, is not coverage. `/root` is the routine container and CI case, so the
+    disagreement showed up exactly where the project most needs its suite to be trustworthy."""
+    import codeintel.redact as r
 
-    home = os.path.expanduser("~")
-    flat = home.strip("/").replace("/", "-")
-    leaky = f"private-tmp-{flat}-scratch-cobra.Execute"
-    assert contains_home_path(leaky), "the detector cannot see the form that leaked"
-    assert not contains_home_path(redact_text(leaky))
+    monkeypatch.setattr(r, "_home", lambda: "/Users/alice")
+    leaky = "private-tmp-Users-alice-scratch-cobra.Execute"
+    assert r.contains_home_path(leaky), "the detector cannot see the form that leaked"
+    assert not r.contains_home_path(r.redact_text(leaky))
 
 
 def test_a_flat_namespace_qualified_name_still_gets_its_project_prefix_stripped():

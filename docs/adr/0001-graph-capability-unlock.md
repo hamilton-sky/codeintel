@@ -1,6 +1,12 @@
 # ADR 0001 — Graph Capability Unlock
 
-> **Status: accepted, and partly superseded.** The decision stands. Two details in it no longer describe the code: `deadcode` was later **retired** after a labelled corpus measured its precision at 25%, and `chain`'s hop `risk` labels were replaced by resolution **evidence** (`risk` restated hop distance, which every row already prints). See [../graph.md](../graph.md).
+> **Status: accepted, and partly superseded.** The decision — discrete curated ops over a generic passthrough — stands, and Option A is what the code does. Three details in it no longer describe the code:
+>
+> * **`deadcode` was retired.** The ADR shipped it; a labelled corpus later measured it at **25% precision as shipped**, and at **zero true positives on real code** once the planted canaries were removed. The op name survives only to explain itself, returning `reason: "op-withdrawn"`. `callers` on a specific symbol answers the same question accurately and is the documented substitute.
+> * **`hotspots` was withdrawn too, and then reinstated.** Not in the ADR at all, because it happened after. Its rankings came back 100% `.tsx` on two repositories that are two-thirds Python — caused by two request bugs, not a missing metric: it asked only for `Function` nodes (hiding 2,381 methods on one repo) and capped candidates at 200 rows in *name* order, so the client-side sort ranked an alphabetical 4% slice. Both fixed and pinned by `test_hotspots_ranks_across_languages`.
+> * **`chain`'s hop `risk` labels became resolution evidence.** `risk` restated hop distance, which every row already prints.
+>
+> The "Neutral" note below calls `Method`-node coverage a documented follow-up. It shipped — as the fix that reinstated `hotspots`. See [../graph.md](../graph.md).
 
 **Status:** Accepted — shipped in v0.9.0
 **Date:** 2026-08-14
@@ -165,21 +171,23 @@ no current equivalent. Rejected.
 
 ---
 
-## Action Items
+## Outcome
 
-1. **graph.py** — add `_op_changed`, `_op_deadcode`, `_op_hotspots`; add a private
-   `_search_symbols` helper (calls `search_graph`, returns `Optional[list[dict]]`:
-   `None` on backend failure/malformed, else the possibly-empty parsed list). Wire all
-   three into `_dispatch`. Add `risk_labels:true` to `_op_chain`'s payload and render the
-   `risk` badge. Add `_looks_like_test` / `_is_synthetic` filter helpers.
-2. **gateway.py** — add `_UNCACHED_OPS = frozenset({"changed"})` and skip the cache
-   get/put for those ops. (Optional: add the three ops to `_AUTO_ENGINE` for explicitness;
-   not required — default is `graph`.)
-3. **server.py** — extend the `code.query` tool description to enumerate the new ops
-   (flag that `changed` needs no `target`); add one clause to `_MCP_INSTRUCTIONS`
-   surfacing `changed` as a pre-edit check.
-4. **tests/** — add captured-real-shape fixtures (`search_graph`, `detect_changes`,
-   `trace_path` risk) and op-level + never-raise + caching tests; extend the live
-   (skip-if-absent) test.
-5. **docs/graph.md** — add the new rows to the ops table, note `chain`'s risk badge,
-   update the "six ops" wording.
+The action items this ADR carried were completed in v0.9.0; what follows is where each landed and
+what has happened to it since, which is the part still worth reading.
+
+| Planned | Where it is now |
+|---|---|
+| `_op_changed` | `providers/graph.py`. Shipped and live. |
+| `_op_hotspots` | `providers/graph.py`. Shipped, later withdrawn, **reinstated** once it asked for `Method` nodes and stopped ranking an alphabetical slice. |
+| `_op_deadcode` | **Gone.** The implementation was removed; `"deadcode"` remains in `_GRAPH_OPS` and `_ROOT_SCOPED_OPS` only so the name still explains itself and cannot be silently un-scoped if something later takes it. |
+| `_search_symbols` helper | `providers/graph.py`. Shipped, and still shared. |
+| `_UNCACHED_OPS` in `gateway.py` | Shipped — and grown to `frozenset({"changed", "changes"})`, the ADR having specified only `changed`. |
+| `chain` + `risk_labels:true` | Shipped, then replaced: hops carry resolution **evidence**, not a risk badge. |
+| Tool description, tests, `docs/graph.md` | All done. `graph.md` is the current reference and wins wherever it disagrees with this record. |
+
+One consequence the ADR predicted correctly is worth naming, because it is the reason two of these
+ops did not survive contact: it listed "renderers must carry a little domain logic … client-side
+test/builtin filtering, client-side sort for hotspots because `search_graph` does not sort" under
+**cost**. That client-side sort over an unsorted, capped candidate list is exactly what made
+`hotspots` rank an alphabetical 4% slice. The cost was real and was priced too low.

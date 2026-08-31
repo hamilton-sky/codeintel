@@ -1,6 +1,8 @@
 # Benchmarks
 
-> **Scope: the semantic engine only.** For **call-edge accuracy** — precision and recall of `callers`/`impact` against labelled ground truth, per question, across engines — see [../bench/README.md](../bench/README.md), which is a different measurement with a different method. The `codeintel` version stamped below refers to when these semantic numbers were taken, not to the current release (0.22.0).
+> **Scope: the semantic engine only.** For **call-edge accuracy** — precision and recall of `callers`/`impact` against labelled ground truth, per question, across engines — see [../bench/README.md](../bench/README.md), which is a different measurement with a different method.
+>
+> **These numbers were taken at 0.10.0 and have NOT been re-measured. The semantic engine has changed since, so the query-latency row in particular is stale.** This doc used to say "semantic engine unchanged since; re-measure if that changes"; that is no longer true, and by its own rule the re-measurement is now owed. See [What has changed since these numbers](#what-has-changed-since-these-numbers).
 
 Real, reproducible numbers for the **semantic** engine at scale — the one engine that does heavy
 local work (chunk → embed → index → search). The graph and LSP engines delegate to external
@@ -18,7 +20,7 @@ backends and are not measured here.
 | RAM | 24 GB |
 | OS | macOS 26.5 (arm64) |
 | Embedding model | `BAAI/bge-small-en-v1.5` (384-dim), via `fastembed` on CPU |
-| codeintel | 0.10.0 (semantic engine unchanged since; re-measure if that changes) |
+| codeintel | 0.10.0 — **the measurement version, not the current release (0.22.0)**. See below for what changed after. |
 
 ## Corpus
 
@@ -55,9 +57,35 @@ hybrid rerank → render), measured warm over 11 realistic queries:
 | First query (incl. model warm) | 301 ms |
 | Relevant hit rate | 11 / 11 |
 
+> **Stale.** The query path measured above no longer exists. `Searcher.search` now verifies every
+> candidate against current source before ranking (`_verify`, added in 0.18.0), which reads each
+> candidate's file from disk inside the measured window — and `rerank_candidates` defaults to 60,
+> not the 30 the original design specified, so that read set is twice what it was. Direction of the
+> effect is knowable, magnitude is not: re-measure before quoting a latency figure.
+
 The latency is dominated by **embedding the query string** on CPU (~230 ms); the vec0 KNN over 25 k
 vectors is sub-millisecond. A GPU or a smaller model would cut the bulk of it. For an agent making a
 handful of `code.query` calls while reasoning, sub-¼-second is comfortably interactive.
+
+## What has changed since these numbers
+
+Four releases after the measurement touched the semantic engine, which is why the "unchanged since"
+claim this doc used to carry had to go:
+
+| Release | Change | Affects |
+|---|---|---|
+| 0.17.0 | live progress for `codeintel index` | the cold-index rows (reporting work inside the timed pass) |
+| 0.18.0 | hits verified against current source; enclosing function named in mid-body previews | **query latency** — `_verify` reads each candidate from disk, in `Searcher.search` |
+| 0.19.0 | an index that cannot be verified is reported `unconfirmed` | query path |
+| 0.20.0 | per-edge confidence no longer discarded | envelope, not the semantic hot path |
+
+The corpus, machine and model rows are still an accurate description of *what was measured*. What is
+no longer safe is treating the latency figures as current, or the "unchanged" claim as a reason not
+to re-run. The git history available in a shallow clone starts at 0.15.4, so changes between 0.10.0
+and 0.15.4 are not visible here and are not accounted for above — another reason the honest status is
+"re-measure", not "adjust".
+
+---
 
 ## Extrapolation to the configured ceiling
 
@@ -78,10 +106,10 @@ the engine stays interactive as the repo grows; index time and disk scale linear
 Into a throwaway `HOME` so your real cache is untouched:
 
 ```bash
-export HOME=/tmp/ci-bench && mkdir -p "$HOME/.codeintel"
+export CODEINTEL_HOME=/tmp/ci-bench && mkdir -p "$CODEINTEL_HOME/.codeintel"
 codeintel index /path/to/small-repo >/dev/null   # warm-up: downloads the model, not timed
 /usr/bin/time -l codeintel index /path/to/large-repo   # wall time + max RSS; prints "Indexed N chunks"
-ls -la "$HOME/.codeintel/"*.db                          # on-disk index size
+ls -la "$CODEINTEL_HOME/.codeintel/"*.db                # on-disk index size
 ```
 
 Query latency: load the provider once and time warm searches (see `codeintel query --op search

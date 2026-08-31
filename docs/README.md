@@ -36,7 +36,7 @@ not the same claim as `not-in-graph`.
 | Doc | What it measures |
 |---|---|
 | [../bench/README.md](../bench/README.md) | **Call-edge accuracy** — precision/recall of `callers`/`impact` against labelled ground truth, per question, across graph vs LSP vs LSP-plus-syntax. Includes what the oracle proves is NOT a caller — without which a fabricated caller costs an engine nothing — and what it refuses to judge. Reported numbers are **Python only**; a TypeScript arm exists but has not been run against a real repository. |
-| [benchmarks.md](benchmarks.md) | **Semantic engine** throughput and index size at scale. A different measurement with a different method. |
+| [benchmarks.md](benchmarks.md) | **Semantic engine** throughput and index size at scale. A different measurement with a different method. **Taken at 0.10.0 and not re-measured** — the query path has changed since, so the latency rows are stale. |
 
 ## Outputs other than `code.query`
 
@@ -65,9 +65,9 @@ banner saying what still holds.
 | [refactor-graph-provider.md](refactor-graph-provider.md) | Done — the seams it proposed exist, and `wire_text.py` was later added at one of them. |
 | [layers-design.md](layers-design.md) | Design only; not implemented. |
 | [roadmap-semantic.md](roadmap-semantic.md) | **Both phases shipped.** Syntax-aware chunking is the default `chunk_strategy`; hybrid reranking is `Searcher._rerank`. Kept for the reasoning and for the "explicitly out of scope: an in-house graph" decision, which still holds. |
-| [eval-2026-08-17.md](eval-2026-08-17.md) | Historical — adversarial evaluation at 0.15.3. |
-| [eval-2026-08-17-fix-architecture.md](eval-2026-08-17-fix-architecture.md) | Historical — the fix plan that followed it. |
-| [eval-2026-08-23-status-and-market.md](eval-2026-08-23-status-and-market.md) | Historical — status and market position at 0.15.5. |
+| [eval-2026-08-17.md](eval-2026-08-17.md) | Historical — adversarial evaluation at 0.15.3. §12 re-checks its open findings at 0.22.0: one of six has closed (B5, the semantic corpus split); scope, phantom counts, index lifecycle and `doctor`'s corrupt-file reporting are still open. |
+| [eval-2026-08-17-fix-architecture.md](eval-2026-08-17-fix-architecture.md) | Historical — the fix plan that followed it. Of the three modules its core design proposes, only `outcome.py` was built; `answer.py` and `envelope.py` were not. |
+| [eval-2026-08-23-status-and-market.md](eval-2026-08-23-status-and-market.md) | Historical — status and market position at 0.15.5. Of its two defects, D1 (redaction under `HOME=/root`) is fixed; D2 (`no-index` outside the could-not-ask family) is still open. |
 | [../pathly/README.md](../pathly/README.md) | **Pre-implementation planning, not documentation.** 85 files written before this codebase existed in its current form — the spec there still calls the distribution `codecortex`. Four times the size of `docs/`, so it is indexed with a banner rather than left to be mistaken for a reference. |
 
 ## Mental model in one line
