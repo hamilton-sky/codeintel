@@ -1,5 +1,9 @@
 # codeintel — status and market position, 2026-08-23
 
+> **Status: historical record.** A point-in-time snapshot, kept because the reasoning is worth having and correcting it would falsify the record. Numbers and version claims below were true when written and are NOT current — codeintel is at 0.22.0. Where it disagrees with a reference doc, the reference doc wins.
+>
+> Superseded in two ways worth naming: the graph backend's guessed-edge problem described here is now **disclosed** rather than silent (see [graph.md](graph.md#relationship-kind-and-how-an-edge-was-resolved)), and it is **measured** rather than argued about (see [../bench/README.md](../bench/README.md)).
+
 **Subject:** codeintel / `codecortex` 0.15.5 (released 2026-08-19)
 **Method:** the repository read at `b038efa`; the suite run in a clean venv on a fresh Linux
 container (Python 3.11, running as `root`, no outbound access to the model host); release and

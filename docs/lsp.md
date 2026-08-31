@@ -52,6 +52,50 @@ cannot run until `find_symbol` has located the symbol:
 Calls `get_symbols_overview` with `relative_path: target`. Pass an empty string for a
 project-level overview.
 
+## A booted server is not a serving server
+
+serena takes **one config per project**, and it names a fixed list of language servers. On a polyglot
+repository that list is routinely narrower than the tree:
+
+```yaml
+# .serena/project.yml
+language_servers:
+  - typescript        # …beside 69 Python files
+```
+
+Every Python `symbol` query against that repo returns an empty body with a
+`references / not-asked` gap — not an error, just nothing — while the process itself booted fine. The
+doctor used to report `lsp: ok / reached READY`, which was true about the process and false about
+every answer it would give. Green while the thing it certifies serves nothing is the worst shape a
+health check can take.
+
+`probe()` now compares the configured list against a census of the repo's own files (vendored
+directories excluded, and a floor of 5 files so one stray `setup.py` beside a TypeScript app does not
+turn the engine red). An unserved language makes the engine **not runnable** and names itself, its
+file count, the symptom and the fix:
+
+```
+└─ lsp: serena booted via `uvx` and reached READY — but .serena/project.yml serves only
+   typescript, so python (69 files) get NO answer from this engine (empty `symbol` results,
+   not errors)
+   fix: add the missing language(s) to `language_servers:` in .serena/project.yml and re-run,
+   or use `--engine graph` for python symbols
+```
+
+Only the config is authoritative about what is served, so with no `.serena/project.yml` this check
+stays silent rather than guessing.
+
+## References are not calls
+
+`find_referencing_symbols` returns **references**, and a reference is not a call. On one measured
+symbol, 9 references comprised 5 call sites, 2 import lines, and 2 duplicate rows — **74% precision**
+across a stratified Python set when taken as callers, against 100% once each site is classified by
+the syntax at its line ([../bench/README.md](../bench/README.md)).
+
+This is why the gateway's cross-check **appends** the LSP reference list next to the graph's answer
+rather than replacing it: the two engines answer related but different questions, and presenting one
+as the other would substitute a new over-claim for the one it was correcting.
+
 ## Session state machine
 
 Each `project_root` gets its own `_LspSession`. State transitions:

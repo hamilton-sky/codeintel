@@ -1,5 +1,7 @@
 # ADR 0001 — Graph Capability Unlock
 
+> **Status: accepted, and partly superseded.** The decision stands. Two details in it no longer describe the code: `deadcode` was later **retired** after a labelled corpus measured its precision at 25%, and `chain`'s hop `risk` labels were replaced by resolution **evidence** (`risk` restated hop distance, which every row already prints). See [../graph.md](../graph.md).
+
 **Status:** Accepted — shipped in v0.9.0
 **Date:** 2026-08-14
 **Deciders:** codeintel maintainers

@@ -8,7 +8,7 @@ never an error — so "working" means: installed, this repo indexed/warm where r
 [`install.md`](install.md).
 
 Verified state on the author's machine for this repo (2026-08-24): `doctor --deep` → **ready 3/3,
-healthy**. graph = codebase-memory-mcp 0.9.0 (indexed); lsp = serena booted via `uvx` and reached
+healthy**. graph = codebase-memory-mcp 0.9.x or 0.10.x (indexed); lsp = serena booted via `uvx` and reached
 READY; semantic = 3,921 chunks (fastembed 0.8.0 + sqlite-vec 0.1.9).
 
 ## TL;DR — the whole thing in three commands
@@ -33,19 +33,21 @@ the call/import-structure ops.
 **Bring-up**
 1. **Install the binary on PATH.** It is a standalone native backend distributed by its own project,
    NOT pip-installable. Put `codebase-memory-mcp` for your platform on PATH (`~/.local/bin` here).
-2. **Pin 0.9.x.** This release parses the `{columns, rows}` JSON wire format. `0.10.x` replaced it
-   with a text format, and `list_projects` stayed JSON — so a 0.10 backend looks healthy but every
-   real op silently returns nothing. `doctor` catches this and says `backend-incompatible`; the fix
-   is `pip install 'codebase-memory-mcp==0.9.*'` (pip launcher) or re-installing the 0.9.x native
-   build. Note `codebase-memory-mcp update` self-updates to 0.10.x — do not run it until codeintel
-   speaks the new format.
+2. **Either dialect works; prefer `0.10.x`.** `0.9.x` answers in `{columns, rows}` JSON and
+   `0.10.x` in a text layout, and `wire_text.py` reads both at one transport seam. `0.10.x` is the
+   better backend — guessed `CALLS` edges drop from 24-43% of the graph to 9-30%, and Python
+   enclosing-function attribution from ~32% lost to 2.7%. Two traps: `codebase-memory-mcp update`
+   **deletes every index before** it can succeed and then fails on a non-TTY (pass `--standard`), and
+   indexes are not portable across `0.9`/`0.10` — delete the repo's `.db` under
+   `~/.cache/codebase-memory-mcp/` and re-index after switching. Start a daemon
+   (`codebase-memory-mcp daemon start`): `0.10.x` otherwise spawns a temporary one per CLI call.
 3. **Index the repo:** `codeintel index <path>` (or the first query auto-registers it).
 
 **Verify:** `doctor` → `graph: ok, resolved project '…'`.
 
 **Failure modes → fix**
 - `engine-unavailable` — binary not on PATH → install it, re-run `setup`.
-- `backend-incompatible` — 0.10.x installed → pin 0.9.x (above).
+- `backend-incompatible` — the reply matched neither dialect, so most likely a backend newer than this codeintel. Upgrade codeintel first; failing that pin `codebase-memory-mcp==0.10.*`.
 - `backend-unreachable` (NOT "not indexed") — the binary re-initialises its allocator every
   invocation (~5.8s measured), and a slow machine can exceed the resolve budget. Raise it:
   `export CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS=40000`. This is the failure that once reported a fully

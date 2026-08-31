@@ -1,5 +1,7 @@
 # Architectural layer views for `codeintel c4` — design
 
+> **Status: design only**, unchanged. Nothing here is implemented; `codeintel c4` ships the file/directory + import model described in [c4.md](c4.md), not these layer views.
+
 Status: **design only.** Nothing here is implemented. This document decides *how*, so an
 implementation session does not have to re-litigate it.
 

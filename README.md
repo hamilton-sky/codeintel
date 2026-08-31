@@ -54,7 +54,7 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Who calls this? | `callers` | graph | caller symbols + files |
 | What does this call? | `callees` | graph | callee symbols + files |
 | Blast radius of a change | `impact` | graph | callers **and** callees together |
-| Trace a call chain up/downstream | `chain` | graph | ordered, risk-labeled hops |
+| Trace a call chain up/downstream | `chain` | graph | ordered hops, each labelled with how it was resolved |
 | Find symbols by pattern | `pattern` | graph | matching nodes + locations |
 | Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
 | Everything about one symbol | `context` | graph + lsp | both views merged |
@@ -306,7 +306,7 @@ The optional keys are the ones worth reading when an answer surprises you:
 
 | Engine | Key ops | Install prereq |
 |---|---|---|
-| `graph` | `impact`, `callers`, `callees`, `chain`, `pattern`, `overview`, `context` | `codebase-memory-mcp` **0.9.x** on PATH (`pip install 'codebase-memory-mcp==0.9.*'`) — 0.10.x changed its response format and returns nothing for every op but resolution; see [docs/graph.md](docs/graph.md) |
+| `graph` | `impact`, `callers`, `callees`, `chain`, `pattern`, `overview`, `context` | `codebase-memory-mcp` **0.9.x or 0.10.x** on PATH — both wire dialects are read; `0.10.x` is the more accurate backend and is recommended (`pip install 'codebase-memory-mcp==0.10.*'`). See [docs/graph.md](docs/graph.md) |
 | `lsp` | `symbol`, `overview`, `context` | `uvx` on PATH — serena is fetched from GitHub on first use; see [docs/lsp.md](docs/lsp.md) |
 | `semantic` | `search`, `context` | `fastembed` + `sqlite-vec` (installed with the package) — see [docs/semantic.md](docs/semantic.md) |
 

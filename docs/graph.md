@@ -13,29 +13,45 @@ install the build for your OS/arch and ensure it is on `PATH` (it self-manages v
 `codebase-memory-mcp install|update`). Run `codeintel doctor` to confirm it is detected and that
 this repo is indexed.
 
-> ### Supported backend version: `0.9.x`
+> ### Supported backend versions: `0.9.x` and `0.10.x`
+>
+> Both are read. They speak **different wire formats** and `codeintel` translates between them at a
+> single seam (`BackendClient._decode` → `codeintel/wire_text.py`), so no op above the transport
+> knows there are two:
+>
+> | backend | `query_graph` reply | notes |
+> |---|---|---|
+> | `0.9.x` | `{"columns": [...], "rows": [...]}` JSON | the original dialect |
+> | `0.10.x` | a compact human-readable text layout | `list_projects` alone stayed JSON |
+>
+> **Prefer `0.10.x`.** Measured over the same three repositories, the share of `CALLS` edges below
+> the 0.85 confidence floor falls from **24% / 33% / 43%** to **9% / 18% / 30%**, and Python
+> enclosing-function attribution improves from ~32% of production caller rows collapsing to
+> `module scope of <file>` to **2.7%**.
 >
 > ```bash
-> pip install 'codebase-memory-mcp==0.9.*'
+> pip install 'codebase-memory-mcp==0.10.*'
 > ```
 >
-> **`0.10.x` does not work with this release.** It replaced the `{"columns": [...], "rows": [...]}`
-> response that every renderer here parses with a compact human-readable text format. Crucially it
-> kept `list_projects` as JSON — so project resolution and `codeintel doctor` still succeed, while
-> **every other op returns nothing**: `callers`, `callees`, `impact`, `chain`, `pattern`,
-> `overview`, `changed` and `hotspots` all come back empty against a fully indexed
+> **The 0.10.x text layout is not a contract** — it is output meant for humans and can change in a
+> patch release. Every parser in `wire_text.py` therefore refuses rather than guesses: an
+> unrecognised shape returns `None` and the op safe-nulls with `backend-incompatible`. A wrong answer
+> assembled from a format we no longer understand would be worse than that refusal, which is the only
+> thing that made the original `0.9 → 0.10` break diagnosable instead of looking like an unindexed
 > repository.
 >
-> As of this release `doctor` detects the mismatch by asking a real query rather than trusting
-> `list_projects`, and reports `backend-incompatible` with the pin above. Queries report the same
-> reason instead of `not-in-graph`, so the tool no longer makes a false claim about your index.
+> **Two operational traps.**
 >
-> **The backend self-updates.** `codebase-memory-mcp update` can therefore break the graph engine.
-> If graph ops stop returning results, check the version first.
+> - `codebase-memory-mcp update` **deletes every project index before** checking it can proceed, and
+>   on a non-TTY then fails with `variant selection requires a terminal` — destroying the indexes for
+>   nothing. Pass `--standard`.
+> - Indexes are **not portable across `0.9`/`0.10`**. After switching, delete the repo's `.db` under
+>   `~/.cache/codebase-memory-mcp/` and re-index.
 >
-> Note also that the backend re-initialises a native runtime on every invocation — roughly **6
-> seconds per call** on an ordinary machine. `codebase-memory-mcp daemon start` keeps one warm and
-> removes that cost. If your machine is slower still, raise
+> The backend re-initialises a native runtime on every invocation — roughly **6 seconds per call**,
+> and `0.10.x` spawns a temporary daemon per CLI call unless one is running.
+> `codebase-memory-mcp daemon start` keeps one warm and removes that cost; without it a long test run
+> can flake on contention. If your machine is slower still, raise
 > `CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS` (default 20000).
 
 ## Supported ops
@@ -46,7 +62,7 @@ this repo is indexed.
 | `callees` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 functions called by the symbol |
 | `impact` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Combined callers + callees section |
 | `context` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Alias for `impact` — the graph's contribution to the `context` fan-out |
-| `chain` | `"A->B"` or symbol | Call path from A (trace_path), each hop risk-labeled when the backend classifies it |
+| `chain` | `"A->B"` or symbol | Call path from A (trace_path). Each hop carries how it was **resolved** (`[lsp]`, `[import]`, `[?name-guess]`), and the walk follows `CALL_REFERENCE` as well as `CALLS` |
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | (ignored) | Impact of the **uncommitted git worktree**: changed files → impacted symbols (via `detect_changes`) |
@@ -103,6 +119,54 @@ that one was live too. The README carries the full numbers and the reasoning:
 **Use `callers` on a specific symbol instead.** It answers the same underlying question — "does
 anything call this?" — accurately, one symbol at a time.
 
+### Relationship kind, and how an edge was resolved
+
+Two independent axes, and conflating them was this engine's most consequential defect. They are
+reported separately because they license different actions.
+
+**Kind — what the edge asserts.** `callers`/`callees` match `CALLS|USAGE|CALL_REFERENCE`:
+
+| kind | what it means |
+|---|---|
+| `CALLS` | invoked directly |
+| `USAGE` | referenced, not called — module scope, or a mention that is not a call site |
+| `CALL_REFERENCE` | **passed as a value or registered as a callback** — never invoked here |
+
+Every row is badged with its kind, direct calls sort first, and the heading splits them whenever an
+answer mixes kinds (`Callers of X (0 direct, 2 other reference(s))`). An answer made entirely of
+`CALLS` keeps its plain count, so the common case is unchanged.
+
+Why it matters: `set_forward_fn(app.forward_released_item)` registers a method at two real sites. The
+backend stored both correctly as `CALL_REFERENCE`; codeintel queried only `CALLS|USAGE` and answered
+*"no callers"* — the reading that deletes a live method. No confidence threshold could have recovered
+it, because the edge existed at full confidence under a kind nothing asked for.
+
+**Provenance — how the target was resolved.** The backend stamps every edge with `c.strategy`, and
+that, not a numeric score, decides how a row is presented:
+
+| class | strategies | shown as |
+|---|---|---|
+| resolved | `lsp_*`, `import_map`, `same_module` | no badge |
+| **name guess** | `unique_name`, `suffix_match`, `heuristic`, fuzzy | `[?0.75]` and counted in a note |
+
+A guessed row is kept, never silently dropped — dropping it would trade a false positive for a false
+negative, and "no callers" is the more dangerous of the two when the next action is a delete.
+
+The strategy is read rather than inferred from `c.confidence` because the two do not line up: on a
+real repository `unique_name` appears at **both 0.75 and 0.38**, so a numeric floor splits one
+strategy across two tiers and describes the same evidence two different ways. The float survives only
+as a fallback for a backend that reports no strategy.
+
+**The collision signature.** When *every* row in an answer of five or more is a name guess, the op
+raises the `all-rows-name-resolved` gap — that is the shape of a name the index does not own (a
+library function, a test-runner global, a builtin method) collecting every call site that mentions
+it. The gateway escalates on exactly that condition and appends the language server's reference list
+for comparison. It is the difference between `callers describe` returning 32 fabricated rows at
+`confidence: "complete"` and returning them badged, counted, and next to the one real caller the
+graph could not bind.
+
+Measured accuracy for these answers is in [../bench/README.md](../bench/README.md).
+
 ### The repo-scan ops
 
 `changed` and `hotspots` key on the whole index / git state, not a symbol, so `target` is ignored. An
@@ -112,8 +176,18 @@ string, not safe-null; only a backend failure returns safe-null.
 ### `chain` detail
 
 If `target` contains `"->"`, the part before `->` is used as the source for a `trace_path`
-call in `calls` mode. Otherwise, `chain` falls back to `impact`. The call is made with
-`risk_labels` on, so each hop carries a `[risk: …]` badge when the backend classifies it.
+call in `calls` mode. Otherwise, `chain` falls back to `impact`.
+
+Two arguments matter:
+
+- **`edge_types: [CALLS, CALL_REFERENCE]`** — so a walk does not stop dead at the point a function is
+  handed to something rather than invoked.
+- **`include_evidence: true`**, which replaced `risk_labels`. The backend treats those two as
+  mutually exclusive, and nothing was lost: `risk` was a restatement of hop distance
+  (hop 1 = `CRITICAL`, hop 2 = `HIGH`, hop 3 = `MEDIUM`) that every row already prints as `[hop N]`,
+  so it dressed a visible number as an assessment nobody made. Evidence is the fact `chain` could not
+  report before — a `[?name-guess]` hop makes everything downstream of it suspect, and used to be
+  indistinguishable from a resolved one.
 
 ### `changed` detail
 
@@ -122,6 +196,25 @@ gets a higher timeout floor, 15 s). Its result is **never cached** — the conte
 see the live git worktree, so a cached answer would be stale. The backend returns duplicate
 `changed_files` (staged + unstaged) and mixes file markers into `impacted_symbols`; the provider
 dedupes the files and keeps the symbol list symbols-only.
+
+The answer has **three** sections, and the middle one is not what its old heading claimed:
+
+1. **Changed files** — the uncommitted source files, non-source dropped but counted (a tree of only
+   `.md` edits must not report as "clean").
+2. **The backend's symbol list**, whose meaning differs by dialect: `0.9.x` returns the symbols
+   *defined in* the changed files (containment), `0.10.x` returns a *transitive* impacted set stamped
+   with a `hop`. Same field, two meanings — so the heading is derived from the data and prints the hop
+   rather than asserting the older reading, which had filed symbols from three unrelated files under
+   "defined in the changed files".
+3. **Callers elsewhere that reach into them** — the actual blast radius, computed here rather than by
+   the backend: symbols *outside* the changed files with a `CALLS`, `CALL_REFERENCE` or `USAGE` edge
+   into them, one row per calling symbol at its strongest claim.
+
+`changed` answers a **recall** question — "what should I look at before committing" — so the
+asymmetry runs opposite to `callers`: indirect edges are included rather than withheld, ranked below
+direct calls, and every row labelled. Under-reporting impact is how live code gets broken;
+over-reporting costs a reader one line. An empty ripple says so out loud, because an absent section
+and an empty one read identically to a model and only one of them is a claim.
 
 ## Project resolution
 
@@ -144,8 +237,9 @@ defaults to **5000 ms**.
 | `'project-not-indexed-standalone'` | The repo isn't indexed on its own — it only resolves via a containing ancestor project, and the op (`overview`/`changed`/`changes`/`hotspots`) is scoped to the repo boundary, so it refuses rather than answer for the wrong tree |
 | `'unsupported-op'` | `op` is not one of the ops listed above |
 | `'op-withdrawn'` | `op` is `deadcode`, which is retired — see [above](#deadcode-is-retired) |
-| `'not-in-graph'` | The op ran, but the target isn't in the graph index for this project — the common "symbol/target not found" case |
-| `'backend-incompatible'` | The backend's reply couldn't be parsed as the expected JSON — usually an unpinned `codebase-memory-mcp` version (pin `0.9.x`, see above) |
+| `'not-in-graph'` | The op ran and the target genuinely is not in the index — a stale index, a typo, or a rename |
+| `'no-edges'` | The target **is** indexed and simply has no edge of this kind. A different fact from the row above, and it licenses the opposite action: framework-dispatched handlers (routes, ASGI apps) look exactly like this, so it must not be read as dead code. The hint names where the symbol is defined and censuses the relationships that *do* point at it. Re-indexing will not change it |
+| `'backend-incompatible'` | The reply matched **neither** supported dialect — most often a backend newer than this codeintel. Upgrade codeintel first; failing that, pin `codebase-memory-mcp==0.10.*` |
 | `'timeout'` / `'backend-error'` / `'unparsable'` | Returned dynamically (as `reason: miss.kind`) when a backend call inside the op itself timed out, errored, or returned something unreadable — distinct from `not-in-graph`, which means the call succeeded and the target genuinely isn't there |
 | `'error'` | Unexpected exception during execution |
 

@@ -1,5 +1,7 @@
 # Scoping: splitting `GraphProvider` (SOLID)
 
+> **Status: done.** The split described here shipped — `graph_backend.py`, `graph_resolution.py` and `graph_render.py` exist, and `wire_text.py` was added later at the transport seam this refactor created. Kept for the reasoning behind the seams.
+
 `providers/graph.py` is 1,976 lines and `GraphProvider` is **41 methods / ~1,362 lines** — the
 largest class in the codebase by a factor of two (next: `Indexer`, 22/608). It violates SRP by owning
 four unrelated concerns. This is the plan to split it, ordered **safest-first** so momentum is built

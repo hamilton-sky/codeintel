@@ -1,5 +1,7 @@
 # codeintel — fix architecture after eval-2026-08-17
 
+> **Status: historical record.** A point-in-time snapshot, kept because the reasoning is worth having and correcting it would falsify the record. Numbers and version claims below were true when written and are NOT current — codeintel is at 0.22.0. Where it disagrees with a reference doc, the reference doc wins.
+
 Read: the eval doc, and `src/codeintel/{gateway,provider,cache,containment,reindexer,indexer,searcher,semantic_db,server,reset,doctor,source_kind}.py`,
 `src/codeintel/providers/{graph,lsp,semantic}.py`, `src/codeintel/commands/{query,index,_common,reset}.py`,
 `tests/{conftest,test_lsp_real}.py`.

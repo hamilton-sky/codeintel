@@ -49,7 +49,7 @@ flowchart TD
 | **Transports** | `server.py` (MCP stdio), `http_server.py` (HTTP), `__main__.py` (CLI) | Accept a request, hand it to the gateway, return the envelope verbatim. |
 | **Gateway** | `gateway.py`, `cache.py`, `policy.py`, `reindexer.py` | Route by op/engine, fan out & merge, cache, enforce the contract, fire background reindex. |
 | **Protocol** | `provider.py` | The `CodeProvider` interface + the `Result` envelope + `safe_null_result`. |
-| **Providers** | `providers/graph.py`, `lsp.py`, `semantic.py`, `none.py` | One adapter per engine; each **never raises**. `GraphProvider` composes three sibling modules: `graph_backend.py` (`BackendClient`, the subprocess transport), `graph_resolution.py` (`ProjectResolver`), and `graph_render.py` (path/label + render helpers). |
+| **Providers** | `providers/graph.py`, `lsp.py`, `semantic.py`, `none.py` | One adapter per engine; each **never raises**. `GraphProvider` composes three sibling modules: `graph_backend.py` (`BackendClient`, the subprocess transport), `graph_resolution.py` (`ProjectResolver`), `graph_render.py` (path/label + render helpers), and `wire_text.py` (reads the `0.10.x` backend's text dialect back into the `0.9.x` shapes every renderer parses — see [graph.md](graph.md)). |
 | **Backends** | (external) + `indexer.py`, `semantic_db.py`, `searcher.py` | The actual intelligence — two wrapped, one in-house. |
 
 ## The CodeProvider protocol

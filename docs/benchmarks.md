@@ -1,5 +1,7 @@
 # Benchmarks
 
+> **Scope: the semantic engine only.** For **call-edge accuracy** — precision and recall of `callers`/`impact` against labelled ground truth, per question, across engines — see [../bench/README.md](../bench/README.md), which is a different measurement with a different method. The `codeintel` version stamped below refers to when these semantic numbers were taken, not to the current release (0.22.0).
+
 Real, reproducible numbers for the **semantic** engine at scale — the one engine that does heavy
 local work (chunk → embed → index → search). The graph and LSP engines delegate to external
 backends and are not measured here.
