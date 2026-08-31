@@ -20,7 +20,26 @@ flowchart LR
 ```
 
 1. **Read** the graph index for the project (`MapGenerator(GraphProvider)`).
-2. **Rank** symbols by fan-in (most-called first) and roll up per module.
+2. **Rank** symbols by fan-in (most-called first) and roll up per module. Fan-in is counted from
+   `CALLS` edges into **callable** node labels only — `Function`, `Method`, `Class`, `Interface`,
+   `Route` (`mapper._RANK_LABELS`) — and the ranking then drops test, generated, archived, builtin
+   and pure-data files via `GraphProvider._is_noise`.
+
+   Both constraints exist because their absence produced wrong answers on real repositories, not
+   for tidiness. Unlabelled, the backend's `Variable`, `Folder`, `Channel` and `Section` nodes
+   compete with functions on equal terms and win: a 12,638-node TypeScript repo ranked `logger`
+   (which resolves to a **`Folder`** node) at 716 and `error` (a **`Channel`**) at 403, and a Python
+   repo ranked YAML and JSON keys as its most load-bearing symbols. Counting `USAGE` alongside
+   `CALLS` is what inflated those numbers — every textual mention of a name became a "caller".
+
+   Note the ordering constraint: the label filter must live in the **query**, not in a post-filter.
+   `LIMIT` is applied server-side, so noise that reaches the client has already consumed the window
+   and displaced the real symbols no client-side filter can then recover. One query per label rather
+   than one filtered query, because the backend's Cypher subset accepts neither `labels()` in
+   `WHERE` nor an `(fn:A OR fn:B)` predicate — a label is only expressible in the `MATCH` pattern.
+
+   Counts arrive from the backend as **strings**, so they are coerced before the client-side merge
+   sorts them; lexicographically `"9"` outranks `"40"`.
 3. **Select** the highest-signal items — architecture summary, top modules, key symbols, entry points.
 4. **Budget** — trim to fit `--budget` bytes (default `32768`) so the file stays cheap to read.
 5. **Write** `CODE_INTEL.md` at the project root; optionally `--inject` a reference block into the

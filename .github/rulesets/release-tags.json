@@ -11,15 +11,6 @@
   "bypass_actors": [],
   "rules": [
     { "type": "deletion" },
-    { "type": "non_fast_forward" },
-    {
-      "type": "tag_name_pattern",
-      "parameters": {
-        "name": "release tags are vX.Y.Z",
-        "operator": "regex",
-        "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
-        "negate": false
-      }
-    }
+    { "type": "non_fast_forward" }
   ]
 }

@@ -1,8 +1,9 @@
 # LspProvider Reference
 
 Wraps the LSP-over-MCP bridge (serena) in a background thread. Never raises — always returns
-an envelope. The session warms up asynchronously; the first call(s) may return a safe null
-with `reason: 'warming'` while the server is starting.
+an envelope. The session warms up asynchronously, and a call that arrives mid-boot **waits** for
+it — bounded, and only for as long as the boot plausibly needs (see [Warming](#warming)). A boot
+that outlasts the bound still returns a safe null with `reason: 'warming'`.
 
 ## Install prerequisite
 
@@ -106,12 +107,39 @@ IDLE ──start──► WARMING ──warmup ok──► READY
                     └──warmup fail──► FAILED ──60 s cooldown──► (retry on next call)
 ```
 
-- **WARMING** — server is starting; calls return safe null with `reason: 'warming'`.
+- **WARMING** — server is starting. A call waits up to `_WARM_WAIT_S` for the boot to settle
+  (see [Warming](#warming)) and returns a safe null with `reason: 'warming'` only if it does not.
 - **READY** — server is up; queries are dispatched.
 - **FAILED** — warmup threw; calls return safe null with `reason: 'boot-failed'` until
   the 60-second cooldown expires, then the session is discarded and recreated on the next call.
 
 The cooldown period is **60 seconds** (`_COOLDOWN_SECONDS = 60`).
+
+## Warming
+
+A `WARMING` session is waited for rather than declined outright. Returning `'warming'` the instant
+a session was booting made the engine effectively unavailable on the **first call of every
+session** — which is the call an agent makes when it starts work on a repo. It also silently
+disabled the cross-check behind `callers`/`context`'s `[?…]` unverified badges: those badges tell
+the reader to confirm against the LSP, and the LSP had always just declined.
+
+The wait lives in the provider, so **every transport inherits it**. It previously lived in
+`commands/query.py` as a retry loop, which meant the CLI had it and the MCP and HTTP transports —
+the ones an agent actually calls — did not.
+
+The bound is **8.0 s** (`_WARM_WAIT_S`), additionally clamped to the caller's own budget. It is
+sized from measurement: the `initialize` handshake settled in 2.30 s, 2.50 s and 1.85 s across a
+70-file repo, an 803-file TypeScript repo and a mixed-language repo — flat with repo size, because
+the handshake does not load the workspace. That load is the ~11.65 s the dispatch timeout below is
+sized for, and it happens on the far side of `READY`, so the two budgets do not overlap.
+
+The bound is a ceiling, not a cost: the wait ends the moment the session settles, and a session
+already `READY` never waits at all. A boot that genuinely exceeds it — a cold `uvx` still resolving
+and downloading `serena-agent` — degrades to the same safe null as before, with `retry_after_s` in
+the envelope's `gaps`.
+
+Sessions signal through a `threading.Event` set on **both** `READY` and `FAILED`, so a waiter is
+never stranded on a session that has already settled.
 
 ## Budget / timeout
 
@@ -123,7 +151,7 @@ If `budget` is 0 or absent, the timeout defaults to **30.0 s** (`_DEFAULT_TIMEOU
 | reason | When returned |
 |---|---|
 | `'engine-unavailable'` | Neither `serena` nor `uvx` is on PATH |
-| `'warming'` | Session exists but has not finished starting |
+| `'warming'` | Session did not finish starting within `_WARM_WAIT_S` (8 s) of the call |
 | `'boot-failed'` | Session failed to start (cooldown active) |
 | `'backend-error'` | The session is up, but the language server reported an error for this call |
 | `'unsupported-op'` | `op` is not `symbol`, `overview`, or `context` |

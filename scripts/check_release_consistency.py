@@ -100,10 +100,18 @@ def check_tag(tag: str) -> int:
     wanted = tag[1:] if tag.startswith("v") else tag
     version = current_version()
     if wanted != version:
+        # The remediation deliberately does NOT say `git tag -f && git push --force`, which is what
+        # it used to say. The `release tags (v*)` ruleset now carries `deletion` and
+        # `non_fast_forward` with an empty bypass list, so a pushed `v*` tag can be neither moved
+        # nor deleted — by anyone, including the maintainer. Advising a force-push would send the
+        # reader at the one operation the protection exists to refuse, and they would discover that
+        # only after the push was rejected. A tag that is already published is spent: the way
+        # forward is a new one.
         print(
             f"tag {tag} does not match __version__ ({version}).\n"
-            f"Bump __version__ and the CHANGELOG, move the tag onto that commit, and push again:\n"
-            f"  git tag -f {tag} && git push --force origin {tag}"
+            f"`v*` tags are protected against deletion and force-push, so {tag} cannot be moved — "
+            f"bump __version__ and the CHANGELOG, commit, then tag that commit afresh:\n"
+            f"  git tag v<the-new-version> && git push origin v<the-new-version>"
         )
         return 1
     if version not in changelog_versions():

@@ -18,14 +18,19 @@ Five steps, all in the GitHub UI, roughly five minutes. Nothing here happens by 
 
 - [ ] **Import the branch ruleset.** Settings → Rules → Rulesets → New ruleset → *Import a ruleset*
       → `main.json` → Create.
-- [ ] **Import the tag ruleset.** Same path, `release-tags.json`.
+- [x] **Import the tag ruleset.** Same path, `release-tags.json`. **Done** — applied via
+      `gh api -X POST repos/hamilton-sky/codeintel/rulesets --input .github/rulesets/release-tags.json`,
+      which works as well as the UI importer and is reproducible. See the note below on the one rule
+      GitHub refuses on this plan.
 - [ ] **Gate the `pypi` environment.** Settings → Environments → `pypi` → add yourself under
       *Required reviewers*, and set *Deployment branches and tags* to the tag pattern `v*`.
 - [ ] **Lock down Actions.** Settings → Actions → General → *Workflow permissions* = **Read
       repository contents and packages**; *Fork pull request workflows* → require approval for
       **all external contributors**.
 - [ ] **Prove it.** `git commit --allow-empty -m x && git push origin main` — expect a rejection.
-      Then `git reset --hard origin/main` to drop the local commit.
+      Then `git reset --hard origin/main` to drop the local commit. Worth actually doing: this
+      checklist sat unticked long enough that a direct push to `main` still succeeded, which is how
+      the gap was found.
 
 The rest of this document is why each of those is set the way it is, and what to change when the
 project stops having exactly one maintainer.
@@ -103,12 +108,29 @@ Applies to `refs/tags/v*` — the tags `publish.yml` publishes from:
 
 - **Block deletion** and **block force update**: a `v*` tag cannot be moved to a different commit
   or deleted after the fact, so "what shipped as 0.22.0" stays answerable from the repo.
-- **Tag name must match `^v[0-9]+\.[0-9]+\.[0-9]+$`**: `publish.yml` fires on `v*`, so a typo like
-  `v0.22` or `v.0.22.0` starts a real publish run that then fails somewhere inside it. This rejects
-  the malformed tag at push time instead.
+### The tag-name pattern rule is not available on this repo
 
-This does not stop a *wrong-but-well-formed* tag; `scripts/check_release_consistency.py` already
-covers that by refusing a tag that disagrees with `__version__`.
+The ruleset originally also carried a `tag_name_pattern` rule requiring
+`^v[0-9]+\.[0-9]+\.[0-9]+$`, so a typo like `v0.22` would be rejected at push time rather than
+starting a real publish run that fails inside it. **GitHub will not accept it here.** The API
+answers `422 Validation Failed — Invalid rule 'tag_name_pattern'` regardless of how the parameters
+are shaped, because metadata-restriction rules (tag/branch name, commit message, author email) are
+an organization feature on a paid plan; this repository is user-owned. The rule has been removed
+from `release-tags.json` so the file matches what is actually enforceable — a committed
+configuration that cannot be applied is worse than no file, since it reads as protection that
+exists.
+
+**Where the pattern is enforced instead:** the first step of `publish.yml` runs
+`scripts/check_release_consistency.py --tag "$GITHUB_REF_NAME"`, which exits non-zero on any tag
+that disagrees with `__version__` — and a malformed tag necessarily disagrees. Verified:
+`v0.22` → exit 1, `v9.9.9` → exit 1, `v0.22.0` → exit 0. That runs before anything is built or
+uploaded, so the practical cost of losing the ruleset rule is seconds of CI rather than a bad
+release. What is genuinely lost is push-time rejection: the bad tag does land in the repo, and
+because deletion and force-update are blocked it then stays there, spent.
+
+That is also why the script no longer advises `git tag -f && git push --force` when it fails. Under
+this ruleset that operation is refused, so the remediation is to bump `__version__`, commit, and cut
+a **new** tag.
 
 ## Two settings worth doing at the same time
 

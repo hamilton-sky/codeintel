@@ -531,10 +531,12 @@ def run() -> None:
             "WRITES a file: generates/refreshes CODE_INTEL.md at the repo root — a ranked "
             "architecture overview (node/edge counts, top symbols by caller count, entry points, "
             "routes), stamped with the generation time and the index counts it was built from. Good "
-            "first call to orient on an unfamiliar repo. To read the same information without "
-            "writing anything, use `code.query` with `op=\"overview\"` instead. Never overwrites a "
-            "populated map with a degraded one. See `inject`'s own description before setting it — "
-            "it writes a SECOND file, your CLAUDE.md/AGENTS.md."
+            "first call to orient on an unfamiliar repo. For a read-only alternative, `code.query` "
+            "with `op=\"overview\"` writes nothing — but it is NOT the same information: `overview` "
+            "returns node/edge counts and languages alone, without the ranked symbols, entry points "
+            "or routes this file carries. Never overwrites a populated map with a degraded one. See "
+            "`inject`'s own description before setting it — it writes a SECOND file, your "
+            "CLAUDE.md/AGENTS.md."
         ),
     )
 
