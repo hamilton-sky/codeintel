@@ -258,13 +258,14 @@ def _collapse_repeats(label: str) -> str:
 # with a compact human-readable text format; `list_projects` stayed JSON, so project resolution and
 # `doctor` still work while EVERY other op silently returns nothing. That combination is the worst
 # possible: the tool looks healthy and answers "not in the graph index" about a fully indexed repo.
-_SUPPORTED_BACKEND = "0.9.x"
+_SUPPORTED_BACKEND = "0.9.x and 0.10.x"
 _INCOMPATIBLE_HINT = (
     "the graph backend returned a response this release cannot parse — codebase-memory-mcp "
-    f"{_SUPPORTED_BACKEND} answers with JSON rows, and 0.10.x replaced that with a text format. "
-    "Pin the supported backend (pip/uv: `pip install 'codebase-memory-mcp==0.9.*'`; standalone "
-    "binary: re-install the 0.9.x build) or check for a newer "
-    "codeintel. This is NOT a statement about whether your repository is indexed."
+    f"{_SUPPORTED_BACKEND} are both understood (0.9.x answers in JSON rows, 0.10.x in a text "
+    "layout this release reads), so this is a THIRD shape: most likely a backend newer than this "
+    "codeintel. Check for a newer codeintel, or pin a known-good backend (pip/uv: "
+    "`pip install 'codebase-memory-mcp==0.10.*'`; standalone binary: re-install a 0.10.x build). "
+    "This is NOT a statement about whether your repository is indexed."
 )
 
 
@@ -733,19 +734,18 @@ class GraphProvider:
         if self._probe_wire_format(self._any_project_name(raw)) is False:
             return {
                 "installed": True, "runnable": False, "repo_indexed": False, "project": None,
-                "detail": f"incompatible codebase-memory-mcp — this release needs "
-                          f"{_SUPPORTED_BACKEND}, which answers queries with JSON rows; the "
-                          f"installed backend replies in a text format, so every graph op except "
-                          f"project resolution returns nothing",
+                "detail": f"incompatible codebase-memory-mcp — this release speaks "
+                          f"{_SUPPORTED_BACKEND}, and the installed backend answers in neither, "
+                          f"so every graph op except project resolution returns nothing",
                 # Two install shapes exist and only one takes a pip command: the PyPI launcher, and
                 # a standalone native binary that self-manages. Naming only pip left the binary
                 # users — including this project's own maintainer — with an instruction they could
                 # not run, which is the failure mode this whole check exists to avoid.
-                "remediation": "downgrade the backend to 0.9.x — pip/uv installs: "
-                               "`pip install 'codebase-memory-mcp==0.9.*'`; standalone binary: "
-                               "re-install the 0.9.x build for your platform (note `codebase-"
-                               "memory-mcp update` self-updates back to 0.10.x). Or check for a "
-                               "newer codeintel that speaks the new format.",
+                "remediation": "upgrade codeintel first — a backend newer than this release is "
+                               "the usual cause. If that does not resolve it, pin a known-good "
+                               "backend: pip/uv installs `pip install "
+                               "'codebase-memory-mcp==0.10.*'`; standalone binary: re-install a "
+                               "0.10.x build for your platform.",
             }
         resolution = self._match_project(raw, project_root)
         if resolution is None:
@@ -1824,7 +1824,13 @@ class GraphProvider:
             saw_any = False
             for label in ("Function", "Method"):
                 got = self._search_symbols(
-                    {"label": label, "min_degree": 1, "limit": 2000}, project, timeout_ms,
+                    # `fields` asks 0.10.x for the per-node metrics this op RANKS on. They are core
+                    # columns in 0.9.x and optional ones in 0.10.x, where omitting them yields rows
+                    # whose complexity is uniformly zero — a hotspots list sorted by nothing.
+                    # 0.9.x ignores the key, so one payload serves both.
+                    {"label": label, "min_degree": 1, "limit": 2000,
+                     "fields": ["complexity", "cognitive", "is_test"]},
+                    project, timeout_ms,
                 )
                 if got is None:
                     continue

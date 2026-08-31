@@ -1,0 +1,22 @@
+function: runAlerts
+direction: both
+mode: calls
+callees_total: 10
+callees: 10  (cols: qn hop risk)
+  Users-shammaihamilton-Documents-project-daycap.src.app.latch.isLatchState 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.app.latch.evaluateLatch 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.app.alert.isTrusted 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.app.alert.signalFor 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.domain.budget.signalId 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.domain.budget.stepFractions 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.domain.budget.evaluate 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.app.latch.empty 2 HIGH
+  Users-shammaihamilton-Documents-project-daycap.src.app.latch.firedKey 2 HIGH
+  Users-shammaihamilton-Documents-project-daycap.src.domain.budget.fractionOf 2 HIGH
+callers_total: 4
+callers: 4  (cols: qn hop risk)
+  Users-shammaihamilton-Documents-project-daycap.src.bin.daycap.runRefresh 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.bin.daycap.runToday 1 CRITICAL
+  Users-shammaihamilton-Documents-project-daycap.src.bin.daycap.main 2 HIGH
+  Users-shammaihamilton-Documents-project-daycap.src.bin.daycap 3 MEDIUM
+

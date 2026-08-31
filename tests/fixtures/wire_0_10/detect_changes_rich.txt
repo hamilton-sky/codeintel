@@ -1,0 +1,24 @@
+base: main
+merge_base: 71502b896af0eb3057ff11ef55dfa1f7c45074b2
+direction: inbound
+changed_files: 2
+  src/domain/budget.ts
+  .serena/
+seed_symbols: 1
+impacted_total: 5
+impacted_shown: 5
+impacted: 5  (rows: name label hop; qn = group prefix + "." + name; nearest hops first)
+Users-shammaihamilton-Documents-project-daycap.src.app.alert (src/app/alert.ts):
+  runAlerts Function 1
+Users-shammaihamilton-Documents-project-daycap.src.bin.daycap (src/bin/daycap.ts):
+  runRefresh Function 2
+  runToday Function 2
+Users-shammaihamilton-Documents-project-daycap.test.unit.alert-coalescing (test/unit/alert-coalescing.test.ts):
+  test Module 2
+Users-shammaihamilton-Documents-project-daycap.test.unit.budget (test/unit/budget.test.ts):
+  test Module 1
+impacted_modules: (rows: module count)
+  src/app 1
+  src/bin 2
+  test/unit 2
+

@@ -721,9 +721,18 @@ def _provider_speaking(stdout_bytes):
     return gp, _fake
 
 
-def test_a_text_speaking_backend_is_reported_as_incompatible_not_as_missing_data(monkeypatch):
-    """The exact 0.10.x behaviour: exit 0, and a human-readable body where JSON was promised."""
-    text = b'rows: 2  (cols: a.name)\n  "codeintel"\n  "codeintel.viewer"\ntotal: 2\n'
+def test_a_text_speaking_backend_is_now_understood(monkeypatch):
+    """The exact 0.10.x reply shape — exit 0, a human-readable body where JSON was promised.
+
+    This used to be the incompatibility case, and it is now a supported dialect: `wire_text`
+    translates the layout back into the rows every op above the transport already parses. The
+    assertions below are deliberately about the ANSWER, not about the parse: a translation that
+    produced a well-formed envelope with the wrong rows in it would be worse than the refusal it
+    replaced."""
+    text = (b'rows: 2  (cols: a.name a.qualified_name a.file_path labels(a) type(c))\n'
+            b'  bar pkg.bar bar.py "[\\"Function\\"]" CALLS\n'
+            b'  baz pkg.baz baz.py "[\\"Function\\"]" CALLS\n'
+            b'total: 2\n')
     gp, fake = _provider_speaking(text)
     monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
     gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
@@ -731,11 +740,30 @@ def test_a_text_speaking_backend_is_reported_as_incompatible_not_as_missing_data
 
     res = gp.build_result("callers", "thing", [], 5000, "/repo")
     assert res["ok"] is True
+    assert res["result"] is not None, res
+    assert res.get("reason") is None
+    assert "pkg.bar" in res["result"] and "pkg.baz" in res["result"]
+    assert "(2)" in res["result"]
+    assert gp._saw_unparsable is False
+
+
+def test_a_third_dialect_is_still_reported_as_incompatible_not_as_missing_data(monkeypatch):
+    """The protection the test above used to provide, kept for the shape nobody has parsed yet.
+
+    Supporting a second dialect must not cost the honest refusal for a third. A reply this release
+    cannot read has to stay distinguishable from "your symbol is not in the index" — that
+    distinction is the only reason the 0.9→0.10 break was diagnosable rather than looking like an
+    unindexed repository, and the next wire change will look exactly the same from here."""
+    gp, fake = _provider_speaking(b"<html><body>gateway timeout</body></html>")
+    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
+    gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
+        ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
+
+    res = gp.build_result("callers", "thing", [], 5000, "/repo")
+    assert res["ok"] is True
     assert res["result"] is None
-    # The critical assertion: it must NOT claim the symbol is absent from the index.
     assert res["reason"] == "backend-incompatible"
     assert res["reason"] != "not-in-graph"
-    assert "0.9" in res["hint"]
     assert "NOT a statement about whether your repository is indexed" in res["hint"]
 
 

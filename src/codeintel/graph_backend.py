@@ -27,6 +27,7 @@ import threading
 import time
 from typing import Any
 
+from codeintel import wire_text
 from codeintel.outcome import Missing
 
 
@@ -162,18 +163,7 @@ class BackendClient:
             )
             if result.returncode != 0:
                 return self._FAIL  # unsupported / error → let the raw-JSON fallback try
-            try:
-                return json.loads(result.stdout)
-            except ValueError:
-                # The backend RAN and exited 0 — it simply did not answer in JSON. That is a
-                # dialect mismatch, not a failure, and it must not be folded into the same `None`
-                # as a crash: `codebase-memory-mcp` 0.10.x replaced the `{columns, rows}` payload
-                # this provider parses with a compact human-readable text format, so every op that
-                # is not `list_projects` (still JSON) silently returned "not in graph index" — on a
-                # repository that was fully indexed. Distinguishing it is what lets the caller say
-                # so instead of sending the user to re-index for the third time.
-                self._saw_unparsable = True
-                return self._UNPARSABLE
+            return self._decode(method, result.stdout)
         except Exception:
             return self._FAIL
 
@@ -190,13 +180,35 @@ class BackendClient:
             )
             if result.returncode != 0:
                 return self._FAIL
-            try:
-                return json.loads(result.stdout)
-            except ValueError:
-                self._saw_unparsable = True
-                return self._UNPARSABLE
+            return self._decode(method, result.stdout)
         except Exception:
             return self._FAIL
+
+    def _decode(self, method: str, stdout: bytes) -> Any:
+        """One backend reply, in whichever dialect the installed backend speaks.
+
+        Two are supported. 0.9.x answers in JSON. 0.10.x answers all but `list_projects` in a
+        compact human-readable text layout — passing `--json` does not undo that, it only wraps the
+        same text in an MCP envelope — and `wire_text` translates it back into the 0.9.x-shaped
+        dict every caller above this line already parses. Neither the ops nor the renderers learn
+        that a second dialect exists.
+
+        The ordering matters: JSON is tried first, so a 0.9.x backend never pays for the text path
+        and never risks a misparse. And the text path must still be able to FAIL — a reply that is
+        no longer in a shape this release understands has to reach `_UNPARSABLE`, because the
+        "your backend and this release do not agree on a wire format" answer is the only thing that
+        made the 0.9→0.10 break diagnosable instead of looking like an unindexed repository. A
+        parser that guessed rather than refused would take that away.
+        """
+        try:
+            return json.loads(stdout)
+        except ValueError:
+            pass
+        parsed = wire_text.parse(method, stdout.decode("utf-8", "replace"))
+        if parsed is not None:
+            return parsed
+        self._saw_unparsable = True
+        return self._UNPARSABLE
 
     def _clear_failure(self) -> None:
         """Reset the per-query failure record.
