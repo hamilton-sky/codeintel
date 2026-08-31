@@ -1,6 +1,9 @@
 # Architectural layer views for `codeintel c4` — design
 
-> **Status: design only**, unchanged. Nothing here is implemented; `codeintel c4` ships the file/directory + import model described in [c4.md](c4.md), not these layer views.
+> **Status: design only.** No layer code is implemented; `codeintel c4` ships the file/directory +
+> import model described in [c4.md](c4.md), not these layer views. **Phase 0's two probes have been
+> run** (2026-09-01) — findings are recorded in §8 and settle open questions §9.1 and §9.3. Phase 1
+> is unblocked.
 
 Status: **design only.** Nothing here is implemented. This document decides *how*, so an
 implementation session does not have to re-litigate it.
@@ -788,9 +791,66 @@ have. It only checks the order of the things that exist.
 
 ## 8. Phased plan
 
-### Phase 0 — probes. No shipped code. (~half a day)
+### Phase 0 — probes. No shipped code. **DONE — 2026-09-01.**
 
 Two probes, both blocking, because committing to an emission shape without them is guessing.
+Both were run; findings are recorded inline below, and the two open questions they settle
+(§9.1 and §9.3) are marked there. Nothing else in this document changed as a result — the
+phasing and the option-A recommendation survive the measurements.
+
+**Probe (a) results — LikeC4 1.59.2, Node 26.6.0.**
+
+| question | answer |
+|---|---|
+| Does `group` exist in a view body? | **Yes.** `group 'Label' { include a, b }` parses and validates. |
+| Does it *position*, or only decorate? | **Only decorates.** It compiles to a Graphviz `subgraph cluster_@grN` — a box with a label. Clusters do not carry rank. |
+| Tag-filter predicate in `include` | `include element.tag = #layerA` parses and validates. |
+| A `view` with zero `include` statements | Parses and validates. |
+| Deployment holding declared model elements | **Yes** — `instanceOf a` inside a `deploymentNode` validates. |
+| Same element instantiated more than once | **Yes** — two `instanceOf a` in different nodes validates. |
+| Relations auto-derived into a deployment view | **Yes** — a model `a -> b` surfaces as `layerTop -> layerBot`. |
+
+The decisive test for the positioning question declared bands top-to-bottom while pointing every
+edge the other way (`bottomA -> midA -> topA`). Rendered `y` came back `BottomA 61, MidA 361,
+TopA 661` — layout followed the edges and inverted the declared bands completely.
+
+**What that means, and it is not the bad news it first looks like.** `group` cannot force a stack,
+but it does not have to. With the edges pointing the way the layers say they point, the default
+`rankdir=TB` layout produces the stack on its own: the same model with `topA -> midA -> bottomA`
+renders `TopA 61, MidA 361, Bottom 661` with band labels at `8 / 308 / 600`. And edges pointing the
+right way is not a hope — on inferred layers it is §2.3's theorem, which guarantees every edge
+descends. So **layout supplies the order and `group` supplies the label**, which is the division of
+labour the feature actually needs.
+
+It also means a *declared* layer violation will visibly bend the diagram rather than hide in it,
+because that is exactly the case where the edges disagree with the bands. That is a feature, and
+the violation view should not try to straighten it out.
+
+**Probe (b) results — element-level `IMPORTS` cycle survey, four indexed repos.**
+
+Measured at each repo's own auto-fit depth, tests excluded, via `codeintel c4 <repo> --json`
+(the payload already tags each relation `imports` or `calls_usage`).
+
+| repo | elements | depth | `IMPORTS` SCCs>1 | largest | frac | `UNION` SCCs>1 | largest | frac |
+|---|---|---|---|---|---|---|---|---|
+| codeintel | 67 | 4 | 0 | 0 | 0.0% | 2 | 26 | **38.8%** |
+| daycap | 27 | 4 | 0 | 0 | 0.0% | 1 | 19 | **70.4%** |
+| pathly-adapters | 81 | 3 | 2 | 3 | 3.7% | 1 | 37 | **45.7%** |
+| brightsky-ai | 29 | 2 | 1 | 4 | 13.8% | 1 | 14 | **48.3%** |
+
+Three things fall out, all of which the design assumed and none of which had been measured:
+
+1. **§1 holds, and by a wide margin.** The union is not layerable on any repo tested — between 38.8%
+   and 70.4% of all elements collapse into a *single* strongly-connected component. `IMPORTS` alone
+   stays between 0% and 13.8%. This is no longer an argument, it is four data points.
+2. **Real `IMPORTS` cycles exist in the wild.** pathly-adapters has two (largest: 3 elements —
+   `src/pathly_data/core`, `studio/src/main`, `studio/src/renderer`) and brightsky-ai has one of
+   four spanning `backend/src`, `frontend/extension` and `frontend/src`. §2.4's degradation path can
+   therefore be exercised against real repositories, and the instruction to construct a synthetic
+   fixture instead is withdrawn — the fixture would have been less representative than what is
+   already on disk. This closes the "do not ship the degradation path unexercised" blocker.
+3. **The 50% threshold never fires.** The largest real `IMPORTS` fraction seen is 13.8% — the
+   threshold sits ~3.6x above anything measured. See §9.3.
 
 **(a) LikeC4 grammar.** Install LikeC4 (the repo already assumes `npx likec4`) and answer, against
 the actual installed version, recording findings the way `c4.py`'s colour comment does:
@@ -859,12 +919,23 @@ than conclude it was overlooked.
 
 The rest, listed rather than guessed at.
 
-1. **Does LikeC4 `group` position, or only decorate?** Decides option C vs A, and therefore whether
-   the layer view actually reads as a stack. Phase 0(a).
+1. ~~**Does LikeC4 `group` position, or only decorate?**~~ **ANSWERED (Phase 0(a), 2026-09-01):
+   it only decorates** — a Graphviz cluster, no rank. But the question turned out to be the wrong
+   one: the stack comes from edge direction under `rankdir=TB`, which §2.3's theorem already
+   guarantees, so `group` only ever needed to supply the band label. **Option A stands**, with
+   `group` used for labelling rather than positioning; option C is not a separate option so much as
+   a misunderstanding of what `group` was for.
 2. **Is the deployment model a legitimate second hierarchy for non-deployment concerns?** Named in
    §4.2 as option D; I do not know its constraints well enough to recommend it either way.
-3. **50% is the degradation threshold in §2.4 — calibrated against one measurement.** It should be
-   re-checked against Phase 0(b)'s survey rather than treated as settled.
+3. **50% is the degradation threshold in §2.4.** Re-checked against Phase 0(b) and **still not
+   settled, for a new reason**: across four repos the largest `IMPORTS` SCC was 13.8%, so the
+   threshold is ~3.6x above anything real and would not have fired once. That makes it a
+   catastrophe guard rather than an operating parameter — which is defensible, but it means the
+   degradation path ships essentially untested by normal use. Pick one deliberately: lower it into
+   a range real repos reach (the 13.8% observation suggests somewhere near 20-25%) so it is
+   exercised, or keep 50% and say plainly in the doc and the code that it is a guard against a
+   pathological repo, not a routine mode. Do not leave it at 50% by default and describe it as
+   tuned.
 4. **Should `--layers` become the default?** Deferred until it has run on several repos. The answer
    probably depends on how often option A's coloured-graph weakness (§4.2) shows up in practice.
 5. **`spread`'s threshold (≥ 3 inferred ranks within one declared layer)** is a guess. It needs one
