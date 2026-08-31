@@ -30,6 +30,19 @@ _COOLDOWN_SECONDS = 60
 # the cold path; a warm call returns in ~1s and never approaches it.
 _DEFAULT_TIMEOUT_S = 30.0
 
+# How long a query may wait for a WARMING session to finish booting before it gives up and returns
+# the `warming` safe-null (see `build_result`). Sized from the measured boot, not guessed: the
+# `initialize` handshake settled in 2.30s / 2.50s / 1.85s on daycap (70 files), brightsky-ai (803
+# TypeScript files) and pathly-adapters respectively — flat with repo size, because the handshake
+# does not load the workspace. That load is the 11.65s the dispatch budget above is sized for, and
+# it happens on the far side of READY, so this wait and that timeout do not overlap.
+#
+# 8s is ~3x the worst measured boot. It is deliberately NOT sized for a cold `uvx` that must still
+# resolve and download serena-agent; that case exceeds any bound worth holding an agent's call open
+# for, and degrading to `warming` — with `retry_after_s` in the envelope's gaps — is the right
+# answer for it.
+_WARM_WAIT_S = 8.0
+
 # Serena ships as the `serena-agent` package (executable name `serena`); `uvx serena` does NOT
 # work ("Package `serena` does not provide any executables"). The working invocation — verified
 # against the installed serena and the machine's own serena MCP config — pulls it straight from
@@ -119,6 +132,9 @@ class _LspSession:
         self.state = _State.WARMING
         self.cooldown_until: float = 0.0
         self._lock = threading.Lock()
+        # Set once the boot resolves either way (READY or FAILED), so a caller can wait for the
+        # outcome instead of polling the state behind `_lock`. See `wait_until_settled`.
+        self.settled = threading.Event()
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._mcp_session: ClientSession | None = None
         self._thread = threading.Thread(
@@ -128,6 +144,17 @@ class _LspSession:
         )
         self._thread.start()
 
+    def wait_until_settled(self, timeout_s: float) -> _State:
+        """Block up to *timeout_s* for the boot to resolve, then report the state.
+
+        Returns `WARMING` when the wait expired with the boot still in flight — the caller then
+        degrades exactly as it did before there was a wait at all.
+        """
+        if timeout_s > 0:
+            self.settled.wait(timeout_s)
+        with self._lock:
+            return self.state
+
     def _run(self, project_root: str, cmd: str) -> None:
         try:
             self._loop.run_until_complete(self._warmup(project_root, cmd))
@@ -136,6 +163,10 @@ class _LspSession:
                 self.state = _State.FAILED
                 self.cooldown_until = time.monotonic() + _COOLDOWN_SECONDS
         finally:
+            # Unblock any waiter whatever happened — including the path where `_warmup` returns
+            # without ever reaching READY. A waiter that is never woken would burn its whole
+            # timeout on a session that already settled.
+            self.settled.set()
             try:
                 self._loop.close()
             except Exception:
@@ -155,6 +186,7 @@ class _LspSession:
                 with self._lock:
                     self._mcp_session = session
                     self.state = _State.READY
+                self.settled.set()
                 # Keep the loop (and the subprocess/session it owns) alive so _call_tool can
                 # schedule coroutines onto it. Resolves only when the thread/loop is torn down.
                 await asyncio.get_running_loop().create_future()
@@ -417,7 +449,27 @@ class LspProvider:
                 state = session.state
 
             if state == _State.WARMING:
-                return safe_null_result(op_str, target_str, engine="lsp", reason="warming")
+                # Wait, briefly, rather than returning `warming` the instant a session is booting.
+                #
+                # Returning immediately made the LSP engine effectively unavailable on the FIRST
+                # call of every session — which is exactly the call an agent makes when it starts
+                # work on a repo. Worse, `callers`/`context` fold the LSP in as a CROSS-CHECK of
+                # graph rows resolved by bare name: the `[?…]` badges say "unverified, ask the LSP",
+                # and the engine that would verify them had always just declined. Dogfooding on
+                # three repos hit that on every first query and never once saw the cross-check
+                # arrive. `commands/query.py` already worked around it with a 45s retry loop, but
+                # that loop lives in the CLI, so the MCP and HTTP transports — the ones an agent
+                # actually calls — never got the benefit.
+                #
+                # Bounded well under the dispatch timeout this method already grants itself, so a
+                # boot that is genuinely slow still degrades to the same safe null instead of
+                # holding the call open. `_WARM_WAIT_S` is a ceiling, not a cost: the wait ends the
+                # moment the session settles, and a session that is already READY never enters
+                # this branch at all.
+                state = session.wait_until_settled(min(_WARM_WAIT_S, timeout_s))
+                if state == _State.WARMING:
+                    return safe_null_result(
+                        op_str, target_str, engine="lsp", reason="warming")
 
             if state == _State.FAILED:
                 return safe_null_result(op_str, target_str, engine="lsp", reason="boot-failed")

@@ -37,6 +37,22 @@ All notable changes to codeintel are documented here. The format is based on
   (`spectrum.ts`, `latest.ts`, `attest.ts`) cannot be hidden — over-filtering is what retired
   `deadcode` at 25% precision, so the bar for widening this filter is that a convention *cannot*
   conceal a real symbol, not that it looks test-shaped.
+- **A warming LSP session is now waited for on every transport, not just the CLI.** Returning
+  `reason: "warming"` the instant a session was booting made the LSP engine effectively unavailable
+  on the *first* call of every session — which is the call an agent makes when it starts work on a
+  repo. Worse, `callers` and `context` fold the LSP in as the cross-check behind their `[?…]`
+  unverified badges: the badges say "ask the LSP", and the engine that would answer had always just
+  declined. Dogfooding across three repositories hit that on every first query and never once saw the
+  cross-check arrive. `commands/query.py` had worked around it since it was written, but that retry
+  loop lives in the CLI, so the MCP and HTTP transports — the ones an agent actually calls — never
+  got the benefit. The wait now lives in the provider, bounded at 8s and additionally clamped to the
+  caller's own budget, and it is sized from measurement rather than guessed: the `initialize`
+  handshake settled in 2.30s / 2.50s / 1.85s across a 70-file, an 803-file and a mixed-language repo
+  — flat with repo size, because the handshake does not load the workspace. That load is the 11.65s
+  the dispatch timeout was already sized for, and it happens on the far side of READY, so the two
+  budgets do not overlap. A boot that genuinely exceeds the bound (a cold `uvx` still downloading
+  serena-agent) degrades to exactly the safe null it returned before.
+
 ### Internal
 - **`main` and the `v*` release tags are protected, and the configuration is committed** rather than
   living only in whoever clicked the toggles — two importable rulesets in `.github/rulesets/` plus

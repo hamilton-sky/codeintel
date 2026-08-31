@@ -19,6 +19,11 @@ def _make_fake_session(state: _State, cooldown_until: float = 0.0) -> Any:
     s._lock = threading.Lock()
     s._loop = None
     s._mcp_session = None
+    # A WARMING session is now WAITED for rather than declined outright. This double stands in for
+    # a boot that does not settle within the wait, which is what keeps these tests asserting the
+    # states they were written to assert; the wait itself is covered separately below.
+    s.settled = threading.Event()
+    s.wait_until_settled.return_value = state
     return s
 
 
@@ -107,6 +112,9 @@ def test_lsp_provider_cooldown_expiry(monkeypatch):
 
         def __init__(self, project_root, cmd):
             started.append(project_root)
+
+        def wait_until_settled(self, timeout_s):
+            return self.state  # a boot still in flight when the wait expires
 
     monkeypatch.setattr("codeintel.providers.lsp._LspSession", FakeNewSession)
 
@@ -310,3 +318,109 @@ def test_the_error_summary_never_quotes_the_backend(monkeypatch):
     assert "Inform the user" not in summary
     assert "initializationOptions" not in summary
     assert summary == "the language server reported an error for this query"
+
+
+# ---------------------------------------------------------------------------
+# Warming: a first call must not silently forfeit the LSP engine
+# ---------------------------------------------------------------------------
+
+def test_a_warming_session_is_waited_for_rather_than_declined():
+    """The LSP was effectively unavailable on the FIRST call of every session — the one an agent
+    makes when it starts on a repo. `callers`/`context` fold the LSP in as the cross-check behind
+    their `[?…]` unverified badges, so the engine that would confirm them had always just declined.
+    Dogfooding on three repos never once saw the cross-check arrive."""
+    import threading
+
+    from codeintel.providers import lsp as lsp_mod
+
+    session = MagicMock()
+    session._lock = threading.Lock()
+    session.state = lsp_mod._State.WARMING
+
+    def _settle(timeout_s):
+        session.state = lsp_mod._State.READY
+        return lsp_mod._State.READY
+
+    session.wait_until_settled.side_effect = _settle
+
+    provider = LspProvider.__new__(LspProvider)
+    provider.available = True
+    provider._get_or_create_session = lambda root: session
+    provider._clear_backend_error = lambda: None
+    provider._dispatch = lambda *a, **k: "## Symbol: thing"
+    provider._pending_gaps = ()
+
+    out = provider.build_result("symbol", "thing", "auto", 0, "/repo")
+
+    session.wait_until_settled.assert_called_once()
+    assert out.get("result") == "## Symbol: thing"
+    assert out.get("reason") != "warming"
+
+
+def test_a_boot_that_never_settles_still_degrades_to_the_warming_safe_null():
+    """The wait is a bounded courtesy, not a promise. A genuinely slow boot (a cold `uvx` still
+    downloading serena-agent) must return the same safe null it always did rather than hold the
+    agent's call open."""
+    import threading
+
+    from codeintel.providers import lsp as lsp_mod
+
+    session = MagicMock()
+    session._lock = threading.Lock()
+    session.state = lsp_mod._State.WARMING
+    session.wait_until_settled.return_value = lsp_mod._State.WARMING
+
+    provider = LspProvider.__new__(LspProvider)
+    provider.available = True
+    provider._get_or_create_session = lambda root: session
+    provider._pending_gaps = ()
+
+    out = provider.build_result("symbol", "thing", "auto", 0, "/repo")
+
+    assert out.get("result") is None
+    assert out.get("reason") == "warming"
+
+
+def test_the_wait_is_bounded_by_the_callers_own_timeout():
+    """A caller that granted a short budget must not be held for the full `_WARM_WAIT_S`."""
+    import threading
+
+    from codeintel.providers import lsp as lsp_mod
+
+    session = MagicMock()
+    session._lock = threading.Lock()
+    session.state = lsp_mod._State.WARMING
+    session.wait_until_settled.return_value = lsp_mod._State.WARMING
+
+    provider = LspProvider.__new__(LspProvider)
+    provider.available = True
+    provider._get_or_create_session = lambda root: session
+    provider._pending_gaps = ()
+
+    provider.build_result("symbol", "thing", "auto", 1000, "/repo")  # 1s budget
+
+    waited = session.wait_until_settled.call_args[0][0]
+    assert waited <= 1.0, f"a 1s budget must not wait {waited}s"
+
+
+def test_settled_is_set_on_a_failed_boot_so_a_waiter_is_not_stranded():
+    """A waiter that is never woken burns its whole timeout on a session that already settled."""
+    import threading
+
+    from codeintel.providers import lsp as lsp_mod
+
+    sess = lsp_mod._LspSession.__new__(lsp_mod._LspSession)
+    sess.state = lsp_mod._State.WARMING
+    sess.cooldown_until = 0.0
+    sess._lock = threading.Lock()
+    sess.settled = threading.Event()
+    sess._loop = MagicMock()
+
+    def _boom(*a, **k):
+        raise RuntimeError("boot failed")
+
+    sess._loop.run_until_complete.side_effect = _boom
+    sess._run("/repo", "uvx")
+
+    assert sess.settled.is_set()
+    assert sess.wait_until_settled(0.01) is lsp_mod._State.FAILED
