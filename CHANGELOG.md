@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-08-31
+
 ### Fixed
 - **`chain`, `changed` and `impact` now separate relationship kind too.** `impact` inherited it for
   free (it composes `callers`/`callees`). `chain` gained `edge_types` so a walk no longer stops
