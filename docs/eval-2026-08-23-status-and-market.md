@@ -9,9 +9,14 @@
 >   redact a *single-segment* home at all — flattened, `/root` is a bare English word, and replacing
 >   it rewrote ordinary prose ("root cause analysis" → "`<home>` cause analysis"). `tests/test_redaction_boundary.py` pins both. The report's other suggestion — exempting `reason` outright — was not
 >   taken and is no longer needed, since anchoring stops a reason code from matching.
-> * **D2 — `no-index` sitting outside the could-not-ask family: still open.** `no-index` is still
->   not in `_COULD_NOT_ASK`, so an agent can still read "this project was never indexed" as a real
->   negative about the code. This is the finding in §2 that has not moved.
+> * **D2 — `no-index` sitting outside the could-not-ask family: resolved, though not the way the
+>   report proposed.** Widening the family to admit `no-index` would have been wrong: a pass that
+>   *completed* and found nothing to embed genuinely is an answer about the repository. The real
+>   defect was one level down — `no-index` was **overloaded**, covering both that case and an index
+>   pass that ran and failed, because the provider discarded `Indexer.index`'s `-1` and its
+>   `last_error`. A failed pass is now `index-failed`, which carries the cause in its `hint` and
+>   *is* in both could-not-ask families (the gateway's `unreachable` set and the cold tier's
+>   `_COULD_NOT_ASK`). `no-index` stays out of them, deliberately.
 >
 > The three source references in §6 have drifted with the code and no longer point at what they
 > named — `semantic.py:158` and `gateway.py:181` in particular. Grep for the symbols rather than

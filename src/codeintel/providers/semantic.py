@@ -259,8 +259,17 @@ class SemanticProvider:
                 "chunk_strategy": str(cfg.get("chunk_strategy", "syntax")),
             }
             no_index = not searcher.has_index(project_root)
+            # Why the inline pass failed, when it did. `Indexer.index` returns -1 and parks the
+            # cause on `last_error` precisely so a caller can SHOW it instead of logging it; this
+            # call site discarded both, so a failed pass and a repo nobody has indexed yet came
+            # back as the same `no-index` — with a hint telling the reader to run the very thing
+            # that had just failed, and the real cause (a blocked model download, an unwritable
+            # cache) left in a stderr line they had no reason to connect to the answer.
+            index_error: str | None = None
             if background_reindex_off or (no_index and self._blocking_index):
-                Indexer(db, **indexer_kwargs).index(project_root)
+                indexer = Indexer(db, **indexer_kwargs)
+                if indexer.index(project_root) < 0:
+                    index_error = indexer.last_error or "unrecoverable failure"
             elif no_index:
                 # Non-blocking caller (the long-lived MCP/HTTP server): a cold pass over a real repo
                 # is minutes long (~500s / 25k chunks per docs/benchmarks.md) plus a one-time ~50MB
@@ -281,6 +290,16 @@ class SemanticProvider:
                 )
 
             if not searcher.has_index(project_root):
+                if index_error:
+                    # Distinct from `no-index` because it licenses a different conclusion: the
+                    # engine was asked and could not answer, rather than asked and found nothing.
+                    return safe_null_result(
+                        op, target, engine="semantic", reason="index-failed",
+                        hint=(f"an inline index pass ran for this repo and failed: {index_error} "
+                              f"— this is NOT 'never indexed'. Run `codeintel index "
+                              f"{project_root}` to see the failure with progress output, or "
+                              f"`codeintel doctor` to check the engine"),
+                    )
                 return safe_null_result(
                     op, target, engine="semantic", reason="no-index",
                     hint=f"run: codeintel index {project_root}  (or: codeintel doctor)",

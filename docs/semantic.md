@@ -178,6 +178,11 @@ Searcher(db).search(query, project_root, k=10, cosine_floor=0.25,
 - An empty index (zero rows in `chunk_hashes`) is surfaced as `reason: 'no-index'` — before any
   search runs. `below-floor` is reserved for a non-empty index that yielded no match above the
   cosine floor.
+- An inline pass that **ran and failed** — a blocked model download, an unwritable cache — is
+  `reason: 'index-failed'`, never `'no-index'`, and the failure's own message travels in the `hint`.
+  The two license opposite next steps ("nothing to find here" versus "the engine could not be
+  asked"), and `Indexer.index` keeps the cause on `last_error` precisely so the answer can carry it
+  instead of leaving it in a log line the reader has already scrolled past.
 
 ### Hybrid rerank
 
@@ -261,7 +266,8 @@ returning nothing.
 | `'op-not-supported'` | `op` is not `'search'` |
 | `'engine-unavailable'` | `fastembed` or `sqlite-vec` not importable |
 | `'no-project-root'` | `project_root` is empty or falsy |
-| `'no-index'` | The index is empty for this project (zero rows in `chunk_hashes`) after an inline index pass found nothing to embed. The CLI always takes this path on a cold repo; the server does too when `CODEINTEL_REINDEX=off` (see **Indexing** above) — otherwise the server reports `'indexing-in-progress'` instead, below |
+| `'no-index'` | The index is empty for this project (zero rows in `chunk_hashes`) after an inline index pass **completed** and found nothing to embed. The CLI always takes this path on a cold repo; the server does too when `CODEINTEL_REINDEX=off` (see **Indexing** above) — otherwise the server reports `'indexing-in-progress'` instead, below |
+| `'index-failed'` | An inline index pass ran and could not finish, so there is still no index. The `hint` carries the underlying cause. A **could-not-ask** reason, not a finding: it is in the gateway's `unreachable` set, so a fan-out where it is the only outcome summarises as `engines-unavailable` with "this is NOT evidence the target does not exist" rather than as `no-result`. `'no-index'` is deliberately *not* in that set — a completed pass that found nothing IS an answer about the repository |
 | `'indexing-in-progress'` | **Server transports only** (MCP stdio / HTTP): no index existed for this project, and a cold-index pass just started in the background rather than blocking this request. Not "nothing found" — retry shortly, or run `codeintel index <path>` to build it synchronously now. Never returned by the CLI, which indexes inline instead (see **Indexing** above) |
 | `'below-floor'` | A non-empty index yielded no match above the cosine floor |
 | `'index-stale'` | Matches were found, but every one failed staleness verification — the files changed since indexing. Distinct from `'below-floor'`: the code may well exist, the index just no longer locates it. Re-index to restore. |

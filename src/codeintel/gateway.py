@@ -293,7 +293,11 @@ class Gateway:
             # otherwise careful to preserve per-provider.
             reasons = {eng: str(r.get("reason") or "no-result") for eng, r in results.items()}
             unreachable = {"engine-unavailable", "boot-failed", "warming", "project-not-indexed",
-                           "project-not-indexed-standalone", "error", "timeout"}
+                           "project-not-indexed-standalone", "error", "timeout",
+                           # An index pass that RAN and FAILED is a could-not-ask, not a
+                           # found-nothing. `no-index` deliberately stays out: it means the pass
+                           # completed and there was nothing to embed, which is an answer.
+                           "index-failed"}
             all_unreachable = bool(reasons) and all(v in unreachable for v in reasons.values())
             summary = "engines-unavailable" if all_unreachable else "no-result"
             detail = ", ".join(f"{eng}: {why}" for eng, why in sorted(reasons.items()))

@@ -343,3 +343,111 @@ def test_probe_reports_indexing_in_progress(tmp_path, monkeypatch):
     assert r["installed"] is True and r["repo_indexed"] is False
     assert "indexing in progress" in r["detail"]
     assert "codeintel index" in r["remediation"]
+
+
+# --- D2: an index pass that FAILED is not a repo nobody indexed ------------------------------
+#
+# `Indexer.index` returns -1 and parks the cause on `last_error` specifically so a caller can SHOW
+# it rather than log it. The provider discarded both, so a blocked model download and a repo nobody
+# had indexed yet produced the same `no-index` — with a hint telling the reader to run the very
+# pass that had just failed. These two tests pin the pair, because the distinction only means
+# something while BOTH sides hold.
+
+class _FailingIndexer:
+    """Stands in for a pass that ran and could not finish — a blocked model download, say."""
+
+    def __init__(self, *_args, **_kwargs):
+        self.last_error = "SSLError: certificate verify failed"
+
+    def index(self, _project_root):
+        return -1
+
+
+def test_a_failed_inline_index_is_reported_as_index_failed_with_its_cause(tmp_path, monkeypatch):
+    import codeintel.indexer as idx
+    import codeintel.providers.semantic as sem
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "widget.py").write_text("def make_widget(name):\n    return name\n")
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr(sem, "_DEPS_OK", True)
+    monkeypatch.setattr(idx, "Indexer", _FailingIndexer)
+
+    result = SemanticProvider().build_result("search", "widget factory", [], 0, str(repo))
+
+    assert result["result"] is None
+    assert result["reason"] == "index-failed", (
+        "a pass that ran and failed must not be reported as `no-index` — that is the reason a "
+        "reader takes as 'nobody has indexed this yet', which licenses the opposite next step"
+    )
+    # The cause travels in the answer, not only in a log line the reader already scrolled past.
+    assert "certificate verify failed" in result["hint"]
+    assert "NOT 'never indexed'" in result["hint"]
+
+
+def test_an_index_pass_that_finds_nothing_still_reports_no_index(tmp_path, monkeypatch):
+    """The other half. `no-index` keeps its documented meaning — the pass completed and there was
+    nothing to embed — which is an answer about the repository, not a failure to ask."""
+    import codeintel.providers.semantic as sem
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr(sem, "_DEPS_OK", True)
+    with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
+        result = SemanticProvider().build_result("search", "x", [], 0, str(empty))
+
+    assert result["result"] is None
+    assert result["reason"] == "no-index"
+
+
+def test_a_fanout_where_the_index_failed_is_not_evidence_the_symbol_is_absent() -> None:
+    """The gateway's `_merge` is, by its own comment, "the one place the codebase throws away the
+    could-not-ask / asked-and-found-nothing distinction it is otherwise careful to preserve".
+
+    With `engine="all"` semantic joins the fan-out, so its reason reaches that set. Before
+    `index-failed` was added to it, a run where the index pass simply failed summarised as
+    `no-result` with no caveat — which an agent reads as "that symbol does not exist".
+    """
+    from codeintel.gateway import Gateway
+
+    def stub(engine, reason):
+        class _S:
+            available = True
+
+            def build_result(self, op, target, *_a, **_k):
+                return {"ok": True, "op": op, "target": target, "engine": engine,
+                        "result": None, "reason": reason, "cached": False}
+        return _S()
+
+    gw = Gateway(graph=stub("graph", "engine-unavailable"), lsp=stub("lsp", "boot-failed"),
+                 semantic=stub("semantic", "index-failed"))
+    r = gw.query(op="context", target="make_widget", engine="all", project_root="/x")
+
+    assert r["reason"] == "engines-unavailable"
+    assert "semantic: index-failed" in r["hint"]
+    assert "NOT evidence the target does not exist" in r["hint"]
+
+
+def test_a_fanout_where_the_repo_is_merely_unindexed_keeps_its_ordinary_summary() -> None:
+    """The negative control, and the reason `no-index` was deliberately left OUT of that set: a
+    completed pass that found nothing to embed IS an answer about the repository, so it must not
+    borrow the "could not ask" caveat."""
+    from codeintel.gateway import Gateway
+
+    def stub(engine, reason):
+        class _S:
+            available = True
+
+            def build_result(self, op, target, *_a, **_k):
+                return {"ok": True, "op": op, "target": target, "engine": engine,
+                        "result": None, "reason": reason, "cached": False}
+        return _S()
+
+    gw = Gateway(graph=stub("graph", "not-in-graph"), lsp=stub("lsp", "not-found"),
+                 semantic=stub("semantic", "no-index"))
+    r = gw.query(op="context", target="make_widget", engine="all", project_root="/x")
+
+    assert r["reason"] == "no-result"
+    assert "NOT evidence" not in (r.get("hint") or "")

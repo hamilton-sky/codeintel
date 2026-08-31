@@ -54,6 +54,12 @@ _COULD_NOT_ASK = {
     "engine-unavailable", "backend-unreachable", "backend-error", "backend-incompatible",
     "boot-failed", "warming", "timeout", "unparsable", "provider-error", "error",
     "project-not-indexed", "project-not-indexed-standalone",
+    # An inline index pass that RAN and FAILED. Before this reason existed the semantic provider
+    # reported that case as `no-index` — indistinguishable from a repo nobody had indexed yet —
+    # which is D2 in docs/eval-2026-08-23-status-and-market.md. `no-index` itself stays OUT of this
+    # set on purpose: it means the pass completed and found nothing to embed, which is an answer
+    # about the repository rather than a failure to ask.
+    "index-failed",
 }
 _ASKED_AND_FOUND_NOTHING = {"not-in-graph", "no-result", "below-floor", "not-found"}
 _EMPTINESS_MARKERS = ("(none)", "(none found)", "(no matches)", "(0)")
