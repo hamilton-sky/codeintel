@@ -45,9 +45,16 @@ from typing import Any
 # `;` inside the parens is prose for a human and is discarded where the group is read.
 _SECTION_RE = re.compile(r"^(?P<key>[a-z_]+):\s*(?P<count>\d+)?\s*\((?:cols|rows):\s*(?P<cols>.*)\)\s*$")
 _SCALAR_RE = re.compile(r"^(?P<key>[a-z_]+):\s*(?P<value>.*)$")
-# `<qualified.name> (<path>):` — a group header. The path may contain spaces, so anchor on the
-# trailing `):` rather than splitting on whitespace.
-_GROUP_RE = re.compile(r"^(?P<prefix>\S+)\s+\((?P<file>.+)\):$")
+# `<qualified.name> (<path>):` — a group header, and `<qualified.name>:` when the backend has no
+# path to attach (every `trace_path` group, and any node outside a file such as `builtins.*`). The
+# path is OPTIONAL for exactly that reason: requiring it made the row reader treat a path-less group
+# as a foreign line and abandon the section, so `trace_path` parsed its header, read ZERO rows, and
+# `chain` reported a symbol with 17 hops as having none.
+#
+# Anchored on the trailing `:` — that is what separates a group line from a scalar (`mode: calls`,
+# which ends in its value) and from a section header (which ends in `)`). The path may contain
+# spaces, so it is matched greedily inside its parens rather than by splitting on whitespace.
+_GROUP_RE = re.compile(r"^(?P<prefix>\S+?)(?:\s+\((?P<file>.+)\))?:$")
 _INDENT = "  "
 
 _NULL = "-"
@@ -181,9 +188,12 @@ class _Doc:
                 i += 1
                 continue
             if not line.startswith(_INDENT):
+                if _SECTION_RE.match(line):
+                    break                               # a sibling section, not a group of ours
                 group = _GROUP_RE.match(line.strip())
                 if group:
-                    prefix, file = group.group("prefix"), group.group("file")
+                    prefix = group.group("prefix")
+                    file = group.group("file") or ""
                     i += 1
                     continue
                 break                                   # a new top-level key ends this section
@@ -289,8 +299,12 @@ def _trace_path(doc: _Doc) -> dict | None:
         out = []
         for r in doc.rows.get(key, []):
             qn = r.get("qn") or r.get("_qn") or ""
+            # `risk` and `strategy`/`confidence` are alternative column sets — the backend emits one
+            # or the other depending on which flag was passed — so both are read and whichever
+            # arrived is passed on.
             out.append({"name": qn.rsplit(".", 1)[-1], "qualified_name": qn,
-                        "hop": _int(r.get("hop")), "risk": r.get("risk")})
+                        "hop": _int(r.get("hop")), "risk": r.get("risk"),
+                        "strategy": r.get("strategy"), "confidence": r.get("confidence")})
         return out
 
     return {"function": doc.scalars.get("function", ""),

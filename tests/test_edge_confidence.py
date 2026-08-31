@@ -75,12 +75,16 @@ def test_a_name_resolved_row_is_badged_counted_and_makes_the_envelope_partial(mo
     assert any(g["kind"] == "low-confidence-edges" for g in env["gaps"]), env["gaps"]
 
 
-def test_a_fuzzy_row_is_marked_apart_from_a_unique_name_row(monkeypatch):
-    """The tiers fail differently and a reader has to be able to tell them apart from the row
-    alone: `unique_name` is a plausible binding, a string-similarity match usually is not."""
+def test_one_glyph_carries_the_verdict_and_the_number_is_detail(monkeypatch):
+    """The glyph used to split on the float — `!` at or below 0.55, `?` above — which put
+    `unique_name` at 0.75 and `unique_name` at 0.38 into two visual classes despite being the same
+    strategy and the same kind of evidence. One verdict now, with the score behind it. Where the
+    backend reports no strategy (this fixture, and every 0.9.x edge) the note still separates the
+    tiers, because there the number is the only signal there is."""
     env = _callers(monkeypatch, _rows("0.75", "0.38"))
     body = env["result"]
-    assert "[?0.75]" in body and "[!0.38]" in body, body
+    assert "[?0.75]" in body and "[?0.38]" in body, body
+    assert "[!" not in body, body
     assert "LIKELY SPURIOUS" in body and "UNVERIFIED" in body
 
 
@@ -101,7 +105,8 @@ def test_the_floor_is_inclusive_at_its_own_value(monkeypatch):
     assert "[?" not in _callers(monkeypatch, _rows(str(_EDGE_CONFIDENCE_FLOOR)))["result"]
     just_under = f"{_EDGE_CONFIDENCE_FLOOR - 0.01:.2f}"
     assert "[?" in _callers(monkeypatch, _rows(just_under))["result"]
-    assert "[!" in _callers(monkeypatch, _rows(str(_EDGE_CONFIDENCE_WEAK)))["result"]
+    # Both sub-floor tiers now carry the same glyph — the number is what separates them.
+    assert "[?0.55]" in _callers(monkeypatch, _rows(str(_EDGE_CONFIDENCE_WEAK)))["result"]
 
 
 def test_an_answer_made_entirely_of_guesses_raises_the_collision_signature(monkeypatch):
@@ -142,5 +147,5 @@ def test_both_edge_ops_disclose_identically(monkeypatch, op, rows_key):
     """The two ops have drifted apart before — one disclosing while the other stayed silent. Both
     read the same column and must reach the same conclusion from it."""
     env = _provider(monkeypatch, _rows("0.38")).build_result(op, "target", [], 30000, ROOT)
-    assert "[!0.38]" in env["result"], (op, env["result"])
+    assert "[?0.38]" in env["result"], (op, env["result"])
     assert env["confidence"] == "partial"

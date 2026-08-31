@@ -448,10 +448,19 @@ def test_chain_carries_risk_labels(monkeypatch):
     assert "[risk: CRITICAL]" in r["result"] and "[risk: HIGH]" in r["result"]
 
 
-def test_chain_requests_risk_labels(monkeypatch):
+def test_chain_requests_evidence_and_the_registration_edge(monkeypatch):
+    """`risk_labels` is gone on purpose. The backend treats it as mutually exclusive with
+    `include_evidence`, and `risk` was a restatement of hop distance (hop 1 = CRITICAL, hop 2 =
+    HIGH) that this op already prints on every row — so it dressed a number the reader can see as
+    an assessment nobody made. Evidence is the fact it could not report before: how each hop was
+    resolved. `edge_types` widens the walk so a chain no longer stops where a function is handed to
+    something rather than invoked."""
     p, seen = _capturing_provider(monkeypatch, CAP_TRACE_RISK)
     p.build_result("chain", "code_status_handler", [], 0, ROOT)
-    assert seen["method"] == "trace_path" and seen["payload"].get("risk_labels") is True
+    assert seen["method"] == "trace_path"
+    assert seen["payload"].get("include_evidence") is True
+    assert "CALL_REFERENCE" in (seen["payload"].get("edge_types") or [])
+    assert "risk_labels" not in seen["payload"]
 
 
 def test_new_ops_never_raise_when_run_throws(monkeypatch):

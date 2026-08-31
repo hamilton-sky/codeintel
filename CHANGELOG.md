@@ -7,6 +7,32 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **`chain`, `changed` and `impact` now separate relationship kind too.** `impact` inherited it for
+  free (it composes `callers`/`callees`). `chain` gained `edge_types` so a walk no longer stops
+  where a function is handed to something rather than invoked, and `changed`'s ripple query gained
+  `CALL_REFERENCE` and `USAGE` — a function registered somewhere breaks just as thoroughly when its
+  signature moves. `changed` answers a recall question, so the asymmetry runs the other way from
+  `callers`: include the indirect edges, rank direct calls above them, and label every row.
+- **Provenance now drives the verdict, not a numeric threshold.** The backend records `c.strategy`
+  per edge (`lsp_callable_alias`, `import_map`, `same_module`, `unique_name`, `suffix_match`, …) and
+  0.20.0's confidence floor inferred that from the float instead of reading it. On a real repository
+  `unique_name` appears at **both 0.75 and 0.38** — one strategy, one kind of guess — so the
+  threshold split it across two tiers and reported the same evidence two different ways. Answers now
+  name the strategy ("resolved by name matching (`unique_name`)"), one glyph carries the verdict with
+  the score behind it, and the float remains only as the fallback for a backend that reports no
+  strategy. `chain` reads the same field through `include_evidence`, which replaces `risk_labels` —
+  the backend treats them as mutually exclusive, and `risk` was a restatement of hop distance that
+  every row already prints.
+- **`trace_path` parsed zero rows whenever its groups had no file path.** Latent in the 0.21.0 text
+  support: the group pattern required ` (<path>):`, and `trace_path` groups on a bare qualified name
+  — as does any node outside a file (`builtins.*`). The row reader treated the line as foreign and
+  abandoned the section, so `chain` reported a symbol with 17 hops as having none. The path is
+  optional now, and a sibling section still terminates the rows above it.
+- **`changed`'s heading claimed containment for a walk.** 0.9.x returns the symbols *defined in* the
+  changed files; 0.10.x returns a transitive impacted set stamped with a `hop`. The same field, two
+  meanings — so the heading is derived from the data (and prints the hop) rather than asserting the
+  older one, which had put symbols from three unrelated files under "defined in the changed files".
+
 - **A registered callback was reported as having no callers.** `callers` matched `[:CALLS|USAGE]`
   and never asked for `CALL_REFERENCE` — the relationship the backend uses when a function is
   *passed* somewhere rather than invoked. `forward_released_item` is registered at two real sites

@@ -201,3 +201,33 @@ def test_the_parser_never_raises_on_malformed_input():
                  "\x00\xff binary", "key:\n  \n  \n"):
         parse("query_graph", junk)          # must not raise
         parse("detect_changes", junk)
+
+
+def test_a_group_line_with_no_file_path_still_opens_its_rows():
+    """`trace_path` groups its rows under a bare qualified name with NO parenthesised path — and so
+    does any node outside a file (`builtins.*`). Requiring the path made the row reader treat that
+    line as foreign and abandon the section, so a `trace_path` reply parsed its header, read ZERO
+    rows, and `chain` reported a symbol with 17 hops as having none. Latent in the 0.10.x support
+    until `--include-evidence` changed the column set to the grouped form."""
+    text = ("function: f\ndirection: both\ncallees_total: 2\n"
+            "callees: 2  (rows: name hop strategy confidence; qn = group prefix + \".\" + name)\n"
+            "proj.faults.delay:\n"
+            "  apply 1 lsp 0.88\n"
+            "builtins:\n"
+            "  str 1 heuristic 0.38\n")
+    out = parse("trace_path", text)
+    assert out is not None
+    assert len(out["callees"]) == 2, out
+    first = out["callees"][0]
+    assert first["qualified_name"] == "proj.faults.delay.apply"
+    assert first["strategy"] == "lsp" and first["confidence"] == "0.88"
+
+
+def test_a_sibling_section_ends_the_previous_one():
+    """With the group pattern loosened, a following section header must still terminate the rows
+    above it rather than being swallowed as a group of theirs."""
+    text = ("callees: 1  (cols: qn hop)\n  a.b 1\n"
+            "callers: 1  (cols: qn hop)\n  c.d 2\n")
+    out = parse("trace_path", text)
+    assert [c["qualified_name"] for c in out["callees"]] == ["a.b"], out
+    assert [c["qualified_name"] for c in out["callers"]] == ["c.d"], out

@@ -323,6 +323,57 @@ _EDGE_KINDS: dict[str, str] = {
 }
 _DIRECT_KIND = "CALLS"
 
+# HOW an edge was resolved, which the backend records per edge as `c.strategy`. This is provenance,
+# not a score, and it is the field that should drive policy.
+#
+# The confidence float alone is not enough, and shipping a threshold over it was a mistake this
+# constant exists to correct: on one real repository `unique_name` — a single strategy, one kind of
+# guess — appears at BOTH 0.75 and 0.38, so a numeric floor splits one strategy across two tiers and
+# reports the same kind of evidence two different ways. Meanwhile `same_module` at 0.90 and
+# `lsp_constructor` at 0.85 are genuinely different KINDS of claim that a float renders as neighbours.
+# Read the strategy; keep the number as detail.
+#
+# Classified by prefix because the vocabulary is open — `lsp_direct`, `lsp_ts_method`,
+# `lsp_callable_alias`, `lsp_builtin_constructor` and a dozen more are all the same class of
+# evidence, and enumerating them would go stale on the backend's next release.
+_TRUSTED_EVIDENCE: tuple[str, ...] = ("lsp", "import_map", "same_module")
+_GUESS_EVIDENCE: tuple[str, ...] = ("unique_name", "suffix_match", "fuzzy", "qualified_suffix")
+
+
+def _evidence_class(strategy: str) -> str:
+    """`c.strategy` reduced to the class that decides how an edge should be presented.
+
+    ``"lsp"`` / ``"import"`` / ``"same-module"`` are resolutions: something followed a real binding.
+    ``"name-guess"`` is the cascade falling back on a bare name matching. ``""`` means the backend
+    did not say, which is its own state and never silently promoted to either side."""
+    st = (strategy or "").strip().lower()
+    if not st:
+        return ""
+    # Two vocabularies reach this function and both have to be understood. `query_graph` returns the
+    # SPECIFIC strategy on the edge (`lsp_callable_alias`, `unique_name`, `suffix_match`);
+    # `trace_path --include-evidence` returns the backend's own COARSE class
+    # (`lsp | language_rule | heuristic | unresolved`). Mapping only the specific names left every
+    # traced hop labelled "other" — including the `heuristic` ones, which are exactly the guesses
+    # that most need saying.
+    if st.startswith("lsp"):
+        return "lsp"
+    if st.startswith("import"):
+        return "import"
+    if st.startswith("same_module"):
+        return "same-module"
+    if st.startswith("language_rule"):
+        return "language-rule"
+    if st.startswith("unresolved"):
+        return "unresolved"
+    # `heuristic` is the coarse class the backend uses for the weak end of its cascade — the same
+    # thing `unique_name`/`suffix_match` are, named one level up.
+    if st.startswith("heuristic"):
+        return "name-guess"
+    for guess in _GUESS_EVIDENCE:
+        if st.startswith(guess):
+            return "name-guess"
+    return "other"
+
 # How much the backend trusts an edge's target resolution — and the line below which it is a GUESS.
 #
 # The graph backend resolves each call target through a prioritised cascade and stamps the edge with
@@ -500,12 +551,17 @@ def _confidence_badge(row: dict) -> str:
     Two glyphs rather than one because the tiers mean different things and a reader scanning a list
     should be able to tell "unverified" from "probably junk" without consulting the note: `?` is a
     unique-name binding, `!` a suffix or string-similarity one."""
+    if "_low_confidence" not in row:
+        return ""
     conf = row.get("_low_confidence")
     if conf is None:
-        return ""
-    conf = float(conf)
-    glyph = "!" if conf <= _EDGE_CONFIDENCE_WEAK else "?"
-    return f" [{glyph}{conf:.2f}]"
+        # Condemned by its strategy, with no number attached. Say the strategy's verdict rather
+        # than inventing a score for it.
+        return " [?name-guess]"
+    # ONE glyph. `!` and `?` used to split on the confidence float, which put `unique_name` at 0.75
+    # and `unique_name` at 0.38 — the same strategy, the same kind of evidence — into two different
+    # visual classes. The number still shows, as detail behind a single verdict.
+    return f" [?{float(conf):.2f}]"
 
 
 def _group_edges(rows: list[dict], name_key: str, qn_key: str, file_key: str) -> list[_EdgeGroup]:
@@ -1157,6 +1213,7 @@ class GraphProvider:
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE|CALL_REFERENCE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
             "RETURN a.name, a.qualified_name, a.file_path, labels(a), type(c), c.confidence, "
+            "c.strategy AS strategy, "
             f"b.name, b.qualified_name, b.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
@@ -1296,9 +1353,24 @@ class GraphProvider:
         backend is not a low score, and flattening the two is the same error one level down.
         """
         weak = unverified = unstamped = no_column = total = 0
+        guessed_by: set[str] = set()
         for g in groups:
             for r in g.rows:
                 total += 1
+                # PROVENANCE FIRST. `c.strategy` says how the edge was resolved, which is the fact;
+                # the float is a summary of it. Where the backend reports a strategy it decides,
+                # and the numeric floor below is only the fallback for a backend generation that
+                # does not (0.9.x, and any edge the newer one leaves unlabelled).
+                evidence = _evidence_class(str(r.get("strategy") or ""))
+                if evidence == "name-guess":
+                    r["_low_confidence"] = _edge_confidence(r)
+                    r["_evidence"] = evidence
+                    guessed_by.add(str(r.get("strategy") or "").strip())
+                    unverified += 1
+                    continue
+                if evidence in ("lsp", "import", "same-module"):
+                    r["_evidence"] = evidence
+                    continue
                 conf = _edge_confidence(r)
                 if conf is None:
                     # Two different silences, and only one of them is about the code. A row with NO
@@ -1338,15 +1410,20 @@ class GraphProvider:
                 f"string-similarity match (confidence <= {_EDGE_CONFIDENCE_WEAK}), not by any "
                 f"import.")
         if unverified:
+            # Name the STRATEGY when the backend reported one. "resolved by `unique_name`" is a
+            # fact about how the edge was produced; "confidence < 0.85" is a fact about a threshold
+            # this code chose, and only the first tells a reader what to distrust.
+            named = ", ".join(f"`{st}`" for st in sorted(s for s in guessed_by if s))
+            how = (f"by name matching ({named})" if named
+                   else f"by bare symbol name (confidence < {_EDGE_CONFIDENCE_FLOOR})")
             details.append(
-                f"{unverified} of {total} row(s) were resolved by bare symbol name because this is "
-                f"the only symbol of that name in the index (confidence < {_EDGE_CONFIDENCE_FLOOR}), "
-                f"not by following the calling file's imports")
+                f"{unverified} of {total} row(s) were resolved {how}, not by following an import or "
+                f"a language-server binding")
             parts.append(
-                f"**{unverified} of {total} row(s) are UNVERIFIED** — bound because this is the only "
-                f"symbol of that name in the index (confidence < {_EDGE_CONFIDENCE_FLOOR}), not by "
-                f"following the calling file's imports. Correct when the call really targets this "
-                f"symbol; wrong when it targets a same-named symbol the index never saw.")
+                f"**{unverified} of {total} row(s) are UNVERIFIED** — resolved {how}, not by "
+                f"following an import or a language-server binding. Correct when the call really "
+                f"targets this symbol; wrong when it targets a same-named symbol the index never "
+                f"saw.")
         if unstamped:
             details.append(
                 f"{unstamped} of {total} row(s) carry no confidence from the backend at all, so how "
@@ -1374,8 +1451,7 @@ class GraphProvider:
                 "method — collecting every call site in the repository that mentions it. Treat the "
                 "whole answer as unconfirmed until `--engine lsp` agrees.")
         self._add_gap(op, "low-confidence-edges", "; ".join(details))
-        marked = "Marked `[?…]` (unverified) and `[!…]` (likely spurious) below. " if (
-            weak or unverified) else ""
+        marked = "Marked `[?…]` below. " if (weak or unverified) else ""
         return "\n\n_" + marked + " ".join(parts) + "_"
 
     def _collision_note(self, op: str, dropped: int) -> str:
@@ -1452,6 +1528,7 @@ class GraphProvider:
         cypher = (
             f'MATCH (a)-[c:CALLS|USAGE|CALL_REFERENCE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
             "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), c.confidence, "
+            "c.strategy AS strategy, "
             f"a.name, a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
@@ -1568,7 +1645,7 @@ class GraphProvider:
             because = (
                 f" — which is also why any unresolved call to a `{wanted.name}` the index does not "
                 f"contain (a library function, a framework global, a builtin method) binds here. "
-                f"Rows badged `[?…]` or `[!…]` are those bindings."
+                f"Rows badged `[?…]` are those bindings."
             ) if badged else "."
             return (f"\n\n_Resolved by symbol NAME, not by type: {groups[0].describe()} is the "
                     f"only symbol named `{wanted.name}` with edges in this index{because}_")
@@ -1603,7 +1680,19 @@ class GraphProvider:
             return None
         raw = self._run(
             "trace_path",
-            {"project": project, "function_name": src, "mode": "calls", "risk_labels": True},
+            # `edge_types` widens the walk to the relationship that records a callback being
+            # registered, so a chain no longer stops dead at the point a function is handed to
+            # something else rather than invoked.
+            #
+            # `include_evidence` replaces `risk_labels`, which the backend treats as mutually
+            # exclusive with it. Nothing is lost: `risk` is a restatement of hop distance
+            # (hop 1 = CRITICAL, hop 2 = HIGH, hop 3 = MEDIUM) and the hop is already printed on
+            # every row, so it dressed a number this op shows anyway as an assessment it never
+            # made. Evidence is the fact it could not previously report — how each hop was
+            # resolved.
+            {"project": project, "function_name": src, "mode": "calls",
+             "direction": "both", "include_evidence": True,
+             "edge_types": ["CALLS", "CALL_REFERENCE"]},
             timeout_ms,
         )
         if not isinstance(raw, dict):
@@ -1626,11 +1715,20 @@ class GraphProvider:
                     qn = _strip_project_prefix(str(it.get("qualified_name") or ""),
                                                may_be_filename=False)
                     hop = it.get("hop")
-                    risk = it.get("risk")
                     label = qn or nm
                     hop_s = f" [hop {hop}]" if hop is not None else ""
-                    risk_s = f" [risk: {risk}]" if risk else ""
-                    out.append(f"- {label}{hop_s}{risk_s}")
+                    # How this hop was resolved, in the same vocabulary `callers` uses, so a reader
+                    # does not have to learn two. A guessed hop is the one that makes a whole chain
+                    # downstream of it suspect, and it used to be indistinguishable.
+                    klass = _evidence_class(str(it.get("strategy") or ""))
+                    ev_s = ""
+                    if klass == "name-guess":
+                        ev_s = " [?name-guess]"
+                    elif klass:
+                        ev_s = f" [{klass}]"
+                    risk = it.get("risk")
+                    risk_s = f" [risk: {risk}]" if risk and not klass else ""
+                    out.append(f"- {label}{hop_s}{ev_s}{risk_s}")
             return out
 
         callees = _fmt(raw.get("callees"))
@@ -1796,54 +1894,80 @@ class GraphProvider:
                 if key in seen_s:
                     continue
                 seen_s.add(key)
-                syms.append((label, fp))
+                try:
+                    hop = int(str(s.get("hop") or 0))
+                except (TypeError, ValueError):
+                    hop = 0
+                syms.append((label, fp, hop))
             if not files and not syms:
                 if dropped:
                     return ("## Changes impact\n(no source changes — the working tree's "
                             f"{dropped} uncommitted change(s) are all non-source files)")
                 return "## Changes impact\n(working tree clean — no uncommitted changes)"
             ripple, ripple_truncated = self._changed_ripple(files, project, timeout_ms)
-            parts = [f"## Changes impact ({len(files)} files → {len(syms)} symbols defined in them "
-                     f"→ {len(ripple)} callers elsewhere)"]
+            walked_hdr = any(h > 0 for _, _, h in syms)
+            parts = [f"## Changes impact ({len(files)} files → {len(syms)} "
+                     + ("symbols impacted" if walked_hdr else "symbols defined in them")
+                     + f" → {len(ripple)} callers elsewhere)"]
             if files:
                 parts.append(f"### Changed files ({len(files)})")
                 parts.extend(f"- {f}" for f in files[:40])
                 if len(files) > 40:
                     parts.append(f"… (+{len(files) - 40} more)")
             if syms:
-                # Named for what they are. These are the symbols the edit CONTAINS — everything
-                # defined in a touched file, whether or not the edit came near it — which is a
-                # different and much weaker claim than "impacted", the word that used to head this
-                # list and the reason it read as a blast radius.
-                parts.append(f"### Symbols defined in the changed files ({len(syms)})")
-                for label, fp in syms[:40]:
+                # The same backend field means two different things across dialects, so the heading
+                # is derived from the data rather than assumed. 0.9.x returns the symbols the edit
+                # CONTAINS — everything defined in a touched file, whether or not the edit came near
+                # it, which is a much weaker claim than "impacted". 0.10.x already returns a
+                # transitive walk and stamps each row with a `hop`. Labelling a walk as containment
+                # put symbols from three other files under "defined in the changed files".
+                walked = any(h > 0 for _, _, h in syms)
+                parts.append(
+                    f"### Symbols the backend reports as impacted, up to {max(h for _, _, h in syms)}"
+                    f" hop(s) ({len(syms)})" if walked
+                    else f"### Symbols defined in the changed files ({len(syms)})")
+                for label, fp, hop in syms[:40]:
                     tail = f"  ({fp})" if fp and fp != label else ""
-                    parts.append(f"- {label}{tail}")
+                    hop_s = f" [hop {hop}]" if hop > 0 else ""
+                    parts.append(f"- {label}{hop_s}{tail}")
                 if len(syms) > 40:
                     parts.append(f"… (+{len(syms) - 40} more)")
             if ripple:
                 parts.append(f"### Callers elsewhere that reach into them ({len(ripple)})")
                 parts.append("_This is the blast radius: symbols outside the changed files whose "
                              "behaviour can move because of this edit._")
-                for label, fp, conf in ripple[:40]:
+                for label, fp, conf, kind, evidence in ripple[:40]:
                     tail = f"  ({fp})" if fp and fp != label else ""
-                    if conf is None:
-                        mark = " [unscored]"
-                    elif conf <= _EDGE_CONFIDENCE_WEAK:
-                        mark = f" [!{conf:.2f}]"
-                    elif conf < _EDGE_CONFIDENCE_FLOOR:
+                    # The relationship comes first: "registered" and "calls" are different things
+                    # to check, and a reviewer triages on that before they weigh confidence.
+                    kind_s = f" [{kind}]" if kind != _DIRECT_KIND else ""
+                    if evidence == "name-guess":
+                        mark = f" [?{conf:.2f}]" if conf is not None else " [?name-guess]"
+                    elif not evidence and conf is not None and conf < _EDGE_CONFIDENCE_FLOOR:
+                        # No strategy reported (0.9.x, or an edge the newer backend left
+                        # unlabelled), so the float is the only signal there is. Dropping this
+                        # branch silently un-flagged every soft edge on the older backend.
                         mark = f" [?{conf:.2f}]"
+                    elif conf is None and not evidence:
+                        mark = " [unscored]"
                     else:
                         mark = ""
-                    parts.append(f"- {label or fp}{mark}{tail}")
+                    parts.append(f"- {label or fp}{kind_s}{mark}{tail}")
                 if len(ripple) > 40:
                     parts.append(f"… (+{len(ripple) - 40} more)")
-                weak = sum(1 for _, _, c in ripple
-                           if c is not None and c < _EDGE_CONFIDENCE_FLOOR)
-                if weak:
-                    parts.append(f"\n_{weak} of {len(ripple)} caller(s) were resolved by symbol "
-                                 f"name rather than by import (`?`/`!` above) and may not reach "
-                                 f"this code at all._")
+                guessed = sum(1 for r in ripple
+                              if r[4] == "name-guess"
+                              or (not r[4] and r[2] is not None and r[2] < _EDGE_CONFIDENCE_FLOOR))
+                indirect = sum(1 for r in ripple if r[3] != _DIRECT_KIND)
+                notes = []
+                if indirect:
+                    notes.append(f"{indirect} of {len(ripple)} reach this code without calling it "
+                                 f"(registered as a callback, or referenced) — they can still break")
+                if guessed:
+                    notes.append(f"{guessed} were resolved by name matching and may not reach this "
+                                 f"code at all")
+                if notes:
+                    parts.append("\n_" + "; ".join(notes) + "._")
             elif files:
                 # An empty ripple is a real and useful answer — but only if it cannot be confused
                 # with one that was never computed.
@@ -1867,7 +1991,7 @@ class GraphProvider:
 
     def _changed_ripple(
         self, files: list[str], project: str, timeout_ms: int
-    ) -> tuple[list[tuple[str, str, float | None]], bool]:
+    ) -> tuple[list[tuple[str, str, float | None, str, str]], bool]:
         """Symbols OUTSIDE the changed files that call into them — the actual blast radius.
 
         `changed` used to stop at containment and call it impact. Editing one function in
@@ -1889,30 +2013,45 @@ class GraphProvider:
             return [], False
         listed = files[: self._RIPPLE_FILE_CAP]
         in_list = ", ".join(f'"{_cypher_literal(f)}"' for f in listed)
+        # CALLS is not the whole blast radius. A function REGISTERED somewhere
+        # (`set_forward_fn(app.forward_released_item)`) breaks just as thoroughly when its signature
+        # moves, and the edge recording that is CALL_REFERENCE. USAGE is in for the same reason:
+        # this op answers a recall question — "what should I look at before committing" — and the
+        # asymmetry matters. Under-reporting impact is how live code gets broken; over-reporting it
+        # costs a reader one line, and every row says which kind it is.
         cypher = (
-            f"MATCH (a)-[c:CALLS]->(b) WHERE b.file_path IN [{in_list}] "
+            f"MATCH (a)-[c:CALLS|CALL_REFERENCE|USAGE]->(b) WHERE b.file_path IN [{in_list}] "
             f"AND NOT a.file_path IN [{in_list}] "
-            "RETURN a.qualified_name, a.file_path, c.confidence "
+            "RETURN a.qualified_name, a.file_path, c.confidence, type(c) AS kind, "
+            "c.strategy AS strategy "
             f"LIMIT {self._RIPPLE_ROW_CAP}"
         )
         rows = self._query_rows(cypher, project, timeout_ms)
         truncated = len(rows) >= self._RIPPLE_ROW_CAP or len(files) > self._RIPPLE_FILE_CAP
         # One entry per calling symbol, keeping its best-scored edge: a caller that reaches three
         # changed symbols is one thing to review, not three.
-        best: dict[tuple[str, str], float | None] = {}
+        # One row per calling symbol: a caller that reaches three changed symbols is one thing to
+        # review, not three. Where the same caller has several kinds of edge, the STRONGEST claim
+        # wins — a direct call outranks a registration, which outranks a bare reference — because
+        # that is the one a reviewer needs to see first.
+        rank = {_DIRECT_KIND: 0, "CALL_REFERENCE": 1, "USAGE": 2}
+        best: dict[tuple[str, str], tuple[int, float | None, str, str]] = {}
         for r in rows:
             label = _strip_project_prefix(
                 str(r.get("a.qualified_name") or ""), may_be_filename=False)
             fp = str(r.get("a.file_path") or "")
             if not label and not fp:
                 continue
-            conf = _edge_confidence(r)
+            kind = str(r.get("kind") or "").strip() or _DIRECT_KIND
+            evidence = _evidence_class(str(r.get("strategy") or ""))
+            cand = (rank.get(kind, 3), _edge_confidence(r), kind, evidence)
             key = (label, fp)
-            prev = best.get(key, -1.0)
-            if key not in best or (conf is not None and (prev is None or conf > prev)):
-                best[key] = conf
-        out = [(lbl, fp, c) for (lbl, fp), c in best.items()]
-        out.sort(key=lambda t: (-(t[2] if t[2] is not None else -1.0), t[0]))
+            prev = best.get(key)
+            if prev is None or (cand[0], -(cand[1] or -1.0)) < (prev[0], -(prev[1] or -1.0)):
+                best[key] = cand
+        out = [(lbl, fp, c[1], c[2], c[3]) for (lbl, fp), c in best.items()]
+        # Strongest kind first, then best-resolved within it.
+        out.sort(key=lambda t: (rank.get(t[3], 3), -(t[2] if t[2] is not None else -1.0), t[0]))
         return out, truncated
 
     def _op_hotspots(self, project: str, timeout_ms: int) -> str | None:

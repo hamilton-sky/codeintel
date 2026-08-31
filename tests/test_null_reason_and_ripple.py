@@ -84,7 +84,8 @@ def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(mon
     # One caller reaching two changed symbols is one thing to review, at its best score.
     assert body.count("runAlerts") == 1, body
     assert "[?0.75]" not in body, "a caller's best edge should win, not its worst"
-    assert "[!0.38]" in body                              # and a weak caller still says so
+    assert "[?0.38]" in body                              # and a weak caller still says so
+    assert "resolved by name matching" in body
 
 
 def test_changed_says_zero_ripple_out_loud_rather_than_omitting_the_section(monkeypatch):
@@ -303,3 +304,43 @@ def test_a_zero_count_is_never_rendered_as_a_relationship(monkeypatch):
     hint = p.build_result("callers", "x", [], 30000, ROOT)["hint"]
     assert "0 DATA_FLOWS" not in hint, hint
     assert "Other relationships DO point at it" not in hint, hint
+
+
+def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkeypatch):
+    """A function REGISTERED somewhere breaks just as thoroughly when its signature moves, and the
+    edge recording that is CALL_REFERENCE — which the ripple query used to exclude. This op answers
+    a recall question, so the asymmetry runs the other way from `callers`: include it, and label it."""
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    detect = {"changed_files": ["src/proxy.py"], "impacted_symbols": []}
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        LIST_PROJECTS if method == "list_projects"
+        else detect if method == "detect_changes" else None))
+    monkeypatch.setattr(p, "_query_rows", lambda cypher, project, timeout_ms: [
+        {"a.qualified_name": "proj.main.serve", "a.file_path": "src/main.py",
+         "kind": "CALL_REFERENCE", "c.confidence": "0.95", "strategy": "lsp_direct"},
+        {"a.qualified_name": "proj.app.run", "a.file_path": "src/app.py",
+         "kind": "CALLS", "c.confidence": "0.95", "strategy": "lsp_direct"},
+    ])
+    body = p.build_result("changed", "", [], 30000, ROOT)["result"]
+
+    assert "[CALL_REFERENCE]" in body, body
+    assert "reach this code without calling it" in body
+    # A direct call outranks a registration, so it is listed first.
+    rows = [ln for ln in body.splitlines() if ln.startswith("- proj.")]
+    assert rows[0].startswith("- proj.app.run"), rows
+
+
+def test_changed_ripple_asks_for_the_registration_edge(monkeypatch):
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    seen: list[str] = []
+    detect = {"changed_files": ["src/proxy.py"], "impacted_symbols": []}
+    monkeypatch.setattr(p, "_run", lambda m, pay, t: (
+        LIST_PROJECTS if m == "list_projects" else detect if m == "detect_changes" else None))
+    monkeypatch.setattr(p, "_query_rows",
+                        lambda cypher, project, t: (seen.append(cypher), [])[1])
+    p.build_result("changed", "", [], 30000, ROOT)
+    assert seen and "CALL_REFERENCE" in seen[0], seen
