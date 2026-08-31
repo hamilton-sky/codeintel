@@ -39,7 +39,9 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
-from oracle_py import CALL, UNDECIDABLE, Truth, label_file, truth_for
+import oracle_py
+import oracle_ts
+from oracle_py import CALL, UNDECIDABLE, Truth
 
 # `- pkg.mod.sym [CALLS] [?0.75] (path/to/file.py)` and `- module scope of path/to/file.py`
 _ROW = re.compile(r"^- (?P<label>.+?)(?P<badges>(?: \[[^\]]+\])*)(?: \((?P<file>[^)]+)\))?$")
@@ -68,6 +70,75 @@ class Answer:
         return self.callers | self.others
 
 
+class _Python:
+    """Everything the scorer needs that differs by language, for Python."""
+
+    key = "python"
+
+    def prepare(self, root: str) -> None:
+        self.root = root
+
+    def target(self, root: str, def_file: str, symbol: str) -> str:
+        return oracle_py.target_from_definition(root, def_file, symbol)
+
+    def truth(self, root: str, qn: str) -> Truth:
+        return oracle_py.truth_for(root, qn)
+
+    def enclosing(self, root: str, rel_file: str, line: int) -> str | None:
+        """The symbol containing *line*, via the oracle's own descent. None if unreadable."""
+        import ast
+        try:
+            with open(os.path.join(root, rel_file), encoding="utf-8", errors="replace") as fh:
+                tree = ast.parse(fh.read())
+        except (OSError, SyntaxError):
+            return None
+        return oracle_py._enclosing_map(tree).get(line, "<module>")
+
+    def kinds_at(self, root: str, rel_file: str, line: int, qn: str) -> set[str]:
+        if getattr(self, "_aliases", None) is None or self._aliases_for != qn:
+            files = oracle_py._walk_py(root)
+            self._aliases = oracle_py._alias_set(qn, oracle_py._reexport_map(root, files))
+            self._aliases_for = qn
+        verdict = oracle_py.label_file(os.path.join(root, rel_file), root, qn, self._aliases)
+        return {s.kind for s in verdict.sites if s.line == line}
+
+    _aliases = None
+    _aliases_for = None
+
+
+class _TypeScript:
+    """The same seam for TypeScript. One `index_repo` per run, reused by every target."""
+
+    key = "typescript"
+
+    def prepare(self, root: str) -> None:
+        self.root = root
+        self.repo = oracle_ts.index_repo(root)
+
+    def target(self, root: str, def_file: str, symbol: str) -> str:
+        return oracle_ts.target_from_definition(root, def_file, symbol)
+
+    def truth(self, root: str, qn: str) -> Truth:
+        return oracle_ts.truth_for(root, qn, self.repo)
+
+    def enclosing(self, root: str, rel_file: str, line: int) -> str | None:
+        entry = self.repo.trees.get(os.path.abspath(os.path.join(root, rel_file)))
+        if entry is None:
+            return None
+        tree, src = entry
+        return oracle_ts._enclosing_map(tree.root_node, src).get(line, "<module>")
+
+    def kinds_at(self, root: str, rel_file: str, line: int, qn: str) -> set[str]:
+        def_file, _, name = qn.partition("::")
+        aliases = oracle_ts.alias_set(os.path.join(root, def_file), name, self.repo)
+        verdict = oracle_ts.label_file(os.path.join(root, rel_file), root,
+                                       os.path.join(root, def_file), name, aliases, self.repo)
+        return {s.kind for s in verdict.sites if s.line == line}
+
+
+LANGUAGES = {"python": _Python, "typescript": _TypeScript}
+
+
 def _run_codeintel(root: str, op: str, target: str, engine: str, exe: str) -> dict:
     try:
         proc = subprocess.run(
@@ -77,20 +148,6 @@ def _run_codeintel(root: str, op: str, target: str, engine: str, exe: str) -> di
         return json.loads(proc.stdout or "{}")
     except Exception as exc:                                # never let one symbol kill a run
         return {"result": None, "reason": f"harness-error: {type(exc).__name__}: {exc}"}
-
-
-def _enclosing_of(root: str, rel_file: str, line: int) -> str | None:
-    """The symbol containing *line*, via the oracle's own descent. None if unreadable."""
-    import ast
-
-    from oracle_py import _enclosing_map
-    try:
-        with open(os.path.join(root, rel_file), encoding="utf-8",
-                  errors="replace") as fh:
-            tree = ast.parse(fh.read())
-    except (OSError, SyntaxError):
-        return None
-    return _enclosing_map(tree).get(line, "<module>")
 
 
 def graph_answer(root: str, target_name: str, exe: str) -> Answer:
@@ -137,7 +194,8 @@ def graph_answer(root: str, target_name: str, exe: str) -> Answer:
     return ans
 
 
-def lsp_answers(root: str, target_name: str, target_qn: str, exe: str) -> tuple[Answer, Answer]:
+def lsp_answers(root: str, target_name: str, target_qn: str, exe: str,
+                lang) -> tuple[Answer, Answer]:
     """`(lsp_raw, lsp_classified)` — references as callers, and references filtered by syntax."""
     env = _run_codeintel(root, "symbol", target_name, "lsp", exe)
     raw, classified = Answer(reason=env.get("reason")), Answer(reason=env.get("reason"))
@@ -159,7 +217,6 @@ def lsp_answers(root: str, target_name: str, target_qn: str, exe: str) -> tuple[
         raw.reason = classified.reason = env.get("reason") or why
         return raw, classified
     in_refs = False
-    aliases = None
     for line in body.splitlines():
         if line.startswith("## References"):
             in_refs = True
@@ -170,17 +227,13 @@ def lsp_answers(root: str, target_name: str, target_qn: str, exe: str) -> tuple[
         if not m:
             continue
         file, ln = m.group("file"), int(m.group("line"))
-        enclosing = _enclosing_of(root, file, ln)
+        enclosing = lang.enclosing(root, file, ln)
         if enclosing is None:
             continue
         key = (file, enclosing)
         raw.callers.add(key)                          # taken at face value: every ref is a caller
         # …and classified: ask the syntax at that exact line what the reference actually is.
-        if aliases is None:
-            from oracle_py import _alias_set, _reexport_map, _walk_py
-            aliases = _alias_set(target_qn, _reexport_map(root, _walk_py(root)))
-        verdict = label_file(os.path.join(root, file), root, target_qn, aliases)
-        kinds = {s.kind for s in verdict.sites if s.line == ln}
+        kinds = lang.kinds_at(root, file, ln, target_qn)
         if CALL in kinds:
             classified.callers.add(key)
         elif kinds and kinds != {UNDECIDABLE}:
@@ -228,17 +281,19 @@ def _pct(v: float | None) -> str:
     return "  n/a" if v is None else f"{v * 100:4.0f}%"
 
 
-def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel") -> None:
+def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
+        language: str = "python") -> None:
+    lang = LANGUAGES[language]()
+    lang.prepare(root)
     arms = ("graph", "lsp_raw", "lsp_classified")
     direct = {a: Scores() for a in arms}
     impact = {a: Scores() for a in arms}
     covered: list[float] = []
 
-    print(f"repo: {root}\n")
+    print(f"repo: {root}  ({language})\n")
     for def_file, symbol in targets:
-        from oracle_py import target_from_definition
-        qn = target_from_definition(root, def_file, symbol)
-        t: Truth = truth_for(root, qn)
+        qn = lang.target(root, def_file, symbol)
+        t: Truth = lang.truth(root, qn)
         covered.append(t.coverage)
         # Decidable population, and the two truths drawn from it. `negatives` are sites the oracle
         # proved are NOT the target; including them is what lets a fabricated caller cost an engine
@@ -249,7 +304,7 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel") -> No
         true_impact = t.calls | t.references        # an import alone does not break when a body moves
 
         g = graph_answer(root, symbol, exe)
-        lr, lc = lsp_answers(root, symbol, qn, exe)
+        lr, lc = lsp_answers(root, symbol, qn, exe, lang)
         got = {"graph": g, "lsp_raw": lr, "lsp_classified": lc}
         for a in arms:
             direct[a].add(got[a].callers, true_calls, decidable, got[a].unavailable)

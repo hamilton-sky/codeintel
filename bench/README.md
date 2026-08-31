@@ -10,8 +10,12 @@ same evidence produced opposite designs.
 CODEINTEL_BENCH_PATHLY=~/src/pathly-adapters python bench/run.py pathly-adapters
 CODEINTEL_BENCH_SNITCH=~/src/snitch-simulator python bench/run.py snitch-simulator
 
-# Against the checked-in corpus — needs nothing, runs in CI, pins the oracle itself.
-pytest tests/test_bench_oracle.py
+# Against a real TypeScript repository — set the path, then list its disputed symbols in run.py.
+CODEINTEL_BENCH_TS=~/src/some-app python bench/run.py typescript
+
+# Against the checked-in corpora — needs nothing, runs in CI, pins both oracles.
+pytest tests/test_bench_oracle.py tests/test_bench_oracle_ts.py
+python bench/run.py corpus-ts        # the TypeScript arm end to end, on 19 known files
 ```
 
 The repository paths used to be hardcoded to one laptop, which meant the artifact that turns this
@@ -73,8 +77,9 @@ Labels are relationship **kinds**, not confidences: `call`, `reference`, `import
 
 ## The fixture corpus
 
-`bench/fixtures/corpus` is a checked-in micro-repository with a known answer for every site, and
-`tests/test_bench_oracle.py` asserts the label of each one. It does not replace a run against real
+`bench/fixtures/corpus` (Python) and `bench/fixtures/corpus_ts` (TypeScript) are checked-in
+micro-repositories with a known answer for every site, and `tests/test_bench_oracle.py` /
+`tests/test_bench_oracle_ts.py` assert the label of each one. It does not replace a run against real
 code — real repositories are where the mess lives — but it is the floor, and it runs without a
 backend, a clone, or either private repo. It pins the three defect classes that each silently zeroed
 a result: a `src/` source root, a transitive re-export, and a bare name bound to something else.
@@ -115,25 +120,44 @@ Three things worth stating plainly:
    failure lives, and it was the one thing the scoring could not see. It is also a result *about
    0.10.8*, which fixed the Python attribution defect; the same measurement on 0.9.x would look
    materially worse.
-3. **No TypeScript arm yet** — and the worst failure ever observed here (`describe`, 32 fabricated
-   callers) is TypeScript. Nothing in this table speaks to it. This is the largest open gap.
+3. **The table is Python only.** The worst failure ever observed here (`describe`, 32 fabricated
+   callers) is TypeScript. The arm to measure it now exists — see below — but pointing it at a real
+   TypeScript repository is still open, and nothing in this table speaks to that failure.
 
-## The TypeScript arm, and why the negative comes first
+## The TypeScript arm
 
-Built on positives-only truth, a TypeScript arm pointed at `describe` would have reported `n/a` or
-100% — measuring nothing about the failure it exists to measure. With `not-target` in the population
-it can charge that failure, which is why the label landed first.
+`oracle_ts.py` labels TypeScript with the same five kinds, sharing `Site`, `FileVerdict` and `Truth`
+with the Python oracle so one scorer reads both. It could not have been built a commit earlier:
+under positives-only truth every `describe` site was unjudged, so an arm pointed straight at them
+would have reported `n/a` or 100% and measured nothing.
 
-TypeScript should end up **more** decidable than Python here, not less. Python has to abstain on an
-unbound global because another module can install one; ES modules have no such escape — a
-module-scope symbol in another file is reachable only through an import, and `import * as ns` binds a
-namespace object, so uses stay `ns.foo` and remain readable. So "this file calls a bare `describe`,
-imports no `describe`, and declares none" is a **proven negative** in TypeScript where its Python
-equivalent is an abstention. Ambient `declare global`, `@types` packages and CommonJS `require` are
-the parts that still need abstention. `tree-sitter-language-pack` is already a dependency and
-`indexer.py` already carries the TypeScript node types, so the parser is in hand.
+The result worth stating is that **TypeScript is more decidable than Python on exactly that case.**
+Python must abstain on an unbound bare name, because another module can install a global. An ES
+module's bindings are exhaustively stated — a module-scope symbol in another file is reachable only
+through an `import`, and `import * as ns` binds a namespace object so its uses stay `ns.foo` and stay
+readable. So "this file is a module, calls a bare `describe`, imports no `describe` and declares
+none" is a **proven negative** where the Python equivalent is an abstention. The two oracles are
+asserted against each other on that one shape in
+`test_the_case_python_must_abstain_on_is_decidable_here`.
 
-Also open: the oracle abstains on attribute calls on values, which is exactly where short common
-names live. Proven negatives raise coverage on the shadowing cases; the attribute case is untouched
+Three guards keep that argument honest, because each is a real way it fails:
+
+| guard | why |
+|---|---|
+| **script files** | a file with no import and no export is not a module. Its top-level names share the global scope, so reachability says nothing and every bare name in it is undecidable. |
+| **self-installed globals** | a tree that assigns `globalThis.foo = ...` anywhere has manufactured the escape hatch the argument denies. The oracle abstains on that *name* tree-wide. |
+| **unresolvable specifiers** | `import { foo } from "@app/proxy"` may be a path alias for the target or a package sharing a name. Unless tsconfig `paths` or `node_modules` settles it, the name is undecidable in that file. |
+
+Stated re-exports are followed transitively (`export { x } from`, including `export *`), aliased
+imports are tracked under their new spelling — scanning only for the target's own name finds the
+import and none of its callers — and a property access on a value stays an abstention, as in Python.
+
+`bench/fixtures/corpus_ts` is 19 files covering all of it, and `python bench/run.py corpus-ts` drives
+the whole path — oracle, scorer and both engines through codeintel's own envelope. It is a **smoke
+test, not a measurement**: files written to have a known answer cannot say anything about real code.
+The real measurement needs a real TypeScript repository, which is the largest thing still open.
+
+Also open: the oracle abstains on property accesses on values, which is exactly where short common
+names live. Proven negatives raise coverage on the shadowing cases; the receiver case is untouched
 and is harder, because resolving a receiver's type means type inference — which reintroduces the
 circularity the oracle exists to avoid.
