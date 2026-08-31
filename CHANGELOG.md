@@ -6,6 +6,37 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **`map`'s ranked-symbol table no longer ranks things that cannot be called.** The fan-in query
+  constrained no node label, so a JSON key, a YAML key, a folder and a message channel competed with
+  functions on equal terms — and won. On a 12,638-node TypeScript repo the top rows were `logger`
+  716, `error` 403, `onClick` 107, `size`, `type`; a Cypher probe resolved `logger` to a **Folder**
+  node and `error` to a **Channel**. On a Python repo it ranked YAML and JSON keys as the most
+  load-bearing symbols in the project (`flow` from a `.flow.yaml` at 144, `feature` from a
+  `.schema.json` at 126), leaving ~4 of 23 rows real. This is the output that gets *written to
+  `CODE_INTEL.md` and committed* under the claim that it shows the load-bearing code, so it was a
+  wrong answer that survived in the tree and got reviewed as fact. Two causes, both fixed: the
+  ranking now asks only for callable labels (`Function`/`Method`/`Class`/`Interface`/`Route`), and it
+  counts `CALLS` rather than `CALLS|USAGE` — the USAGE half is what inflated a variable to 716
+  "callers", which is every mention of that name in the tree, not a caller count. The existing
+  `_is_noise` post-filter could not have saved this: `LIMIT` runs server-side, so label noise
+  consumed the window before any client-side filter could see what it had displaced. One query per
+  label rather than one filtered query, because the backend's Cypher subset supports neither
+  `labels()` in `WHERE` nor an `(fn:A OR fn:B)` predicate — the same constraint that shaped
+  `hotspots`. `c4` had already reached the same conclusion independently for its own ranking
+  (defect (g)) and was not affected.
+- **Test-file detection now recognises JavaScript's conventions, not only Python's.** Every pattern
+  in `_looks_like_test` was Python's, and a real repo showed the cost: NestJS's `Injectable` (138),
+  `Inject` (59) and `Optional` (20), each bound by bare-name collision to
+  `backend/src/__tests__/agent/ack-checkpoint.service.spec.ts`, were reported as that repo's three
+  most load-bearing symbols. `__tests__` is not `/tests/` and `.spec.ts` is not `_test.py`, so all
+  three walked through the filter whose whole job was to stop them — and a label filter cannot help,
+  because a decorator genuinely is a `Function` node. `__tests__`/`__test__` directories and the
+  `.spec.` / `.test.` filename infixes are now matched. Shared by `hotspots` and `changed` through
+  `_is_noise`, so both improve. Matched as filename infixes rather than substrings so ordinary source
+  (`spectrum.ts`, `latest.ts`, `attest.ts`) cannot be hidden — over-filtering is what retired
+  `deadcode` at 25% precision, so the bar for widening this filter is that a convention *cannot*
+  conceal a real symbol, not that it looks test-shaped.
 ### Internal
 - **`main` and the `v*` release tags are protected, and the configuration is committed** rather than
   living only in whoever clicked the toggles — two importable rulesets in `.github/rulesets/` plus

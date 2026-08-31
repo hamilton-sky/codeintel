@@ -1123,13 +1123,30 @@ class GraphProvider:
     def _looks_like_test(fp: str, name: str) -> bool:
         """Heuristic test detection. The backend's own ``is_test`` flag comes back False for pytest
         functions (verified by dogfooding), so dead-code / hotspot scans must filter by path+name
-        or drown in test noise — this is the single most load-bearing renderer detail."""
+        or drown in test noise — this is the single most load-bearing renderer detail.
+
+        Every convention here was Python's until this recognised none of JavaScript's, and a real
+        repo showed what that costs: on brightsky-ai the ranked-symbols table's top three rows were
+        NestJS's `Injectable` (138), `Inject` (59) and `Optional` (20), each bound by name collision
+        to `backend/src/__tests__/agent/ack-checkpoint.service.spec.ts`. `__tests__` is not
+        `/tests/` and `.spec.ts` is not `_test.py`, so all three sailed through a filter whose whole
+        job was to stop them — and they were reported as the repo's most load-bearing code.
+
+        `__tests__` / `__test__` (Jest's directory convention) and the `.spec.` / `.test.` filename
+        infixes are added for that. Both are unambiguous — no non-test file is named
+        `foo.spec.ts` — which is the bar for widening this filter at all: over-filtering is what
+        retired `deadcode` at 25% precision, so a convention gets added when it cannot hide a real
+        symbol, not when it merely looks test-shaped."""
         f = (fp or "").lower()
         if f.startswith(("tests/", "test/")) or "/tests/" in f or "/test/" in f:
             return True
+        if "__tests__/" in f or "__test__/" in f or f.startswith(("__tests__/", "__test__/")):
+            return True
         base = f.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
         return (base.startswith("test_") or base.endswith("_test.py")
-                or base == "conftest.py" or (name or "").startswith("test_"))
+                or base == "conftest.py" or (name or "").startswith("test_")
+                or stem.endswith((".spec", ".test")))
 
     @staticmethod
     def _is_synthetic(fp: str) -> bool:

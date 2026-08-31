@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from codeintel.injector import Injector
-from codeintel.mapper import MapGenerator, _is_populated_map, _minimal_map
+from codeintel.mapper import (
+    _RANK_LABELS,
+    MapGenerator,
+    _is_populated_map,
+    _minimal_map,
+)
 from codeintel.providers.graph import ProjectResolution
 
 _POPULATED = (
@@ -36,10 +41,23 @@ def _make_provider(ranked=None, entry=None, arch=None):
     else:
         provider.build_result.return_value = arch
 
-    # _run for query_graph calls — returns ranked then entry
+    # _run for query_graph calls. Dispatched on the query TEXT rather than call order: the ranking
+    # issues one query per node label (see mapper._RANK_LABELS), so a positional side_effect list
+    # would break — and silently, by StopIteration — every time that label set changes. `ranked`
+    # rows are served for the `Function` label only, the way the real backend serves each label its
+    # own disjoint rows, so a fixture is never duplicated across labels.
     ranked_rows = ranked if ranked is not None else []
     entry_rows = entry if entry is not None else []
-    provider._run.side_effect = [ranked_rows, entry_rows]
+
+    def _dispatch(method, payload, timeout_ms):
+        q = str(payload.get("query", ""))
+        if "is_entry_point" in q:
+            return entry_rows
+        if "(fn:Function)" in q:
+            return ranked_rows
+        return []
+
+    provider._run.side_effect = _dispatch
     return provider
 
 
@@ -166,7 +184,13 @@ def test_generate_reads_columns_rows_shape():
         "ok": True, "op": "overview", "target": "", "result": "## Arch",
         "engine": "graph", "cached": False,
     }
-    provider._run.side_effect = [ranked, entry]
+    def _dispatch(method, payload, timeout_ms):
+        q = str(payload.get("query", ""))
+        if "is_entry_point" in q:
+            return entry
+        return ranked if "(fn:Function)" in q else []
+
+    provider._run.side_effect = _dispatch
 
     out = MapGenerator(provider).generate("/repo")
     assert "## Ranked Symbols (by caller count)" in out
@@ -175,6 +199,10 @@ def test_generate_reads_columns_rows_shape():
     assert "<python-builtins>" not in out and "`str`" not in out  # noise filtered
     assert "pyproject.toml" not in out
     assert "## Entry Points" in out and "`main`" in out
+    # The backend returns aggregate counts as strings; ranking merges several per-label queries and
+    # so sorts client-side. Lexicographic order would put "29" above "22" by luck but "9" above
+    # "22" by bug, so pin that the higher count leads.
+    assert out.index("`query`") < out.index("`Result`")
 
 
 def test_write_creates_file():
@@ -475,3 +503,156 @@ def test_offer_injection_prints_command_off_a_tty(tmp_path, monkeypatch, capsys)
     assert result["action"] == "printed"
     assert "codeintel map --inject" in capsys.readouterr().out
     assert not (tmp_path / "AGENTS.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Ranked-symbols label discipline
+#
+# The table these tests guard is WRITTEN to CODE_INTEL.md and committed, under the claim that it
+# shows "the load-bearing code at a glance". Two real repos falsified that claim: brightsky-ai
+# ranked `logger` (a Folder node) at 716 and `error` (a Channel) at 403, and pathly-adapters ranked
+# YAML and JSON keys as its most load-bearing symbols. Both are reproduced below with the rows those
+# repos actually produced.
+# ---------------------------------------------------------------------------
+
+def _capture_queries(ranked_by_label=None, entry=None):
+    """Provider that records every Cypher it is asked to run. *ranked_by_label* maps a label name to
+    the rows that label's query should return."""
+    queries: list[str] = []
+    by_label = ranked_by_label or {}
+
+    provider = MagicMock()
+    provider.available = True
+    provider._resolve_project.return_value = ProjectResolution(
+        name="proj", matched_root="/repo", scope="exact")
+    provider.build_result.return_value = {
+        "ok": True, "op": "overview", "target": "", "result": "## Arch",
+        "engine": "graph", "cached": False,
+    }
+
+    def _dispatch(method, payload, timeout_ms):
+        q = str(payload.get("query", ""))
+        queries.append(q)
+        if "is_entry_point" in q:
+            return entry or []
+        for label, rows in by_label.items():
+            if f"(fn:{label})" in q:
+                return rows
+        return []
+
+    provider._run.side_effect = _dispatch
+    return provider, queries
+
+
+def test_ranked_symbols_never_requests_a_non_callable_label():
+    """The fix lives in the QUERY, not in a post-filter: the backend applies `LIMIT` server-side, so
+    label noise that reaches the client has already consumed the window and no Python-side filter
+    can recover the real symbols it displaced. Assert the request itself is constrained."""
+    provider, queries = _capture_queries()
+    MapGenerator(provider).generate("/repo")
+
+    ranking = [q for q in queries if "in_degree" in q]
+    assert ranking, "no fan-in query was issued at all"
+    for label in ("Variable", "Folder", "Module", "File", "Section",
+                  "Channel", "EnvVar", "Decorator"):
+        assert not any(f"(fn:{label})" in q for q in ranking), (
+            f"{label} is not a callable and must never be ranked by caller count")
+    for q in ranking:
+        assert any(f"(fn:{lbl})" in q for lbl in _RANK_LABELS), (
+            f"fan-in query constrains no callable label, so every node type competes: {q}")
+
+
+def test_ranked_symbols_counts_calls_not_usage():
+    """`USAGE` is what inflated a `logger` variable to 716 "callers" — every mention of that name in
+    the tree. The heading promises caller count; `CALLS` is what delivers it."""
+    provider, queries = _capture_queries()
+    MapGenerator(provider).generate("/repo")
+
+    for q in (q for q in queries if "in_degree" in q):
+        assert "[:CALLS]" in q, f"fan-in must rank on CALLS alone: {q}"
+        assert "USAGE" not in q, f"USAGE inflates a caller count with bare-name mentions: {q}"
+
+
+def test_ranked_symbols_drops_a_framework_decorator_bound_to_a_spec_file():
+    """brightsky-ai regression. NestJS's `Injectable`/`Inject`/`Optional` are `Function` nodes — the
+    label filter cannot touch them — bound by name collision to a `.spec.ts` under `__tests__/`.
+    They were the table's top three rows. `_looks_like_test` recognised neither convention."""
+    spec = "backend/src/__tests__/agent/ack-checkpoint.service.spec.ts"
+    provider, _ = _capture_queries(ranked_by_label={"Function": {
+        "columns": ["fn.name", "fn.qualified_name", "fn.file_path", "in_degree"],
+        "rows": [
+            ["Injectable", "backend.Injectable", spec, "138"],
+            ["Inject", "backend.Inject", spec, "59"],
+            ["useAppDispatch", "frontend.store.hooks.useAppDispatch",
+             "frontend/src/store/hooks.ts", "46"],
+        ],
+    }})
+    out = MapGenerator(provider).generate("/repo")
+
+    assert "`Injectable`" not in out and "`Inject`" not in out
+    assert "`useAppDispatch`" in out, "a real symbol must survive the widened test filter"
+
+
+def test_ranked_symbols_drops_yaml_and_json_keys():
+    """pathly-adapters regression: `flow` from a .flow.yaml (144), `feature` from a .schema.json
+    (126) and `name` from an architect.yaml (99) ranked above every real function. A YAML/JSON key
+    is a `Variable` node, so constraining the label is what keeps it out."""
+    provider, _ = _capture_queries(ranked_by_label={
+        "Variable": {  # the label the ranking must never ask for — served anyway to prove it doesn't
+            "columns": ["fn.name", "fn.file_path", "in_degree"],
+            "rows": [["flow", "src/pathly_data/core/flows/quick-fix.flow.yaml", "144"]],
+        },
+        "Function": {
+            "columns": ["fn.name", "fn.file_path", "in_degree"],
+            "rows": [
+                ["feature", "src/pathly_data/schemas/state.schema.json", "126"],
+                ["get_db", "src/pathly_orchestrator/db/connection.py", "579"],
+            ],
+        },
+    })
+    out = MapGenerator(provider).generate("/repo")
+
+    assert "`flow`" not in out, "a Variable label must never be requested"
+    assert "quick-fix.flow.yaml" not in out
+    assert "`feature`" not in out, "_is_data_file must drop a JSON key even at a callable label"
+    assert "`get_db`" in out and "579" in out
+
+
+def test_ranked_symbols_merges_labels_in_numeric_order():
+    """Counts arrive as strings and now several queries are merged client-side, so the sort is ours
+    to get wrong. Lexicographically "9" outranks "40" — pin that it does not."""
+    provider, _ = _capture_queries(ranked_by_label={
+        "Function": {"columns": ["fn.name", "fn.file_path", "in_degree"],
+                     "rows": [["small", "src/a.py", "9"]]},
+        "Method": {"columns": ["fn.name", "fn.file_path", "in_degree"],
+                   "rows": [["big", "src/b.py", "40"]]},
+    })
+    out = MapGenerator(provider).generate("/repo")
+
+    assert "`big`" in out and "`small`" in out
+    assert out.index("`big`") < out.index("`small`"), "40 callers must outrank 9"
+
+
+def test_ranked_symbols_survives_one_label_query_failing():
+    """Never-raise: a backend that rejects one label still yields a ranking from the rest."""
+    def _dispatch(method, payload, timeout_ms):
+        q = str(payload.get("query", ""))
+        if "(fn:Route)" in q:
+            raise RuntimeError("backend does not know this label")
+        if "(fn:Function)" in q:
+            return {"columns": ["fn.name", "fn.file_path", "in_degree"],
+                    "rows": [["survivor", "src/a.py", "5"]]}
+        return []
+
+    provider = MagicMock()
+    provider.available = True
+    provider._resolve_project.return_value = ProjectResolution(
+        name="proj", matched_root="/repo", scope="exact")
+    provider.build_result.return_value = {
+        "ok": True, "op": "overview", "target": "", "result": "## Arch",
+        "engine": "graph", "cached": False,
+    }
+    provider._run.side_effect = _dispatch
+
+    out = MapGenerator(provider).generate("/repo")
+    assert "`survivor`" in out

@@ -30,11 +30,46 @@ def _is_populated_map(text: str) -> bool:
 # Real codebase-memory-mcp contract (verified live): query_graph returns {columns, rows}
 # value-arrays, module-level calls are USAGE (not only CALLS), and nodes carry `is_entry_point`
 # (there is no `fn.type` property — that filter matched nothing, so the old queries were dead).
-_FAN_IN_CYPHER = (
-    "MATCH (caller)-[:CALLS|USAGE]->(fn) WHERE fn.name IS NOT NULL "
-    "RETURN fn.name, fn.qualified_name, fn.file_path, count(caller) AS in_degree "
-    "ORDER BY in_degree DESC LIMIT 40"
-)
+#
+# This ranking is what gets WRITTEN to CODE_INTEL.md and committed, under the claim that it shows
+# "the load-bearing code at a glance". Two things in the original query falsified that claim on
+# every large repo it was pointed at, and both are fixed here:
+#
+# - **It constrained no label.** The backend labels a JSON key, a YAML key, a folder and a message
+#   channel the same way it labels a function, so they competed for the ranking on equal terms and
+#   won. On brightsky-ai the table's top rows were `logger` 716, `error` 403, `onClick` 107, `size`,
+#   `type` — a Cypher probe resolved `logger` to a **Folder** node and `error` to a **Channel**. On
+#   pathly-adapters it ranked YAML and JSON keys as the repo's most load-bearing symbols (`flow`
+#   from quick-fix.flow.yaml 144, `feature` from state.schema.json 126, `name` from architect.yaml
+#   99); only ~4 of 23 rows were real functions. `_is_noise` could not save it: the `LIMIT` runs in
+#   the DB, so the label noise consumed the window *before* any Python-side filter could see it.
+# - **It ranked on `CALLS|USAGE`.** The USAGE half is what inflated the variables — 716 "callers"
+#   of a `logger` variable is every mention of that name in the tree. `CALLS` is what the heading
+#   "by caller count" actually promises. c4 reached the same conclusion independently for its own
+#   hotspot ranking (see `c4.py`, defect (g)) and ranks on `IMPORTS` alone for the same reason.
+#
+# One query PER LABEL rather than one filtered query, because the backend's Cypher subset supports
+# neither `labels()` in WHERE ("unsupported function 'labels'") nor a `(fn:A OR fn:B)` predicate
+# (matches zero rows) — a label is only expressible in the MATCH pattern. That forces the same shape
+# `_op_hotspots` arrived at for the same reason: over-request per label, merge, sort client-side.
+_RANK_LABELS = ("Function", "Method", "Class", "Interface", "Route")
+
+# Labels deliberately NOT ranked: File, Folder, Module, Section, Variable, EnvVar, Channel,
+# Decorator, Enum, Type, Branch, Project. None of them is a callable, so none can have a "caller".
+# The backend's own `search_graph` filters the same family server-side ("Noise labels
+# (File/Folder/Module/Variable) are filtered out") — this list is that policy, applied where the
+# mapper needs it.
+
+
+def _fan_in_cypher(label: str) -> str:
+    """Fan-in query for one node *label*. Over-requests (40 per label) so the client-side merge
+    ranks a real population rather than an arbitrary slice — the truncation bug `_op_hotspots` was
+    reinstated to fix. *label* is a module-controlled constant, never caller input."""
+    return (
+        f"MATCH (caller)-[:CALLS]->(fn:{label}) WHERE fn.name IS NOT NULL "
+        "RETURN fn.name, fn.qualified_name, fn.file_path, count(caller) AS in_degree "
+        "ORDER BY in_degree DESC LIMIT 40"
+    )
 
 _ENTRY_CYPHER = (
     "MATCH (fn) WHERE fn.is_entry_point = true "
@@ -193,29 +228,59 @@ class MapGenerator:
             return path, False
 
 
+def _as_degree(value: object) -> int:
+    """Coerce a backend ``count(...)`` cell to int for sorting.
+
+    0.10.x returns aggregate counts as STRINGS (`"138"`). The old single-query ranking never
+    noticed, because it rendered the cell verbatim and leaned on the DB's own `ORDER BY` for
+    ordering. Merging several per-label queries means sorting client-side, and sorting `"99"` against
+    `"138"` lexicographically would put 99 first — so the coercion is load-bearing, not cosmetic."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
 def _query_ranked_symbols(provider: GraphProvider, project: str) -> list[dict]:
-    raw = provider._run("query_graph", {"project": project, "query": _FAN_IN_CYPHER}, 8000)
-    rows = []
-    for row in _rows_from(raw):
-        name = row.get("fn.name") or row.get("name") or "?"
-        path = str(row.get("fn.file_path") or row.get("file_path") or "")
-        deg = row.get("in_degree", 0)
-        if path in _RANK_SKIP_PATHS:  # drop builtins / project node noise
+    """Top symbols by caller count, ranked across `_RANK_LABELS` and filtered of non-source noise.
+
+    Never-raise: a label whose query fails contributes nothing rather than failing the map, so a
+    backend that does not know one of these labels still yields a ranking from the rest.
+    """
+    # Imported here rather than at module scope: `GraphProvider` is a TYPE_CHECKING-only import
+    # above, and the mapper is constructed with a provider instance rather than importing one.
+    from codeintel.providers.graph import GraphProvider as _GP
+
+    seen: set[tuple[str, str]] = set()
+    rows: list[dict] = []
+    for label in _RANK_LABELS:
+        try:
+            raw = provider._run(
+                "query_graph", {"project": project, "query": _fan_in_cypher(label)}, 8000)
+        except Exception:  # one label's failure must not cost the whole ranking
             continue
-        # `hotspots` was specifically hardened against archived and generated content after a
-        # minified bundle took its top two slots; this ranking is its sibling and had none of that
-        # filtering — three skip paths and nothing else. It is also the one that gets WRITTEN to
-        # CODE_INTEL.md and committed, so a webpack chunk listed as the repo's most load-bearing
-        # symbol is a wrong answer that survives in the tree and gets reviewed as fact.
-        # Imported here rather than at module scope: `GraphProvider` is a TYPE_CHECKING-only import
-        # above, and the mapper is constructed with a provider instance rather than importing one.
-        from codeintel.providers.graph import GraphProvider as _GP
-        if _GP._is_noise({"file_path": path, "name": str(name)}):
-            continue
-        rows.append({"name": name, "file_path": path, "in_degree": deg})
-        if len(rows) >= 30:
-            break
-    return rows
+        for row in _rows_from(raw):
+            name = row.get("fn.name") or row.get("name") or "?"
+            path = str(row.get("fn.file_path") or row.get("file_path") or "")
+            if path in _RANK_SKIP_PATHS:  # drop builtins / project node noise
+                continue
+            # `hotspots` was specifically hardened against archived and generated content after a
+            # minified bundle took its top two slots; this ranking is its sibling and had none of
+            # that filtering — three skip paths and nothing else. It is also the one that gets
+            # WRITTEN to CODE_INTEL.md and committed, so a webpack chunk listed as the repo's most
+            # load-bearing symbol is a wrong answer that survives in the tree and gets reviewed as
+            # fact. `_is_noise` also drops test code, which is what keeps a framework decorator
+            # bound by name collision to a `.spec.ts` file out of the top slot.
+            if _GP._is_noise({"file_path": path, "name": str(name)}):
+                continue
+            key = (str(name), path)
+            if key in seen:  # a node carrying two ranked labels must not be listed twice
+                continue
+            seen.add(key)
+            rows.append({"name": name, "file_path": path,
+                         "in_degree": _as_degree(row.get("in_degree", 0))})
+    rows.sort(key=lambda r: r["in_degree"], reverse=True)
+    return rows[:30]
 
 
 def _query_entry_points(provider: GraphProvider, project: str) -> list[dict]:

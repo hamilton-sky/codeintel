@@ -23,8 +23,8 @@ of those confirmed by both sources, 1 by ``IMPORTS`` alone, and 133 found ONLY v
 including the known-true ``__main__ -> commands.*`` and ``gateway -> providers.*`` edges. The same
 comparison on a second indexed repo (token-tracker) also showed ``CALLS|USAGE`` recovering
 edges ``IMPORTS`` missed entirely. So this module aggregates the UNION of ``IMPORTS`` and
-``CALLS|USAGE`` (already this codebase's higher-recall relation for fan-in — mapper.py's
-``_FAN_IN_CYPHER`` — and for the call graph — grapher.py), keeping the existing noise/test/scope
+``CALLS|USAGE`` (already this codebase's higher-recall relation for the call graph — grapher.py),
+keeping the existing noise/test/scope
 filters (which already reject synthetic/non-source endpoints — nothing further needed there, unlike
 ``grapher.py``'s standalone ``_synth`` check, because every endpoint here is matched against the
 ``File`` nodes actually kept by ``keep_source`` rather than trusted verbatim). ``CALLS|USAGE`` is
@@ -565,8 +565,8 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
         # IMPORTS alone is a low-recall edge source (module-level static imports only — lazy and
         # function-body imports are invisible to it) and was measured fabricating edges from source
         # files to test files that do not reference them. CALLS|USAGE — already this codebase's
-        # higher-recall relation for fan-in (mapper.py's `_FAN_IN_CYPHER`) and the call graph
-        # (grapher.py) — is unioned in here for the same reason: it reproduces nearly everything
+        # higher-recall relation for the call graph (grapher.py) — is unioned in here for the same
+        # reason: it reproduces nearly everything
         # IMPORTS finds and recovers real cross-module edges IMPORTS misses entirely (measured:
         # gateway -> providers.*, most of commands/* -> its collaborators). It is not a strictly
         # cleaner source — it carries its own bare-name-collision noise — so every relation records

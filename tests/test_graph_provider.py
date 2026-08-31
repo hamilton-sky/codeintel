@@ -843,3 +843,40 @@ def test_no_renderer_passes_a_qualified_name_through_the_filename_guard():
     ]
     assert not offenders, (
         "a qualified name is being stripped with the filename guard on:\n" + "\n".join(offenders))
+
+
+# ---------------------------------------------------------------------------
+# _looks_like_test: JavaScript/TypeScript conventions
+# ---------------------------------------------------------------------------
+
+def test_looks_like_test_recognises_the_javascript_conventions():
+    """Every convention this filter knew was Python's, and a real repo showed the cost: NestJS's
+    `Injectable` (138 callers), `Inject` (59) and `Optional` (20), each bound by bare-name collision
+    to `backend/src/__tests__/agent/ack-checkpoint.service.spec.ts`, were reported as brightsky-ai's
+    three most load-bearing symbols in its committed CODE_INTEL.md. `__tests__` is not `/tests/` and
+    `.spec.ts` is not `_test.py`, so the filter whose whole job was to stop them never fired."""
+    from codeintel.providers.graph import GraphProvider as _GP
+
+    assert _GP._looks_like_test(
+        "backend/src/__tests__/agent/ack-checkpoint.service.spec.ts", "Injectable")
+    assert _GP._looks_like_test("__tests__/unit/thing.ts", "x")
+    assert _GP._looks_like_test("src/__test__/thing.ts", "x")
+    assert _GP._looks_like_test("frontend/src/components/InlineApproval.test.tsx", "x")
+    assert _GP._looks_like_test("src/utils/currency.spec.js", "x")
+    assert _GP._looks_like_test("src/a/b/thing.spec.ts", "x")
+
+
+def test_looks_like_test_does_not_catch_real_source_that_merely_reads_test_shaped():
+    """The bar for widening this filter is that a convention cannot hide a real symbol —
+    over-filtering is what retired `deadcode` at 25% precision. `.spec`/`.test` are matched as
+    filename INFIXES, not substrings, so ordinary words containing them are safe."""
+    from codeintel.providers.graph import GraphProvider as _GP
+
+    for path in ("src/spectrum.ts",            # starts with "spec"
+                 "src/latest.ts",              # ends with "test"
+                 "src/protest.py",
+                 "src/inspector/attest.ts",
+                 "src/spec.ts",                # a module literally named spec.ts is source
+                 "src/testing/helpers.ts",     # "testing", not "test"
+                 "src/contest_results.py"):
+        assert not _GP._looks_like_test(path, "thing"), f"{path} is source, not a test"
