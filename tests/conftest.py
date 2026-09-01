@@ -34,6 +34,7 @@ import os
 import shutil
 import sys
 import sysconfig
+from typing import Any
 
 import pytest
 
@@ -115,11 +116,24 @@ def _release_embedding_runtimes():
     passed. The suite was green; the process exit code was 134, which fails the job just the same
     and points at nothing.
 
-    Freeing them here makes the teardown deterministic and moves it inside Python's lifetime, where
-    a failure would be a normal exception rather than a C++ abort in a finalising interpreter. It is
-    a mitigation of a native-teardown race, not a proof that no such race exists: it removes the
-    pile-up that made it likely, and it cannot make things worse, because dropping a reference at
-    session end is exactly what the interpreter was about to do less carefully.
+    Freeing them here moves most of the teardown inside Python's lifetime, where a failure would be a
+    normal exception rather than a C++ abort in a finalising interpreter.
+
+    **This is no longer what makes the exit code trustworthy, and the distinction matters.** When this
+    fixture was written it was described as "a mitigation of a native-teardown race, not a proof that
+    no such race exists" — and that caveat was correct: the abort recurred four more times with this
+    in place, on 3.11 and 3.12, once on `main` after a green merge. The reason it cannot close the
+    race is structural: it drops the `TextEmbedding.model` reference and relies on refcounting to
+    cascade to the `ort.InferenceSession` two levels down (`TextEmbedding.model` is the embedding
+    WORKER; the session is that worker's own `.model`, per `fastembed/common/onnx_model.py`). Any
+    reference cycle defers that to the cyclic collector, which may not run until shutdown — exactly
+    the window being avoided.
+
+    The guarantee now lives in the `pytest_unconfigure` hook at the bottom of this file, which exits
+    before finalisation runs at all. This fixture is kept because promptly releasing ~100 native
+    inference sessions is good hygiene on its own, it makes the shutdown window smaller for anyone
+    running with `CODEINTEL_NO_HARD_EXIT=1`, and it cannot make anything worse. It is defence in
+    depth, not the defence.
     """
     yield
     try:
@@ -197,3 +211,61 @@ def _reset_graph_wire_format_cache():
     GraphProvider._reset_wire_format_cache()
     yield
     GraphProvider._reset_wire_format_cache()
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# The exit code must not depend on a native teardown race.
+#
+# `_release_embedding_runtimes` above reduces the pile-up. It cannot eliminate the race, and its own
+# docstring says so — which turned out to matter: the abort recurred FOUR times with that fixture in
+# place, on 3.11 and 3.12, and the fourth was on `main` after a green merge. Measured over one
+# session: four fresh CI matrix runs, three needed a manual re-run.
+#
+# Every one of those runs had already printed `NNNN passed` and `Required test coverage ... reached`
+# before dying. So nothing of value happens between "coverage report written" and "process exits" —
+# the only thing left in that window is CPython finalising `onnxruntime`'s C++ objects, and that is
+# exactly where `terminate called without an active exception` comes from: a `std::thread` destroyed
+# while still joinable. `os._exit` skips finalisation, so the window closes.
+#
+# WHY THIS IS THE RIGHT LAYER, and it is worth being precise because the alternative looks tidier:
+# chasing the last Python reference to every `InferenceSession` is what the fixture above already
+# does, and it is a probabilistic improvement — it cannot be proved to have removed the last one,
+# because a reference cycle collected during shutdown reopens the race. Making the exit code
+# independent of finalisation is DETERMINISTIC: there is no reference left to reason about.
+#
+# WHAT THIS DOES NOT DO: it does not make a real crash invisible. A segfault or abort DURING the test
+# run still fails the run — pytest never reports, `_final_session` never carries a status, and the
+# hook below returns without exiting. It only suppresses a death that happens after the verdict is
+# already in, which is the one case where the process had nothing left to do.
+_final_session: list[Any] = []
+
+
+def pytest_sessionstart(session):
+    _final_session.append(session)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    # `pytest_unconfigure` is the last hook pytest calls, and `trylast` puts this after every other
+    # plugin's. By here pytest-cov has written its report AND applied `--cov-fail-under`, and the
+    # terminal reporter has re-derived the final status — which is why the status is read from
+    # `session.exitstatus` HERE rather than captured from `pytest_sessionfinish`'s argument, where
+    # it is still provisional. That distinction is load-bearing: capturing it earlier reported 0 for
+    # a coverage failure.
+    if os.environ.get("CODEINTEL_NO_HARD_EXIT"):
+        # Escape hatch for anyone debugging finalisation itself, or for a future run that needs
+        # atexit handlers to fire.
+        return
+    if not _final_session:
+        return                           # session never started; let the normal path run
+    status = getattr(_final_session[-1], "exitstatus", None)
+    if status is None:
+        return
+    # `os._exit` skips buffer flushing, so flush what pytest has written or a passing run can lose
+    # its own summary — which would be a worse bug than the one being fixed.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(int(status))
