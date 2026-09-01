@@ -519,6 +519,16 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Fail instead of indexing an un-indexed repo (default: index it "
                                 "first, so one command always produces a model)")
     c4_parser.add_argument("--json", action="store_true", help="Print the payload; write nothing")
+    # Phase 1 of the layer feature is inference only: `--layers` REPORTS the inferred bands, it does
+    # not add a view to the model. Named now rather than later so the flag does not change meaning
+    # between releases — a `--layers` that printed a summary in one version and emitted a diagram in
+    # the next would be the same flag doing two jobs.
+    c4_parser.add_argument("--layers", action="store_true",
+                           help="Print the inferred architectural layers (from IMPORTS only) and "
+                                "any import cycles. Reports; does not add a view to the model.")
+    c4_parser.add_argument("--suggest-config", action="store_true",
+                           help="Print a pasteable [layers] TOML block from the inferred ranks and "
+                                "write nothing — a green baseline on the tree that generated it")
 
     # doctor subcommand
     doctor_parser = subparsers.add_parser(

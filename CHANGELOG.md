@@ -6,6 +6,40 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`codeintel c4 --layers` infers architectural layers from the import graph, and
+  `--suggest-config` emits them as a pasteable `[layers]` config.** Phase 1 of
+  [docs/layers-design.md](docs/layers-design.md) — inference only: no new views, no exit codes, no
+  config parsing yet. Ranks come from height-to-sink longest-path over the element-level `IMPORTS`
+  graph, condensed by Tarjan so an import cycle occupies exactly one rank instead of being stacked
+  into an order its members do not have.
+  - **`IMPORTS` only, never the `CALLS|USAGE` union** — measured, not preferred. Across four indexed
+    repos the union collapsed 38.8%-70.4% of all elements into a *single* strongly-connected
+    component, which is not layerable; `IMPORTS` alone stayed between 0% and 13.8%.
+  - **Longest path, not shortest.** With `1 + min`, one shortcut edge from a high module straight to a
+    leaf drags that leaf up beside its own dependencies and the edge stops descending. `1 + max`
+    guarantees every edge strictly descends — checked empirically rather than assumed: 69 of 69 edges
+    on this repo, 99 of 99 on a second with two cycles present, zero upward and zero same-rank
+    outside a cycle.
+  - **Elements with no import edge either way are reported as `unassigned`, not ranked into the
+    foundation.** Longest-path ranking gives a zero-degree element rank 0, which is the bottom band,
+    which every reader takes to mean "what everything rests on". On one evaluated repo that put 18 of
+    29 elements — `vite.config`, `eslint.config`, scripts and docs — into the "foundation". They are
+    not low-level, and a rank cannot say what they are.
+  - **What `unassigned` does not mean is "unrelated".** `IMPORTS` is module-level only:
+    `src/codeintel/doctor.py` has seven `codeintel` imports and every one sits inside a function, so
+    it lands here while being heavily coupled. An earlier draft of this output called such elements
+    unrelated; that was a claim the edge source cannot support, and the wording now says which fact
+    it actually has.
+  - **An inferred layering can never report a violation, and the output says so.** Every edge
+    descending is a theorem, not an observation, so an empty violation report against inferred ranks
+    is the absence of an opinion rather than a clean bill of health. Only a declared `[layers]` config
+    (Phase 2) can fail. `--suggest-config` therefore emits a green baseline on the tree that generated
+    it, which is what stops a first adoption drowning in false positives.
+  - Membership is emitted as **file paths, not element ids**, so a config survives a `--depth` change.
+    Layers are named `layer_0`… deliberately: the generator can see that a band exists, not what it
+    is, and a plausible wrong name reads as an opinion the tool does not hold.
+
 ### Fixed
 - **`map`'s ranked-symbol table no longer ranks things that cannot be called.** The fan-in query
   constrained no node label, so a JSON key, a YAML key, a folder and a message channel competed with

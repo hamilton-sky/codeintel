@@ -101,7 +101,7 @@ _EMPTY_STATS: dict[str, Any] = {
 _EMPTY: dict[str, Any] = {
     "project": "", "engine": "graph", "op": "c4",
     "fit": {}, "elements": [], "relations": [], "dropped": [],
-    "stats": dict(_EMPTY_STATS), "reason": "",
+    "stats": dict(_EMPTY_STATS), "layers": {}, "reason": "",
 }
 
 # Two relationship kinds record edge provenance rather than asserting every edge is a static
@@ -706,10 +706,25 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
             "truncated": bool(files_truncated or imports_truncated or calls_truncated),
         }
 
+        # Layers are computed unconditionally and cost nothing to carry: O(V+E) over the elements
+        # and relations already in hand, no extra query. Gating it behind `--layers` would mean the
+        # flag changes what the payload CONTAINS rather than what the CLI prints, and `--json`
+        # consumers would then see a different shape depending on an unrelated flag.
+        from codeintel.c4_layers import compute_layers
+
+        try:
+            layers = compute_layers(elements, relations)
+        except Exception as exc:
+            # Never lose a whole model for a derived section — the same rule churn follows above.
+            log_swallowed("c4.build_c4_payload.layers", exc)
+            from codeintel.c4_layers import empty_layers
+
+            layers = empty_layers()
+
         return {
             "project": display_name, "engine": "graph", "op": "c4",
             "fit": fit, "elements": elements, "relations": relations, "dropped": dropped,
-            "stats": stats, "segment_titles": segment_titles, "reason": "",
+            "stats": stats, "segment_titles": segment_titles, "layers": layers, "reason": "",
         }
     except Exception as exc:
         log_swallowed("c4.build_c4_payload", exc)
