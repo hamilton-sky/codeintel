@@ -40,6 +40,44 @@ All notable changes to codeintel are documented here. The format is based on
     Layers are named `layer_0`… deliberately: the generator can see that a band exists, not what it
     is, and a plausible wrong name reads as an opinion the tool does not hold.
 
+- **`codeintel c4 --check` gates CI on a declared `[layers]` config, with exit 2 for architectural
+  drift.** Phase 2 of [docs/layers-design.md](docs/layers-design.md). Adds config validation and a
+  path-glob membership matcher to `c4_layers.py`, and a new `c4_check.py` holding the finding records
+  and their two serializers. `--json` carries every record verbatim under `findings`.
+  - **Exit 2, not 1, and that is the point.** A CI step must distinguish "codeintel is broken or the
+    repo is not indexed" from "your architecture drifted". Conflate them and the first person to hit a
+    broken index allowlists the failure — and then the gate is dead. A `--check` on a repo that fails
+    to index still exits 1.
+  - **Membership matches file paths, not element ids.** Element ids depend on `--depth`, which
+    auto-fits and moves when a repo crosses the element cap, so an id-keyed config would silently stop
+    matching as the repo grew — the check would keep passing while covering less and less. `*` matches
+    within one segment, `**` across, and the most specific pattern wins so a catch-all can coexist
+    with a specific claim. `fnmatch` is used one segment at a time and never on a whole path, where
+    its `*` crosses `/` and would silently widen every pattern an author writes.
+  - **A generated baseline is provably green.** `--suggest-config`'s ranks come from the very edges
+    the check judges, and longest-path ranking makes every edge descend — so pasting the suggestion
+    yields zero violations on the commit that generated it. Verified: 0 gating / exit 0 on this repo,
+    and reversing only the `order` list turns the same tree into 70 gating violations / exit 2.
+  - **The allowlist requires a `reason`; an entry without one is itself gating.** That single rule is
+    the difference between an allowlist and a mute button — and a reasonless entry excuses nothing, so
+    it produces two findings, not zero. Allowed violations stay listed and counted, demoted to `info`.
+    Entries matching no current violation are reported stale, so the list cannot silently grow forever.
+  - **A shorthand config cannot gate.** `order` with no `[layers.members]` guesses membership from
+    layer names; findings are reported and the gating count is forced to zero. Failing a build on a
+    guess about which layer a file belongs to is the worst thing this feature could do. `--check
+    --layers-from inferred` is refused outright for the same reason: an inferred layering has zero
+    violations by construction, and a gate that cannot fail is worse than no gate.
+  - **Records are defined before serializers.** One finding is one record; every class uses the same
+    shape with irrelevant fields `null` rather than absent, `severity` is resolved after config is
+    applied so no two serializers can disagree about the exit code, and each carries a mandatory
+    concrete file-pair witness because a finding a human cannot go look at is not actionable. No line
+    numbers: measured against the live index, an `IMPORTS` edge exposes the target's `start_line` but
+    not the offending file's import line, which is backwards from what an annotation wants.
+  - Never gating: CALLS/USAGE-only up-edges (collapsed to a count — the union fabricates edges by bare
+    symbol name and is not evidence of a dependency), `split`, `spread`, `stale-allow`,
+    `layer-ambiguous`. A malformed `[layers]` block yields a named problem and exit 1, never a
+    traceback and never a silently empty check.
+
 ### Fixed
 - **`map`'s ranked-symbol table no longer ranks things that cannot be called.** The fan-in query
   constrained no node label, so a JSON key, a YAML key, a folder and a message channel competed with
