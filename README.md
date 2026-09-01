@@ -369,7 +369,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap |
 | `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
 | `codeintel graph [project_root] [--html] [--out FILE] [--limit N]` | Emit the call graph as `{nodes,edges}` JSON, or `--html` a self-contained interactive viewer — see [docs/graph-viewer.md](docs/graph-viewer.md) |
-| `codeintel c4 [project_root] [--out DIR] [--depth N] [--scope PATH] [--include-tests] [--no-index] [--json]` | Write a LikeC4 architecture model (`.c4`) of the repo's file/directory structure and its import graph — committable, diffable, hand-editable source rather than a rendered picture. Indexes the repo first if it has no graph index. See [docs/c4.md](docs/c4.md) |
+| `codeintel c4 [project_root] [--out DIR] [--depth N] [--scope PATH] [--include-tests] [--no-index] [--json] [--layers] [--suggest-config]` | Write a LikeC4 architecture model (`.c4`) of the repo's file/directory structure and its import graph — committable, diffable, hand-editable source rather than a rendered picture. Indexes the repo first if it has no graph index. `--layers` reports architectural layers inferred from the import graph and `--suggest-config` emits them as a pasteable config; both print and write nothing. See [docs/c4.md](docs/c4.md) |
 | `codeintel reset [project_root] [--all] [--yes] [--json]` | Clear this repo's index — **both** semantic and graph — so it's as if never indexed; `--all` wipes every repo. Recovers from a corrupt/stale DB |
 | `codeintel gen-token` | Print a secure random bearer token (for `serve-http` / RBAC `auth.toml`) |
 

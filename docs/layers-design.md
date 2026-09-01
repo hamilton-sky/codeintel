@@ -913,7 +913,33 @@ least three indexed repos. This repo is clean, so §2.4 — the part most likely
 currently untested against reality. If no available repo has an `IMPORTS` cycle, **construct one** in
 a fixture and test against that. Do not ship the degradation path unexercised.
 
-### Phase 1 — inference only. No rendering at all. *(smallest useful increment)*
+### Phase 1 — inference only. No rendering at all. **DONE — 2026-09-01.**
+
+Shipped as specified, with the two decisions this phase was blocked on made and recorded in
+`c4_layers.py`'s own header (isolated elements excluded as `unassigned`; the 50% guard kept and
+labelled a guard). §9.3 and the §2.2 Phase 0 note are closed accordingly. What the implementation
+measured on the way, all of it reproducing Phase 0 rather than contradicting it:
+
+| repo | elements | ranked | bands | IMPORTS edges | cycles | largest | unassigned |
+|---|---|---|---|---|---|---|---|
+| codeintel | 71 | 54 | 6 | 69 | 0 | 0 | 17 (23.9%) |
+| pathly-adapters | 81 | 60 | 6 | 99 | 2 | 3 | 21 (25.9%) |
+
+pathly-adapters reproduces Phase 0(b)'s row exactly — 81 elements, 99 import edges, 2 SCCs, largest
+3 (`src/pathly_data/core`, `studio/src/main`, `studio/src/renderer`), 21 isolated at 25.9%, and a
+largest-cycle fraction of 3.7% against all elements. Independent code arriving at the same numbers is
+the strongest evidence available that the probe and the implementation agree.
+
+**§2.3's theorem was checked empirically, not assumed.** Across both repos: zero edges where
+`rank(from) < rank(to)`, and zero same-rank edges outside a reported cycle. On codeintel that is 69
+of 69 edges strictly descending; on pathly-adapters, 99 of 99 with two cycles present.
+
+**One correction the implementation forced.** The first draft of the CLI output described unassigned
+elements as *"unrelated rather than foundational"*. That is false, and `src/codeintel/doctor.py`
+disproves it: seven `codeintel` imports, every one inside a function, so `IMPORTS` sees none of them
+while the module is heavily coupled. Zero degree is a fact about the edge source, not the
+architecture. The wording now says so, and so does the module header — the §2.2 note was right that
+these elements must not be called the foundation, and half-right about why.
 
 New module `c4_layers.py`, pure:
 
@@ -973,8 +999,14 @@ The rest, listed rather than guessed at.
    a misunderstanding of what `group` was for.
 2. **Is the deployment model a legitimate second hierarchy for non-deployment concerns?** Named in
    §4.2 as option D; I do not know its constraints well enough to recommend it either way.
-3. **50% is the degradation threshold in §2.4.** Re-checked against Phase 0(b) and **still not
-   settled, for a new reason**: across four repos the largest `IMPORTS` SCC was 13.8%, so the
+3. ~~**50% is the degradation threshold in §2.4.**~~ **DECIDED (Phase 1, 2026-09-01): kept at 50%,
+   and documented in code as a catastrophe guard rather than a tuned parameter.** Lowering it into
+   the 20-25% range real repos reach would exercise it, but at the cost of stamping `degraded` on
+   views that still read perfectly well — and the flag's whole value is meaning something when it
+   appears. `c4_layers.py`'s header states this explicitly, which is what the instruction below asked
+   for. Both cycle fractions (against ranked and against all elements) are reported in `stats`, so
+   adding the isolated-element exclusion did not silently redefine the number that calibrated it.
+   Original reasoning, kept: across four repos the largest `IMPORTS` SCC was 13.8%, so the
    threshold is ~3.6x above anything real and would not have fired once. That makes it a
    catastrophe guard rather than an operating parameter — which is defensible, but it means the
    degradation path ships essentially untested by normal use. Pick one deliberately: lower it into

@@ -72,6 +72,106 @@ def _other_c4_files_elsewhere(project_root: str, out_dir: str) -> list[str]:
         return []
 
 
+def _common_prefix(ids: list[str]) -> str:
+    """The longest shared dotted-segment prefix, so a report of 54 module ids stays readable.
+
+    Segment-wise, never character-wise: trimming `src.codeintel.c` off `c4` and `cache` would be
+    shorter and meaningless. Returns "" when there is nothing shared, which is the common case for a
+    payload spanning `src/`, `bench/` and `scripts/`.
+    """
+    if len(ids) < 2:
+        return ""
+    split = [i.split(".") for i in ids]
+    shared: list[str] = []
+    for parts in zip(*split, strict=False):
+        if len(set(parts)) != 1:
+            break
+        shared.append(parts[0])
+    # Never consume the whole id — an element must keep at least one segment to be nameable.
+    while shared and any(len(s) <= len(shared) for s in split):
+        shared.pop()
+    return ".".join(shared) + "." if shared else ""
+
+
+def _print_layers(payload: dict) -> None:
+    """Print the inferred layer bands, top to bottom, plus cycles and what was left out.
+
+    Elements are named by their ELEMENT ID, not their title. Titles collide — this repo alone has two
+    elements titled `c4` (`src/codeintel/c4.py` and `src/codeintel/commands/c4.py`) and two titled
+    `graph`, sitting in different bands. A first draft of this function printed titles, and the output
+    showed `c4` twice in one band and `graph` in two, which reads as a bug in the ranking rather than
+    an ambiguity in the label. A shared prefix is trimmed once, and named, to keep ids readable.
+
+    Three things are stated explicitly rather than left for the reader to infer, because each is a way
+    this output could be misread:
+
+    * **Bands are IMPORTS-only, and IMPORTS is module-level only.** A reader who assumes it covers
+      calls, or covers imports inside functions, would over-trust it.
+    * **Zero violations here means nothing.** Inferred ranks make every edge descend by construction
+      (§2.3), so an inferred layering can never report a violation. Printing a reassuring "no
+      problems" would be the absence of an opinion dressed as a clean bill of health.
+    * **An excluded element is not known to be unrelated.** This is the correction that matters most:
+      `unassigned` means "no MODULE-LEVEL import edge either way", and that is not the same fact.
+      `src/codeintel/doctor.py` has seven `codeintel` imports, every one of them inside a function,
+      so `IMPORTS` sees none of them — it is heavily related and completely invisible here. An earlier
+      draft of this line called such elements "unrelated rather than foundational", which was a claim
+      about the world the edge source cannot support.
+    """
+    layers = payload.get("layers") or {}
+    stats = layers.get("stats") or {}
+    bands = layers.get("bands") or []
+    unassigned = list(layers.get("unassigned") or [])
+
+    every_id = [eid for band in bands for eid in (band.get("elements") or [])] + unassigned
+    prefix = _common_prefix(every_id)
+
+    def label(eid: str) -> str:
+        return eid[len(prefix):] if prefix and eid.startswith(prefix) else eid
+
+    ranked = int(stats.get("elements_ranked") or 0)
+    total = int(stats.get("elements_total") or 0)
+    print(f"Inferred layers for {payload.get('project') or '?'} — "
+          f"{len(bands)} band(s) over {ranked} of {total} element(s), "
+          f"{stats.get('edges_used') or 0} IMPORTS edge(s)")
+    print("  source: module-level IMPORTS only. The CALLS|USAGE union is not layerable (measured: "
+          "38.8%-70.4% of elements collapse into one cycle), and an import inside a function is "
+          "invisible to IMPORTS entirely.")
+    if prefix:
+        print(f"  names below are relative to `{prefix}`")
+
+    if layers.get("degraded"):
+        largest = stats.get("largest_cycle") or 0
+        print(f"  ! DEGRADED: one import cycle covers {largest} of {ranked} ranked element(s). "
+              f"The band order below is close to meaningless; fix the cycle first.")
+
+    if not bands:
+        print("  no element has a module-level IMPORTS edge, so there is no layering to show")
+    for position, band in enumerate(bands):
+        names = sorted(label(eid) for eid in (band.get("elements") or []))
+        print(f"  [{position}] rank {band.get('rank')}: {', '.join(names)}")
+
+    cycles = layers.get("cycles") or []
+    if cycles:
+        print(f"  {len(cycles)} import cycle(s) — each occupies ONE rank, because its members have "
+              f"no relative order:")
+        for cycle in cycles:
+            shown = ", ".join(label(m) for m in (cycle.get("members") or []))
+            omitted = int(cycle.get("members_omitted") or 0)
+            more = f" (+{omitted} more)" if omitted else ""
+            print(f"    rank {cycle.get('rank')}, {cycle.get('size')} members: {shown}{more}")
+
+    if unassigned:
+        print(f"  {len(unassigned)} element(s) not placed — no MODULE-LEVEL import edge either way. "
+              f"That is a limit of the edge source, NOT evidence they are unrelated: a module whose "
+              f"imports all sit inside functions lands here while being heavily coupled.")
+        shown = ", ".join(label(u) for u in unassigned[:12])
+        extra = f" (+{len(unassigned) - 12} more)" if len(unassigned) > 12 else ""
+        print(f"    {shown}{extra}")
+
+    print("  note: inferred ranks make every edge descend by construction, so this view can never "
+          "report a layer violation. Only a declared [layers] config can — see --suggest-config.")
+
+
 # code=1: this command's job is to WRITE A FILE. Exiting 0 after failing to write it reports
 # success to any CI step gating on $? while nothing was produced — same reasoning as graph.py.
 @never_raise("c4 failed: {exc}", code=1)
@@ -142,6 +242,21 @@ def run(args: Any) -> int:
         fix = _REASON_FIX.get(reason, "run `codeintel doctor`")
         print(f"c4 failed: {reason} — {fix}")
         return 1
+
+    # Both of these are BARE outputs like `--json`: they print and write nothing. `--suggest-config`
+    # emits TOML meant to be redirected into a file, so it must never share stdout with a progress
+    # line — hence it returns before the writing path rather than decorating it.
+    if getattr(args, "suggest_config", False):
+        from codeintel.c4_layers import suggest_config
+
+        layers = payload.get("layers") or {}
+        print(suggest_config(layers.get("ranks") or {}, payload.get("elements") or []),
+              end="")
+        return 0
+
+    if getattr(args, "layers", False):
+        _print_layers(payload)
+        return 0
 
     dsl = c4.render_c4_dsl(payload)
     out_dir = getattr(args, "out", None) or "codeintel-c4"
