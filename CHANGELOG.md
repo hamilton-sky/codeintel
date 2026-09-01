@@ -79,6 +79,37 @@ All notable changes to codeintel are documented here. The format is based on
     traceback and never a silently empty check.
 
 ### Fixed
+- **The test job no longer fails with exit 134 after the suite has already passed.** A native
+  teardown race in `onnxruntime` aborted CI four times — `terminate called without an active
+  exception` and a core dump *after* pytest had printed `NNNN passed` and met the coverage floor. It
+  hit both 3.11 and 3.12, and the fourth landed on `main` after a green merge. Measured over one
+  session: four fresh CI matrix runs, **three needed a manual re-run**, every one of which passed
+  unchanged. The failure pointed at nothing — the summary said green, the exit code said failed — so
+  the natural first suspicion was always whatever the branch had touched.
+  - **Why the previous mitigation could not close it.** `_release_embedding_runtimes` dropped the
+    `TextEmbedding.model` reference and relied on refcounting to cascade to the
+    `ort.InferenceSession` *two levels down* — `TextEmbedding.model` is the embedding worker, and the
+    session is that worker's own `.model`. Any reference cycle defers the release to the cyclic
+    collector, which may not run until interpreter shutdown: precisely the window being avoided. Its
+    own docstring said it was "a mitigation … not a proof that no such race exists", and that was
+    right.
+  - **The fix removes the dependency instead of narrowing the race.** Nothing of value happens between
+    "coverage report written" and "process exits", so a `trylast pytest_unconfigure` hook flushes and
+    calls `os._exit(session.exitstatus)`. Finalisation never runs, so the C++ thread that was being
+    destroyed while still joinable is never destroyed at all. Deterministic, rather than a smaller
+    probability.
+  - **Read the status in `pytest_unconfigure`, not `pytest_sessionfinish`** — a wrong first
+    implementation took the `exitstatus` argument and reported **0** for a coverage failure, because
+    the terminal reporter re-derives the final status after the coverage summary runs. There is a test
+    for exactly that case.
+  - **It cannot hide a real crash.** An abort *during* the run still fails: pytest never reports,
+    `pytest_sessionstart` never recorded a session, and the hook returns without touching anything.
+    Only a death after the verdict is already in gets suppressed.
+  - `tests/test_hard_exit.py` pins every exit code through subprocesses (0 pass, 1 failure, 1 coverage
+    failure, 2 collection error, 4 usage error, 5 no match), that the summary survives the unflushed
+    exit, and that `CODEINTEL_NO_HARD_EXIT=1` restores ordinary finalisation for anyone debugging it.
+    Without these, a regression here would be silent and total: every run exits 0 and CI goes
+    permanently green.
 - **`map`'s ranked-symbol table no longer ranks things that cannot be called.** The fan-in query
   constrained no node label, so a JSON key, a YAML key, a folder and a message channel competed with
   functions on equal terms — and won. On a 12,638-node TypeScript repo the top rows were `logger`
