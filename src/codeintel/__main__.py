@@ -529,6 +529,17 @@ def build_parser() -> argparse.ArgumentParser:
     c4_parser.add_argument("--suggest-config", action="store_true",
                            help="Print a pasteable [layers] TOML block from the inferred ranks and "
                                 "write nothing — a green baseline on the tree that generated it")
+    # Exit 2, not 1. A CI step must be able to tell "codeintel is broken / the repo is not indexed"
+    # from "your architecture drifted": conflate them and the first person to hit a broken index
+    # allowlists the failure, and the gate is dead.
+    c4_parser.add_argument("--check", action="store_true",
+                           help="Check the declared [layers] config in .codeintel.toml and exit 2 "
+                                "on gating findings. Still writes the model. Exits 0 with a note if "
+                                "no [layers] block exists — nobody gets a wall they did not ask for.")
+    c4_parser.add_argument("--layers-from", choices=["auto", "inferred", "declared"], default="auto",
+                           help="Which ranking to report (default: auto — declared if a [layers] "
+                                "block exists, else inferred). `declared` exits 1 if none exists, so "
+                                "CI can assert that a config had better be present.")
 
     # doctor subcommand
     doctor_parser = subparsers.add_parser(

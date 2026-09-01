@@ -955,7 +955,43 @@ Wire-up: one call added in `build_c4_payload`, `layers` added to the payload and
 ranks alone answer "what is the shape of this repo"), it touches `c4.py` in exactly one place, and
 because it renders nothing it **cannot conflict with the concurrent renderer work**.
 
-### Phase 2 — declared layers and the check. Still no rendering.
+### Phase 2 — declared layers and the check. Still no rendering. **DONE — 2026-09-01.**
+
+Shipped as specified. `c4_layers.py` gained config validation, the segment glob matcher and
+membership assignment; the check and its two serializers live in a new `c4_check.py`, which is the
+record-before-serializer split below being honoured rather than described.
+
+**§5.4's mechanism 2 is now a verified theorem, not a hope.** Generating a config with
+`--suggest-config` on this repo and running `--check` against it yields **0 gating findings, exit 0**
+— 56 of 72 elements assigned, 16 unassigned (info), 51 CALLS/USAGE advisories collapsed to a count.
+Reversing only the `order` list, leaving membership untouched, turns the same tree into **70 gating
+violations, exit 2**. That pair is the check working in both directions on real code.
+
+Every §5.2 class and every exit path was exercised end to end against this repository:
+
+| case | result |
+|---|---|
+| no `[layers]` block | exit **0**, "nothing to check" — nobody gets a wall they did not ask for |
+| `--suggest-config` baseline | exit **0**, 0 gating |
+| `order` reversed | exit **2**, 70 gating violations |
+| allowlist **with** reason | violation demoted to `info`, exit **0**, reason printed |
+| allowlist **without** reason | exit **2**, 2 gating — the entry *and* the violation it failed to excuse |
+| stale allowlist entry | reported `info`, exit **0** |
+| `require_all = true` | 70 unassigned promoted to gating, exit **2** |
+| shorthand (`order`, no members) | findings reported, gating forced to 0, exit **0** |
+| `--check --layers-from inferred` | exit **1** — a gate that cannot fail is worse than no gate |
+| malformed `[layers]` | exit **1** with a named problem, never a traceback |
+| `--layers-from declared`, no config | exit **1** — CI can assert a config exists |
+
+**One deviation from the letter of §3.3, and it is a correction.** The spec says a genuine tie is
+"all three specificity keys equal". That is unreachable: position in `order` always differs when the
+layers differ, so it always breaks the tie. What actually deserves reporting is a tie broken
+*arbitrarily* — two equally specific patterns from different layers, separated only by declaration
+order — and that is what `layer-ambiguous` now records.
+
+**§3.2's switch comment is stale and §5.2's table is the authority.** The comment says "both default
+false" above three switches, one of which its own example sets true. Implemented per §5.2's
+reasoning: `allow_same_layer = true`, `strict_adjacent = false`, `require_all = false`.
 
 Config parse + validate, path-glob membership matching (§3.3), split/unassigned handling, violation
 computation, allowlist with required reasons and staleness, `--check`, exit code 2.

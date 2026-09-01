@@ -101,7 +101,8 @@ _EMPTY_STATS: dict[str, Any] = {
 _EMPTY: dict[str, Any] = {
     "project": "", "engine": "graph", "op": "c4",
     "fit": {}, "elements": [], "relations": [], "dropped": [],
-    "stats": dict(_EMPTY_STATS), "layers": {}, "reason": "",
+    "stats": dict(_EMPTY_STATS), "layers": {}, "declared": {}, "findings": [],
+    "reason": "",
 }
 
 # Two relationship kinds record edge provenance rather than asserting every edge is a static
@@ -721,10 +722,35 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
 
             layers = empty_layers()
 
+        # Phase 2: the DECLARED check, if `.codeintel.toml` carries a `[layers]` block. Computed
+        # here so `--json` carries `findings` verbatim for every consumer (§6.2) rather than only for
+        # the code path that prints a report. `config.py` preserves the unknown `[layers]` key
+        # already, so this needs no change there — but it arrives unvalidated, which is why
+        # `parse_layers_config` exists.
+        from codeintel.c4_check import check_layers
+        from codeintel.c4_layers import parse_layers_config
+
+        findings: list[dict[str, Any]] = []
+        declared: dict[str, Any] = {}
+        try:
+            from codeintel.config import load_config
+
+            parsed_layers = parse_layers_config(load_config(str(project_root or "")))
+            if parsed_layers.get("present"):
+                declared = check_layers(
+                    {"project": display_name, "fit": fit, "elements": elements,
+                     "relations": relations}, parsed_layers)
+                findings = list(declared.get("findings") or [])
+        except Exception as exc:
+            # A malformed config must not cost the model. Same rule as churn and layers above.
+            log_swallowed("c4.build_c4_payload.check", exc)
+            declared, findings = {}, []
+
         return {
             "project": display_name, "engine": "graph", "op": "c4",
             "fit": fit, "elements": elements, "relations": relations, "dropped": dropped,
-            "stats": stats, "segment_titles": segment_titles, "layers": layers, "reason": "",
+            "stats": stats, "segment_titles": segment_titles, "layers": layers,
+            "declared": declared, "findings": findings, "reason": "",
         }
     except Exception as exc:
         log_swallowed("c4.build_c4_payload", exc)

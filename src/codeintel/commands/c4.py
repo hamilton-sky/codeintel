@@ -5,6 +5,7 @@ import os
 import time
 from typing import Any
 
+from codeintel import c4_check as _c4_check
 from codeintel.commands._common import never_raise, require_dir, resolve_root
 
 _REASON_FIX = {
@@ -172,6 +173,40 @@ def _print_layers(payload: dict) -> None:
           "report a layer violation. Only a declared [layers] config can — see --suggest-config.")
 
 
+def _run_check(payload: dict, declared: dict, wants: str) -> int:
+    """`--check`: print the layer report and pick the exit code. Never writes.
+
+    Exit codes follow §5.3, and the third one is the point of the flag: `0` ran and found nothing
+    gating, `1` the command could not do its job (the existing contract, unchanged), `2` it ran fine
+    and your architecture drifted. `2` rather than `1` is not cosmetic — a CI step that cannot tell a
+    broken index from a real violation gets the broken index allowlisted, and then the gate is dead.
+    """
+    if wants == "inferred":
+        # An inferred layering cannot produce a violation (§2.3), so checking against it would always
+        # exit 0 — a gate that can never fail is worse than no gate, because it looks like one.
+        print("--check needs declared layers: an inferred layering has zero violations by "
+              "construction, so it cannot gate.")
+        print("  drop --layers-from inferred, or generate a config with --suggest-config")
+        return 1
+
+    if not declared:
+        # §5.4's first and most important mechanism: the check is opt-in and needs a config. Nobody
+        # gets a wall of findings they did not ask for, and this is exit 0 — not configuring a check
+        # is not a failure.
+        print("no declared layers in .codeintel.toml; nothing to check")
+        print("  `codeintel c4 . --suggest-config > layers.toml` prints a green starting point")
+        return 0
+
+    problem = str(declared.get("problem") or "")
+    if problem:
+        # A malformed block is the command failing, not the architecture failing.
+        print(f"c4 failed: malformed [layers] config — {problem}")
+        return 1
+
+    print(_c4_check.render_report(payload, declared))
+    return 2 if int(declared.get("gating") or 0) else 0
+
+
 # code=1: this command's job is to WRITE A FILE. Exiting 0 after failing to write it reports
 # success to any CI step gating on $? while nothing was produced — same reasoning as graph.py.
 @never_raise("c4 failed: {exc}", code=1)
@@ -254,8 +289,24 @@ def run(args: Any) -> int:
               end="")
         return 0
 
+    # `--layers-from declared` is an ASSERTION, not a preference: CI uses it to fail when a config it
+    # expects has gone missing. Exit 1, because nothing was checked — this is the command not being
+    # able to do its job, which is the existing meaning of 1, not an architecture problem (which is 2).
+    declared = payload.get("declared") or {}
+    wants = getattr(args, "layers_from", "auto")
+    if wants == "declared" and not declared:
+        print("c4 failed: --layers-from declared, but .codeintel.toml has no [layers] block")
+        print("  run `codeintel c4 . --suggest-config > layers.toml` to generate one")
+        return 1
+
+    if getattr(args, "check", False):
+        return _run_check(payload, declared, wants)
+
     if getattr(args, "layers", False):
-        _print_layers(payload)
+        if declared and wants != "inferred":
+            print(_c4_check.render_report(payload, declared))
+        else:
+            _print_layers(payload)
         return 0
 
     dsl = c4.render_c4_dsl(payload)

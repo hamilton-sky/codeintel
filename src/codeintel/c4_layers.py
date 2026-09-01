@@ -397,3 +397,261 @@ def suggest_config(ranks: dict[str, int], elements: Iterable[dict]) -> str:
             lines.append(f"{name} = []   # no file paths recorded for these elements")
 
     return "\n".join(lines) + "\n"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# Phase 2 — DECLARED layers: config, membership matching, and the element→layer assignment.
+#
+# Inference above answers "what shape is this repo". Everything below answers "does it match the
+# shape someone declared", which is the half that can actually fail a build (§2.3). The two are kept
+# in one module because they share the element/relation vocabulary, and deliberately kept in separate
+# functions because only the declared half is allowed to gate.
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+# Defaults for the three switches. Note the design's §3.2 comment says "both default false" while
+# listing three switches, one of which its own example sets true — §5.2's table and its reasoning are
+# the authority, and they are unambiguous: same-layer imports are normal (so `allow_same_layer` is
+# TRUE by default) and strict adjacency produces a wall of findings on real code (so
+# `strict_adjacent` is FALSE). Recorded because the next reader will hit the same inconsistency.
+_SWITCH_DEFAULTS: dict[str, bool] = {
+    "strict_adjacent": False,
+    "allow_same_layer": True,
+    "require_all": False,
+}
+
+
+def _split_segments(value: str) -> list[str]:
+    return [seg for seg in value.replace("\\", "/").strip("/").split("/") if seg]
+
+
+def glob_match(pattern: str, path: str) -> bool:
+    """Does a repo-relative path match a layer-membership glob?
+
+    ``*`` matches within ONE path segment; ``**`` matches across segments.
+
+    **`fnmatch` on the whole path would be wrong**, and the design names this trap explicitly:
+    `fnmatch`'s ``*`` crosses ``/``, so ``src/*.py`` would match ``src/a/b/c.py`` and silently widen
+    every pattern an author writes — a check that quietly covers more than it says. `fnmatch` is used
+    here only ONE SEGMENT AT A TIME, where it is exactly right: a segment contains no ``/``, so there
+    is nothing for ``*`` to cross, and character classes like ``[0-9]`` come for free.
+
+    `pathlib.PurePath.match` is also not a substitute: its ``**`` handling only became correct in
+    3.13 and this package supports 3.11.
+    """
+    from fnmatch import fnmatchcase
+
+    pats = _split_segments(pattern)
+    segs = _split_segments(path)
+    # (pattern index, path index) -> reachable. Memoised because `**` branches.
+    seen: set[tuple[int, int]] = set()
+
+    def walk(i: int, j: int) -> bool:
+        if (i, j) in seen:
+            return False
+        seen.add((i, j))
+        if i == len(pats):
+            return j == len(segs)
+        if pats[i] == "**":
+            # Zero or more segments. Trying j..len inclusive is what makes `a/**/b` match `a/b`.
+            return any(walk(i + 1, k) for k in range(j, len(segs) + 1))
+        if j >= len(segs):
+            return False
+        if not fnmatchcase(segs[j], pats[i]):
+            return False
+        return walk(i + 1, j + 1)
+
+    return walk(0, 0)
+
+
+def _specificity(pattern: str) -> tuple[int, int]:
+    """How specific a pattern is: (literal segments before the first wildcard, pattern length).
+
+    Most-specific-wins is what lets ``core = ["src/codeintel/*.py"]`` act as a catch-all while
+    ``gateway = ["src/codeintel/gateway.py"]`` still claims its own file, with no obligation on the
+    author to list specific patterns before general ones. First-match-in-order would also work, but
+    only if authors happen to get the ordering right, and getting it wrong is invisible.
+    """
+    literal = 0
+    for seg in _split_segments(pattern):
+        if any(ch in seg for ch in "*?["):
+            break
+        literal += 1
+    return (literal, len(pattern))
+
+
+def parse_layers_config(config: Any) -> dict[str, Any]:
+    """Validate a ``[layers]`` block out of a loaded ``.codeintel.toml``. Never raises.
+
+    `config.py` already preserves unknown keys verbatim, so a `[layers]` table reaches us with zero
+    changes there — but it arrives UNVALIDATED, because `_DEFAULTS`/`_ENUMS` are scalar-shaped and a
+    nested table does not fit that model. So validation lives here, under the same degrade-and-report
+    contract as the rest of this module: a malformed block yields a named `problem`, never a
+    traceback and never a silently empty check.
+
+    Returns ``{present, order, members, switches, allow, shorthand, problem}``. `shorthand` is true
+    when `order` was given without `[layers.members]` (§3.6) — supported for looking, and refused for
+    gating, because failing someone's build on a guess about which layer a file belongs to is the
+    worst thing this feature could do.
+    """
+    out: dict[str, Any] = {
+        "present": False, "order": [], "members": {}, "allow": [],
+        "switches": dict(_SWITCH_DEFAULTS), "shorthand": False, "problem": "",
+    }
+    if not isinstance(config, dict):
+        return out
+    block = config.get("layers")
+    if block is None:
+        return out
+    out["present"] = True
+    if not isinstance(block, dict):
+        out["problem"] = "layers-not-a-table"
+        return out
+
+    order = block.get("order")
+    if not isinstance(order, list) or not order:
+        out["problem"] = "layers-order-missing"
+        return out
+    if not all(isinstance(name, str) and name.strip() for name in order):
+        out["problem"] = "layers-order-not-strings"
+        return out
+    names = [str(name).strip() for name in order]
+    if len(set(names)) != len(names):
+        out["problem"] = "layers-order-duplicate"
+        return out
+    out["order"] = names
+
+    for key, default in _SWITCH_DEFAULTS.items():
+        raw = block.get(key, default)
+        if not isinstance(raw, bool):
+            out["problem"] = f"layers-{key.replace('_', '-')}-not-a-bool"
+            return out
+        out["switches"][key] = raw
+
+    members = block.get("members")
+    if members is None:
+        # §3.6: an order with no membership. Kept, marked, and barred from gating.
+        out["shorthand"] = True
+        out["members"] = {name: [f"**/{name}/**"] for name in names}
+        return out
+    if not isinstance(members, dict):
+        out["problem"] = "layers-members-not-a-table"
+        return out
+    unknown = sorted(set(members) - set(names))
+    if unknown:
+        # A layer with members but no place in `order` has no rank, so an edge touching it could not
+        # be judged. Silently ignoring it would mean the config covers less than it appears to.
+        out["problem"] = f"layers-members-not-in-order:{','.join(unknown)}"
+        return out
+    parsed: dict[str, list[str]] = {}
+    for name in names:
+        patterns = members.get(name, [])
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+            out["problem"] = f"layers-members-not-patterns:{name}"
+            return out
+        parsed[name] = [p for p in (str(p).strip() for p in patterns) if p]
+    out["members"] = parsed
+
+    allow = block.get("allow", [])
+    if allow is None:
+        allow = []
+    if not isinstance(allow, list):
+        out["problem"] = "layers-allow-not-a-list"
+        return out
+    entries: list[dict[str, Any]] = []
+    for position, raw in enumerate(allow):
+        if not isinstance(raw, dict):
+            out["problem"] = f"layers-allow-entry-not-a-table:{position}"
+            return out
+        # A missing `reason` is NOT a parse error — it is a gating FINDING (`allow-no-reason`), which
+        # is the single rule separating an allowlist from a mute button. Rejecting the config here
+        # would deny the check the chance to report it.
+        entries.append({
+            "index": position,
+            "from": str(raw.get("from") or "").strip(),
+            "to": str(raw.get("to") or "").strip(),
+            "reason": str(raw.get("reason") or "").strip(),
+        })
+    out["allow"] = entries
+    return out
+
+
+def assign_declared_layers(elements: Iterable[dict], parsed: dict[str, Any]) -> dict[str, Any]:
+    """Map each element onto a declared layer by matching its FILE PATHS against the config globs.
+
+    Paths, not element ids (§3.3) — the single most consequential schema decision. Element ids are a
+    function of `--depth`, which auto-fits and moves the moment a repo crosses the element cap. A
+    config keyed on ids would silently stop matching as a repo grew, and the failure mode is the worst
+    available: the check keeps passing while covering less and less.
+
+    Returns ``{layer_of, index_of, splits, ambiguous, unassigned}``.
+
+    An element whose files land in different layers takes the **HIGHEST** of them, not the majority
+    one, and gets a `split` record. Layering constrains what may depend on what, so a container
+    holding one `cli` file must be treated as `cli` for direction purposes or edges into it are
+    wrongly judged fine. When a check has to guess, it guesses toward reporting more.
+    """
+    order: list[str] = list(parsed.get("order") or [])
+    members: dict[str, list[str]] = dict(parsed.get("members") or {})
+    rank_of_layer = {name: position for position, name in enumerate(order)}
+
+    layer_of: dict[str, str] = {}
+    splits: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    unassigned: list[str] = []
+
+    for element in elements:
+        eid = str(element.get("id") or "")
+        if not eid:
+            continue
+        paths = [p.strip() for p in str(element.get("path") or "").split(",") if p.strip()]
+        per_path_layer: dict[str, str] = {}
+        for path in paths:
+            # Every (layer, pattern) that claims this path, so the winner and the ties are both
+            # visible. Collecting first and deciding after is what keeps the tie DETECTION separate
+            # from the tie BREAKING — an earlier version interleaved them and could only see a tie
+            # against the current best, missing one that arrived before it.
+            claims = [(_specificity(pattern), name, pattern)
+                      for name in order
+                      for pattern in members.get(name, [])
+                      if glob_match(pattern, path)]
+            if not claims:
+                continue
+            top = max(spec for spec, _, _ in claims)
+            contenders = [(name, pattern) for spec, name, pattern in claims if spec == top]
+            # Most specific wins; among equals the layer earliest in `order` wins, which is the only
+            # tie-break left. The design's literal "all three specificity keys equal" is unreachable,
+            # because position in `order` always differs when the layers do — so what actually
+            # deserves reporting is a tie broken ARBITRARILY: two equally specific patterns from
+            # DIFFERENT layers, resolved by declaration order alone.
+            contenders.sort(key=lambda pair: rank_of_layer[pair[0]])
+            winner_layer, winner_pattern = contenders[0]
+            for other_layer, other_pattern in contenders[1:]:
+                if other_layer != winner_layer:
+                    ambiguous.append({"path": path,
+                                      "pattern_a": winner_pattern, "layer_a": winner_layer,
+                                      "pattern_b": other_pattern, "layer_b": other_layer})
+            per_path_layer[path] = winner_layer
+
+        if not per_path_layer:
+            unassigned.append(eid)
+            continue
+        distinct = sorted(set(per_path_layer.values()), key=lambda n: rank_of_layer[n])
+        chosen = distinct[0]                       # index 0 in `order` is the HIGHEST layer
+        layer_of[eid] = chosen
+        if len(distinct) > 1:
+            counts: dict[str, int] = {}
+            for name in per_path_layer.values():
+                counts[name] = counts.get(name, 0) + 1
+            splits.append({"element": eid, "chosen": chosen,
+                           "layer_split": dict(sorted(counts.items(),
+                                                      key=lambda kv: rank_of_layer[kv[0]]))})
+
+    return {
+        "layer_of": dict(sorted(layer_of.items())),
+        "index_of": {eid: rank_of_layer[name] for eid, name in sorted(layer_of.items())},
+        "splits": sorted(splits, key=lambda s: s["element"]),
+        "ambiguous": ambiguous,
+        "unassigned": sorted(unassigned),
+    }
