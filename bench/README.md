@@ -5,6 +5,11 @@ arithmetic rather than argument. It exists because every accuracy claim made abo
 either direction — had rested on a handful of hand-checked symbols, and two careful readings of that
 same evidence produced opposite designs.
 
+> **Two benchmarks live in `bench/`, on different axes.** This one measures *accuracy* — is the
+> answer right. The [agent-cost benchmark](#agent-cost-benchmark) measures *what the answer costs* —
+> tokens and tool calls to get it. Neither substitutes for the other, and the second exists because
+> the first cannot support a claim about cost no matter how good its numbers are.
+
 ```bash
 # Against real repositories — needs a live graph backend and an indexed clone.
 CODEINTEL_BENCH_PATHLY=~/src/pathly-adapters python bench/run.py pathly-adapters
@@ -161,3 +166,108 @@ Also open: the oracle abstains on property accesses on values, which is exactly 
 names live. Proven negatives raise coverage on the shadowing cases; the receiver case is untouched
 and is harder, because resolving a receiver's type means type inference — which reintroduces the
 circularity the oracle exists to avoid.
+
+---
+
+# Agent-cost benchmark
+
+Measures **tokens and tool calls to answer a real question**, per tool surface — the axis the
+call-edge benchmark above cannot reach and the one this market compares on.
+
+It exists because [`README.md`](../README.md) claims codeintel yields "fewer, sharper tool calls,
+less re-reading". That is a fact asserted about the world by a project whose own recurring defect
+class is *a fact asserted about the world by code that never checked it* — and the accuracy numbers
+above cannot support it, however good they get. Accuracy and cost are different axes.
+
+```bash
+# Verify the harness — real loop, real tools, real scorer, scripted model. No API calls, no spend.
+python bench/agent_bench.py --dry-run
+python bench/agent_bench.py --dry-run --repo-key pathly-adapters
+
+# The real thing. Needs ANTHROPIC_API_KEY (or an `ant auth login` profile) and costs money.
+python bench/agent_bench.py --repo-key codeintel        --out /tmp/ci.json
+python bench/agent_bench.py --repo-key pathly-adapters  --out /tmp/pa.json
+
+# One question, one arm — the cheap way to sanity-check before committing to a full matrix.
+python bench/agent_bench.py --questions q_pa_collision --arms codeintel --repo-key pathly-adapters
+```
+
+## Three arms, and what makes the comparison fair
+
+| arm | structural tools added |
+|---|---|
+| `grep_only` | none — the baseline an agent falls back on |
+| `codeintel` | `code_query` (this project's own envelope, as an agent receives it) |
+| `raw_backend` | `search_graph`, `trace_path`, `get_code_snippet` — `codebase-memory-mcp` direct |
+
+**Every arm keeps `grep`, `read_file` and `list_files`.** The claim under test is about what an agent
+*chooses* to do when it has a structural index, not about what it can do when the alternative is
+confiscated. Taking grep away from the codeintel arm would measure tool deprivation and report it as
+product value. So an agent that greps anyway is charged for it, and the bias runs **against**
+codeintel — the same direction `run.py`'s stratified target list takes, for the same reason.
+
+`raw_backend` is included because it is the honest competitor: a user who installs
+`codebase-memory-mcp` alone gets most of the capability table with less setup, which the project's
+own status section already says. If codeintel's unification does not pay for itself against its own
+backend, that is the finding.
+
+## Cost per *correct* answer is the headline, not cost per question
+
+A token count on its own is won by giving up early, and an arm that confidently names a docstring as
+a call site scores the same as one that did the work. "57% fewer tokens" with no accuracy column is
+the standard way this measurement gets faked, and it is the same hole proven negatives closed for the
+call-edge benchmark.
+
+So correctness is scored jointly with cost, and truth has two halves:
+
+* `must_include` — every pattern must appear in the final answer.
+* `must_forbid` — the trap. `q_callers_gateway` requires the two real `Gateway.query` call sites and
+  **forbids `injector.py`**, whose docstring contains `code.query(op="changed")` and which a `.query(`
+  grep finds. `q_pa_route_handler` forbids `CLAUDE.md` and `stop_telemetry`, three live decoys that
+  mention `/runner/terminal/result` without handling it.
+
+Scoring is regex, not an LLM judge — deliberately. A judge would add a second model's opinion to a
+measurement whose whole purpose is to replace an unverified assertion, and would make the result
+unreproducible without spending money. The cost is that a right answer for the wrong reason can pass,
+which is why every run's full answer text is kept in the `--out` JSON for a human to read.
+
+## Two repositories, and why neither is enough alone
+
+| set | tree | why |
+|---|---|---|
+| `codeintel` | this checkout | ground truth cheap to establish — and the author picked the questions knowing the code |
+| `pathly-adapters` | 3,284 files, 419 Python / 398 TSX / 343 TS | not written for this benchmark; the tree `run.py` already scores |
+
+Report both or neither. The self-referential set alone is the weaker half, for exactly the reason the
+project's own status section gives: this tool's bugs have come from repositories its author did not
+write. The `pathly-adapters` questions are picked for failure modes rather than coverage — a
+cross-language seam (TypeScript posting to a Python route), a value that lives in a JSON schema
+rather than in code, a re-export chain, an entry point whose target is one of **fourteen** functions
+named `main`, and a bare name with three separate definitions.
+
+## `--dry-run` is a positive control, not a smoke test
+
+It runs the real loop against the real tools and answers each question from its `canned_answer` — a
+realistic correct answer stored beside the ground truth. That proves every `must_include` is
+**satisfiable by prose a model would actually write**. An unescaped pattern would otherwise mark every
+arm wrong on that question forever and read as a product finding rather than a typo; one such bug was
+already caught this way. Run it after touching `questions.py`.
+
+Two harness bugs found during bring-up, both of which would have faked the result, are worth naming
+because they are the class to watch for:
+
+* `grep` without `-E` uses basic regex, so the model's natural `\.query\(` died with *"parentheses not
+  balanced"* — charging an arm for the harness's regex dialect.
+* ripgrep's `-I` is **`--no-filename`**, not "ignore binary" as in `grep`. It silently stripped file
+  paths, so `grep_only` could not have answered any question asking *which file* — scoring it near
+  zero and handing codeintel a win it had not earned.
+
+## Findings so far
+
+**None. This has not been run against the API yet** — the harness is verified, the number does not
+exist. Writing a table here before measuring is precisely the defect this benchmark was built to
+correct, so this section stays empty until there is a run to report.
+
+What a run will need stated alongside it: one model, five questions per repository, **one run each**,
+so there is no variance estimate and a small spread between arms is not a result. Prompt caching is
+off, so the token column is the raw quantity the claim is about rather than a cache-hit artifact.
