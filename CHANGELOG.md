@@ -7,78 +7,29 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
-- **`codeintel c4 --layers` infers architectural layers from the import graph, and
-  `--suggest-config` emits them as a pasteable `[layers]` config.** Phase 1 of
-  [docs/layers-design.md](docs/layers-design.md) — inference only: no new views, no exit codes, no
-  config parsing yet. Ranks come from height-to-sink longest-path over the element-level `IMPORTS`
-  graph, condensed by Tarjan so an import cycle occupies exactly one rank instead of being stacked
-  into an order its members do not have.
-  - **`IMPORTS` only, never the `CALLS|USAGE` union** — measured, not preferred. Across four indexed
-    repos the union collapsed 38.8%-70.4% of all elements into a *single* strongly-connected
-    component, which is not layerable; `IMPORTS` alone stayed between 0% and 13.8%.
-  - **Longest path, not shortest.** With `1 + min`, one shortcut edge from a high module straight to a
-    leaf drags that leaf up beside its own dependencies and the edge stops descending. `1 + max`
-    guarantees every edge strictly descends — checked empirically rather than assumed: 69 of 69 edges
-    on this repo, 99 of 99 on a second with two cycles present, zero upward and zero same-rank
-    outside a cycle.
-  - **Elements with no import edge either way are reported as `unassigned`, not ranked into the
-    foundation.** Longest-path ranking gives a zero-degree element rank 0, which is the bottom band,
-    which every reader takes to mean "what everything rests on". On one evaluated repo that put 18 of
-    29 elements — `vite.config`, `eslint.config`, scripts and docs — into the "foundation". They are
-    not low-level, and a rank cannot say what they are.
-  - **What `unassigned` does not mean is "unrelated".** `IMPORTS` is module-level only:
-    `src/codeintel/doctor.py` has seven `codeintel` imports and every one sits inside a function, so
-    it lands here while being heavily coupled. An earlier draft of this output called such elements
-    unrelated; that was a claim the edge source cannot support, and the wording now says which fact
-    it actually has.
-  - **An inferred layering can never report a violation, and the output says so.** Every edge
-    descending is a theorem, not an observation, so an empty violation report against inferred ranks
-    is the absence of an opinion rather than a clean bill of health. Only a declared `[layers]` config
-    (Phase 2) can fail. `--suggest-config` therefore emits a green baseline on the tree that generated
-    it, which is what stops a first adoption drowning in false positives.
-  - Membership is emitted as **file paths, not element ids**, so a config survives a `--depth` change.
-    Layers are named `layer_0`… deliberately: the generator can see that a band exists, not what it
-    is, and a plausible wrong name reads as an opinion the tool does not hold.
+- **`codeintel c4 --edges imports` emits only static imports, which is what makes a large model
+  readable.** The union has higher recall so it stays the default, but it was reaching the one
+  artifact a human actually looks at while being excluded everywhere this module is careful.
+  - **Measured on this repo** at `--scope src --depth 3`: 179 relations, of which **134 are
+    CALLS|USAGE-only**. Rendered, that is a hairball where 75% of the edges are the low-confidence
+    kind. The same 45 elements with only the 45 IMPORTS edges are legible — and come out roughly
+    layered, because every remaining edge descends.
+  - **It closes an inconsistency.** Hotspot ranking is already IMPORTS-only (bare-name matching
+    fabricates fan-in — measured at 54 of 60 rows into one file), and layer inference is already
+    IMPORTS-only (the union is not layerable: 38.8%-70.4% of elements collapse into a single SCC).
+    The diagram was the last place still taking the union.
+  - **The filter runs before `fan_in`/`fan_out`**, so every derived number in the file describes the
+    model the file contains. Filtering in the renderer would have left `fan_in`, the stats and
+    `--json` describing 179 edges while the diagram drew 45.
+  - **The header follows the flag, and a first version of it lied.** It reported the CALLS|USAGE
+    count with "(dashed `calls_usage` edges below)" one line after reporting the filtered total — so
+    the same block claimed 45 relations and 134 dashed edges. Under `--edges imports` the header now
+    names the flag, states that coverage is LOWER than the default, counts what was excluded, and
+    says the excluded group is not in the file. The view `description` follows too, since that is the
+    only provenance that survives an image export. Provenance counts are still computed before the
+    filter, because what the index found is worth keeping even when the model deliberately shows less.
+  - An unrecognised value degrades to `union` rather than emitting an arbitrarily filtered model.
 
-- **`codeintel c4 --check` gates CI on a declared `[layers]` config, with exit 2 for architectural
-  drift.** Phase 2 of [docs/layers-design.md](docs/layers-design.md). Adds config validation and a
-  path-glob membership matcher to `c4_layers.py`, and a new `c4_check.py` holding the finding records
-  and their two serializers. `--json` carries every record verbatim under `findings`.
-  - **Exit 2, not 1, and that is the point.** A CI step must distinguish "codeintel is broken or the
-    repo is not indexed" from "your architecture drifted". Conflate them and the first person to hit a
-    broken index allowlists the failure — and then the gate is dead. A `--check` on a repo that fails
-    to index still exits 1.
-  - **Membership matches file paths, not element ids.** Element ids depend on `--depth`, which
-    auto-fits and moves when a repo crosses the element cap, so an id-keyed config would silently stop
-    matching as the repo grew — the check would keep passing while covering less and less. `*` matches
-    within one segment, `**` across, and the most specific pattern wins so a catch-all can coexist
-    with a specific claim. `fnmatch` is used one segment at a time and never on a whole path, where
-    its `*` crosses `/` and would silently widen every pattern an author writes.
-  - **A generated baseline is provably green.** `--suggest-config`'s ranks come from the very edges
-    the check judges, and longest-path ranking makes every edge descend — so pasting the suggestion
-    yields zero violations on the commit that generated it. Verified: 0 gating / exit 0 on this repo,
-    and reversing only the `order` list turns the same tree into 70 gating violations / exit 2.
-  - **The allowlist requires a `reason`; an entry without one is itself gating.** That single rule is
-    the difference between an allowlist and a mute button — and a reasonless entry excuses nothing, so
-    it produces two findings, not zero. Allowed violations stay listed and counted, demoted to `info`.
-    Entries matching no current violation are reported stale, so the list cannot silently grow forever.
-  - **A shorthand config cannot gate.** `order` with no `[layers.members]` guesses membership from
-    layer names; findings are reported and the gating count is forced to zero. Failing a build on a
-    guess about which layer a file belongs to is the worst thing this feature could do. `--check
-    --layers-from inferred` is refused outright for the same reason: an inferred layering has zero
-    violations by construction, and a gate that cannot fail is worse than no gate.
-  - **Records are defined before serializers.** One finding is one record; every class uses the same
-    shape with irrelevant fields `null` rather than absent, `severity` is resolved after config is
-    applied so no two serializers can disagree about the exit code, and each carries a mandatory
-    concrete file-pair witness because a finding a human cannot go look at is not actionable. No line
-    numbers: measured against the live index, an `IMPORTS` edge exposes the target's `start_line` but
-    not the offending file's import line, which is backwards from what an annotation wants.
-  - Never gating: CALLS/USAGE-only up-edges (collapsed to a count — the union fabricates edges by bare
-    symbol name and is not evidence of a dependency), `split`, `spread`, `stale-allow`,
-    `layer-ambiguous`. A malformed `[layers]` block yields a named problem and exit 1, never a
-    traceback and never a silently empty check.
-
-### Added
 - **`codeintel setup --languages` configures serena for every language the repo actually contains**,
   so the LSP engine stops silently answering nothing for the ones it was never told about. This
   closes the "LSP silently serves one language per repo" defect rather than merely disclosing it.
@@ -118,28 +69,76 @@ All notable changes to codeintel are documented here. The format is based on
     question is wrong, and `run_setup`'s rule already is that each flag IS consent. Without the flag
     the step still reports what it *would* change and names the flag; `--all` includes it.
 
-- **`codeintel c4 --edges imports` emits only static imports, which is what makes a large model
-  readable.** The union has higher recall so it stays the default, but it was reaching the one
-  artifact a human actually looks at while being excluded everywhere this module is careful.
-  - **Measured on this repo** at `--scope src --depth 3`: 179 relations, of which **134 are
-    CALLS|USAGE-only**. Rendered, that is a hairball where 75% of the edges are the low-confidence
-    kind. The same 45 elements with only the 45 IMPORTS edges are legible — and come out roughly
-    layered, because every remaining edge descends.
-  - **It closes an inconsistency.** Hotspot ranking is already IMPORTS-only (bare-name matching
-    fabricates fan-in — measured at 54 of 60 rows into one file), and layer inference is already
-    IMPORTS-only (the union is not layerable: 38.8%-70.4% of elements collapse into a single SCC).
-    The diagram was the last place still taking the union.
-  - **The filter runs before `fan_in`/`fan_out`**, so every derived number in the file describes the
-    model the file contains. Filtering in the renderer would have left `fan_in`, the stats and
-    `--json` describing 179 edges while the diagram drew 45.
-  - **The header follows the flag, and a first version of it lied.** It reported the CALLS|USAGE
-    count with "(dashed `calls_usage` edges below)" one line after reporting the filtered total — so
-    the same block claimed 45 relations and 134 dashed edges. Under `--edges imports` the header now
-    names the flag, states that coverage is LOWER than the default, counts what was excluded, and
-    says the excluded group is not in the file. The view `description` follows too, since that is the
-    only provenance that survives an image export. Provenance counts are still computed before the
-    filter, because what the index found is worth keeping even when the model deliberately shows less.
-  - An unrecognised value degrades to `union` rather than emitting an arbitrarily filtered model.
+- **`codeintel c4 --check` gates CI on a declared `[layers]` config, with exit 2 for architectural
+  drift.** Phase 2 of [docs/layers-design.md](docs/layers-design.md). Adds config validation and a
+  path-glob membership matcher to `c4_layers.py`, and a new `c4_check.py` holding the finding records
+  and their two serializers. `--json` carries every record verbatim under `findings`.
+  - **Exit 2, not 1, and that is the point.** A CI step must distinguish "codeintel is broken or the
+    repo is not indexed" from "your architecture drifted". Conflate them and the first person to hit a
+    broken index allowlists the failure — and then the gate is dead. A `--check` on a repo that fails
+    to index still exits 1.
+  - **Membership matches file paths, not element ids.** Element ids depend on `--depth`, which
+    auto-fits and moves when a repo crosses the element cap, so an id-keyed config would silently stop
+    matching as the repo grew — the check would keep passing while covering less and less. `*` matches
+    within one segment, `**` across, and the most specific pattern wins so a catch-all can coexist
+    with a specific claim. `fnmatch` is used one segment at a time and never on a whole path, where
+    its `*` crosses `/` and would silently widen every pattern an author writes.
+  - **A generated baseline is provably green.** `--suggest-config`'s ranks come from the very edges
+    the check judges, and longest-path ranking makes every edge descend — so pasting the suggestion
+    yields zero violations on the commit that generated it. Verified: 0 gating / exit 0 on this repo,
+    and reversing only the `order` list turns the same tree into 70 gating violations / exit 2.
+  - **The allowlist requires a `reason`; an entry without one is itself gating.** That single rule is
+    the difference between an allowlist and a mute button — and a reasonless entry excuses nothing, so
+    it produces two findings, not zero. Allowed violations stay listed and counted, demoted to `info`.
+    Entries matching no current violation are reported stale, so the list cannot silently grow forever.
+  - **A shorthand config cannot gate.** `order` with no `[layers.members]` guesses membership from
+    layer names; findings are reported and the gating count is forced to zero. Failing a build on a
+    guess about which layer a file belongs to is the worst thing this feature could do. `--check
+    --layers-from inferred` is refused outright for the same reason: an inferred layering has zero
+    violations by construction, and a gate that cannot fail is worse than no gate.
+  - **Records are defined before serializers.** One finding is one record; every class uses the same
+    shape with irrelevant fields `null` rather than absent, `severity` is resolved after config is
+    applied so no two serializers can disagree about the exit code, and each carries a mandatory
+    concrete file-pair witness because a finding a human cannot go look at is not actionable. No line
+    numbers: measured against the live index, an `IMPORTS` edge exposes the target's `start_line` but
+    not the offending file's import line, which is backwards from what an annotation wants.
+  - Never gating: CALLS/USAGE-only up-edges (collapsed to a count — the union fabricates edges by bare
+    symbol name and is not evidence of a dependency), `split`, `spread`, `stale-allow`,
+    `layer-ambiguous`. A malformed `[layers]` block yields a named problem and exit 1, never a
+    traceback and never a silently empty check.
+
+- **`codeintel c4 --layers` infers architectural layers from the import graph, and
+  `--suggest-config` emits them as a pasteable `[layers]` config.** Phase 1 of
+  [docs/layers-design.md](docs/layers-design.md) — inference only: no new views, no exit codes, no
+  config parsing yet. Ranks come from height-to-sink longest-path over the element-level `IMPORTS`
+  graph, condensed by Tarjan so an import cycle occupies exactly one rank instead of being stacked
+  into an order its members do not have.
+  - **`IMPORTS` only, never the `CALLS|USAGE` union** — measured, not preferred. Across four indexed
+    repos the union collapsed 38.8%-70.4% of all elements into a *single* strongly-connected
+    component, which is not layerable; `IMPORTS` alone stayed between 0% and 13.8%.
+  - **Longest path, not shortest.** With `1 + min`, one shortcut edge from a high module straight to a
+    leaf drags that leaf up beside its own dependencies and the edge stops descending. `1 + max`
+    guarantees every edge strictly descends — checked empirically rather than assumed: 69 of 69 edges
+    on this repo, 99 of 99 on a second with two cycles present, zero upward and zero same-rank
+    outside a cycle.
+  - **Elements with no import edge either way are reported as `unassigned`, not ranked into the
+    foundation.** Longest-path ranking gives a zero-degree element rank 0, which is the bottom band,
+    which every reader takes to mean "what everything rests on". On one evaluated repo that put 18 of
+    29 elements — `vite.config`, `eslint.config`, scripts and docs — into the "foundation". They are
+    not low-level, and a rank cannot say what they are.
+  - **What `unassigned` does not mean is "unrelated".** `IMPORTS` is module-level only:
+    `src/codeintel/doctor.py` has seven `codeintel` imports and every one sits inside a function, so
+    it lands here while being heavily coupled. An earlier draft of this output called such elements
+    unrelated; that was a claim the edge source cannot support, and the wording now says which fact
+    it actually has.
+  - **An inferred layering can never report a violation, and the output says so.** Every edge
+    descending is a theorem, not an observation, so an empty violation report against inferred ranks
+    is the absence of an opinion rather than a clean bill of health. Only a declared `[layers]` config
+    (Phase 2) can fail. `--suggest-config` therefore emits a green baseline on the tree that generated
+    it, which is what stops a first adoption drowning in false positives.
+  - Membership is emitted as **file paths, not element ids**, so a config survives a `--depth` change.
+    Layers are named `layer_0`… deliberately: the generator can see that a band exists, not what it
+    is, and a plausible wrong name reads as an opinion the tool does not hold.
 
 ### Fixed
 - **The generated `.c4` header no longer claims `IMPORTS` is a "real, file-scoped static edge".** It
