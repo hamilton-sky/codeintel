@@ -163,3 +163,51 @@ def test_next_steps_never_raises_on_malformed_doctor():
     for bad in ({"engines": None}, {"engines": {"semantic": "x"}}, {}, None,
                 {"engines": 5}, {"engines": {"lsp": 7}}):
         assert isinstance(onboarding._next_steps(bad, "/repo"), list)
+
+
+def test_a_reporting_only_languages_step_does_not_suppress_the_diagnose_only_hint(tmp_path,
+                                                                                  monkeypatch):
+    """The languages step is the ONLY one that runs without its flag, so its presence cannot be taken
+    as evidence that setup did something.
+
+    `_ACTION_STEPS` matches by step NAME, and every other action step exists only when its flag was
+    passed — so adding this step's name to that set made the "(diagnose only — run --all)" hint
+    disappear from every bare `codeintel setup`, removing the one line that tells a new user how to
+    fix anything. Steps now carry an explicit `action` flag, and this pins it.
+    """
+    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    serena = tmp_path / ".serena"
+    serena.mkdir()
+    (serena / "project.yml").write_text("language_servers:\n- python\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(30):
+        (src / f"a{i}.ts").write_text("x\n", encoding="utf-8")
+
+    report = onboarding.run_setup(str(tmp_path), fix_languages=False)
+    names = [s["name"] for s in report["steps"]]
+    assert "languages: serena language_servers" in names          # it ran and reported
+    step = next(s for s in report["steps"] if s["name"] == "languages: serena language_servers")
+    assert step["action"] is False                                 # but changed nothing
+    # Matched on the hint's own words, not on "setup --all" — that string also appears in the Next
+    # steps block, which is a different and legitimate mention.
+    assert "diagnose only" in onboarding.render_setup_text(report)
+
+
+def test_a_languages_step_that_wrote_counts_as_an_action(tmp_path, monkeypatch):
+    """The other half: once it has edited the config, setup DID something and must not claim to have
+    been diagnose-only."""
+    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    serena = tmp_path / ".serena"
+    serena.mkdir()
+    (serena / "project.yml").write_text("language_servers:\n- python\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(30):
+        (src / f"a{i}.ts").write_text("x\n", encoding="utf-8")
+
+    report = onboarding.run_setup(str(tmp_path), fix_languages=True)
+    step = next(s for s in report["steps"] if s["name"] == "languages: serena language_servers")
+    assert step["action"] is True
+    assert "diagnose only" not in onboarding.render_setup_text(report)
+    assert "- typescript" in (serena / "project.yml").read_text(encoding="utf-8")
