@@ -205,7 +205,18 @@ def run_one(send, runner: ToolRunner, question: Question, arm: str,
 # -------------------------------------------------------------------------------------------------
 
 def make_live_sender(arm: str, effort: str):
-    import anthropic
+    # Imported here, not at module scope, so `--dry-run` works without the SDK installed — the whole
+    # point of the dry run is verifying the loop, the tools and the scoring on a machine that has no
+    # API access. The cost of that is exactly the defect below, so the error has to be worth reading.
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise SystemExit(
+            "the agent-cost benchmark needs the Anthropic SDK, which is NOT a codeintel "
+            "dependency — this project makes no outbound API calls of its own.\n"
+            "    pip install -e '.[bench]'      (or: uv pip install anthropic)\n"
+            "`--dry-run` needs none of this and still exercises the loop, the tools and the scoring."
+        ) from exc
 
     client = anthropic.Anthropic()
     tools = schemas_for(arm)

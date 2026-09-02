@@ -706,3 +706,74 @@ def test_the_view_description_follows_the_edge_source(monkeypatch):
 
     union_dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4))
     assert "edges are the union" in union_dsl
+
+
+# --------------------------------------------------------------------------- per-source weights
+
+def _both_sources(monkeypatch):
+    """One pair confirmed by BOTH queries — 1 import reference and 200 CALLS|USAGE references.
+
+    The shape that made the bug visible on a real repo: brightsky-ai had exactly one (fabricated)
+    import edge from `backend/src` into `frontend/src` and 247 CALLS|USAGE references between the
+    same two directories, so the edge was labelled `imports` and emitted with `n '248'`.
+    """
+    _wire(monkeypatch,
+          file_rows=_rows(["src/a.py", "src/b.py"]),
+          import_rows=[{"a.file_path": "src/a.py", "b.file_path": "src/b.py", "count(*)": 1}],
+          calls_rows=[{"a.file_path": "src/a.py", "b.file_path": "src/b.py", "count(*)": 200}])
+
+
+def test_edges_imports_reports_the_import_weight_not_the_union_weight(monkeypatch):
+    """The bug this fixes. `--edges imports` promises import evidence only, and a weight summed
+    across both sources describes references the reader cannot see — one real import statement was
+    emitted as 248."""
+    _both_sources(monkeypatch)
+    rel = c4.build_c4_payload("/repo", depth=4, edges="imports")["relations"][0]
+    assert rel["kind"] == "imports"
+    assert rel["n"] == 1
+
+
+def test_the_union_still_reports_the_combined_weight(monkeypatch):
+    """The negative control: fixing the filtered case must not quietly change the default. There the
+    weight IS the union weight, and both sources are in the model."""
+    _both_sources(monkeypatch)
+    rel = c4.build_c4_payload("/repo", depth=4)["relations"][0]
+    assert rel["kind"] == "imports"
+    assert rel["n"] == 201
+
+
+def test_every_relation_carries_the_split_so_a_label_can_be_weighed(monkeypatch):
+    """The most useful thing to know about an edge labelled `imports` is whether that label rests on
+    one import statement or on hundreds. A single total cannot say."""
+    _both_sources(monkeypatch)
+    for edges in ("union", "imports"):
+        rel = c4.build_c4_payload("/repo", depth=4, edges=edges)["relations"][0]
+        assert rel["n_imports"] == 1, edges
+        assert rel["n_calls_usage"] == 200, edges
+
+
+def test_a_calls_usage_only_pair_keeps_its_weight_in_the_union(monkeypatch):
+    """Only the emitted sources are counted, so a `calls_usage` edge must still carry its own weight
+    when the union is what is being emitted."""
+    _wire(monkeypatch,
+          file_rows=_rows(["src/a.py", "src/c.py"]),
+          calls_rows=[{"a.file_path": "src/a.py", "b.file_path": "src/c.py", "count(*)": 7}])
+    rel = c4.build_c4_payload("/repo", depth=4)["relations"][0]
+    assert rel["kind"] == "calls_usage"
+    assert rel["n"] == 7
+    assert rel["n_imports"] == 0
+
+
+def test_weights_from_several_file_pairs_still_sum_into_one_element_edge(monkeypatch):
+    """Per-source accounting must not lose the roll-up: two files in one element importing two files
+    in another is one element edge carrying both weights."""
+    _wire(monkeypatch,
+          file_rows=_rows(["src/pkg/a.py", "src/pkg/b.py", "src/lib/x.py", "src/lib/y.py"]),
+          import_rows=[
+              {"a.file_path": "src/pkg/a.py", "b.file_path": "src/lib/x.py", "count(*)": 3},
+              {"a.file_path": "src/pkg/b.py", "b.file_path": "src/lib/y.py", "count(*)": 4},
+          ])
+    rel = next(r for r in c4.build_c4_payload("/repo", depth=2, edges="imports")["relations"]
+               if r["from"].endswith("pkg"))
+    assert rel["n"] == 7
+    assert rel["n_imports"] == 7

@@ -54,6 +54,14 @@ codeintel = "codeintel.__main__:main"
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "numpy>=1.24", "ruff>=0.16", "mypy>=1.11"]
 
+# `bench/agent_bench.py` only. Deliberately NOT in `dev`, and emphatically not a runtime dependency:
+# codeintel's own code makes zero outbound HTTP calls and that claim is load-bearing in the README.
+# The agent-cost benchmark is the one artifact here that talks to a model API, it is a manual paid
+# run, and nothing in `src/` or the test suite imports this. Its own extra keeps `dev` (and CI) from
+# installing an API client for code they never execute.
+#     pip install -e '.[bench]'
+bench = ["anthropic>=0.40"]
+
 # Single source of truth for the version: read from codeintel.__version__ (AST-parsed, no import).
 [tool.setuptools.dynamic]
 version = { attr = "codeintel.__version__" }
