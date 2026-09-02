@@ -1,6 +1,6 @@
 # codeintel — status and market position, 2026-08-23
 
-> **Status: historical record.** A point-in-time snapshot, kept because the reasoning is worth having and correcting it would falsify the record. Numbers and version claims below were true when written and are NOT current — codeintel is at 0.22.0. Where it disagrees with a reference doc, the reference doc wins.
+> **Status: historical record.** A point-in-time snapshot, kept because the reasoning is worth having and correcting it would falsify the record. Numbers and version claims below were true when written and are NOT current — see the [CHANGELOG](../CHANGELOG.md) for where the project is now. No version is named here on purpose: this line is not maintained against releases, and quoting one made it drift. Where it disagrees with a reference doc, the reference doc wins.
 >
 > **What became of the two defects in §2.**
 >
