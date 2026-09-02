@@ -21,6 +21,7 @@ def run(args: Any) -> int:
         install_deps=args.install_deps or all_steps,
         do_index=args.index or all_steps,
         warm_lsp=args.warm or all_steps,
+        fix_languages=getattr(args, "languages", False) or all_steps,
     )
     emit(report, as_json=args.json, render=onboarding.render_setup_text)
     return 0 if report.get("doctor", {}).get("summary", {}).get("healthy") else 1

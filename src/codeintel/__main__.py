@@ -564,6 +564,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--index", action="store_true",
                               help="Index this repo now (first run downloads the ~50MB model)")
     setup_parser.add_argument("--warm", action="store_true", help="Boot serena now (first run pulls it via uvx; slow)")
+    # Editing the user's serena config is a real side effect, so it needs its own flag — `run_setup`'s
+    # rule is that each flag IS consent. Without it the step still runs and reports what it WOULD do.
+    setup_parser.add_argument("--languages", action="store_true",
+                              help="Add every language this repo contains to `language_servers:` in "
+                                   ".serena/project.yml, so the LSP engine stops silently returning "
+                                   "nothing for the languages serena was not configured to serve")
     setup_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
     # prompt subcommand

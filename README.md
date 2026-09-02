@@ -359,7 +359,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 |---|---|
 | `codeintel help` | Every command grouped by task, with descriptions and examples (also the bare `codeintel`). A mistyped command suggests what you meant. |
 | `codeintel install [--agent auto\|claude\|codex\|gemini\|zed\|all] [--no-verify] [--relative-command]` | Register codeintel with the agents installed on this machine (`auto`, the default), then prove it by completing a real MCP handshake against the registered command |
-| `codeintel setup [project_root] [--all] [--index] [--warm] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
+| `codeintel setup [project_root] [--all] [--index] [--warm] [--languages] [--install-uv] [--install-deps] [--json]` | Prepare backends + index this repo (`--all` = one command: do everything automatable, idempotent); ends with a health report + **Next:** steps |
 | `codeintel prompt [project_root] [--agent auto\|claude\|codex\|gemini\|zed] [--fresh] [--deep]` | Print a paste-to-your-agent setup prompt; probes health and emits only the outstanding steps (or "just restart me" when already healthy). `--fresh` = the full sequence from `pip install`, to send a friend |
 | `codeintel index [project_root] [--quiet]` | Index a repo (semantic embeddings + best-effort graph & map refresh), with a live progress display; `--quiet` prints only the result line |
 | `codeintel serve` | Start the MCP server (stdio transport) |

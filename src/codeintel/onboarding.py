@@ -122,6 +122,7 @@ def run_setup(
     install_deps: bool = False,
     do_index: bool = False,
     warm_lsp: bool = False,
+    fix_languages: bool = False,
     index_timeout_s: float = 900.0,
     lsp_warm_timeout_s: float = 90.0,
     out=sys.stderr,
@@ -129,8 +130,14 @@ def run_setup(
     """Diagnose + (opt-in) fix a repo's codeintel setup. Never raises; each flag IS consent."""
     steps: list[dict] = []
 
-    def _step(name: str, status: str, detail: str = "") -> None:
-        steps.append({"name": name, "status": status, "detail": detail})
+    def _step(name: str, status: str, detail: str = "", *, action: bool | None = None) -> None:
+        # `action` records whether this step actually CHANGED something. Every other step here only
+        # exists when its flag was passed, so its mere presence implies an action and the renderer can
+        # match on the name. The languages step is the exception: it runs unconditionally so a dry run
+        # can report the gap, so presence proves nothing and it must say so explicitly. Without this,
+        # a bare `codeintel setup` would suppress the "(diagnose only — run --all)" hint that tells a
+        # new user how to fix anything.
+        steps.append({"name": name, "status": status, "detail": detail, "action": action})
 
     def _empty_doctor() -> dict:
         return {"ok": False, "project_root": root, "engines": {}, "summary": {"ready": 0, "total": 3, "healthy": False}}
@@ -200,6 +207,32 @@ def run_setup(
             except Exception as exc:
                 _step("warm lsp", "warn", f"warm attempt failed ({type(exc).__name__})")
 
+        # BEFORE the final doctor, so the report reflects the repaired config rather than the one the
+        # run started with — and AFTER the warm step, which is what creates `.serena/project.yml` on a
+        # repo serena has never seen. Ordered that way deliberately: on a fresh machine
+        # `--all` would otherwise plan against a file that did not exist yet and report
+        # `no-serena-config` for a config it was about to create.
+        #
+        # The step runs even without consent, because a dry run is information and silence is not: it
+        # says what it WOULD change and names the flag. Only the write is gated.
+        try:
+            from codeintel import lang_config
+
+            plan = lang_config.apply_plan(root, apply=bool(fix_languages))
+            if plan.get("problem"):
+                status = "warn"
+            elif plan.get("applied"):
+                status = "ok" if plan.get("verified") is not False else "warn"
+            elif plan.get("additions"):
+                status = "warn"          # a real gap, unrepaired — do not report it as fine
+            else:
+                status = "ok"
+            _step("languages: serena language_servers", status, lang_config.describe(plan),
+                  action=bool(plan.get("applied")))
+        except Exception as exc:
+            _step("languages: serena language_servers", "warn",
+                  f"could not check language coverage ({type(exc).__name__})", action=False)
+
         try:
             final_doctor = doctor.run_doctor(root)
         except Exception:
@@ -254,7 +287,12 @@ def render_setup_text(report: dict) -> str:
             lines.append(f"  [{i}/{n}] {c.glyph(step.get('status', 'na'))} {name}{tail}")
         _ACTION_STEPS = {"install uv", "install deps (fastembed + sqlite-vec)", "index: semantic",
                         "index: graph", "warm lsp"}
-        if not any(s.get("name") in _ACTION_STEPS for s in steps):
+
+        def _did_something(step: dict) -> bool:
+            explicit = step.get("action")
+            return bool(explicit) if explicit is not None else step.get("name") in _ACTION_STEPS
+
+        if not any(_did_something(s) for s in steps):
             lines.append(c.dim("  (diagnose only — run `codeintel setup --all` to install + index "
                                "everything automatically)"))
         lines.append("")

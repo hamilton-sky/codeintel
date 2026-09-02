@@ -412,7 +412,8 @@ def test_doctor_degrades_instead_of_tracebacking(monkeypatch, capsys):
 
 def _setup_args(**kw):
     return _args({"project_root": None, "all_steps": False, "install_uv": False,
-                  "install_deps": False, "index": False, "warm": False, "json": False}, **kw)
+                  "install_deps": False, "index": False, "warm": False, "languages": False,
+                  "json": False}, **kw)
 
 
 def test_setup_all_implies_every_automatable_step(monkeypatch, capsys):
@@ -426,7 +427,8 @@ def test_setup_all_implies_every_automatable_step(monkeypatch, capsys):
     monkeypatch.setattr("codeintel.onboarding.render_setup_text", lambda r: "STEPS")
 
     assert import_module("codeintel.commands.setup").run(_setup_args(all_steps=True)) == 0
-    assert seen == {"install_uv": True, "install_deps": True, "do_index": True, "warm_lsp": True}
+    assert seen == {"install_uv": True, "install_deps": True, "do_index": True, "warm_lsp": True,
+                    "fix_languages": True}
 
 
 def test_setup_without_all_runs_only_the_named_steps(monkeypatch):
@@ -437,7 +439,7 @@ def test_setup_without_all_runs_only_the_named_steps(monkeypatch):
 
     import_module("codeintel.commands.setup").run(_setup_args(index=True))
     assert seen == {"install_uv": False, "install_deps": False, "do_index": True,
-                    "warm_lsp": False}
+                    "warm_lsp": False, "fix_languages": False}
 
 
 @pytest.mark.parametrize("report,expected", [

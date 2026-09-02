@@ -86,6 +86,35 @@ file count, the symptom and the fix:
 Only the config is authoritative about what is served, so with no `.serena/project.yml` this check
 stays silent rather than guessing.
 
+### Fixing it: `codeintel setup --languages`
+
+The check above knows the census, the config path and the exact list to write — so it can do the fix
+rather than describe it. serena runs **several language servers in parallel** (*"the first language
+server that supports a given file will be used"*, from the config's own comments), so the whole defect
+is one missing line of YAML.
+
+```bash
+codeintel setup .              # reports what it WOULD add, writes nothing
+codeintel setup . --languages  # adds them, then verifies by re-reading the file
+```
+
+Measured on a real repo: `pathly-adapters` had `language_servers: [python]` against **771 TypeScript
+files** and 418 Python. One flag, and the 771 become answerable.
+
+Five rules it follows, each of which is a way this could go wrong:
+
+| rule | why |
+|---|---|
+| Runs only as a `setup` step, never at query time | Mutating a user's config as a side effect of asking a question is wrong, and a language server needing an extra install would then fail a query that used to work. `--all` includes it; without the flag it reports and names the flag. |
+| `c` is written as **`cpp`** | serena's accepted ids are `cpp`/`cpp_ccls` with **no bare `c`**, while codeintel's census language for `.c`/`.h` is `c`. Writing the census value through would emit `- c` and break serena's startup for a repo that had been working. Anything not in the map is skipped and reported — serena says its id list "may be outdated", so drift fails closed. |
+| Existing entries are never reordered | The first entry is the default and the fallback, so re-sorting by file count could change which server answers for an ambiguous file. Missing languages are appended, most-populous first. |
+| A language under the 5-file floor is recorded, not added | Every entry is a server serena will **boot**. One stray `.ts` file should not cost a whole TypeScript server's startup on every session. |
+| No config, or an unparseable one, is refused | A bare file written by us would skip serena's own comments and setup notes; editing a file we could not parse is how a config gets corrupted. |
+
+The write is atomic (temp file, then `os.replace`) and confirmed by re-reading through the same parser
+the check uses — a half-written `project.yml` would take this engine from one language to none, which
+is worse than the defect being fixed. It is also idempotent, so running it again does nothing.
+
 ## References are not calls
 
 `find_referencing_symbols` returns **references**, and a reference is not a call. On one measured

@@ -78,6 +78,46 @@ All notable changes to codeintel are documented here. The format is based on
     `layer-ambiguous`. A malformed `[layers]` block yields a named problem and exit 1, never a
     traceback and never a silently empty check.
 
+### Added
+- **`codeintel setup --languages` configures serena for every language the repo actually contains**,
+  so the LSP engine stops silently answering nothing for the ones it was never told about. This
+  closes the "LSP silently serves one language per repo" defect rather than merely disclosing it.
+  - **The defect, measured on a real repo.** serena gets one config per project naming a fixed list of
+    language servers, and its init writes a single language. On `pathly-adapters`,
+    `.serena/project.yml` read `language_servers: [python]` while the tree held **771 TypeScript
+    files** against 418 Python — so every TypeScript `symbol` query returned an empty body, and
+    `doctor` reported the engine healthy, which was true about the process and false about every
+    answer it would give.
+  - **It was already detected and never acted on.** `LspProvider._language_coverage` censuses the
+    tree by extension and compares it to the config; `_unserved_note` then told the user to go and
+    edit the file. serena supports several language servers in parallel, so the whole defect was one
+    missing line of YAML that codeintel already knew the contents of.
+  - **`c` is written as `cpp`, because serena has no bare `c`.** Not hypothetical: codeintel's census
+    language for `.c`/`.h` is `c`, serena's accepted ids are `cpp`/`cpp_ccls`, and passing the census
+    value straight through would have emitted `- c` and broken serena's startup for a repo that had
+    been working. `_SERENA_ID` maps the two vocabularies explicitly and skips anything unmapped —
+    serena's own comment says its id list "may be outdated", so drift has to fail closed.
+  - **Existing entries are never reordered.** The config's comments state the first entry is the
+    default and the fallback, so re-sorting by file count could silently change which server answers
+    for an ambiguous file. Missing languages are appended, most-populous first.
+  - **A language below the file floor is recorded, not added.** Every entry is a server serena will
+    BOOT, and one stray `.ts` file in a Python repo should not cost a whole TypeScript server's
+    startup on every session. The threshold is `LspProvider._UNSERVED_FILE_FLOOR` itself, so the
+    repair and the warning cannot disagree about what counts as a language the repo is written in.
+  - **It refuses rather than guesses.** No `.serena/project.yml` is reported, never scaffolded — a
+    bare one would skip serena's own comments and setup notes. A config whose `language_servers:` key
+    cannot be found is refused rather than appended to, because editing a file that could not be
+    parsed is how a config gets corrupted.
+  - **The edit is surgical and atomic.** A temp file in the same directory then `os.replace`, so a
+    reader sees the old config or the new one and never a partial write — a half-written
+    `project.yml` would take the engine from one language to none. Written by text manipulation rather
+    than a YAML round trip, which keeps the ~35 lines of serena's own comments (the accepted-id list,
+    the note that some servers need extra installs) and adds no YAML dependency. Success is confirmed
+    by re-reading through the provider's own parser, not assumed.
+  - Runs as a step, never at query time: mutating a user's config as a side effect of asking a
+    question is wrong, and `run_setup`'s rule already is that each flag IS consent. Without the flag
+    the step still reports what it *would* change and names the flag; `--all` includes it.
+
 ### Fixed
 - **The test job no longer fails with exit 134 after the suite has already passed.** A native
   teardown race in `onnxruntime` aborted CI four times — `terminate called without an active
