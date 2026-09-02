@@ -225,6 +225,7 @@ def run(args: Any) -> int:
             depth=getattr(args, "depth", None),
             scope=tuple(getattr(args, "scope", None) or ()),
             include_tests=bool(getattr(args, "include_tests", False)),
+            edges=str(getattr(args, "edges", "union") or "union"),
         )
 
     payload = build()

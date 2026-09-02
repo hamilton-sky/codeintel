@@ -18,7 +18,8 @@ def _args(defaults: dict | None = None, **overrides) -> argparse.Namespace:
 
 def _c4_args(**kw):
     return _args({"project_root": None, "out": None, "depth": None, "scope": None,
-                 "include_tests": False, "no_index": False, "json": False}, **kw)
+                 "include_tests": False, "no_index": False, "edges": "union",
+                 "json": False}, **kw)
 
 
 def _valid_payload(*, depth=1, table=None):

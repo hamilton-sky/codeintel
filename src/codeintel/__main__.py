@@ -518,6 +518,14 @@ def build_parser() -> argparse.ArgumentParser:
     c4_parser.add_argument("--no-index", action="store_true",
                            help="Fail instead of indexing an un-indexed repo (default: index it "
                                 "first, so one command always produces a model)")
+    # The union is the default because it has higher recall; a lower-recall default would silently
+    # hide real dependencies from anyone who never read this flag. But the union is already excluded
+    # from hotspot ranking and layer inference, and it is 75% of the edges on this repo — so the
+    # diagram, the one artifact a human reads, needs a way to opt out.
+    c4_parser.add_argument("--edges", choices=["union", "imports"], default="union",
+                           help="Which edges enter the model: `union` (default — IMPORTS plus "
+                                "CALLS|USAGE, higher recall) or `imports` (static module-level "
+                                "imports only, far more legible on a large model)")
     c4_parser.add_argument("--json", action="store_true", help="Print the payload; write nothing")
     # Phase 1 of the layer feature is inference only: `--layers` REPORTS the inferred bands, it does
     # not add a view to the model. Named now rather than later so the flag does not change meaning

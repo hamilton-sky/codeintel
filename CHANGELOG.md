@@ -118,6 +118,29 @@ All notable changes to codeintel are documented here. The format is based on
     question is wrong, and `run_setup`'s rule already is that each flag IS consent. Without the flag
     the step still reports what it *would* change and names the flag; `--all` includes it.
 
+- **`codeintel c4 --edges imports` emits only static imports, which is what makes a large model
+  readable.** The union has higher recall so it stays the default, but it was reaching the one
+  artifact a human actually looks at while being excluded everywhere this module is careful.
+  - **Measured on this repo** at `--scope src --depth 3`: 179 relations, of which **134 are
+    CALLS|USAGE-only**. Rendered, that is a hairball where 75% of the edges are the low-confidence
+    kind. The same 45 elements with only the 45 IMPORTS edges are legible — and come out roughly
+    layered, because every remaining edge descends.
+  - **It closes an inconsistency.** Hotspot ranking is already IMPORTS-only (bare-name matching
+    fabricates fan-in — measured at 54 of 60 rows into one file), and layer inference is already
+    IMPORTS-only (the union is not layerable: 38.8%-70.4% of elements collapse into a single SCC).
+    The diagram was the last place still taking the union.
+  - **The filter runs before `fan_in`/`fan_out`**, so every derived number in the file describes the
+    model the file contains. Filtering in the renderer would have left `fan_in`, the stats and
+    `--json` describing 179 edges while the diagram drew 45.
+  - **The header follows the flag, and a first version of it lied.** It reported the CALLS|USAGE
+    count with "(dashed `calls_usage` edges below)" one line after reporting the filtered total — so
+    the same block claimed 45 relations and 134 dashed edges. Under `--edges imports` the header now
+    names the flag, states that coverage is LOWER than the default, counts what was excluded, and
+    says the excluded group is not in the file. The view `description` follows too, since that is the
+    only provenance that survives an image export. Provenance counts are still computed before the
+    filter, because what the index found is worth keeping even when the model deliberately shows less.
+  - An unrecognised value degrades to `union` rather than emitting an arbitrarily filtered model.
+
 ### Fixed
 - **The test job no longer fails with exit 134 after the suite has already passed.** A native
   teardown race in `onnxruntime` aborted CI four times — `terminate called without an active
