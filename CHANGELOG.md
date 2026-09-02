@@ -142,6 +142,27 @@ All notable changes to codeintel are documented here. The format is based on
   - An unrecognised value degrades to `union` rather than emitting an arbitrarily filtered model.
 
 ### Fixed
+- **A server that dies on startup is no longer reported as a slow one.** `verify_stdio_server` backs
+  the registration proof and the release canary — the code whose whole job is telling a user *why* a
+  server they registered will not answer — so a wrong reason there is worse than no reason. Closes
+  #10, found as an unrelated failure while confirming #3.
+  - **The race.** `await_id` returns as soon as the child's stdout hits EOF, and `Popen.poll()` was a
+    single non-blocking check. There is a real window between that EOF and `waitpid` publishing the
+    exit status; under CI load `poll()` lost it, and a process that had exited with code 3 came back
+    as `no \`initialize\` response within 15s`. A bounded `proc.wait()` closes the window, and only
+    failure paths reach it so the success path costs nothing.
+  - **The message was also false, which is the more interesting half.** Roughly 15 seconds had not
+    elapsed — the wait ended on EOF almost immediately — so the text asserted a fact nothing had
+    checked, and pointed whoever read it at a performance problem in a process that had crashed.
+  - **Three outcomes now have three messages.** `await_id` already knew which of them occurred and
+    discarded it; it records `gave_up` now. A process that exited names its exit code; a server that
+    closed stdout while still running says exactly that, since it needs to answer on stdout rather
+    than be restarted or given longer; and the timeout message is left for the case where the
+    deadline genuinely passed. Each has a different remedy, which is why collapsing them cost
+    something.
+  - Applied at all three call sites (`initialize`, `tools/list`, and the `tools/call` path) through
+    one shared helper, because the defect was identical in each and fixing it once is what stops it
+    diverging later.
 - **The test job no longer fails with exit 134 after the suite has already passed.** A native
   teardown race in `onnxruntime` aborted CI four times — `terminate called without an active
   exception` and a core dump *after* pytest had printed `NNNN passed` and met the coverage floor. It

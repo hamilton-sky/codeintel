@@ -6,6 +6,7 @@ subprocess, and must give an actionable reason for each distinct way a host laun
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import textwrap
 import time
@@ -169,3 +170,87 @@ def test_json_payloads_are_newline_delimited(tmp_path):
     """)
     res = verify_stdio_server(argv[0], argv[1:], timeout_s=30)
     assert res["ok"] is True
+
+
+# --------------------------------------------------------------------------- why no reply
+#
+# `await_id` returning None used to mean three different things, all reported as a timeout. The worst
+# case was a server that DIED on startup being told "no response within 15s" when ~15s had not
+# elapsed — the wait ended on EOF almost immediately — which sends whoever is diagnosing it hunting a
+# performance problem in a process that exited with a code. `verify_stdio_server` backs the
+# registration proof and the release canary, so a wrong reason there is worse than no reason.
+
+def test_a_process_that_exits_is_named_as_exited_not_as_a_timeout(tmp_path):
+    """Also the regression this fixes: `Popen.poll()` was a single non-blocking check, and there is a
+    real window between the child's stdout closing (which ends `await_id`) and `waitpid` seeing the
+    exit code. Under CI load `poll()` lost that race and this came back as a 15s timeout."""
+    argv = _script(tmp_path, "import sys; sys.exit(3)")
+    res = verify_stdio_server(argv[0], argv[1:], timeout_s=15)
+    assert res["ok"] is False
+    assert "exited" in res["detail"]
+    assert "code 3" in res["detail"]                  # the actual status, not just "it died"
+    assert "within 15s" not in res["detail"]          # the claim that was false
+
+
+def test_a_process_that_exits_is_detected_fast_not_after_the_whole_budget(tmp_path):
+    """The bounded wait must close the race without spending the caller's budget: a dead child is
+    reported in well under the timeout, or the fix would have traded a wrong message for a slow one.
+    """
+    argv = _script(tmp_path, "import sys; sys.exit(3)")
+    started = time.monotonic()
+    verify_stdio_server(argv[0], argv[1:], timeout_s=15)
+    assert time.monotonic() - started < 5.0
+
+
+def test_a_server_that_closes_stdout_but_keeps_running_says_so(tmp_path):
+    """The third outcome, which had no message of its own. It is a distinct failure with a distinct
+    remedy — the server is alive and needs to answer on stdout, not to be restarted or given longer.
+
+    `os.close(1)` rather than `sys.stdout.close()`: the latter closes Python's buffered wrapper while
+    leaving fd 1 open, so the parent never sees EOF and this test would silently exercise the timeout
+    path instead. That mistake was made once while building this.
+    """
+    argv = _script(tmp_path, "import os, time\nos.close(1)\ntime.sleep(30)")
+    res = verify_stdio_server(argv[0], argv[1:], timeout_s=3)
+    assert res["ok"] is False
+    assert "closed stdout" in res["detail"]
+    assert "still running" in res["detail"]
+    assert "within 3s" not in res["detail"]
+
+
+def test_a_live_silent_server_still_reports_a_real_timeout(tmp_path):
+    """The negative control. Narrowing the timeout message must not remove it — a server that is up,
+    holding stdout open and simply not answering IS a timeout, and saying so is correct."""
+    argv = _script(tmp_path, "import time; time.sleep(30)")
+    res = verify_stdio_server(argv[0], argv[1:], timeout_s=3)
+    assert res["ok"] is False
+    assert "no `initialize` response within 3s" in res["detail"]
+
+
+def test_the_reason_is_recorded_by_the_reader_that_knows_it(tmp_path):
+    """`gave_up` exists because only the read loop can tell EOF from an expired deadline. Pinned
+    directly so a refactor cannot quietly drop the distinction and leave `_why_no_reply` guessing."""
+    from codeintel.verify import _Conn
+
+    argv = _script(tmp_path, "import os, time\nos.close(1)\ntime.sleep(30)")
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True)
+    try:
+        conn = _Conn(proc, time.monotonic() + 3.0)
+        conn.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        assert conn.await_id(1) is None
+        assert conn.gave_up == "closed"
+        assert proc.poll() is None            # and it really is still alive
+    finally:
+        proc.kill()
+
+    proc2 = subprocess.Popen(_script(tmp_path, "import time; time.sleep(30)"),
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True)
+    try:
+        conn2 = _Conn(proc2, time.monotonic() + 1.0)
+        conn2.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        assert conn2.await_id(1) is None
+        assert conn2.gave_up == "deadline"
+    finally:
+        proc2.kill()
