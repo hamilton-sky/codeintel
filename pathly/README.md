@@ -3,8 +3,14 @@
 > **Status: historical, and pre-implementation.** Eighty-five markdown files written *before* this
 > codebase existed in its current form, last touched at 0.16.0. They describe a project that was
 > then hypothetical: `pathly/project/SPEC.md` calls itself a "greenfield project spec", names the
-> PyPI distribution `codecortex`, and says the names are placeholders. None of that is true now —
-> the distribution is `codeintel` and the current release is 0.22.0.
+> PyPI distribution `codecortex`, and says the names are placeholders.
+>
+> The placeholder claim is the part that stopped being true, and not in the direction this banner
+> used to say. It asserted "the distribution is `codeintel`" — it is not, and never was:
+> `pyproject.toml`, PyPI and the README's own `pip install codecortex` all agree the distribution
+> shipped as **`codecortex`**, exactly as the spec named it, while the CLI and the import name are
+> `codeintel`. No version is quoted here any more either; it drifted twice and had to be corrected
+> by hand each time. For what is current, see the [CHANGELOG](../CHANGELOG.md).
 >
 > **Nothing here is a description of the shipped system.** For that, read [`docs/`](../docs/README.md),
 > which indexes every reference doc, or the top-level [README](../README.md).
