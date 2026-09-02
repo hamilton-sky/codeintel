@@ -92,7 +92,7 @@ it registered and drives `initialize` → `notifications/initialized` → `tools
 ```text
 v claude: registered at /Users/you/.claude.json
 
-v verified: codeintel 0.22.0 — 4 tools (code.query, code.status, code.doctor, code.map)
+v verified: codeintel 0.23.0 — 4 tools (code.query, code.status, code.doctor, code.map)
 ```
 
 If the command is not on `PATH`, or the server fails to start, install says so and **exits

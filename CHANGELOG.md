@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-09-02
+
 ### Added
 - **`codeintel c4 --edges imports` emits only static imports, which is what makes a large model
   readable.** The union has higher recall so it stays the default, but it was reaching the one
