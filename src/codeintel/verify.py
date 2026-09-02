@@ -47,6 +47,11 @@ class _Conn:
     def __init__(self, proc: subprocess.Popen, deadline: float) -> None:
         self._proc = proc
         self._deadline = deadline
+        # Why the last `await_id` returned None: "closed" (the server's stdout ended) or "deadline"
+        # (the shared budget ran out). Those are different failures with different remedies, and
+        # collapsing them into a bare None is what let a process that died on startup be reported as
+        # a slow one — see `_why_no_reply`.
+        self.gave_up: str = ""
         self._q: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=_pump, args=(proc.stdout, self._q), daemon=True).start()
 
@@ -63,16 +68,24 @@ class _Conn:
 
     def await_id(self, want_id: int) -> dict | None:
         """Read until the response with ``want_id`` arrives, skipping notifications and any
-        interleaved traffic. Returns None on timeout, stream close, or unparseable output."""
+        interleaved traffic.
+
+        Returns None on timeout, stream close, or unparseable output — and sets `gave_up` to say
+        WHICH, because the caller's message depends on it and only this loop knows.
+        """
+        self.gave_up = ""
         while True:
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
+                self.gave_up = "deadline"
                 return None
             try:
                 line = self._q.get(timeout=remaining)
             except queue.Empty:
+                self.gave_up = "deadline"
                 return None
             if line is None:  # server closed stdout / died
+                self.gave_up = "closed"
                 return None
             line = line.strip()
             if not line:
@@ -87,6 +100,41 @@ class _Conn:
 
 def _result(ok: bool, detail: str, **extra: Any) -> dict:
     return {"ok": ok, "tools": [], "server": None, "detail": detail, **extra}
+
+
+# How long to let the kernel publish a dead child's exit status before concluding it is still alive.
+# `Popen.poll()` is a single non-blocking check, and there is a real window between the child's
+# stdout closing — which is what ends `await_id` — and `waitpid` seeing the exit code. Under CI load
+# `poll()` lost that race and a process that had exited with code 3 was reported as a 15s timeout.
+# Only failure paths reach this, so the wait never costs the success path anything.
+_EXIT_GRACE_S = 0.5
+
+
+def _exit_code(proc: subprocess.Popen, grace_s: float = _EXIT_GRACE_S) -> int | None:
+    """The child's exit code, waiting briefly for it, or None if it is still running."""
+    try:
+        return proc.wait(timeout=grace_s)
+    except Exception:
+        # TimeoutExpired (still running) and anything else both mean "cannot say it exited".
+        return None
+
+
+def _why_no_reply(conn: _Conn, proc: subprocess.Popen, what: str, timeout_s: float) -> str:
+    """The honest reason no reply to `what` arrived.
+
+    Three different failures used to share one message. A server that **died on startup** was told
+    "no response within 15s" — when roughly 15 seconds had not elapsed, because the wait ended on
+    EOF almost immediately — which sends whoever is diagnosing it hunting a performance problem in a
+    process that exited with a code. This function exists so the three stay distinguishable, since
+    each has a different remedy: fix the crash, fix the server writing to stdout, or raise the budget.
+    """
+    code = _exit_code(proc)
+    if code is not None:
+        return f"process exited (code {code}) without answering `{what}`"
+    if conn.gave_up == "closed":
+        return (f"server closed stdout without answering `{what}` — the process is still running, "
+                f"so it is not a crash")
+    return f"no `{what}` response within {timeout_s:.0f}s"
 
 
 def _spawn(argv: list, env: dict | None, cwd: str | None) -> tuple:
@@ -146,9 +194,7 @@ def _handshake(conn: _Conn, proc: subprocess.Popen, timeout_s: float) -> tuple:
 
     init = conn.await_id(1)
     if init is None:
-        if proc.poll() is not None:
-            return None, [], _result(False, f"process exited immediately (code {proc.returncode})")
-        return None, [], _result(False, f"no `initialize` response within {timeout_s:.0f}s")
+        return None, [], _result(False, _why_no_reply(conn, proc, "initialize", timeout_s))
     if "error" in init:
         return None, [], _result(False, f"initialize failed: {str(init.get('error'))[:160]}")
 
@@ -163,8 +209,8 @@ def _handshake(conn: _Conn, proc: subprocess.Popen, timeout_s: float) -> tuple:
 
     listed = conn.await_id(2)
     if listed is None:
-        return server_info, [], _result(False, f"no `tools/list` response within {timeout_s:.0f}s",
-                                        server=server_info)
+        return server_info, [], _result(
+            False, _why_no_reply(conn, proc, "tools/list", timeout_s), server=server_info)
     if "error" in listed:
         return server_info, [], _result(False, f"tools/list failed: {str(listed.get('error'))[:160]}",
                                         server=server_info)
@@ -291,7 +337,7 @@ def verify_stdio_call(
 
         called = conn.await_id(3)
         if called is None:
-            return _result(False, f"no `{tool}` response within {timeout_s:.0f}s",
+            return _result(False, _why_no_reply(conn, proc, tool, timeout_s),
                            server=server_info, content="", payload=None)
         if "error" in called:
             return _result(False, f"`{tool}` failed: {str(called.get('error'))[:160]}",
