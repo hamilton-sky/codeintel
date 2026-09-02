@@ -142,6 +142,28 @@ All notable changes to codeintel are documented here. The format is based on
   - An unrecognised value degrades to `union` rather than emitting an arbitrarily filtered model.
 
 ### Fixed
+- **The generated `.c4` header no longer claims `IMPORTS` is a "real, file-scoped static edge".** It
+  is not file-scoped: its targets are symbols resolved **by name**. Measured against a live index,
+  `(a:File)-[:IMPORTS]->(b:File)` matches **0 of 1,239** edges while an untyped target matches all
+  1,239 — which is why this generator's own query leaves that endpoint untyped and reads the symbol's
+  `file_path`. Closes #13.
+  - **So `IMPORTS` inherits the same bare-name fabrication mode as `CALLS|USAGE`**, just far more
+    rarely: 1 edge in 1,239 (0.08%) on a 12,638-node TypeScript repo, against 54 rows in 60 into one
+    file for the union. Three orders of magnitude is what justifies ranking hotspots and inferring
+    layers on `IMPORTS` alone — not immunity, which is what the old wording asserted.
+  - **The claim shipped in every generated model**, in the header block whose entire purpose is
+    stating what the model cannot know. And believing it cost a wrong reading: a single fabricated
+    edge rendered as `backend/src -> frontend/src`, which is the natural thing to report as an
+    architectural finding until you grep the source and find no such import exists.
+  - The header now names its own fabrication rate beside `CALLS|USAGE`'s, so the two can be weighed
+    rather than one being trusted absolutely, and says to verify a surprising cross-boundary edge
+    against the source. The shape to watch is named in both the code and `docs/c4.md`: a
+    relative-path import whose segments collide with a symbol name elsewhere in the tree — the
+    observed case was `from './middleware/pre-action.middleware'` bound to a `middleware` function
+    exported by a Redux store index in a different top-level directory.
+  - Two tests pin it, because a wording fix with no test is one refactor away from regressing into
+    the same overclaim.
+
 - **`--edges imports` reported union weights, so an edge with one import statement could be emitted
   as `n '248'`.** Found by running `c4` on an unfamiliar repository the day the flag shipped.
   `rel_weights[pair] += n` accumulated a single total across both the IMPORTS and CALLS|USAGE

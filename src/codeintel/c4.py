@@ -662,10 +662,23 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
         fan_out: dict[str, int] = {}
         # Ranked separately from `fan_in` (defect (g)): CALLS|USAGE matches by bare symbol name, so
         # e.g. every `dict.get(...)` call in the repo lands on `cache.py`'s `ContentHashCache.get`
-        # — measured live at 54 of 60 rows on this repo's own `cache.py`. Only an `imports`-labelled
-        # relation (a real, file-scoped IMPORTS edge — see the `kind` rule above) is trustworthy
-        # enough to RANK elements against each other for a "this is a hotspot" visual claim; the
-        # union-based `fan_in` above stays as descriptive metadata only, same as before.
+        # — measured live at 54 of 60 rows on this repo's own `cache.py`. An `imports`-labelled
+        # relation is precise enough to RANK elements against each other for a "this is a hotspot"
+        # visual claim; the union-based `fan_in` above stays as descriptive metadata only.
+        #
+        # `IMPORTS` IS NOT FILE-SCOPED, and this comment used to say it was. Its targets are symbols
+        # resolved by NAME — measured against a live index, `(a:File)-[:IMPORTS]->(b:File)` matches
+        # 0 of 1,239 edges while `->(b)` matches all 1,239 — which is why the query below leaves `b`
+        # untyped and reads the symbol's `file_path`. So IMPORTS inherits the same bare-name
+        # fabrication mode as CALLS|USAGE, just far more rarely: 1 fabricated edge in 1,239 (0.08%)
+        # on brightsky-ai, against CALLS|USAGE's 54 of 60 on one file. Three orders of magnitude is
+        # what justifies ranking on IMPORTS; it is not immunity, and claiming immunity cost a wrong
+        # architectural finding once (see #13).
+        #
+        # The shape to watch is a RELATIVE-PATH import whose segments collide with a symbol name
+        # elsewhere in the tree: `from './middleware/pre-action.middleware'` in a NestJS module was
+        # bound to a `middleware` function exported by a Redux store index in a different top-level
+        # directory, producing a backend->frontend edge that exists in no source file.
         # `--edges imports` drops the CALLS|USAGE-only relations. Applied HERE — after the
         # provenance counts above, before fan_in/fan_out below — so every derived number describes
         # the model that is actually emitted rather than one the reader cannot see. Filtering in the
@@ -1038,11 +1051,20 @@ def render_c4_dsl(payload: dict) -> str:
                        "symbol")
         # Measured live: on this generator's own repo, 54 of 60 CALLS|USAGE rows into one file
         # were bare `get` — every `dict.get(...)` call in the codebase, attributed to that file's
-        # own class's `.get` method. Ranking hotspots against the union would rank fabricated data;
-        # IMPORTS is a real, file-scoped static edge, so it is the only source trusted for ranking.
+        # own class's `.get` method. Ranking hotspots against the union would rank fabricated data,
+        # so IMPORTS is the only source trusted for ranking — on a measured 0.08%-vs-90% difference
+        # in fabrication rate, NOT because IMPORTS is exact. This header used to say IMPORTS was a
+        # "real, file-scoped static edge", which is false: its targets are name-resolved symbols
+        # (see the `import_fan_in` comment above), and the header block exists precisely to state
+        # what the model cannot know.
         out.append("// hotspot ranking uses IMPORTS-only fan-in, never the CALLS|USAGE union: "
                    "bare-symbol-name matching in CALLS|USAGE fabricates high fan-in on common "
                    "method names, which would rank fabricated data as an architectural hotspot")
+        out.append("// IMPORTS is the more precise source, not an exact one: its edges point at "
+                   "symbols resolved BY NAME, not at files, so a relative-path import whose "
+                   "segments collide with a symbol name elsewhere in the tree can fabricate an "
+                   "edge too — measured at 1 in 1,239 edges on one repo, against 54 in 60 for "
+                   "CALLS|USAGE. Verify a surprising cross-boundary edge against the source.")
         if stats.get("hotspot_count"):
             out.append(f"// {stats['hotspot_count']} element(s) flagged #hotspot: IMPORTS-only "
                        f"fan-in >= {stats.get('hotspot_threshold')} (this repo's own top "
