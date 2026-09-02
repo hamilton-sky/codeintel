@@ -20,7 +20,7 @@ backends and are not measured here.
 | RAM | 24 GB |
 | OS | macOS 26.5 (arm64) |
 | Embedding model | `BAAI/bge-small-en-v1.5` (384-dim), via `fastembed` on CPU |
-| codeintel | 0.10.0 — **the measurement version, not the current release (0.22.0)**. See below for what changed after. |
+| codeintel | 0.10.0 — **the measurement version, not the current release** (see the [CHANGELOG](../CHANGELOG.md); this row is deliberately not maintained against it). See below for what changed after. |
 
 ## Corpus
 
