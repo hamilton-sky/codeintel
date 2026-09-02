@@ -589,7 +589,12 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
             f"LIMIT {MAX_CALLS_ROWS}", project, timeout_ms) or []
         calls_truncated = len(calls_rows) >= MAX_CALLS_ROWS
 
-        rel_weights: dict[tuple, int] = {}
+        # Weight PER SOURCE, not one running total. A single total is what let `--edges imports`
+        # report a union number: a pair confirmed by IMPORTS even once was labelled `imports` and
+        # then carried the summed weight of both queries, so an edge with ONE real import statement
+        # was emitted as `n '248'`. Measured on brightsky-ai, where the union added 247 CALLS|USAGE
+        # references to a single fabricated import edge.
+        rel_weights: dict[tuple, dict[str, int]] = {}
         rel_sources: dict[tuple, set] = {}
         dropped: list[dict] = []
         internal_by_elem: dict[str, int] = {}
@@ -625,16 +630,29 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
                         dropped.append({"from": eid_a, "to": eid_b, "why": "ancestor"})
                     continue
                 pair = (eid_a, eid_b)
-                rel_weights[pair] = rel_weights.get(pair, 0) + n
+                per_source = rel_weights.setdefault(pair, {})
+                per_source[source] = per_source.get(source, 0) + n
                 rel_sources.setdefault(pair, set()).add(source)
 
         # `imports` when an IMPORTS edge contributed at all (literally true even if CALLS|USAGE also
         # confirmed it); `calls_usage` only when IMPORTS never saw this pair — never the reverse, so
         # the kind never claims stronger evidence than what was actually found.
+        #
+        # `n` counts only the sources this model is emitting, so it can never describe references the
+        # reader cannot see. `n_imports`/`n_calls_usage` are carried alongside because the split is
+        # the most useful thing to know about an edge labelled `imports`: it says whether the label
+        # rests on one import statement or on hundreds.
+        edge_source = str(edges or "union").strip().lower()
+        if edge_source not in EDGE_SOURCES:
+            edge_source = "union"
+        counted = ("imports",) if edge_source == "imports" else ("imports", "calls_usage")
         relations = [
-            {"from": a, "to": b, "n": n,
+            {"from": a, "to": b,
+             "n": sum(w.get(src, 0) for src in counted),
+             "n_imports": w.get("imports", 0),
+             "n_calls_usage": w.get("calls_usage", 0),
              "kind": "imports" if "imports" in rel_sources[(a, b)] else "calls_usage"}
-            for (a, b), n in rel_weights.items()
+            for (a, b), w in rel_weights.items()
         ]
         edges_from_imports_only = sum(1 for s in rel_sources.values() if s == {"imports"})
         edges_from_calls_usage_only = sum(1 for s in rel_sources.values() if s == {"calls_usage"})
@@ -664,9 +682,6 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
         #
         # `union` stays the default: the union has higher recall, and a lower-recall default would
         # silently hide real dependencies from anyone who did not read this flag.
-        edge_source = str(edges or "union").strip().lower()
-        if edge_source not in EDGE_SOURCES:
-            edge_source = "union"
         edges_excluded_by_filter = 0
         if edge_source == "imports":
             before = len(relations)

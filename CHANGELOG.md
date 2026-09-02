@@ -142,6 +142,22 @@ All notable changes to codeintel are documented here. The format is based on
   - An unrecognised value degrades to `union` rather than emitting an arbitrarily filtered model.
 
 ### Fixed
+- **`--edges imports` reported union weights, so an edge with one import statement could be emitted
+  as `n '248'`.** Found by running `c4` on an unfamiliar repository the day the flag shipped.
+  `rel_weights[pair] += n` accumulated a single total across both the IMPORTS and CALLS|USAGE
+  queries, and a pair confirmed by IMPORTS *even once* is labelled `imports` — so filtering the
+  relations by kind dropped the wrong-source edges while leaving the surviving ones carrying weights
+  that counted references the model had deliberately excluded. The flag whose whole purpose is
+  "import evidence only" was reporting non-import numbers.
+  - **Measured on brightsky-ai**: `backend/src -> frontend/src` was emitted as `n '248'` when
+    **one** reference is an import and 247 are CALLS|USAGE. Now `1`, confirmed against an independent
+    roll-up of the same 1,239 file-level rows through `keep_source`. `frontend/extension ->
+    frontend/src` went from `409` to `82`, also confirmed.
+  - Weights are per-source now, `n` sums only the sources being emitted, and every relation carries
+    `n_imports` and `n_calls_usage` — the split says whether an `imports` label rests on one import
+    statement or on hundreds, which a single total cannot.
+  - The union default is unchanged and has a regression test: there the weight IS the union weight.
+
 - **A server that dies on startup is no longer reported as a slow one.** `verify_stdio_server` backs
   the registration proof and the release canary — the code whose whole job is telling a user *why* a
   server they registered will not answer — so a wrong reason there is worse than no reason. Closes
