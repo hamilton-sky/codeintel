@@ -777,3 +777,30 @@ def test_weights_from_several_file_pairs_still_sum_into_one_element_edge(monkeyp
                if r["from"].endswith("pkg"))
     assert rel["n"] == 7
     assert rel["n_imports"] == 7
+
+
+def test_the_header_does_not_claim_imports_is_file_scoped(monkeypatch):
+    """It said "a real, file-scoped static edge", and that is false — IMPORTS targets are symbols
+    resolved BY NAME. Measured against a live index, `(a:File)-[:IMPORTS]->(b:File)` matched 0 of
+    1,239 edges while an untyped target matched all of them, which is why this generator's own query
+    leaves it untyped.
+
+    Pinned as a test because the claim ships in EVERY generated `.c4` header — the block whose whole
+    purpose is stating what the model cannot know — and because believing it cost a wrong reading:
+    one fabricated edge rendered as `backend/src -> frontend/src`, which is the natural thing to
+    report as an architectural finding until you grep the source and find no such import.
+    """
+    _two_kinds(monkeypatch)
+    dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4))
+    assert "file-scoped" not in dsl
+    assert "resolved BY NAME" in dsl
+    assert "not an exact one" in dsl
+
+
+def test_the_header_states_the_fabrication_rate_rather_than_just_warning(monkeypatch):
+    """A warning with no number invites either dismissal or over-caution. The CALLS|USAGE comment
+    already names 54 of 60; the IMPORTS line names its own rate so a reader can weigh the two."""
+    _two_kinds(monkeypatch)
+    dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4))
+    assert "1 in 1,239" in dsl
+    assert "54 in 60" in dsl
