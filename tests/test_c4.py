@@ -606,3 +606,103 @@ def test_a_bare_synthetic_area_keeps_the_real_unsanitised_directory_name(monkeyp
     dsl = c4.render_c4_dsl(payload)
     assert "my_app = area 'my-app' {" in dsl
     assert "area 'my_app'" not in dsl
+
+
+# --------------------------------------------------------------------------- --edges
+
+def _two_kinds(monkeypatch):
+    """A repo where one pair is IMPORTS-confirmed and another is CALLS|USAGE-only."""
+    _wire(monkeypatch,
+          file_rows=_rows(["src/a.py", "src/b.py", "src/c.py"]),
+          import_rows=[{"a.file_path": "src/a.py", "b.file_path": "src/b.py", "count(*)": 2}],
+          calls_rows=[{"a.file_path": "src/a.py", "b.file_path": "src/c.py", "count(*)": 7}])
+
+
+def test_the_union_is_the_default_and_keeps_both_edge_kinds(monkeypatch):
+    """Higher recall, so it stays the default: a lower-recall default would silently hide real
+    dependencies from anyone who never read the flag."""
+    _two_kinds(monkeypatch)
+    payload = c4.build_c4_payload("/repo", depth=4)
+    kinds = sorted(r["kind"] for r in payload["relations"])
+    assert kinds == ["calls_usage", "imports"]
+    assert payload["edge_source"] == "union"
+    assert payload["stats"]["edges_excluded_by_filter"] == 0
+
+
+def test_edges_imports_drops_the_calls_usage_only_relations(monkeypatch):
+    _two_kinds(monkeypatch)
+    payload = c4.build_c4_payload("/repo", depth=4, edges="imports")
+    assert [r["kind"] for r in payload["relations"]] == ["imports"]
+    assert payload["edge_source"] == "imports"
+    assert payload["stats"]["edges_excluded_by_filter"] == 1
+
+
+def test_an_unrecognised_edge_source_falls_back_to_the_union(monkeypatch):
+    """Never-raise: a bad value degrades to the higher-recall default rather than emitting an empty
+    or arbitrarily-filtered model."""
+    _two_kinds(monkeypatch)
+    payload = c4.build_c4_payload("/repo", depth=4, edges="nonsense")
+    assert payload["edge_source"] == "union"
+    assert len(payload["relations"]) == 2
+
+
+def test_derived_counts_describe_the_filtered_model_not_the_index(monkeypatch):
+    """The filter runs BEFORE fan_in/fan_out, so every number in the file agrees with the edges the
+    file contains. Filtering in the renderer instead would leave `fan_in` and the stats describing
+    relations the diagram does not draw."""
+    _two_kinds(monkeypatch)
+    union = c4.build_c4_payload("/repo", depth=4)
+    imports = c4.build_c4_payload("/repo", depth=4, edges="imports")
+
+    def fan_out_of(payload, name):
+        return next(e["fan_out"] for e in payload["elements"] if e["id"].endswith(name))
+
+    assert fan_out_of(union, "a") == 2        # b via IMPORTS, c via CALLS|USAGE
+    assert fan_out_of(imports, "a") == 1      # only b survives
+    assert union["stats"]["edges_kept"] == 2
+    assert imports["stats"]["edges_kept"] == 1
+
+
+def test_provenance_counts_survive_the_filter(monkeypatch):
+    """They are computed before it, on purpose: what the INDEX found is worth keeping even when the
+    model deliberately shows less."""
+    _two_kinds(monkeypatch)
+    payload = c4.build_c4_payload("/repo", depth=4, edges="imports")
+    assert payload["stats"]["edges_from_calls_usage_only"] == 1
+    assert payload["stats"]["edges_from_imports_only"] == 1
+
+
+def test_the_header_never_claims_the_union_after_filtering_it_out(monkeypatch):
+    """The header exists to stop the file misrepresenting itself, so it is the one thing that must
+    follow the flag."""
+    _two_kinds(monkeypatch)
+    dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4, edges="imports"))
+    assert "// edges: IMPORTS ONLY" in dsl
+    assert "union of IMPORTS" not in dsl
+    assert "coverage is LOWER than the default" in dsl
+    assert "1 CALLS|USAGE-only relation(s) excluded by that flag" in dsl
+
+
+def test_the_header_does_not_contradict_itself_about_dashed_edges(monkeypatch):
+    """A first version reported the CALLS|USAGE count with "(dashed `calls_usage` edges below)" one
+    line after reporting the filtered relation total — so the header claimed 45 relations and 134
+    dashed edges in the same block. Nothing catches a header contradicting itself except reading it.
+    """
+    _two_kinds(monkeypatch)
+    dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4, edges="imports"))
+    assert "dashed `calls_usage` edges below" not in dsl
+    assert "NOT in this file" in dsl
+    # And the union still says it, because there they ARE below.
+    union_dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4))
+    assert "dashed `calls_usage` edges below" in union_dsl
+
+
+def test_the_view_description_follows_the_edge_source(monkeypatch):
+    """A view's description is the only provenance that travels with an exported image."""
+    _two_kinds(monkeypatch)
+    imports_dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4, edges="imports"))
+    assert "static module-level IMPORTS only" in imports_dsl
+    assert "edges are the union" not in imports_dsl
+
+    union_dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4))
+    assert "edges are the union" in union_dsl
