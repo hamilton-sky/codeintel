@@ -159,7 +159,7 @@ codeintel is a **single local process** — no cloud service, no API keys, no te
 | External backend — lsp | `uvx` / `serena` (subprocess) | optional; auto-detected |
 | External backend — semantic | *(none)* | fully in-house |
 
-**Network:** the only egress is first-run downloads — `fastembed` fetches the `BAAI/bge-small-en-v1.5` model once (cached under `~/.cache`, offline thereafter), and the optional backends install on first use if you opt in. After setup, no code or data leaves the machine — which is what makes `both`/`all` fan-out safe to run on private repos.
+**Network:** the only egress is first-run downloads — `fastembed` fetches the `BAAI/bge-small-en-v1.5` model once, offline thereafter, and the optional backends install on first use if you opt in. It lands in `fastembed`'s own default cache, **not** `~/.cache`; [install.md](install.md#offline--air-gapped-install) owns that path and the `FASTEMBED_CACHE_PATH` override, because a location repeated in three files is a location that gets corrected in two. After setup, no code or data leaves the machine — which is what makes `both`/`all` fan-out safe to run on private repos.
 
 ## See also
 
