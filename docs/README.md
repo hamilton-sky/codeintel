@@ -62,6 +62,7 @@ banner saying what still holds.
 | Doc | Status |
 |---|---|
 | [adr/0001-graph-capability-unlock.md](adr/0001-graph-capability-unlock.md) | Accepted, partly superseded. Two ops it describes have changed: `deadcode` has since been **withdrawn** — it always safe-nulls with `reason: "op-withdrawn"` after a labelled corpus measured its precision at 25% ([graph.md](graph.md#deadcode-is-retired)) — and `chain`'s hop risk labels became resolution evidence. |
+| [adr/0002-retire-deadcode.md](adr/0002-retire-deadcode.md) | Accepted, and acted on — the op is deleted, not flagged off. Holds the labelled-corpus measurement that retired it (25% precision over 2,425 AST-collected definitions; 18 candidates named on real code, all of them live), moved out of the README so that file can be an install guide rather than the case file for a removal. |
 | [refactor-graph-provider.md](refactor-graph-provider.md) | Done — the seams it proposed exist, and `wire_text.py` was later added at one of them. |
 | [layers-design.md](layers-design.md) | Design only; not implemented. |
 | [roadmap-semantic.md](roadmap-semantic.md) | **Both phases shipped.** Syntax-aware chunking is the default `chunk_strategy`; hybrid reranking is `Searcher._rerank`. Kept for the reasoning and for the "explicitly out of scope: an in-house graph" decision, which still holds. |

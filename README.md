@@ -18,165 +18,6 @@
 
 > *codeintel visualizing its own codebase.* One command — `codeintel graph <repo> --html` — turns any indexed repo into a **self-contained, interactive call graph** you can open offline or share as a file. Layouts, complexity-sized nodes, click-to-inspect metrics, and JSON/Markdown/SVG/PNG export. See **[docs/graph-viewer.md](docs/graph-viewer.md)**.
 
-Prefer plain text? `codeintel map` writes a **readable architecture overview** to `CODE_INTEL.md` — node/edge counts, ranked symbols by caller count, and entry points — for skimming or for MCP hosts that can't render a graph:
-
-<img src="docs/images/code-intel-map.png" width="520" alt="CODE_INTEL.md — the codeintel map: an architecture overview with node/edge counts and symbols ranked by caller count.">
-
-**What `CODE_INTEL.md` is for.** It's a *static, committable* snapshot of a codebase's shape — meant to be read (by a person or an agent) **first**, instead of reconstructing structure by grepping. It covers the cases the live `code.query` tool doesn't:
-
-- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a short, tool-naming pointer block into `AGENTS.md` (the cross-tool surface read by Codex, Cursor, Zed, and others — created with your consent if it doesn't exist yet) plus a one-line `@AGENTS.md` import into `CLAUDE.md`, and writes the fuller `USING_CODEINTEL.md` guide the block points to — into **your** repo, which is why there is no such file to click here — so an agent knows to reach for `code.query` before it reaches for grep, not just that a `CODE_INTEL.md` exists.
-- **A committed, diffable overview.** It lives *in the repo* — reviewable in a PR, browsable on GitHub, available offline. Re-run `codeintel map` after `codeintel index` to refresh it.
-- **The load-bearing code at a glance.** Ranking symbols by caller count surfaces what most of the codebase depends on (the risky-to-change core) plus the entry points — the first things a newcomer, or an agent, should understand before touching anything. The ranking counts `CALLS` edges into **callable** nodes only (functions, methods, classes, interfaces, routes), and skips test, generated and archived files. Both constraints are load-bearing rather than tidy-up: without them a 12,638-node TypeScript repo ranked `logger` (a *folder* node) at 716 and `onClick` at 107, and a Python repo ranked YAML and JSON keys — `flow` from a `.flow.yaml`, `feature` from a `.schema.json` — as its most depended-on symbols. This repo's own map is Python-heavy and barely showed it, which is exactly why dogfooding did not catch it.
-
-See **[docs/map-file.md](docs/map-file.md)** for the format and the `--inject` flow.
-
-## Why an agent needs it
-
-Without structural tools, an agent dropped into unfamiliar code falls back on `grep` and reads whole files to reconstruct relationships by hand — burning tokens, missing call sites, and guessing at blast radius before it edits anything. codeintel answers those questions directly instead:
-
-- **"What calls this? What breaks if I change it?"** → the real call graph, which catches cross-file and module-level callers a text search silently misses.
-- **"Where is this symbol defined, and everywhere it's used?"** → the language server, with exact locations.
-- **"Where's the code that does X?"** (when you don't know the name) → semantic search over the repo.
-- **Always a clean answer.** Every call returns the same JSON envelope. A missing or broken backend degrades to a safe `null` *with a reason* — so the agent falls back to grep instead of crashing on an exception it can't reason its way out of.
-
-Net effect: fewer, sharper tool calls, less re-reading, and an agent that can see *structure* — callers, impact, call chains — that plain search can't.
-
-**The honest framing.** Agentic grep is still the backbone, and codeintel doesn't claim otherwise — Claude Code itself ships grep-only and that is a reasonable default for most of what an agent reads. The defensible claim is narrower: a structural index *where it pays*, degrading to grep the moment an engine is missing or not indexed, which is exactly what the safe-null contract above already does under the hood. Worth saying explicitly rather than leaving it implicit in a failure mode.
-
-## What your agent can ask
-
-It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the default) codeintel picks the engine per operation:
-
-| Ask | `op` | Engine (auto) | Comes back as |
-|---|---|---|---|
-| Find code by meaning ("auth middleware") | `search` | semantic | ranked `path:line │ snippet` hits |
-| A symbol's definition **and** all references | `symbol` | lsp | definition body + reference list |
-| Who calls this? | `callers` | graph | caller symbols + files |
-| What does this call? | `callees` | graph | callee symbols + files |
-| Blast radius of a change | `impact` | graph | callers **and** callees together |
-| Trace a call chain up/downstream | `chain` | graph | ordered hops, each labelled with how it was resolved |
-| Find symbols by pattern | `pattern` | graph | matching nodes + locations |
-| Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
-| Everything about one symbol | `context` | graph + lsp | both views merged |
-| **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
-| Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
-| Unreferenced (dead) code | `deadcode` | graph | **withdrawn and now retired** — a labelled corpus measured its precision at 25%; safe-nulls with `reason: "op-withdrawn"`, and no flag brings it back — [the measurement, and what to use instead](#deadcode-is-retired) |
-
-Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
-
-`callers`, `callees` and `impact` resolve the target by its **unqualified name**. When several
-symbols share it, each matched symbol's rows are reported separately under its own heading and the
-result says how many it found — narrow to one with a qualified target (`core.Group.invoke`) or a file
-hint (`invoke@src/click/testing.py`); see
-[when several symbols share a name](docs/graph.md#when-several-symbols-share-a-name).
-
-#### `deadcode` is retired
-
-`deadcode` no longer exists. Asking for it returns a safe-null (`reason: "op-withdrawn"`) with a hint
-naming what to use instead, and **no flag brings it back** — the implementation has been deleted.
-
-It was withdrawn pending one condition: *"it returns when a labelled corpus measures its precision
-and recall — not before."* That corpus now exists, in
-[`tests/test_corpus.py`](tests/test_corpus.py), and the measurement is what retired it.
-
-**How it was measured.** Two pinned real Python repositories (`pallets/click`, `psf/requests`), with
-every function and method collected from the **AST** — 2,425 definitions, `async def` and class
-methods included, because a verification whose population comes from a pattern like `^\s*def ` cannot
-see half of them. Each is labelled live or dead with the reference behind the label recorded beside
-it. The oracle errs toward *live*: a decorator, a dunder, an override of an external interface, a
-string-dispatch mention, or public-API status is each enough to call a symbol live, so "dead" is only
-what survives all of them. That biases the numbers against the op, which is the correct direction for
-a check whose output is an instruction to delete code. Known-answer canaries are planted in both trees
-so recall has a denominator at all.
-
-**The numbers.**
-
-| | precision | recall |
-|---|---|---|
-| as shipped | **25%** (6 of 24) | 60% (6 of 10) |
-| with the two repairs this codebase already contains elsewhere | 89% (8 of 9) | 80% (8 of 10) |
-
-And the measurement that decided it — **real code only, canaries removed**: the op as shipped named
-**18 candidates across those two repositories, and every one of them was live.** All 18 were Makefile
-targets, which the graph backend indexes as `Function` nodes. Repaired, it names exactly one, and
-that one is `MockRequest.get_type` in requests — a method `http.cookiejar` calls by duck-typed
-convention, whose name appears once in the source.
-
-**Why it was not repaired further.** The verification was a name-frequency scan over the source, so it
-fails on exactly one condition: a symbol whose name appears once and is called by a convention
-outside the source. Two repositories produced three distinct instances of that condition — non-code
-nodes labelled `Function`, interpreter-called dunders, and stdlib duck-typed protocol methods — and
-the earlier TypeScript evidence adds a rollup plugin hook and object-literal properties. The set is
-not enumerable: no specification lists `get_type`. Every repository added revealed a new member of it.
-
-Weighed against that: in 2,425 real definitions across two maintained repositories there was **not
-one** dead private symbol to find. An op whose measured yield on real code is zero true positives has
-no benefit to set against that error rate.
-
-**Use `callers` on a specific symbol instead.** "Does anything call this?" is exactly the question
-`deadcode` was trying to answer in bulk, and `callers` answers it accurately, one symbol at a time.
-
-## An architecture model, as source
-
-`codeintel c4` turns the graph index into a [LikeC4](https://likec4.dev) model — architecture-as-code
-you can commit, diff and hand-edit, rather than a rendered picture you have to regenerate to read.
-Abridged output, from `--scope src/codeintel/providers`:
-
-```
-// Generated by codeintel from the graph index — do not edit by hand.
-// edges: union of IMPORTS (static module-level imports) and CALLS|USAGE (call/usage references)
-// coverage is NOT complete: dispatch through a name/lookup table can still be invisible to both
-// hotspot ranking uses IMPORTS-only fan-in, never the CALLS|USAGE union
-
-model {
-  src = area 'src' {
-    codeintel = area 'codeintel' {
-      providers = area 'providers' {
-        lsp = module 'lsp' {
-          technology 'Python'
-          metadata { path 'src/codeintel/providers/lsp.py'  churn '12'  fan_out '2' }
-        }
-        graph = module 'graph' { /* … */ }
-      }
-    }
-  }
-
-  src.codeintel.providers.lsp -[calls_usage]-> src.codeintel.providers.graph { metadata { n '2' } }
-}
-```
-
-Directories become `area`, files become `module`, and every element carries its real path plus churn
-and fan-in as `metadata` — so the model is queryable, not only drawable. Each file opens with what it
-cannot know: which edge sources it used, that coverage is incomplete, and how many references were
-folded or dropped. `npx likec4 start codeintel-c4` renders it; nothing else here needs Node.
-
-**Two edge sources, and the choice matters more than it sounds.** The default unions static `IMPORTS`
-with `CALLS|USAGE`, which recovers lazy and function-body imports. On this repo at
-`--scope src --depth 3` that is 179 relations — **134 of them `CALLS|USAGE`-only**, which renders as a
-hairball. `--edges imports` leaves the same 45 elements with 45 edges: legible, and roughly layered,
-because every remaining edge descends.
-
-**It also answers two questions without drawing anything.** `--layers` infers architectural bands
-from the import graph — 7 bands over 35 of those 45 elements, the other 10 having no module-level
-import edge either way. `--check` gates CI on a declared
-`[layers]` block in `.codeintel.toml`, exiting **2** on architectural drift — deliberately distinct
-from exit 1 for a broken run, so a CI step can tell "your architecture drifted" from "codeintel is
-broken". A config generated by `--suggest-config` is a *provably* green baseline on the commit that
-produced it, so adoption is paste-confirm-tighten rather than a wall of false positives.
-
-Full reference: **[docs/c4.md](docs/c4.md)**. Why LikeC4 and not something else, measured:
-[docs/eval-2026-08-26-likec4.md](docs/eval-2026-08-26-likec4.md).
-
-## What makes it good
-
-- **Local-first and private.** One process on your machine — no cloud service, no API keys, no telemetry, no per-query network. Safe to point at a private repo, even with `--engine all`. (The one-time exception: `fastembed` downloads its embedding model once, then runs fully offline.)
-- **It never throws.** Every call returns the same JSON envelope; a missing or broken backend degrades to `null` *with a reason*. No exceptions, no 500s, no malformed output for the agent to trip over — so you never wrap `code.query` in a `try`.
-- **One tool, not three.** Register a single MCP server and it auto-routes each question to graph, LSP, or semantic — instead of wiring up three backends with three response shapes and three failure modes.
-- **Degrades instead of breaking.** No graph backend installed? That engine returns `null` and the agent falls back to grep. The semantic engine needs nothing external, so codeintel is useful the moment it's installed and only gets sharper as you add backends.
-- **Fast on repeat, and the cache never lies.** A content-hash cache returns instantly for unchanged code and self-invalidates when a background reindex advances the index, so you never read a cached answer for code that moved on. The cache is bounded (LRU), so a long-running server holds steady memory. (The *cache* is always consistent with the index; how current the index itself is depends on the engine — see [Keeping answers fresh](#keeping-answers-fresh).)
-- **Concurrency-safe.** The HTTP transport handles requests on threads, so one slow query (an LSP session warming, a first-time index) can't block every other agent.
-- **Honest about its own health.** `codeintel doctor` answers three separate questions per engine — *installed?* *runnable?* *is this repo indexed?* — with the single command to fix each gap, so "installed" is never mistaken for "working". And a readiness claim is one a query can actually honor: install a missing backend mid-session and the running server picks it up on the next call, rather than reporting the engine healthy while quietly routing around it until you restart the host.
-
 ## Quickstart
 
 ```bash
@@ -198,19 +39,34 @@ remaining step. It's idempotent, so re-running is safe. The **graph** engine (`c
 is an *optional* external binary that adds who-calls / impact / hotspots / `changed`; codeintel is
 fully usable without it.
 
+**Then verify, before trusting an answer.** `doctor` answers three separate questions per engine —
+*installed?* *runnable?* *is this repo indexed?* — so "installed" is never mistaken for "working",
+and names the one command that fixes each gap:
+
+```bash
+codeintel doctor
+```
+
+**Register with your agent, and ask it something grep cannot answer:**
+
+```bash
+codeintel install            # registers with the agents you actually have installed
+codeintel query --op callers --target aFunctionYouKnow
+```
+
+`callers` is the first query worth running because you can check it by eye: it should name the call
+sites you already know about, including cross-file and module-level ones a text search misses. If
+the graph engine isn't installed it safe-nulls with a reason and a hint rather than failing — that
+is the contract, visible on your first call. `--op search --target "authentication middleware"`
+works with no backend at all, but a semantic hit on an unfamiliar repo is harder to judge, which
+makes it the weaker thing to try first.
+
 Or from source:
 
 ```bash
 git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .
-```
-
-Register with your AI agent(s), then query:
-
-```bash
-codeintel install            # registers with the agents you actually have installed
-codeintel query --op search --target "authentication middleware"
 ```
 
 ### Or: have your agent set it up
@@ -311,6 +167,136 @@ against the built wheel in a clean environment: it registers Codex and Claude Co
 
 > Full reference — what each host reads, the absolute-path rationale, and troubleshooting:
 > **[docs/install.md](docs/install.md)**.
+
+## Why an agent needs it
+
+Without structural tools, an agent dropped into unfamiliar code falls back on `grep` and reads whole files to reconstruct relationships by hand — burning tokens, missing call sites, and guessing at blast radius before it edits anything. codeintel answers those questions directly instead:
+
+- **"What calls this? What breaks if I change it?"** → the real call graph, which catches cross-file and module-level callers a text search silently misses.
+- **"Where is this symbol defined, and everywhere it's used?"** → the language server, with exact locations.
+- **"Where's the code that does X?"** (when you don't know the name) → semantic search over the repo.
+- **Always a clean answer.** Every call returns the same JSON envelope. A missing or broken backend degrades to a safe `null` *with a reason* — so the agent falls back to grep instead of crashing on an exception it can't reason its way out of.
+
+Net effect: fewer, sharper tool calls, less re-reading, and an agent that can see *structure* — callers, impact, call chains — that plain search can't.
+
+**The honest framing.** Agentic grep is still the backbone, and codeintel doesn't claim otherwise — Claude Code itself ships grep-only and that is a reasonable default for most of what an agent reads. The defensible claim is narrower: a structural index *where it pays*, degrading to grep the moment an engine is missing or not indexed, which is exactly what the safe-null contract above already does under the hood. Worth saying explicitly rather than leaving it implicit in a failure mode.
+
+## What your agent can ask
+
+It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the default) codeintel picks the engine per operation:
+
+| Ask | `op` | Engine (auto) | Comes back as |
+|---|---|---|---|
+| Find code by meaning ("auth middleware") | `search` | semantic | ranked `path:line │ snippet` hits |
+| A symbol's definition **and** all references | `symbol` | lsp | definition body + reference list |
+| Who calls this? | `callers` | graph | caller symbols + files |
+| What does this call? | `callees` | graph | callee symbols + files |
+| Blast radius of a change | `impact` | graph | callers **and** callees together |
+| Trace a call chain up/downstream | `chain` | graph | ordered hops, each labelled with how it was resolved |
+| Find symbols by pattern | `pattern` | graph | matching nodes + locations |
+| Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
+| Everything about one symbol | `context` | graph + lsp | both views merged |
+| **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
+| Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
+| Unreferenced (dead) code | `deadcode` | graph | **withdrawn and now retired** — a labelled corpus measured its precision at 25%; safe-nulls with `reason: "op-withdrawn"`, and no flag brings it back — [the measurement, and what to use instead](#deadcode-is-retired) |
+
+Pin one engine with `--engine graph│lsp│semantic`, or fan out with `--engine both` / `all` to merge results.
+
+`callers`, `callees` and `impact` resolve the target by its **unqualified name**. When several
+symbols share it, each matched symbol's rows are reported separately under its own heading and the
+result says how many it found — narrow to one with a qualified target (`core.Group.invoke`) or a file
+hint (`invoke@src/click/testing.py`); see
+[when several symbols share a name](docs/graph.md#when-several-symbols-share-a-name).
+
+#### `deadcode` is retired
+
+`deadcode` no longer exists. Asking for it returns a safe-null (`reason: "op-withdrawn"`) with a
+hint naming what to use instead, and **no flag brings it back** — the implementation has been
+deleted. A labelled corpus of 2,425 AST-collected definitions across `pallets/click` and
+`psf/requests` measured it at **25% precision**, and on real code with the canaries removed it
+named 18 candidates of which **every one was live**.
+
+**Use `callers` on a specific symbol instead.** "Does anything call this?" is exactly the question
+`deadcode` was trying to answer in bulk, and `callers` answers it accurately, one symbol at a time.
+
+The full measurement — the oracle's design, why it errs toward *live*, the two repairs that would
+take it to 89%, and why it was not repaired further — is
+[ADR 0002](docs/adr/0002-retire-deadcode.md).
+
+## A committed architecture overview
+
+Prefer plain text? `codeintel map` writes a **readable architecture overview** to `CODE_INTEL.md` — node/edge counts, ranked symbols by caller count, and entry points — for skimming or for MCP hosts that can't render a graph:
+
+<img src="docs/images/code-intel-map.png" width="520" alt="CODE_INTEL.md — the codeintel map: an architecture overview with node/edge counts and symbols ranked by caller count.">
+
+**What `CODE_INTEL.md` is for.** It's a *static, committable* snapshot of a codebase's shape — meant to be read (by a person or an agent) **first**, instead of reconstructing structure by grepping. It covers the cases the live `code.query` tool doesn't:
+
+- **Agents & hosts that don't speak MCP.** Not every agent supports MCP, and the server isn't always running. `codeintel map` writes a plain file any agent can read; `codeintel map --inject` also drops a short, tool-naming pointer block into `AGENTS.md` (the cross-tool surface read by Codex, Cursor, Zed, and others — created with your consent if it doesn't exist yet) plus a one-line `@AGENTS.md` import into `CLAUDE.md`, and writes the fuller `USING_CODEINTEL.md` guide the block points to — into **your** repo, which is why there is no such file to click here — so an agent knows to reach for `code.query` before it reaches for grep, not just that a `CODE_INTEL.md` exists.
+- **A committed, diffable overview.** It lives *in the repo* — reviewable in a PR, browsable on GitHub, available offline. Re-run `codeintel map` after `codeintel index` to refresh it.
+- **The load-bearing code at a glance.** Ranking symbols by caller count surfaces what most of the codebase depends on (the risky-to-change core) plus the entry points — the first things a newcomer, or an agent, should understand before touching anything. The ranking counts `CALLS` edges into **callable** nodes only (functions, methods, classes, interfaces, routes), and skips test, generated and archived files. Both constraints are load-bearing rather than tidy-up: without them a 12,638-node TypeScript repo ranked `logger` (a *folder* node) at 716 and `onClick` at 107, and a Python repo ranked YAML and JSON keys — `flow` from a `.flow.yaml`, `feature` from a `.schema.json` — as its most depended-on symbols. This repo's own map is Python-heavy and barely showed it, which is exactly why dogfooding did not catch it.
+
+See **[docs/map-file.md](docs/map-file.md)** for the format and the `--inject` flow.
+
+## An architecture model, as source
+
+`codeintel c4` turns the graph index into a [LikeC4](https://likec4.dev) model — architecture-as-code
+you can commit, diff and hand-edit, rather than a rendered picture you have to regenerate to read.
+Abridged output, from `--scope src/codeintel/providers`:
+
+```
+// Generated by codeintel from the graph index — do not edit by hand.
+// edges: union of IMPORTS (static module-level imports) and CALLS|USAGE (call/usage references)
+// coverage is NOT complete: dispatch through a name/lookup table can still be invisible to both
+// hotspot ranking uses IMPORTS-only fan-in, never the CALLS|USAGE union
+
+model {
+  src = area 'src' {
+    codeintel = area 'codeintel' {
+      providers = area 'providers' {
+        lsp = module 'lsp' {
+          technology 'Python'
+          metadata { path 'src/codeintel/providers/lsp.py'  churn '12'  fan_out '2' }
+        }
+        graph = module 'graph' { /* … */ }
+      }
+    }
+  }
+
+  src.codeintel.providers.lsp -[calls_usage]-> src.codeintel.providers.graph { metadata { n '2' } }
+}
+```
+
+Directories become `area`, files become `module`, and every element carries its real path plus churn
+and fan-in as `metadata` — so the model is queryable, not only drawable. Each file opens with what it
+cannot know: which edge sources it used, that coverage is incomplete, and how many references were
+folded or dropped. `npx likec4 start codeintel-c4` renders it; nothing else here needs Node.
+
+**Two edge sources, and the choice matters more than it sounds.** The default unions static `IMPORTS`
+with `CALLS|USAGE`, which recovers lazy and function-body imports. On this repo at
+`--scope src --depth 3` that is 179 relations — **134 of them `CALLS|USAGE`-only**, which renders as a
+hairball. `--edges imports` leaves the same 45 elements with 45 edges: legible, and roughly layered,
+because every remaining edge descends.
+
+**It also answers two questions without drawing anything.** `--layers` infers architectural bands
+from the import graph — 7 bands over 35 of those 45 elements, the other 10 having no module-level
+import edge either way. `--check` gates CI on a declared
+`[layers]` block in `.codeintel.toml`, exiting **2** on architectural drift — deliberately distinct
+from exit 1 for a broken run, so a CI step can tell "your architecture drifted" from "codeintel is
+broken". A config generated by `--suggest-config` is a *provably* green baseline on the commit that
+produced it, so adoption is paste-confirm-tighten rather than a wall of false positives.
+
+Full reference: **[docs/c4.md](docs/c4.md)**. Why LikeC4 and not something else, measured:
+[docs/eval-2026-08-26-likec4.md](docs/eval-2026-08-26-likec4.md).
+
+## What makes it good
+
+- **Local-first and private.** One process on your machine — no cloud service, no API keys, no telemetry, no per-query network. Safe to point at a private repo, even with `--engine all`. (The one-time exception: `fastembed` downloads its embedding model once, then runs fully offline.)
+- **It never throws.** Every call returns the same JSON envelope; a missing or broken backend degrades to `null` *with a reason*. No exceptions, no 500s, no malformed output for the agent to trip over — so you never wrap `code.query` in a `try`.
+- **One tool, not three.** Register a single MCP server and it auto-routes each question to graph, LSP, or semantic — instead of wiring up three backends with three response shapes and three failure modes.
+- **Degrades instead of breaking.** No graph backend installed? That engine returns `null` and the agent falls back to grep. The semantic engine needs nothing external, so codeintel is useful the moment it's installed and only gets sharper as you add backends.
+- **Fast on repeat, and the cache never lies.** A content-hash cache returns instantly for unchanged code and self-invalidates when a background reindex advances the index, so you never read a cached answer for code that moved on. The cache is bounded (LRU), so a long-running server holds steady memory. (The *cache* is always consistent with the index; how current the index itself is depends on the engine — see [Keeping answers fresh](#keeping-answers-fresh).)
+- **Concurrency-safe.** The HTTP transport handles requests on threads, so one slow query (an LSP session warming, a first-time index) can't block every other agent.
+- **Honest about its own health.** `codeintel doctor` answers three separate questions per engine — *installed?* *runnable?* *is this repo indexed?* — with the single command to fix each gap, so "installed" is never mistaken for "working". And a readiness claim is one a query can actually honor: install a missing backend mid-session and the running server picks it up on the next call, rather than reporting the engine healthy while quietly routing around it until you restart the host.
 
 ## How it works
 
