@@ -14,10 +14,15 @@ clicked.
 
 ## What you actually have to do
 
-Five steps, all in the GitHub UI, roughly five minutes. Nothing here happens by merging a PR.
+Five steps, roughly five minutes, and nothing here happens by merging a PR. Three are done; the two
+still open are UI-only.
 
-- [ ] **Import the branch ruleset.** Settings → Rules → Rulesets → New ruleset → *Import a ruleset*
-      → `main.json` → Create.
+- [x] **Import the branch ruleset.** **Done** (2026-09-03) — applied the same reproducible way as
+      the tag ruleset below:
+      `gh api -X POST repos/hamilton-sky/codeintel/rulesets --input .github/rulesets/main.json`.
+      GitHub accepted all five rules and all nine required checks, and the bypass list is empty, so
+      the rules apply to the maintainer too. The UI path (Settings → Rules → Rulesets → New ruleset
+      → *Import a ruleset* → `main.json` → Create) does the same thing.
 - [x] **Import the tag ruleset.** Same path, `release-tags.json`. **Done** — applied via
       `gh api -X POST repos/hamilton-sky/codeintel/rulesets --input .github/rulesets/release-tags.json`,
       which works as well as the UI importer and is reproducible. See the note below on the one rule
@@ -27,10 +32,29 @@ Five steps, all in the GitHub UI, roughly five minutes. Nothing here happens by 
 - [ ] **Lock down Actions.** Settings → Actions → General → *Workflow permissions* = **Read
       repository contents and packages**; *Fork pull request workflows* → require approval for
       **all external contributors**.
-- [ ] **Prove it.** `git commit --allow-empty -m x && git push origin main` — expect a rejection.
-      Then `git reset --hard origin/main` to drop the local commit. Worth actually doing: this
-      checklist sat unticked long enough that a direct push to `main` still succeeded, which is how
-      the gap was found.
+- [x] **Prove it.** **Done** (2026-09-03), immediately after the import, with
+      `git commit --allow-empty -m x && git push origin main` — then `git reset --hard origin/main`
+      to drop the local commit. The push was rejected:
+
+      ```text
+      remote: - Changes must be made through a pull request.
+      remote: - 9 of 9 required status checks are expected.
+       ! [remote rejected] main -> main (push declined due to repository rule violations)
+      ```
+
+      Worth actually doing rather than assuming: this checklist sat unticked long enough that a
+      direct push to `main` still succeeded, which is how the gap was found.
+
+      **This probe cannot verify a later edit to `main.json`.** The command above is a one-time
+      `POST`, which creates a ruleset; `--input` only supplies a request body and never syncs the
+      remote to the file. So after editing the file the *existing* ruleset keeps rejecting direct
+      pushes whether or not your change was applied, and a rejected push reads as success. Apply an
+      edit against the ruleset's own ID and then diff what came back:
+
+      ```bash
+      gh api -X PUT repos/hamilton-sky/codeintel/rulesets/<id> --input .github/rulesets/main.json
+      gh api repos/hamilton-sky/codeintel/rulesets/<id> --jq '.rules'
+      ```
 
 The rest of this document is why each of those is set the way it is, and what to change when the
 project stops having exactly one maintainer.
@@ -39,6 +63,28 @@ project stops having exactly one maintainer.
 
 Rulesets are free on public repositories (this one is public). On a *private* repo they need Pro or
 Team — that is the only plan gate that applies here.
+
+**GitHub injects defaults the file does not mention, and one of them is load-bearing.** After
+importing `main.json`, the live `pull_request` rule came back carrying
+`require_extra_approval_for_unattributed_changes: true` — a parameter absent from the committed
+file. It raises the deliberate `required_approving_review_count: 0` above to an effective **1** for
+any commit GitHub cannot attribute to a known account, which includes one carrying a
+`Co-Authored-By` trailer. On a single-maintainer repo that is unmergeable without a bypass: the
+exact deadlock the 0 exists to avoid. It blocked PR #21 with all nine required checks green and
+`mergeable=true`, reporting only `mergeable_state=blocked`. The key is now set to `false`
+**explicitly** in the file, because a default that is not written down is a rule nobody re-checks.
+
+The same trap applies to any parameter added to this API later. After importing or updating, diff
+what came back against what you sent — the rule is only what the live ruleset says, not what the
+file says:
+
+```bash
+gh api repos/hamilton-sky/codeintel/rulesets/<id> --jq '.rules[] | select(.type=="pull_request") | .parameters'
+```
+
+The file also has to stay **importable**: the API rejects unknown keys with a 422
+(`Unexpected parameter`), so it cannot carry JSON comments. Rationale goes here instead — which is
+why this section exists.
 
 Both files ship with an **empty bypass list**, which means the rules apply to you too. If you want
 an escape hatch, add one in the UI after importing: *Bypass list → Add bypass → Repository admin*,
