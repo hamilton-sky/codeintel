@@ -1136,11 +1136,21 @@ class GraphProvider:
         infixes are added for that. Both are unambiguous — no non-test file is named
         `foo.spec.ts` — which is the bar for widening this filter at all: over-filtering is what
         retired `deadcode` at 25% precision, so a convention gets added when it cannot hide a real
-        symbol, not when it merely looks test-shaped."""
+        symbol, not when it merely looks test-shaped.
+
+        `fixtures/` clears that same bar, and this repo's own committed `CODE_INTEL.md` is the
+        evidence: **all ten** of its "Entry Points" were `bench/fixtures/corpus_ts/src/*.ts`. Those
+        files are not merely test-adjacent — they are written to have a known answer, so a
+        `forwardReleasedItem` in one denotes nothing in this project at all. Presenting them to a
+        newcomer as the code to understand first is the wrong-answer-that-survives-in-the-tree
+        failure the ranking filter exists to stop, and `fixtures/` names test material in every
+        ecosystem that has the convention (pytest, Rails, Jest, Go testdata's sibling)."""
         f = (fp or "").lower()
         if f.startswith(("tests/", "test/")) or "/tests/" in f or "/test/" in f:
             return True
         if "__tests__/" in f or "__test__/" in f or f.startswith(("__tests__/", "__test__/")):
+            return True
+        if f.startswith(("fixtures/", "__fixtures__/")) or "/fixtures/" in f or "/__fixtures__/" in f:
             return True
         base = f.rsplit("/", 1)[-1]
         stem = base.rsplit(".", 1)[0] if "." in base else base

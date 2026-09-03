@@ -71,9 +71,15 @@ def _fan_in_cypher(label: str) -> str:
         "ORDER BY in_degree DESC LIMIT 40"
     )
 
+# Over-requests, for the same reason `_fan_in_cypher` does: the `LIMIT` runs in the DB, so a
+# client-side filter can only ever see what the window already let through. At `LIMIT 10` the
+# entry-point list had no filter at all AND no headroom to add one — this repo's own committed
+# CODE_INTEL.md listed ten entry points and every one was a `bench/fixtures/` file. Ask for a real
+# population, drop the noise, then truncate to the ten that get rendered.
+_ENTRY_POINT_LIMIT = 10
 _ENTRY_CYPHER = (
     "MATCH (fn) WHERE fn.is_entry_point = true "
-    "RETURN fn.name, fn.file_path LIMIT 10"
+    "RETURN fn.name, fn.file_path LIMIT 60"
 )
 
 # Builtins and the synthetic project/config node are high-fan-in but useless as "symbols".
@@ -284,13 +290,25 @@ def _query_ranked_symbols(provider: GraphProvider, project: str) -> list[dict]:
 
 
 def _query_entry_points(provider: GraphProvider, project: str) -> list[dict]:
+    """Entry points, filtered of non-source noise the same way the ranking above is.
+
+    This filtering was absent, and `_query_ranked_symbols` having it made the omission invisible:
+    the two sections sit next to each other in the rendered file under one claim about showing a
+    newcomer the load-bearing code, and only one of them was honouring it.
+    """
+    from codeintel.providers.graph import GraphProvider as _GP
+
     raw = provider._run("query_graph", {"project": project, "query": _ENTRY_CYPHER}, 5000)
     rows = []
     for row in _rows_from(raw):
         name = row.get("fn.name") or row.get("name") or "?"
         path = str(row.get("fn.file_path") or row.get("file_path") or "")
+        if path in _RANK_SKIP_PATHS:
+            continue
+        if _GP._is_noise({"file_path": path, "name": str(name)}):
+            continue
         rows.append({"name": name, "file_path": path})
-    return rows
+    return rows[:_ENTRY_POINT_LIMIT]
 
 
 def _render(
