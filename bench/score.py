@@ -165,6 +165,20 @@ def graph_answer(root: str, target_name: str, exe: str) -> Answer:
     ) or str(env.get("reason") or "").startswith("harness-error"):
         ans.unavailable = True
         return ans
+    # Read the structured gaps, for the mirror of the `not-asked` case handled in `lsp_answers`.
+    # A repository that is not indexed ON ITS OWN is answered from the enclosing indexed project,
+    # which spells every path relative to THAT root: `bench/fixtures/corpus_ts/src/proxy.ts` where
+    # the oracle labelled `src/proxy.ts`. No key can ever match, so the arm scores 0% recall with 0
+    # spurious — which reads as an engine that found nothing rather than as a harness whose keys
+    # never lined up. A silent run of zeros is the exact failure this benchmark exists to catch in
+    # the tools it measures, so it is refused here instead of scored.
+    gaps = env.get("gaps") or []
+    if any(isinstance(g, dict) and g.get("kind") == "ancestor-scope" for g in gaps):
+        ans.unavailable = True
+        ans.reason = ("ancestor-scope: this repo is not indexed on its own, so the backend answered "
+                      "from the project containing it and paths are relative to that root "
+                      f"(index it standalone: `codeintel index {root}`)")
+        return ans
     body = env.get("result") or ""
     for raw in body.splitlines():
         if not raw.startswith("- "):

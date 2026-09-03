@@ -118,9 +118,11 @@ is worse than the defect being fixed. It is also idempotent, so running it again
 ## References are not calls
 
 `find_referencing_symbols` returns **references**, and a reference is not a call. On one measured
-symbol, 9 references comprised 5 call sites, 2 import lines, and 2 duplicate rows — **74% precision**
-across a stratified Python set when taken as callers, against 100% once each site is classified by
-the syntax at its line ([../bench/README.md](../bench/README.md)).
+symbol, 9 references comprised 5 call sites, 2 import lines, and 2 duplicate rows. Across a
+stratified Python set, taking every reference as a caller scores **65% precision** against **100%**
+once each site is classified by the syntax at its line — the whole of that gap is references that
+are not calls ([../bench/README.md](../bench/README.md), which is where the current numbers live;
+this sentence quoted 74% from a run that predated proven-negative truth).
 
 This is why the gateway's cross-check **appends** the LSP reference list next to the graph's answer
 rather than replacing it: the two engines answer related but different questions, and presenting one
