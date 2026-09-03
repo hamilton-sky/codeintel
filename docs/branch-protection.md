@@ -43,9 +43,18 @@ still open are UI-only.
       ```
 
       Worth actually doing rather than assuming: this checklist sat unticked long enough that a
-      direct push to `main` still succeeded, which is how the gap was found. It is also worth
-      re-doing after any edit to `main.json`, since a rule GitHub silently declines leaves the
-      checklist ticked and the branch open.
+      direct push to `main` still succeeded, which is how the gap was found.
+
+      **This probe cannot verify a later edit to `main.json`.** The command above is a one-time
+      `POST`, which creates a ruleset; `--input` only supplies a request body and never syncs the
+      remote to the file. So after editing the file the *existing* ruleset keeps rejecting direct
+      pushes whether or not your change was applied, and a rejected push reads as success. Apply an
+      edit against the ruleset's own ID and then diff what came back:
+
+      ```bash
+      gh api -X PUT repos/hamilton-sky/codeintel/rulesets/<id> --input .github/rulesets/main.json
+      gh api repos/hamilton-sky/codeintel/rulesets/<id> --jq '.rules'
+      ```
 
 The rest of this document is why each of those is set the way it is, and what to change when the
 project stops having exactly one maintainer.
@@ -54,6 +63,28 @@ project stops having exactly one maintainer.
 
 Rulesets are free on public repositories (this one is public). On a *private* repo they need Pro or
 Team — that is the only plan gate that applies here.
+
+**GitHub injects defaults the file does not mention, and one of them is load-bearing.** After
+importing `main.json`, the live `pull_request` rule came back carrying
+`require_extra_approval_for_unattributed_changes: true` — a parameter absent from the committed
+file. It raises the deliberate `required_approving_review_count: 0` above to an effective **1** for
+any commit GitHub cannot attribute to a known account, which includes one carrying a
+`Co-Authored-By` trailer. On a single-maintainer repo that is unmergeable without a bypass: the
+exact deadlock the 0 exists to avoid. It blocked PR #21 with all nine required checks green and
+`mergeable=true`, reporting only `mergeable_state=blocked`. The key is now set to `false`
+**explicitly** in the file, because a default that is not written down is a rule nobody re-checks.
+
+The same trap applies to any parameter added to this API later. After importing or updating, diff
+what came back against what you sent — the rule is only what the live ruleset says, not what the
+file says:
+
+```bash
+gh api repos/hamilton-sky/codeintel/rulesets/<id> --jq '.rules[] | select(.type=="pull_request") | .parameters'
+```
+
+The file also has to stay **importable**: the API rejects unknown keys with a 422
+(`Unexpected parameter`), so it cannot carry JSON comments. Rationale goes here instead — which is
+why this section exists.
 
 Both files ship with an **empty bypass list**, which means the rules apply to you too. If you want
 an escape hatch, add one in the UI after importing: *Bypass list → Add bypass → Repository admin*,
