@@ -14,10 +14,15 @@ clicked.
 
 ## What you actually have to do
 
-Five steps, all in the GitHub UI, roughly five minutes. Nothing here happens by merging a PR.
+Five steps, roughly five minutes, and nothing here happens by merging a PR. Three are done; the two
+still open are UI-only.
 
-- [ ] **Import the branch ruleset.** Settings → Rules → Rulesets → New ruleset → *Import a ruleset*
-      → `main.json` → Create.
+- [x] **Import the branch ruleset.** **Done** (2026-09-03) — applied the same reproducible way as
+      the tag ruleset below:
+      `gh api -X POST repos/hamilton-sky/codeintel/rulesets --input .github/rulesets/main.json`.
+      GitHub accepted all five rules and all nine required checks, and the bypass list is empty, so
+      the rules apply to the maintainer too. The UI path (Settings → Rules → Rulesets → New ruleset
+      → *Import a ruleset* → `main.json` → Create) does the same thing.
 - [x] **Import the tag ruleset.** Same path, `release-tags.json`. **Done** — applied via
       `gh api -X POST repos/hamilton-sky/codeintel/rulesets --input .github/rulesets/release-tags.json`,
       which works as well as the UI importer and is reproducible. See the note below on the one rule
@@ -27,10 +32,20 @@ Five steps, all in the GitHub UI, roughly five minutes. Nothing here happens by 
 - [ ] **Lock down Actions.** Settings → Actions → General → *Workflow permissions* = **Read
       repository contents and packages**; *Fork pull request workflows* → require approval for
       **all external contributors**.
-- [ ] **Prove it.** `git commit --allow-empty -m x && git push origin main` — expect a rejection.
-      Then `git reset --hard origin/main` to drop the local commit. Worth actually doing: this
-      checklist sat unticked long enough that a direct push to `main` still succeeded, which is how
-      the gap was found.
+- [x] **Prove it.** **Done** (2026-09-03), immediately after the import, with
+      `git commit --allow-empty -m x && git push origin main` — then `git reset --hard origin/main`
+      to drop the local commit. The push was rejected:
+
+      ```text
+      remote: - Changes must be made through a pull request.
+      remote: - 9 of 9 required status checks are expected.
+       ! [remote rejected] main -> main (push declined due to repository rule violations)
+      ```
+
+      Worth actually doing rather than assuming: this checklist sat unticked long enough that a
+      direct push to `main` still succeeded, which is how the gap was found. It is also worth
+      re-doing after any edit to `main.json`, since a rule GitHub silently declines leaves the
+      checklist ticked and the branch open.
 
 The rest of this document is why each of those is set the way it is, and what to change when the
 project stops having exactly one maintainer.
