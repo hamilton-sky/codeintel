@@ -80,6 +80,55 @@ def test_generate_with_no_provider():
     assert "not available" in result.lower() or "not" in result.lower()
 
 
+def test_entry_points_are_filtered_of_fixture_and_test_noise():
+    """`_query_ranked_symbols` filtered noise and `_query_entry_points` did not, which made the
+    omission invisible: the two sections render next to each other under one claim about showing a
+    newcomer the load-bearing code, and only one honoured it. This repo's committed CODE_INTEL.md
+    listed ten entry points, all ten from `bench/fixtures/corpus_ts/`."""
+    provider = _make_provider(ranked=[], entry=[
+        {"fn.name": "forwardReleasedItem", "fn.file_path": "bench/fixtures/corpus_ts/src/proxy.ts"},
+        {"fn.name": "describe", "fn.file_path": "bench/fixtures/corpus_ts/src/proxy.ts"},
+        {"fn.name": "main", "fn.file_path": "src/codeintel/__main__.py"},
+        {"fn.name": "helper", "fn.file_path": "tests/test_thing.py"},
+    ])
+    gen = MapGenerator(provider)
+    text = gen.generate("/repo", now=datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert "src/codeintel/__main__.py" in text
+    assert "corpus_ts" not in text
+    assert "tests/test_thing.py" not in text
+
+
+def test_entry_point_query_over_requests_so_the_filter_has_something_to_filter():
+    """The `LIMIT` runs in the DB, so a client-side filter only ever sees what the window let
+    through — the truncation trap already documented for the ranking query. At `LIMIT 10` a repo
+    whose first ten entry points were all fixtures would render an EMPTY section after filtering,
+    trading one wrong answer for no answer."""
+    from codeintel.mapper import _ENTRY_CYPHER, _ENTRY_POINT_LIMIT
+
+    assert "LIMIT 10" not in _ENTRY_CYPHER
+    assert _ENTRY_POINT_LIMIT == 10
+
+    noise = [{"fn.name": f"f{i}", "fn.file_path": f"bench/fixtures/c/{i}.ts"} for i in range(12)]
+    real = [{"fn.name": f"g{i}", "fn.file_path": f"src/codeintel/m{i}.py"} for i in range(3)]
+    provider = _make_provider(ranked=[], entry=noise + real)
+    text = MapGenerator(provider).generate("/repo", now=datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert "corpus" not in text and "fixtures" not in text
+    for i in range(3):
+        assert f"src/codeintel/m{i}.py" in text
+
+
+def test_entry_points_are_capped_at_ten_after_filtering():
+    """Over-requesting must not leak into the rendered file: the section still shows ten."""
+    provider = _make_provider(ranked=[], entry=[
+        {"fn.name": f"g{i}", "fn.file_path": f"src/codeintel/m{i}.py"} for i in range(25)])
+    text = MapGenerator(provider).generate("/repo", now=datetime(2026, 1, 1, tzinfo=UTC))
+
+    rendered = [i for i in range(25) if f"src/codeintel/m{i}.py" in text]
+    assert len(rendered) == 10, rendered
+
+
 def test_generate_byte_budget_enforced():
     ranked = [
         {"fn.name": f"func_{i}", "fn.file_path": f"src/module_{i}.py", "in_degree": 30 - i}

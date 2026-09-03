@@ -866,6 +866,32 @@ def test_looks_like_test_recognises_the_javascript_conventions():
     assert _GP._looks_like_test("src/a/b/thing.spec.ts", "x")
 
 
+def test_looks_like_test_recognises_a_fixtures_directory():
+    """This repo's own committed CODE_INTEL.md listed ten "Entry Points" and every one of them was
+    a `bench/fixtures/corpus_ts/src/*.ts` file — code written to have a KNOWN ANSWER, so its
+    `forwardReleasedItem` denotes nothing in this project. The README claims that section shows
+    "the first things a newcomer, or an agent, should understand before touching anything", so the
+    committed artifact contradicted the doc that advertises it."""
+    from codeintel.providers.graph import GraphProvider as _GP
+
+    assert _GP._looks_like_test("bench/fixtures/corpus_ts/src/proxy.ts", "forwardReleasedItem")
+    assert _GP._looks_like_test("bench/fixtures/corpus/src/corpuspkg/sse.py", "_broadcast")
+    assert _GP._looks_like_test("fixtures/data.py", "x")
+    assert _GP._looks_like_test("src/__fixtures__/user.ts", "x")
+
+
+def test_looks_like_test_does_not_catch_fixture_shaped_real_source():
+    """`fixtures` is matched as a path SEGMENT, not a substring — the same bar `.spec`/`.test` are
+    held to. A module named `fixtures.py` is real source somebody imports, and over-filtering is
+    what retired `deadcode` at 25% precision."""
+    from codeintel.providers.graph import GraphProvider as _GP
+
+    for path in ("src/fixtures.py",             # a module, not a directory
+                 "src/app/fixtureshop/api.py",  # starts with "fixture"
+                 "src/fixture_loader.py"):
+        assert _GP._looks_like_test(path, "x") is False, path
+
+
 def test_looks_like_test_does_not_catch_real_source_that_merely_reads_test_shaped():
     """The bar for widening this filter is that a convention cannot hide a real symbol —
     over-filtering is what retired `deadcode` at 25% precision. `.spec`/`.test` are matched as
