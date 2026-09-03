@@ -99,35 +99,42 @@ purpose.
 
 ## Findings so far
 
-Ten Python symbols in `pathly-adapters`, six in `snitch-simulator`, against
-`codebase-memory-mcp 0.10.8`:
+Ten Python symbols in `pathly-adapters` and six in `snitch-simulator`, against
+`codebase-memory-mcp 0.10.8`, **under proven-negative truth** — re-measured 2026-09-03 with the two
+commands at the top of this file, which is what reproduces the table:
 
-| arm | direct precision | direct recall | impact recall |
-|---|---|---|---|
-| `graph` | 100% | 100% | 100% (pathly) / 60% (snitch) |
-| `lsp_raw` | **74%** | 100% | 100% |
-| `lsp_classified` | 100% | 100% | 100% |
+| arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
+|---|---|---|---|---|---|
+| `graph` | 80% | 100% | 78% | 100% | 0 / 10 |
+| `lsp_raw` | 65% | 100% | 65% | 100% | 0 / 10 |
+| `lsp_classified` | **100%** | 100% | 84% | 100% | 0 / 10 |
 
-> **These numbers predate proven negatives and have not been re-measured since.** They were produced
-> under positives-only truth, which could charge one fabrication class and not the other. Claiming an
-> import or a reference as a call was charged — that is precisely what `lsp_raw`'s 74% is made of, so
-> that figure means what it says. Claiming a bare name the file binds to something else was free, and
-> that class is not represented in any row above. Re-run both repositories before quoting the table.
+`snitch-simulator` is reported separately rather than averaged in, because its arms did not answer
+the same question: `graph` scores **38% direct precision, 33% impact precision and 60% impact
+recall** over six symbols, and **both LSP arms are `n/a` — 6 of 6 unanswered**, the language server
+having resolved none of those symbols. An arm that answered nothing cannot be pooled with one that
+answered ten times.
 
 Three things worth stating plainly:
 
-1. **`lsp_raw` is the weakest arm.** Its 74% precision is import lines and duplicate rows counted as
-   callers — measured, after a hand check on one symbol had suggested 56%. "Promote the LSP to
-   authority for callers" would have shipped a regression.
-2. **The graph engine was exact on this population** — but read that as *on the sites the oracle then
-   judged*, which by construction excluded the bare-name fabrication class. `_broadcast` and
-   `_claude_tokens` are in the target list precisely because short common names are where that
-   failure lives, and it was the one thing the scoring could not see. It is also a result *about
-   0.10.8*, which fixed the Python attribution defect; the same measurement on 0.9.x would look
-   materially worse.
+1. **`lsp_classified` is the most precise arm, and `lsp_raw` the least.** Raw references taken as
+   callers are import lines and duplicate rows; classifying each site by its syntax removes all of
+   them and costs no recall. "Promote the LSP to authority for callers" would have shipped a
+   regression; "LSP locates, syntax classifies" is what the numbers support.
+2. **The graph engine is not exact, and the earlier claim that it was is what proven negatives
+   corrected.** Its 20 points of lost direct precision are almost entirely `_broadcast` (4 claimed
+   callers against 6 proven non-callers) and `_claude_tokens` (1 against 2) — the two short common
+   names on the target list, put there because that is where the fabrication class lives. Under
+   positives-only truth those sites left the population and every arm scored 100%. This is also a
+   result *about 0.10.8*, which fixed the Python attribution defect; 0.9.x would look materially
+   worse.
 3. **The table is Python only.** The worst failure ever observed here (`describe`, 32 fabricated
-   callers) is TypeScript. The arm to measure it now exists — see below — but pointing it at a real
+   callers) is TypeScript. The arm to measure it exists — see below — but pointing it at a real
    TypeScript repository is still open, and nothing in this table speaks to that failure.
+
+A number here is only as current as the run that produced it. Re-run both commands rather than
+quoting the table after a backend release; the previous version of this table survived a backend
+change and a change of truth definition, and was wrong on both counts by the time anyone re-ran it.
 
 ## The TypeScript arm
 
@@ -161,6 +168,15 @@ import and none of its callers — and a property access on a value stays an abs
 the whole path — oracle, scorer and both engines through codeintel's own envelope. It is a **smoke
 test, not a measurement**: files written to have a known answer cannot say anything about real code.
 The real measurement needs a real TypeScript repository, which is the largest thing still open.
+
+**Index the corpus standalone before reading anything into that run.** It lives inside this
+checkout, so unless `codeintel index bench/fixtures/corpus_ts` has been run, the backend answers
+from the enclosing project and spells every path relative to *that* root — no key can match the
+oracle's, and the arm scored 0% recall with 0 spurious, which reads as an engine that found nothing.
+`graph_answer` now refuses on the envelope's `ancestor-scope` gap and reports the arm **unanswered**
+instead, the same way it already refused the LSP's `not-asked`. That the benchmark built to catch
+silent runs of zeros had one of its own for three arms is the argument for reading a `0%` as a
+question rather than a result.
 
 Also open: the oracle abstains on property accesses on values, which is exactly where short common
 names live. Proven negatives raise coverage on the shadowing cases; the receiver case is untouched
