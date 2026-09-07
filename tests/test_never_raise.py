@@ -270,3 +270,41 @@ def test_envelope_shape_semantic_provider(monkeypatch):
 def test_envelope_shape_gateway():
     r = Gateway([]).query("symbol", "x")
     assert _REQUIRED_ENVELOPE_KEYS.issubset(r.keys())
+
+
+# ---------------------------------------------------------------------------
+# Group 12: Indexer — the embedding model cannot be loaded
+#
+# `_get_embedder` raises EmbeddingModelUnavailable when fastembed cannot produce the model, which
+# on a first run means a ~50MB download that a proxy, a firewall or an offline host can refuse.
+# That raise is deliberate — `index()` converts it to -1 and parks the message on `last_error` —
+# but it is a new raising path on the way to a provider, so it gets a fault-injection case: the
+# invariant is that nothing escapes to a caller, whatever the indexer does.
+# ---------------------------------------------------------------------------
+
+def test_index_converts_a_model_load_failure_into_minus_one(monkeypatch, tmp_path):
+    from codeintel.indexer import EmbeddingModelUnavailable, Indexer
+
+    idx = Indexer.__new__(Indexer)
+    idx.last_error = None
+
+    def _raise(_self, _root):
+        raise EmbeddingModelUnavailable("BAAI/bge-small-en-v1.5", Exception("403 Forbidden"))
+
+    monkeypatch.setattr(Indexer, "_index", _raise, raising=True)
+    assert Indexer.index(idx, str(tmp_path)) == -1          # converted, not propagated
+    assert "403 Forbidden" in (idx.last_error or "")        # and the cause survives
+
+
+def test_semantic_provider_survives_a_model_load_failure(monkeypatch, tmp_path):
+    """The boundary that matters: a caller asking a question must still get an envelope."""
+    import codeintel.indexer as _idx_mod
+    from codeintel.indexer import EmbeddingModelUnavailable
+
+    def _raise(_self):
+        raise EmbeddingModelUnavailable("BAAI/bge-small-en-v1.5", Exception("403 Forbidden"))
+
+    monkeypatch.setattr(_idx_mod.Indexer, "_get_embedder", _raise, raising=True)
+    r = SemanticProvider().build_result("search", "anything", [], 0, str(tmp_path))
+    assert _REQUIRED_ENVELOPE_KEYS.issubset(r.keys())
+    assert r["ok"] is True
