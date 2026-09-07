@@ -198,6 +198,27 @@ def _nul_byte_line(path) -> int | None:
     return None if i < 0 else head.count(b"\n", 0, i) + 1
 
 
+class EmbeddingModelUnavailable(RuntimeError):
+    """The embedding model could not be loaded — the one indexing failure with a real remedy.
+
+    Carries the model name and a next step, because the underlying exception routinely carries
+    neither: fastembed downloads the model on first use, so an offline machine, a proxy or a
+    firewall produces a bare transport error ("403 Forbidden", "Connection refused") attached to
+    no visible operation. `str(...)` is deliberately ONE line — `last_error` is rendered inline by
+    `onboarding` (``f"indexing failed - {reason}"``) and by the `index` CLI.
+    """
+
+    def __init__(self, model_name: str, cause: BaseException):
+        self.model_name = model_name
+        self.cause = cause
+        detail = str(cause).strip() or type(cause).__name__
+        super().__init__(
+            f"could not load embedding model '{model_name}' ({detail}) - fastembed downloads it "
+            f"on first use; check network/proxy access to huggingface.co, or pre-populate the "
+            f"fastembed cache, then re-run"
+        )
+
+
 class Indexer:
     def __init__(
         self,
@@ -248,7 +269,15 @@ class Indexer:
     def _get_embedder(self):
         if self._embedder is None:
             from fastembed import TextEmbedding
-            self._embedder = TextEmbedding(model_name=self.model_name)
+            try:
+                self._embedder = TextEmbedding(model_name=self.model_name)
+            except Exception as exc:
+                # Classify HERE, at the operation, rather than by pattern-matching the exception
+                # text later: at this point we know the model is what was being loaded, and that
+                # the first load is a ~50MB network fetch. The raw exception is frequently a bare
+                # transport error — a blocked download surfaces as literally "403 Forbidden", which
+                # names neither the model, nor the download, nor anything to do about it.
+                raise EmbeddingModelUnavailable(self.model_name, exc) from exc
         return self._embedder
 
     def index(self, project_root: str) -> int:
@@ -263,6 +292,12 @@ class Indexer:
         self.last_error = None
         try:
             return self._index(project_root)
+        except EmbeddingModelUnavailable as exc:
+            # Already a complete, actionable sentence — prefixing it with the class name would
+            # bury the remedy behind noise.
+            logger.error("Indexer.index() unrecoverable failure: %s", exc)
+            self.last_error = str(exc)
+            return -1
         except Exception as exc:
             logger.error("Indexer.index() unrecoverable failure: %s", exc)
             self.last_error = f"{type(exc).__name__}: {exc}"
