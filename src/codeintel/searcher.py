@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from codeintel.containment import ContainmentError, open_contained
-from codeintel.semantic_db import chunk_content_hash, model_fetch_hint
+from codeintel.semantic_db import (
+    EmbeddingModelUnavailable,
+    chunk_content_hash,
+    load_embedder,
+)
 
 if TYPE_CHECKING:
     from codeintel.semantic_db import SemanticDb
@@ -96,8 +100,9 @@ class Searcher:
 
     def _get_embedder(self):
         if self._embedder is None:
-            from fastembed import TextEmbedding
-            self._embedder = TextEmbedding(model_name=self.model_name)
+            # Shared with the indexer so a failed model load is classified identically on both
+            # paths — a query is the other way a cold cache is discovered.
+            self._embedder = load_embedder(self.model_name)
         return self._embedder
 
     def _embed_query(self, query: str) -> bytes | None:
@@ -108,16 +113,18 @@ class Searcher:
                 return None
             vec = vecs[0]
             return struct.pack(f"{len(vec)}f", *vec)
+        except EmbeddingModelUnavailable as exc:
+            # Verbatim, for the same reason the indexer reports it verbatim: the sentence already
+            # names the model, the host and the remedy. Still stage-qualified, because a reader
+            # needs to know a QUERY hit this and not an index pass.
+            self.last_query_error = f"embedding the query failed — {exc}"
+            logger.warning("query embedding failed: %s", self.last_query_error)
+            return None
         except Exception as exc:
-            # Same naming as the indexer's failure path: a query is the OTHER way a cold model
-            # cache is discovered, and `ProxyError: 403` is no more actionable here than it was
-            # there. The hint is silent unless the exception looks like the fetch.
-            hint = model_fetch_hint(exc, self.model_name)
-            # Stage-qualified: `last_query_error` is now set from two places, and "which step of
-            # the search failed" is the first thing a reader needs — the fixes are unrelated.
+            # Stage-qualified: `last_query_error` is set from two stages, and "which step of the
+            # search failed" is the first thing a reader needs — the fixes are unrelated.
             self.last_query_error = (
                 f"embedding the query failed — {type(exc).__name__}: {exc}"
-                + (f" — {hint}" if hint else "")
             )
             logger.warning("query embedding failed: %s", self.last_query_error)
             return None

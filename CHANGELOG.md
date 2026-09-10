@@ -6,6 +6,52 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **A failed embedding-model load is classified where the model is loaded, not inferred from the
+  exception text afterwards.** The previous repair matched the raised exception against a list of
+  network-ish substrings (`proxy`, `403`, `max retries`, …) and appended the model story when one
+  hit. That was wrong in both directions, and both directions are now regression-tested:
+  - **False positive:** a `ConnectionError` raised deep in a long index pass — nothing to do with
+    fastembed — matched `connection` and got the whole embedding-model explanation appended,
+    sending the reader to check a proxy that was never involved.
+  - **False negative:** a genuinely blocked download whose message contained none of those words
+    (`request was denied by policy`) got no explanation at all — withholding it exactly when it
+    mattered most.
+  - `semantic_db.load_embedder` now raises `EmbeddingModelUnavailable` from the one place both the
+    indexer and the searcher construct an embedder, so neither can grow its own unclassified copy.
+    At that call site there is nothing to infer: we know the model is what was being loaded, and
+    that the first load is a ~50 MB network fetch. `_MODEL_FETCH_SIGNALS` and `model_fetch_hint`
+    are deleted — the classification carries strictly more information with less machinery.
+  - `last_error` reports that one exception **verbatim** (it is already a complete, actionable
+    sentence; an `EmbeddingModelUnavailable:` prefix would bury the remedy behind noise) and keeps
+    the `Type: message` form for every other cause, where the type is the information.
+
+### Fixed
+- **The background reindexer no longer fails in complete silence.** `_semantic_reindex` discarded
+  `Indexer.index()`'s return value, and `index()` honours the never-raise contract by swallowing
+  the cause and returning -1 — so the `except Exception` in `_do_reindex` was unreachable for the
+  single most likely background failure, a blocked model download on a machine that has never
+  warmed the cache. The pass logged nothing, while the generation bump in `_do_reindex`'s
+  `finally` went on invalidating every cached answer in favour of an index that had not moved.
+  The bump is right (it protects cache correctness); the silence was not. `_graph_reindex`
+  directly below already surfaced its backend's failures for exactly this reason — this was the
+  sibling that never got the same treatment.
+
+- **`codeintel index` shows the reason instead of pointing at it.** On an unrecoverable failure
+  the command printed `index failed — the indexer could not complete (see the warnings above)`.
+  That fails the reader twice: under a live progress line those warnings are routed through the
+  counter and may already be gone, and even when they survive it asks someone whose command just
+  failed to go hunting for the sentence this line could have printed. `last_error` is captured for
+  exactly this; the pointer remains only as the fallback when no reason was captured at all.
+  - A test censuses the tree for every module that both constructs an `Indexer` and calls
+    `.index()`, and requires each to consult `last_error` — with a second test proving the census
+    can actually fail. A hand-typed list is how this defect reached a third call site after being
+    fixed at the first.
+
+- **`docs/architecture.md` stops naming `~/.cache` as the model location.** It is
+  `$TMPDIR/fastembed_cache` (or `FASTEMBED_CACHE_PATH`), and `install.md` owns that path — a
+  location repeated in three files is one that gets corrected in two.
+
 ### Fixed
 - **A vector search that faulted is `query-failed`, not `below-floor`.** The last `return []` in
   `Searcher.search` still indistinguishable from a genuine miss: a corrupt index, an unusable

@@ -28,48 +28,62 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 MODEL_HOST = "huggingface.co"
 MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
 
-# Substrings that mark an exception as a failed FETCH rather than a failed embed. Matched against
-# `"TypeName: message"` lowercased, so a bare status code like `403` is read in the company of the
-# exception type that carries it (`ProxyError`, `HTTPError`) rather than anywhere in free text.
-_MODEL_FETCH_SIGNALS = (
-    "proxy", "connection", "ssl", "certificate", "max retries", "timed out", "timeout",
-    "name resolution", "getaddrinfo", "network is unreachable", "temporary failure",
-    "403", "407", "502", "503", "huggingface", "hf_hub", "hf.co", "unauthorized", "forbidden",
-)
+class EmbeddingModelUnavailable(RuntimeError):
+    """The embedding model could not be loaded — the one indexing/search failure with a real remedy.
 
+    Raised where the model is actually loaded, NOT inferred afterwards from the exception text.
+    That ordering is the whole point. The first version of this fix pattern-matched the raised
+    exception against a list of network-ish substrings ("proxy", "403", "max retries", …) and
+    attached the model story when one hit. It was wrong in both directions: an unrelated network
+    failure during a long index pass got the embedding-model explanation, and a genuine blocked
+    download whose message happened to contain none of those words got nothing. At the call site
+    there is nothing to infer — we know the model is what was being loaded, and that the first
+    load is a ~50 MB network fetch.
 
-def model_fetch_hint(exc: BaseException, model_name: str = DEFAULT_MODEL) -> str | None:
-    """Name the embedding-model download when *exc* looks like a blocked one, else ``None``.
-
-    Deliberately a HINT and not a diagnosis: this cannot prove the failure was the download rather
-    than some other network call, so it says "looks like" and hands over the three facts a blocked
-    user needs — that a model is being fetched, from which host, and which variable relocates the
-    cache. Returning ``None`` for anything unrecognised keeps an unrelated failure (an unwritable
-    cache dir, a corrupt db) from being explained wrongly, which would be worse than the bare
-    exception this augments.
-
-    Never raises: it is called from inside except-handlers that must not acquire a second failure.
+    Carries the model name and a next step, because the underlying exception routinely carries
+    neither: a blocked download surfaces as a bare `403 Forbidden`, attached to no visible
+    operation. ``str(...)`` is deliberately ONE line — `last_error` is rendered inline by
+    `onboarding` (``f"indexing failed — {reason}"``), by the `index` CLI, and by the semantic
+    engine's `index-failed` envelope, and a newline breaks the step table that exists to make the
+    failure legible.
     """
-    try:
-        text = f"{type(exc).__name__}: {exc}".lower()
-        if not any(sig in text for sig in _MODEL_FETCH_SIGNALS):
-            return None
-        return (
-            f"this looks like a blocked download of the {model_name} embedding weights (~50 MB), "
-            f"which fastembed fetches from {MODEL_HOST} the first time the semantic engine runs. "
-            f"codeintel makes no other outbound request. Behind a proxy or air-gapped, set "
-            f"{MODEL_CACHE_ENV} to a directory pre-seeded with the model on a connected machine "
-            f"— see docs/install.md, 'Offline / air-gapped install'"
+
+    def __init__(self, model_name: str, cause: BaseException) -> None:
+        self.model_name = model_name
+        self.cause = cause
+        # The type as well as the message: "403 Forbidden" alone does not say that a proxy
+        # refused it, and `ProxyError` is the word that sends the reader to the right place.
+        # Falls back to the bare type name when `str(cause)` is empty (e.g. `Exception()`), so
+        # the parenthetical never renders as an empty "()".
+        text = str(cause).strip()
+        detail = f"{type(cause).__name__}: {text}" if text else type(cause).__name__
+        super().__init__(
+            f"could not load embedding model '{model_name}' ({detail}) — fastembed downloads it "
+            f"(~50 MB) from {MODEL_HOST} on first use and codeintel makes no other outbound "
+            f"request; check network/proxy access, or set {MODEL_CACHE_ENV} to a directory "
+            f"pre-seeded with the model on a connected machine (see docs/install.md, "
+            f"'Offline / air-gapped install'), then re-run"
         )
-    except Exception:
-        return None
+
+
+def load_embedder(model_name: str):
+    """Construct fastembed's embedder, classifying a failed model load at the operation.
+
+    The single place both the indexer and the searcher build one, so neither can grow its own
+    unclassified copy — the defect this replaces reached two call sites that way.
+    """
+    from fastembed import TextEmbedding
+    try:
+        return TextEmbedding(model_name=model_name)
+    except Exception as exc:
+        raise EmbeddingModelUnavailable(model_name, exc) from exc
+
 
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
 # minified bundle or generated one-liner is one unsplittable chunk however large: a 20MB one-line
 # .py peaked at 3.4GB RSS through the embedder, on the reindexer's daemon thread inside the
 # long-lived MCP server. The head of a chunk carries its identifying content anyway.
 MAX_CHUNK_CHARS = 200_000
-
 
 
 def model_cache_dir() -> str:

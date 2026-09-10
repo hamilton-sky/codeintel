@@ -79,17 +79,21 @@ def run(args: Any) -> int:
             db.init()
             if bridge is not None:
                 idx_logger.addHandler(bridge)
+            # Bound to a name rather than constructed inline: `index()` parks the failure reason
+            # on `indexer.last_error`, and a throwaway instance makes that unreachable — which is
+            # why this command could only ever say "see the warnings above".
+            indexer = Indexer(
+                db,
+                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                window=int(cfg.get("window", 20)),
+                stride=int(cfg.get("stride", 10)),
+                max_chunks=int(cfg.get("max_chunks", 500)),
+                max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+                chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
+                progress=counter,
+            )
             try:
-                count = Indexer(
-                    db,
-                    model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
-                    window=int(cfg.get("window", 20)),
-                    stride=int(cfg.get("stride", 10)),
-                    max_chunks=int(cfg.get("max_chunks", 500)),
-                    max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
-                    chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-                    progress=counter,
-                ).index(project_root)
+                count = indexer.index(project_root)
             finally:
                 if bridge is not None:
                     idx_logger.removeHandler(bridge)
@@ -102,7 +106,18 @@ def run(args: Any) -> int:
             elif count < 0:
                 # Indexer.index() returns -1 for an unrecoverable failure. `> 0` sent that into
                 # the "Nothing new to index" branch, so a total failure read as a clean no-op.
-                print("index failed — the indexer could not complete (see the warnings above)")
+                #
+                # SHOW the reason. It is captured on `last_error` for exactly this, and deferring
+                # to the log fails the reader twice over: under a live progress line those
+                # warnings are routed through the counter and may already be gone, and even when
+                # they survive, "see the warnings above" asks someone whose command just failed to
+                # go hunting for the sentence this line could have printed. The pointer stays only
+                # for the case where no reason was captured at all.
+                if indexer.last_error:
+                    print(f"index failed — {indexer.last_error}")
+                else:
+                    print("index failed — the indexer could not complete "
+                          "(see the warnings above)")
                 failed = True
             else:
                 print("Nothing new to index")
