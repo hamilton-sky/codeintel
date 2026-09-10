@@ -15,6 +15,8 @@ these tests pin both that message and the call sites that have to show it.
 from __future__ import annotations
 
 import ast
+import errno
+import os
 import re
 from pathlib import Path
 
@@ -94,17 +96,58 @@ def test_an_unsupported_model_is_a_config_error_not_a_network_one():
     assert MODEL_CACHE_ENV not in msg       # nothing to pre-seed
 
 
-def test_an_unwritable_cache_names_the_cache_not_the_network(monkeypatch, tmp_path):
-    """The download would succeed and then have nowhere to land — a different fix entirely."""
+@pytest.mark.parametrize(
+    "errno_name",
+    [
+        "EACCES",   # permissions — the only family with its own exception class
+        "EPERM",
+        "ENOSPC",   # full disk        — a bare OSError
+        "EROFS",    # read-only fs     — a bare OSError
+        "EDQUOT",   # quota exceeded   — a bare OSError
+        "ENOTDIR",  # the cache path is not a directory
+        "EISDIR",
+    ],
+)
+def test_every_unwritable_cache_names_the_cache_not_the_network(errno_name, monkeypatch, tmp_path):
+    """The download would succeed and then have nowhere to land — a different fix entirely.
+
+    Keyed on errno rather than exception class, because only EACCES/EPERM get a dedicated class.
+    A full disk, a read-only filesystem and an exceeded quota all arrive as a bare `OSError`, and
+    catching `PermissionError` alone sent those users off to check their proxy.
+    """
+    code = getattr(errno, errno_name, None)
+    if code is None:
+        pytest.skip(f"{errno_name} is not defined on this platform")
+
     monkeypatch.setenv(MODEL_CACHE_ENV, str(tmp_path / "cache"))
     with pytest.raises(EmbeddingModelUnavailable) as caught:
-        _load_with(PermissionError("Permission denied"))
+        _load_with(OSError(code, os.strerror(code)))
 
     msg = str(caught.value)
-    assert "not writable" in msg
+    assert "cannot be written" in msg
     assert str(tmp_path / "cache") in msg   # WHICH directory
     assert MODEL_HOST not in msg
     assert "proxy" not in msg.lower()
+
+
+@pytest.mark.parametrize("exc", [
+    ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+    TimeoutError(errno.ETIMEDOUT, "Connection timed out"),
+    OSError(errno.EHOSTUNREACH, "No route to host"),
+])
+def test_network_oserrors_are_still_the_download(exc):
+    """The other half of the same rule, and the one a broad `except OSError` would have broken.
+
+    `ConnectionRefusedError` and `TimeoutError` ARE `OSError` subclasses. Classifying by class
+    instead of errno would route the genuine network failures — the ones this whole change exists
+    to explain — into the cache bucket.
+    """
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(exc)
+
+    msg = str(caught.value)
+    assert MODEL_HOST in msg
+    assert "cannot be written" not in msg
 
 
 def test_everything_else_is_the_first_use_download():

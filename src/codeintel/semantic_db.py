@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -27,6 +28,30 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 # was actually hitting it, because nobody reads the install doc while the install is what failed.
 MODEL_HOST = "huggingface.co"
 MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
+
+# Errnos that mean "the cache cannot be written", as opposed to "the fetch failed". Only
+# EACCES/EPERM get a dedicated Python exception class (`PermissionError`); a full disk, a
+# read-only filesystem and an exceeded quota all arrive as a bare `OSError`, which is why this
+# classification cannot be done with an `except` clause alone. EDQUOT is not defined on every
+# platform.
+_CACHE_WRITE_ERRNOS = frozenset(
+    n for n in (
+        getattr(errno, name, None)
+        for name in ("EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT", "ENOTDIR", "EISDIR")
+    )
+    if n is not None
+)
+
+
+def _download_remedy() -> str:
+    """The first-use fetch remedy. One definition, because two call sites now emit it."""
+    return (
+        f"fastembed downloads it (~50 MB) from {MODEL_HOST} on first use and codeintel makes no "
+        f"other outbound request; check network/proxy access, or set {MODEL_CACHE_ENV} to a "
+        f"directory pre-seeded with the model on a connected machine (see docs/install.md, "
+        f"'Offline / air-gapped install'), then re-run"
+    )
+
 
 def _one_line(text: str) -> str:
     """Collapse any run of whitespace — newlines included — to single spaces.
@@ -99,24 +124,29 @@ def load_embedder(model_name: str):
             "that is not a model fastembed ships — check the `model` key in your codeintel "
             "config; `TextEmbedding.list_supported_models()` lists the valid names",
         ) from exc
-    except PermissionError as exc:
-        # The cache directory exists and cannot be written. Also not a network problem: the
-        # download would succeed and then have nowhere to land.
+    except OSError as exc:
+        # The cache cannot be written. Also not a network problem: the download would succeed and
+        # then have nowhere to land.
+        #
+        # Keyed on errno, NOT on the exception class. `PermissionError` covers only EACCES/EPERM;
+        # a full disk (ENOSPC), a read-only filesystem (EROFS) and an exceeded quota (EDQUOT) all
+        # raise a plain `OSError` with no dedicated subclass, so catching the subclass alone sent
+        # someone whose disk was full off to check their proxy. And the reverse matters just as
+        # much: `ConnectionRefusedError` and `TimeoutError` ARE `OSError` subclasses, so a broad
+        # `except OSError` would swallow the genuine network failures this whole change exists to
+        # explain. The errno set is what separates the two.
+        if exc.errno not in _CACHE_WRITE_ERRNOS:
+            raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
         raise EmbeddingModelUnavailable(
             model_name, exc,
-            f"the fastembed cache at {model_cache_dir()} is not writable — fix its permissions, "
-            f"or point {MODEL_CACHE_ENV} at a directory this user can write",
+            f"the fastembed cache at {model_cache_dir()} cannot be written — free space or fix "
+            f"permissions there, or point {MODEL_CACHE_ENV} at a writable directory with room "
+            f"for ~50 MB",
         ) from exc
     except Exception as exc:
         # What is left is the first-use fetch: this is the one with the network remedy, and the
         # one an external reviewer hit as a bare `403 Forbidden` naming neither model nor host.
-        raise EmbeddingModelUnavailable(
-            model_name, exc,
-            f"fastembed downloads it (~50 MB) from {MODEL_HOST} on first use and codeintel makes "
-            f"no other outbound request; check network/proxy access, or set {MODEL_CACHE_ENV} to "
-            f"a directory pre-seeded with the model on a connected machine (see docs/install.md, "
-            f"'Offline / air-gapped install'), then re-run",
-        ) from exc
+        raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
 
 
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a

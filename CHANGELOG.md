@@ -26,8 +26,15 @@ All notable changes to codeintel are documented here. The format is based on
     not ship to go and check their proxy is the same defect wearing different clothes. The remedy
     is chosen per cause: an unsupported model (fastembed's own `ValueError`, raised from its model
     list before any request — measured at 0.000s) points at the `model` config key; a
-    `PermissionError` names the cache directory that cannot be written; everything else is the
-    first-use download, with the host and `FASTEMBED_CACHE_PATH`.
+    a cache that cannot be written names that directory; everything else is the first-use
+    download, with the host and `FASTEMBED_CACHE_PATH`.
+  - The cache branch keys on **errno**, not on the exception class, and both directions matter.
+    Only EACCES/EPERM get a dedicated class (`PermissionError`) — a full disk (ENOSPC), a
+    read-only filesystem (EROFS) and an exceeded quota (EDQUOT) all arrive as a bare `OSError`,
+    so catching the subclass alone told someone whose disk was full to go and check their proxy.
+    And `ConnectionRefusedError`/`TimeoutError` are themselves `OSError` subclasses, so a broad
+    `except OSError` would have swallowed the genuine network failures this change exists to
+    explain. The errno set is what separates the two, and both halves are tested.
   - Every field interpolated into that message is flattened to one line, not just the cause.
     `model_name` arrives straight from config and `config._coerce` only `strip()`s it — which
     removes surrounding whitespace but not an interior newline, so a valid TOML multi-line string
