@@ -86,6 +86,11 @@ class Searcher:
         # legacy rows with no stored span, which cannot be checked either way.
         self.last_stale = 0
         self.last_unverifiable = 0
+        # Why the last search could not be RUN, as opposed to running and matching nothing. An
+        # empty result list is the same object either way, so without this a query the embedder
+        # could not encode — a cold model cache behind a proxy is the common case — reached the
+        # caller as `below-floor`, which an agent is told to read as "this code does not exist".
+        self.last_query_error: str | None = None
 
     def _get_embedder(self):
         if self._embedder is None:
@@ -106,7 +111,8 @@ class Searcher:
             # cache is discovered, and `ProxyError: 403` is no more actionable here than it was
             # there. The hint is silent unless the exception looks like the fetch.
             hint = model_fetch_hint(exc, self.model_name)
-            logger.warning("query embedding failed: %s%s", exc, f" — {hint}" if hint else "")
+            self.last_query_error = f"{type(exc).__name__}: {exc}" + (f" — {hint}" if hint else "")
+            logger.warning("query embedding failed: %s", self.last_query_error)
             return None
 
     def _row_count(self, project_root_real: str) -> int:
@@ -306,11 +312,14 @@ class Searcher:
         # Reset FIRST, before any early return. These describe THIS search, and every path out of
         # this method must leave them describing it — including the ones that never reach
         # verification (blank query, unindexed project, a query the embedder could not encode).
+        # `last_query_error` is reset here for the same reason and read on the empty-result path:
+        # a stale one would report a previous query's failure against a search that ran fine.
         # `_get_embedder` caches the model on the instance precisely so a Searcher can be reused,
         # so leaving a previous query's counts in place would have a caller report "N chunks
         # withheld" about a search that never ran.
         self.last_stale = 0
         self.last_unverifiable = 0
+        self.last_query_error = None
 
         if not query or not query.strip():
             return []

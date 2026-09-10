@@ -494,7 +494,7 @@ Register codeintel as an MCP server (`codeintel install`) and the agent gets fou
 | MCP tool | HTTP equivalent | Purpose |
 |---|---|---|
 | `code.query` | `POST /code/query` | The main call — search, trace, understand (the `op` table above) |
-| `code.status` | `GET /code/status` | Per-engine `installed` / `runnable` / `repo_indexed`, probed against the live engines a query actually hits |
+| `code.status` | `GET /code/status` | Per-engine `installed` / `runnable` / `repo_indexed` (plus `model_cached` for semantic), probed against the live engines a query actually hits |
 | `code.doctor` | `POST /code/doctor` | Per-engine health + repo index status, with a fix for each gap |
 | `code.map` | — | Generate/refresh `CODE_INTEL.md`, a static orientation file for hosts without MCP |
 

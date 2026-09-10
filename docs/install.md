@@ -116,8 +116,8 @@ read it, and a server returning `ok: true` with an empty body.
 
 Start a **new** agent session — hosts read MCP config at startup. Then confirm from inside the agent:
 
-- `code.status` — per-engine `installed` / `runnable` / `repo_indexed`, probed against the live
-  engines a query actually hits.
+- `code.status` — per-engine `installed` / `runnable` / `repo_indexed` (plus `model_cached` for
+  semantic), probed against the live engines a query actually hits.
 - `code.doctor` — the same, plus a one-line fix for each gap and any stale registration.
 
 For Claude Code specifically, `claude mcp list` should now show `codeintel`.
@@ -151,6 +151,21 @@ codeintel command that touches the semantic engine:
 export FASTEMBED_CACHE_PATH=/path/to/a/portable/model-cache   # e.g. in your shell profile
 codeintel setup --all /path/to/your/project
 ```
+
+**`codeintel doctor` answers this before you index.** Its semantic row carries a `model_cached`
+field, so "nobody has indexed this repo yet" and "the weights every index pass needs were never
+fetched" stop being the same row with different fixes:
+
+```text
+└─ semantic: no semantic index database yet; embedding weights for BAAI/bge-small-en-v1.5 are not
+   cached yet — the next index downloads ~50 MB from huggingface.co
+   fix: codeintel index /path/to/project  (blocked download? point FASTEMBED_CACHE_PATH at a
+   pre-seeded cache — see docs/install.md, 'Offline / air-gapped install')
+```
+
+It is a **warn**, not a failure: on a connected machine an uncached model is just a download that
+has not happened yet. The check stats the cache directory and never creates it, loads the model,
+or touches the network — `doctor` is read-only and bounded by contract.
 
 This is a real path derived from `fastembed`'s own cache resolution, not something this project
 ships or tests end-to-end in CI (CI has network access, so the air-gapped case is unexercised

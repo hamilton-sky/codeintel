@@ -94,6 +94,37 @@ def _not_indexed_probe(project_root: str, detail: str) -> dict:
     }
 
 
+def _with_model_cache(probe: dict, model_cached: bool | None, model: str) -> dict:
+    """Stamp a probe with whether the embedding weights are on disk, and say so when they are not.
+
+    This is the question `doctor` could not previously ask. "Installed, runnable, repo not
+    indexed" was reported identically whether nobody had run `index` yet or the weights every
+    index pass needs had never been fetched and this machine cannot reach the host that serves
+    them — two states with completely different fixes, and the second is the one that produces
+    "it's installed, why doesn't it work". `doctor` distinguishing installed / runnable / indexed
+    is the thing this tool is praised for; this is the fourth question, in the same style.
+
+    Not a failure on its own: on a connected machine an uncached model is simply a download that
+    has not happened yet, so it warns rather than failing (see `doctor._status_for`).
+    """
+    probe["model_cached"] = model_cached
+    if model_cached is not False:
+        return probe
+    # Imported here, not at module scope: `semantic_db` imports `sqlite_vec`, and a top-level
+    # import would raise on exactly the machines `_DEPS_OK` exists to degrade gracefully for —
+    # turning a clean "engine-unavailable" into an import error at startup.
+    from codeintel.semantic_db import MODEL_CACHE_ENV, MODEL_HOST
+    note = (f"embedding weights for {model} are not cached yet — the next index downloads "
+            f"~50 MB from {MODEL_HOST}")
+    detail = str(probe.get("detail") or "")
+    probe["detail"] = f"{detail}; {note}" if detail else note
+    blocked = (f"blocked download? point {MODEL_CACHE_ENV} at a pre-seeded cache — see "
+               f"docs/install.md, 'Offline / air-gapped install'")
+    rem = str(probe.get("remediation") or "")
+    probe["remediation"] = f"{rem}  ({blocked})" if rem else blocked
+    return probe
+
+
 def _plural(n: int, noun: str) -> str:
     """``3 matching chunks`` / ``1 matching chunk`` — these strings are read by a human deciding
     whether to re-index, and "1 matching chunks were dropped" reads like a formatting bug in the
@@ -158,6 +189,7 @@ class SemanticProvider:
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False,
+                "model_cached": None,  # fastembed is absent — its cache is not the gap to report
                 "detail": "fastembed / sqlite-vec not importable",
                 "remediation": "pip install fastembed sqlite-vec  (or: pip install -e .)",
             }
@@ -166,7 +198,7 @@ class SemanticProvider:
 
         try:
             from codeintel.config import load_config
-            from codeintel.semantic_db import default_db_path
+            from codeintel.semantic_db import DEFAULT_MODEL, default_db_path, model_is_cached
             model = str(load_config(project_root).get("model") or "")
             db_path = default_db_path(model)
         except Exception as exc:
@@ -178,12 +210,20 @@ class SemanticProvider:
             # actual problem. Say what broke and how to override it.
             return {
                 "installed": True, "runnable": False, "repo_indexed": False,
+                "model_cached": None,  # the model name never resolved — no claim to make
                 "detail": f"cannot locate the index cache directory: {exc}",
                 "remediation": "set HOME (or CODEINTEL_HOME) to a writable directory — this "
                                "environment has no resolvable home directory",
             }
+        # Resolved once and stamped on every path below. A filesystem check by contract: `probe`
+        # must not load the model, and this must not create the cache directory it is inspecting.
+        named_model = model or DEFAULT_MODEL
+        cached = model_is_cached(named_model)
         if not os.path.exists(db_path):
-            return _not_indexed_probe(project_root, "no semantic index database yet")
+            return _with_model_cache(
+                _not_indexed_probe(project_root, "no semantic index database yet"),
+                cached, named_model,
+            )
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
@@ -195,17 +235,20 @@ class SemanticProvider:
                 conn.close()
             count = int(row[0]) if row else 0
         except Exception as exc:
-            return {
+            return _with_model_cache({
                 "installed": True, "runnable": False, "repo_indexed": False,
                 "detail": f"semantic cache present but unreadable ({type(exc).__name__})",
                 "remediation": f"codeintel reset {project_root} && codeintel index {project_root}",
-            }
+            }, cached, named_model)
         if count > 0:
-            return {
+            return _with_model_cache({
                 "installed": True, "runnable": True, "repo_indexed": True,
                 "detail": f"{count} indexed chunks for this repo", "remediation": None,
-            }
-        return _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo")
+            }, cached, named_model)
+        return _with_model_cache(
+            _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo"),
+            cached, named_model,
+        )
 
     def build_result(
         self,
@@ -334,6 +377,22 @@ class SemanticProvider:
                 # Distinguish "nothing was similar enough" from "everything similar was stale".
                 # Both used to report `below-floor`, which reads as "this code does not exist" —
                 # the single most damaging thing to tell an agent about a repo it just edited.
+                #
+                # A query the embedder could not ENCODE is the third member of that family and was
+                # the last one still collapsed. `search()` returns `[]` for it exactly as it does
+                # for a genuine miss, so a repo whose model cache is cold behind a proxy answered
+                # every single query with `below-floor` — a confident, wrong statement about the
+                # repository, produced by an engine that was never able to ask it anything. It is
+                # checked FIRST because it outranks the others: staleness counts describe a search
+                # that ran, and this one did not.
+                if searcher.last_query_error:
+                    return safe_null_result(
+                        op, target, engine="semantic", reason="query-failed",
+                        hint=(f"the query could not be embedded, so no search ran: "
+                              f"{searcher.last_query_error}. This is NOT evidence that nothing "
+                              f"matches — run `codeintel doctor {project_root}` to check the "
+                              f"engine"),
+                    )
                 if searcher.last_stale:
                     return safe_null_result(
                         op, target, engine="semantic", reason="index-stale",
