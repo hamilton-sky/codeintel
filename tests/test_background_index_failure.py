@@ -72,18 +72,92 @@ def test_the_key_is_the_realpath_like_every_other_entry(tmp_path):
     assert _background_index_failure(str(tmp_path) + "/") == "boom"
 
 
-def test_starting_a_pass_clears_a_stale_failure(tmp_path, monkeypatch):
-    """Reached only once the cooldown has expired — a leftover cause must not answer for the pass
-    that is now actually in flight."""
+def _no_real_thread(monkeypatch, started: list):
+    monkeypatch.setattr(
+        sem.threading, "Thread",
+        lambda **kw: type("_T", (), {"start": lambda self: started.append("go")})(),
+    )
+
+
+def test_the_start_helper_refuses_while_a_failure_stands(tmp_path, monkeypatch):
+    """The cooldown is enforced under the same lock that marks the start, not by the caller.
+
+    A check in the caller is a check-then-act race with a real losing interleaving: a request
+    looks up the failure and sees none because the thread has not recorded yet; the thread then
+    records and clears `_BG_INDEX_STARTED`; the request, finding no job in flight, starts another
+    pass. An earlier version also destroyed the fresh cause on the way past, so concurrent polling
+    — exactly what "retry shortly" tells an agent to do — could bypass the cooldown indefinitely.
+    """
     started: list[str] = []
-    monkeypatch.setattr(sem.threading, "Thread",
-                        lambda **kw: type("_T", (), {"start": lambda self: started.append("go")})())
+    _no_real_thread(monkeypatch, started)
     key = _index_key(str(tmp_path))
     sem._BG_INDEX_FAILED[key] = (time.monotonic(), "ProxyError: 403")
+
+    assert sem._start_background_index(str(tmp_path), ":memory:", {}) is False
+    assert started == []                          # no pass launched
+    assert key in sem._BG_INDEX_FAILED            # and the cause survives the attempt
+
+
+def test_the_start_helper_allows_the_one_retry_once_expired(tmp_path, monkeypatch):
+    started: list[str] = []
+    _no_real_thread(monkeypatch, started)
+    key = _index_key(str(tmp_path))
+    sem._BG_INDEX_FAILED[key] = (time.monotonic() - _BG_INDEX_COOLDOWN_S - 1, "ProxyError: 403")
 
     assert sem._start_background_index(str(tmp_path), ":memory:", {}) is True
     assert started == ["go"]
     assert key not in sem._BG_INDEX_FAILED
+
+
+def test_a_failure_landing_mid_request_is_not_reported_as_progress(monkeypatch, tmp_path):
+    """The losing interleaving, driven deterministically.
+
+    The caller's first lookup sees nothing; the failure lands before it starts a pass. The helper
+    refuses, and the caller re-reads rather than reporting the refusal as `indexing-in-progress`.
+    """
+    p = _cold_repo_provider(monkeypatch, tmp_path)
+    key = _index_key(str(tmp_path))
+    calls: list[int] = []
+
+    real_lookup = sem._background_index_failure
+
+    def _racy(root):
+        calls.append(1)
+        if len(calls) == 1:
+            return None                                    # nothing recorded yet
+        return real_lookup(root)
+
+    monkeypatch.setattr(sem, "_background_index_failure", _racy)
+    # The thread records its failure in the window between the caller's check and its start.
+    monkeypatch.setattr(sem, "_start_background_index",
+                        lambda *a, **k: (_record_background_failure(key, "ProxyError: 403"), False)[1])
+
+    r = p.build_result("search", "x", [], 0, str(tmp_path))
+
+    assert r["reason"] == "index-failed"
+    assert "403" in r["hint"]
+
+
+def test_expired_entries_are_pruned_globally_not_only_on_their_own_lookup(tmp_path):
+    """A long-lived server sees many one-off roots. Pruning only the key being looked up left
+    every never-revisited root in the dict forever — a cleanup claim the code did not keep."""
+    old_at = time.monotonic() - _BG_INDEX_COOLDOWN_S - 1
+    for i in range(5):
+        sem._BG_INDEX_FAILED[f"/never/queried/again/{i}"] = (old_at, "ProxyError: 403")
+
+    _record_background_failure(_index_key(str(tmp_path)), "a new failure elsewhere")
+
+    assert [k for k in sem._BG_INDEX_FAILED if k.startswith("/never/")] == []
+    assert _background_index_failure(str(tmp_path)) == "a new failure elsewhere"
+
+
+def test_pruning_does_not_evict_entries_that_are_still_live(tmp_path):
+    """The sweep must not become its own cooldown bypass."""
+    sem._BG_INDEX_FAILED["/still/cooling"] = (time.monotonic(), "ProxyError: 403")
+
+    _record_background_failure(_index_key(str(tmp_path)), "another failure")
+
+    assert "/still/cooling" in sem._BG_INDEX_FAILED
 
 
 # --------------------------------------------------------------------------------------------- #

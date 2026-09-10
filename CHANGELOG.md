@@ -26,6 +26,17 @@ All notable changes to codeintel are documented here. The format is based on
   - **A crash on the thread is recorded too**, not only a `-1` return: `index()` never raises, but
     `db.init()` and the imports around it can, and a caller stuck on `indexing-in-progress` cannot
     tell the two apart.
+  - **The cooldown is enforced under the lock that marks the start, not by the caller's earlier
+    check.** A check in the caller is a check-then-act race with a real losing interleaving: a
+    request looks up the failure and sees none because the thread has not recorded yet; the thread
+    then records and clears `_BG_INDEX_STARTED`; the request, finding no job in flight, starts
+    another pass — and a defensive `pop` in the start helper destroyed the fresh cause on the way
+    past. Concurrent polling, which is exactly what "retry shortly" tells an agent to do, could
+    bypass the cooldown indefinitely. The helper now refuses while a failure stands, and the
+    caller re-reads after a refusal so it cannot be reported as progress.
+  - **Expired entries are pruned globally when a failure is recorded**, not only on a later lookup
+    of the same root. Pruning per-key left a long-lived server holding one entry per one-off repo
+    whose pass failed and which nobody queried again — a cleanup claim the code did not keep.
   - **A `db.close()` fault cannot overwrite the real cause.** `close()` runs in a `finally` after
     the cause has been recorded and can itself raise; landing in the outer handler then replaced
     "could not load embedding model … check network/proxy access" with a database-close error —

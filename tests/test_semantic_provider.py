@@ -298,6 +298,14 @@ def test_start_background_index_dedupes_concurrent_calls_for_the_same_root(tmp_p
 
 
 def test_background_index_crash_does_not_wedge_the_project_root(tmp_path, monkeypatch):
+    """A crashed pass must not make the root permanently unstartable.
+
+    The guarantee is "not wedged FOREVER", and it used to be asserted by immediacy: a second call
+    right after the crash had to return True. A crash is now also a recorded failure, so it is
+    refused for `_BG_INDEX_COOLDOWN_S` — deliberately, and bounded. That refusal is not the wedge
+    this guards against (a leaked `_BG_INDEX_STARTED` marker would be), so the property is now
+    asserted directly instead: refused inside the window, startable again outside it.
+    """
     monkeypatch.setattr("codeintel.indexer.Indexer.index",
                          lambda self, project_root: (_ for _ in ()).throw(RuntimeError("boom")))
     root = str(tmp_path)
@@ -306,7 +314,18 @@ def test_background_index_crash_does_not_wedge_the_project_root(tmp_path, monkey
     assert semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS) is True
     _wait_until_not_indexing(root)  # the crash must still clear the in-flight marker
 
-    # Wedged state would make this return False forever; a fresh attempt must be allowed to start.
+    # Inside the cooldown: refused, and the cause is reported rather than retried.
+    assert semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS) is False
+    assert "RuntimeError" in (semantic_mod._background_index_failure(root) or "")
+
+    # Outside it: startable again — which is the anti-wedge property this test exists for.
+    key = semantic_mod._index_key(root)
+    with semantic_mod._BG_INDEX_LOCK:
+        failed_at, cause = semantic_mod._BG_INDEX_FAILED[key]
+        semantic_mod._BG_INDEX_FAILED[key] = (
+            failed_at - semantic_mod._BG_INDEX_COOLDOWN_S - 1, cause,
+        )
+
     monkeypatch.setattr("codeintel.indexer.Indexer.index", lambda self, project_root: 0)
     assert semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS) is True
     _wait_until_not_indexing(root)
