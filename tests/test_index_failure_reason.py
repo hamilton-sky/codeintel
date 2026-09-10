@@ -274,56 +274,91 @@ def test_the_searcher_reports_it_too(monkeypatch):
 # Every call site that runs an index must be able to SHOW why it failed
 # --------------------------------------------------------------------------------------------- #
 
-def _index_call_sites(root: Path) -> list[Path]:
-    """Modules that both construct an `Indexer` and call `.index(...)` on one.
+def _discarded_index_calls(root: Path) -> list[str]:
+    """`file:line` for every `.index(...)` whose RESULT IS THROWN AWAY, in a module that builds an
+    `Indexer`.
 
-    Derived from the tree, never hand-listed: a hand-typed list is how this defect reached a
-    third call site (the CLI and the background reindexer) after it was fixed at the first.
+    The check is per call site, and it had to become so. The first version of this census asked
+    whether the word `last_error` appeared anywhere in the module — and a module can contain one
+    call site that handles the failure and another that discards it. `providers/semantic.py` was
+    exactly that: the blocking inline pass read `last_error`, so the file "passed", while the
+    background cold-index thread twenty lines from the top dropped the return value on the floor.
+    The guard reported compliance for the precise pattern it exists to prevent.
+
+    So the rule now encodes the defect itself rather than a proxy for it: `index()` returns -1 on
+    an unrecoverable failure and parks the cause on `last_error`, so a call whose value nobody
+    binds or tests is a pass whose outcome nobody can ever report. An `ast.Expr` statement is
+    exactly that — a call evaluated for effect, its result discarded.
     """
-    out: list[Path] = []
+    out: list[str] = []
     for path in sorted(root.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        constructs = any(
+        builds_indexer = any(
             isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "Indexer"
             for n in ast.walk(tree)
         )
-        calls_index = any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "index"
-            for n in ast.walk(tree)
-        )
-        if constructs and calls_index:
-            out.append(path)
-    return out
+        if not builds_indexer:
+            continue
+        for node in ast.walk(tree):
+            # A bare expression statement: the value is computed and dropped.
+            if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+                continue
+            func = node.value.func
+            if isinstance(func, ast.Attribute) and func.attr == "index":
+                out.append(f"{path.relative_to(root)}:{node.lineno}")
+    return sorted(out)
 
 
-def _violations(root: Path) -> list[str]:
-    return [
-        str(p.relative_to(root))
-        for p in _index_call_sites(root)
-        if "last_error" not in p.read_text(encoding="utf-8")
-    ]
+def test_no_index_pass_discards_its_outcome():
+    """Every `.index()` in the tree binds or tests its result, so every failure can be reported."""
+    assert _discarded_index_calls(SRC) == []
 
 
-def test_every_index_call_site_consults_last_error():
-    sites = _index_call_sites(SRC)
-    # The census must actually find the known call sites; an empty domain would pass vacuously.
-    names = {p.name for p in sites}
-    assert {"index.py", "reindexer.py", "semantic.py"} <= names, names
-    assert _violations(SRC) == []
+def test_the_census_actually_inspects_the_known_call_sites():
+    """An empty domain would make the assertion above pass vacuously."""
+    sites = {
+        p.name
+        for p in SRC.rglob("*.py")
+        if "Indexer(" in p.read_text(encoding="utf-8")
+    }
+    assert {"index.py", "reindexer.py", "semantic.py"} <= sites, sites
 
 
 def test_the_census_can_actually_fail(tmp_path):
     """A guard that cannot fail converts "we did not check" into "green"."""
     (tmp_path / "offender.py").write_text(
         "def go(db, root):\n"
-        "    idx = Indexer(db)\n"
-        "    return idx.index(root)\n",
+        "    Indexer(db).index(root)\n",          # result discarded — the defect
         encoding="utf-8",
     )
-    assert _violations(tmp_path) == ["offender.py"]
+    assert _discarded_index_calls(tmp_path) == ["offender.py:2"]
+
+
+def test_the_census_does_not_flag_a_handled_call(tmp_path):
+    """And it must not fire on the correct shape, or it would be noise rather than a guard."""
+    (tmp_path / "ok.py").write_text(
+        "def go(db, root):\n"
+        "    idx = Indexer(db)\n"
+        "    if idx.index(root) < 0:\n"
+        "        report(idx.last_error)\n",
+        encoding="utf-8",
+    )
+    assert _discarded_index_calls(tmp_path) == []
+
+
+def test_the_background_cold_index_reports_its_failure():
+    """The site the text-based census missed: a daemon thread whose pass nobody could hear fail.
+
+    `index()` never raises, so the `except` wrapping this thread could not see the most likely
+    failure here. The request that started the pass had already returned `indexing-in-progress`,
+    and every later query got the same answer forever.
+    """
+    text = (SRC / "providers" / "semantic.py").read_text(encoding="utf-8")
+    assert re.search(r"if\s+indexer\.index\(project_root\)\s*<\s*0:", text)
+    assert "background cold index failed" in text
 
 
 def test_the_cli_no_longer_leads_with_a_dead_pointer():

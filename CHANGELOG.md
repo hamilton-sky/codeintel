@@ -46,16 +46,29 @@ All notable changes to codeintel are documented here. The format is based on
   directly below already surfaced its backend's failures for exactly this reason — this was the
   sibling that never got the same treatment.
 
+- **The background cold-index pass no longer fails silently either.** The third instance of the
+  same defect, and the one that proved the first version of the guard below was vacuous:
+  `_start_background_index` discarded `index()`'s return on its daemon thread. `index()` never
+  raises, so the `except` wrapping that thread could not see the most likely failure there — and
+  the request that started the pass had already returned `indexing-in-progress`, so every later
+  query got the same answer forever with nothing recording that the pass had failed.
+
 - **`codeintel index` shows the reason instead of pointing at it.** On an unrecoverable failure
   the command printed `index failed — the indexer could not complete (see the warnings above)`.
   That fails the reader twice: under a live progress line those warnings are routed through the
   counter and may already be gone, and even when they survive it asks someone whose command just
   failed to go hunting for the sentence this line could have printed. `last_error` is captured for
   exactly this; the pointer remains only as the fallback when no reason was captured at all.
-  - A test censuses the tree for every module that both constructs an `Indexer` and calls
-    `.index()`, and requires each to consult `last_error` — with a second test proving the census
-    can actually fail. A hand-typed list is how this defect reached a third call site after being
-    fixed at the first.
+  - A test censuses the tree for every `.index()` call **whose result is thrown away**, in any
+    module that builds an `Indexer` — with tests proving it fires on the defective shape and stays
+    quiet on the correct one. A hand-typed list is how this defect reached a third call site after
+    being fixed at the first.
+  - **The first version of that census was itself vacuous**, and review caught it: it asked whether
+    the word `last_error` appeared anywhere in the module, so a file with one handled call site and
+    one discarding one passed. `providers/semantic.py` was exactly that file. The rule now encodes
+    the defect itself — `index()` returns -1 and parks the cause on `last_error`, so a call whose
+    value nobody binds or tests is a pass whose outcome nobody can report — and it was verified
+    against the pre-fix tree, where it correctly reports `providers/semantic.py:75`.
 
 - **`docs/architecture.md` stops naming `~/.cache` as the model location.** It is
   `$TMPDIR/fastembed_cache` (or `FASTEMBED_CACHE_PATH`), and `install.md` owns that path — a

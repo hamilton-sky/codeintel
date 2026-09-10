@@ -214,7 +214,29 @@ def test_semantic_provider_db_init_raises(monkeypatch):
 
 def _model_unavailable(*_a, **_k):
     from codeintel.semantic_db import DEFAULT_MODEL, EmbeddingModelUnavailable
-    raise EmbeddingModelUnavailable(DEFAULT_MODEL, RuntimeError("403 Forbidden"))
+    # The `remedy` argument is REQUIRED. Omitting it raised TypeError here instead, which every
+    # boundary below caught anyway (they catch `Exception`) — so all four tests passed while
+    # exercising none of the path they exist to pin. A fault-injection test that injects the
+    # wrong fault is worse than no test: it reports coverage it does not have.
+    raise EmbeddingModelUnavailable(
+        DEFAULT_MODEL, RuntimeError("403 Forbidden"), "check network/proxy access",
+    )
+
+
+def _assert_is_model_unavailable():
+    """Guard the guard: prove the injected fault is the one these tests claim to inject."""
+    from codeintel.semantic_db import EmbeddingModelUnavailable
+    try:
+        _model_unavailable()
+    except EmbeddingModelUnavailable:
+        return
+    except BaseException as exc:  # pragma: no cover - only on a regression
+        raise AssertionError(f"injected {type(exc).__name__}, not EmbeddingModelUnavailable") from exc
+    raise AssertionError("nothing raised")
+
+
+def test_the_injected_fault_is_the_advertised_one():
+    _assert_is_model_unavailable()
 
 
 def test_indexer_index_absorbs_a_model_load_failure(monkeypatch, tmp_path):
