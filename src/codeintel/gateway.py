@@ -297,7 +297,11 @@ class Gateway:
                            # An index pass that RAN and FAILED is a could-not-ask, not a
                            # found-nothing. `no-index` deliberately stays out: it means the pass
                            # completed and there was nothing to embed, which is an answer.
-                           "index-failed"}
+                           "index-failed",
+                           # A query the embedder could not encode. No search ran, so the empty
+                           # result says nothing about the repository — the same reasoning as
+                           # `index-failed`, one step later in the pipeline.
+                           "query-failed"}
             all_unreachable = bool(reasons) and all(v in unreachable for v in reasons.values())
             summary = "engines-unavailable" if all_unreachable else "no-result"
             detail = ", ".join(f"{eng}: {why}" for eng, why in sorted(reasons.items()))

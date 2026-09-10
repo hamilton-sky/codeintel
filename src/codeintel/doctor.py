@@ -1,7 +1,10 @@
 """Preflight diagnostics — turn the tool's silent safe-null degradation into a clear signal.
 
 `run_doctor` asks each engine three questions — installed? runnable? is THIS repo indexed? —
-with a one-line remediation per gap. It is never-raise and bounded: no engine check may hang,
+with a one-line remediation per gap. The semantic engine answers a fourth, `model_cached`: an
+index pass needs weights that are downloaded on first use, and "nobody has indexed this repo yet"
+and "the weights were never fetched and this host cannot reach the one that serves them" were
+otherwise the same row with different fixes. It is never-raise and bounded: no engine check may hang,
 crash, load the embedding model, mutate state, or go through the gateway (no reindex side
 effects). The same report drives the CLI `doctor` command, the `code.doctor` MCP tool, and HTTP.
 """
@@ -24,7 +27,8 @@ def _status_for(report: dict) -> str:
     """Roll a probe dict up to ok / warn / fail.
 
     fail = not installed, not runnable, or (graph/semantic) repo not indexed — all actionable.
-    warn = installed but readiness unknown (lsp not-yet-warmed, or a deep boot that timed out).
+    warn = installed but readiness unknown (lsp not-yet-warmed, a deep boot that timed out, or
+           semantic weights not yet downloaded).
     ok   = installed, runnable, and (where applicable) this repo is indexed."""
     if not report.get("installed"):
         return "fail"
@@ -34,6 +38,13 @@ def _status_for(report: dict) -> str:
     if report.get("repo_indexed") is False:
         return "fail"
     if runnable is None:
+        return "warn"
+    # Weights that have never been downloaded are a WARN, not a fail: on a connected machine this
+    # is a download that has not happened yet and the next index performs it silently. It is only
+    # fatal where the host is unreachable, which cannot be known from here — and a probe that
+    # reported "fail" for a perfectly healthy first install would train people to ignore the row
+    # that matters. `None` (could not determine) makes no claim at all.
+    if report.get("model_cached") is False:
         return "warn"
     return "ok"
 

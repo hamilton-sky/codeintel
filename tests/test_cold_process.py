@@ -60,6 +60,10 @@ _COULD_NOT_ASK = {
     # set on purpose: it means the pass completed and found nothing to embed, which is an answer
     # about the repository rather than a failure to ask.
     "index-failed",
+    # A query the embedder could not encode — `Searcher.search` returns `[]` for that exactly as
+    # it does for a genuine miss, so this used to reach the caller as `below-floor`: a confident
+    # claim about the repository from an engine that never ran a search.
+    "query-failed",
 }
 _ASKED_AND_FOUND_NOTHING = {"not-in-graph", "no-result", "below-floor", "not-found"}
 _EMPTINESS_MARKERS = ("(none)", "(none found)", "(no matches)", "(0)")

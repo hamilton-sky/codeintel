@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import pathlib
 import re
 import sqlite3
+import tempfile
 import time
 
 import sqlite_vec
@@ -15,11 +17,125 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
+# Where `fastembed` fetches those weights on a cold cache, and the environment variable that
+# redirects (or pre-seeds) the cache directory. Named here, beside the model itself, because the
+# reason they need naming is a RUNTIME message: the download is the one non-local step in an
+# otherwise local-first tool, and when a proxy blocks it the exception that surfaces is a bare
+# `ProxyError: 403 Forbidden` — which says nothing about an embedding model, names no host, and
+# offers no fix. docs/install.md has documented that exact failure, and the `FASTEMBED_CACHE_PATH`
+# workaround, since the 2026-08-23 status eval; the knowledge simply never reached the user who
+# was actually hitting it, because nobody reads the install doc while the install is what failed.
+MODEL_HOST = "huggingface.co"
+MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
+
+# Substrings that mark an exception as a failed FETCH rather than a failed embed. Matched against
+# `"TypeName: message"` lowercased, so a bare status code like `403` is read in the company of the
+# exception type that carries it (`ProxyError`, `HTTPError`) rather than anywhere in free text.
+_MODEL_FETCH_SIGNALS = (
+    "proxy", "connection", "ssl", "certificate", "max retries", "timed out", "timeout",
+    "name resolution", "getaddrinfo", "network is unreachable", "temporary failure",
+    "403", "407", "502", "503", "huggingface", "hf_hub", "hf.co", "unauthorized", "forbidden",
+)
+
+
+def model_fetch_hint(exc: BaseException, model_name: str = DEFAULT_MODEL) -> str | None:
+    """Name the embedding-model download when *exc* looks like a blocked one, else ``None``.
+
+    Deliberately a HINT and not a diagnosis: this cannot prove the failure was the download rather
+    than some other network call, so it says "looks like" and hands over the three facts a blocked
+    user needs — that a model is being fetched, from which host, and which variable relocates the
+    cache. Returning ``None`` for anything unrecognised keeps an unrelated failure (an unwritable
+    cache dir, a corrupt db) from being explained wrongly, which would be worse than the bare
+    exception this augments.
+
+    Never raises: it is called from inside except-handlers that must not acquire a second failure.
+    """
+    try:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if not any(sig in text for sig in _MODEL_FETCH_SIGNALS):
+            return None
+        return (
+            f"this looks like a blocked download of the {model_name} embedding weights (~50 MB), "
+            f"which fastembed fetches from {MODEL_HOST} the first time the semantic engine runs. "
+            f"codeintel makes no other outbound request. Behind a proxy or air-gapped, set "
+            f"{MODEL_CACHE_ENV} to a directory pre-seeded with the model on a connected machine "
+            f"— see docs/install.md, 'Offline / air-gapped install'"
+        )
+    except Exception:
+        return None
+
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
 # minified bundle or generated one-liner is one unsplittable chunk however large: a 20MB one-line
 # .py peaked at 3.4GB RSS through the embedder, on the reindexer's daemon thread inside the
 # long-lived MCP server. The head of a chunk carries its identifying content anyway.
 MAX_CHUNK_CHARS = 200_000
+
+
+
+def model_cache_dir() -> str:
+    """Where `fastembed` keeps downloaded model weights, WITHOUT creating it.
+
+    Mirrors `fastembed.common.utils.define_cache_dir` — `$FASTEMBED_CACHE_PATH`, else
+    `$TMPDIR/fastembed_cache` — and deliberately does not call it, because that function
+    `mkdir`s the directory as a side effect. `doctor` is documented as read-only and must not
+    bring a cache into existence merely by asking whether one exists; a directory it created
+    would also make the "does the model live here" question answer itself wrongly on the next
+    run. The duplication is one `os.path.join` and is pinned by a test against the real
+    fastembed resolution.
+    """
+    override = os.environ.get(MODEL_CACHE_ENV)
+    if override:
+        return override
+    return os.path.join(tempfile.gettempdir(), "fastembed_cache")
+
+
+# Ceiling on entries examined while looking for cached weights. A user is free to point
+# FASTEMBED_CACHE_PATH at a large shared directory, and `doctor` is bounded (~3s) by contract:
+# past this the honest answer is "could not determine", not a slow one.
+_CACHE_SCAN_LIMIT = 20000
+
+
+def model_is_cached(model_name: str = DEFAULT_MODEL) -> bool | None:
+    """Whether *model_name*'s weights are already on disk. ``None`` means "could not determine".
+
+    Answers the question `doctor` could not previously ask: an engine can be installed, runnable
+    and pointed at an unindexed repo for two completely different reasons — nobody has indexed it
+    yet, or the weights every index pass needs have never been fetched and this machine cannot
+    reach the host that serves them. Those have different fixes, and collapsing them is why
+    "it's installed, why doesn't it work" is the support burden it is.
+
+    Deliberately a filesystem question, not a fastembed one. `ModelManagement.download_model(...,
+    local_files_only=True)` would be authoritative, but it creates cache directories on the way to
+    failing — a probe that mutates what it measures — and it logs its own errors to stderr, on top
+    of the report. So: look for an ONNX weight file whose path names this model. fastembed's two
+    layouts both carry the model's slug in the directory name (`bge-small-en-v1.5` for the GCS
+    tarball, `models--qdrant--bge-small-en-v1.5-onnx-q` for the HuggingFace snapshot), which is
+    what makes a slug match specific enough to not answer "yes" because some OTHER model is
+    cached.
+
+    Never raises: an unreadable cache directory is ``None`` (unknown), never ``False`` — claiming
+    a model is missing because we could not look would send the reader to fix the wrong thing.
+    """
+    try:
+        cache = model_cache_dir()
+        if not os.path.isdir(cache):
+            return False
+        slug = str(model_name or DEFAULT_MODEL).rsplit("/", 1)[-1].lower()
+        if not slug:
+            return None
+        seen = 0
+        for dirpath, _dirnames, filenames in os.walk(cache):
+            for name in filenames:
+                seen += 1
+                if seen > _CACHE_SCAN_LIMIT:
+                    return None
+                if not name.lower().endswith(".onnx"):
+                    continue
+                if slug in os.path.join(dirpath, name).lower():
+                    return True
+        return False
+    except Exception:
+        return None
 
 
 def chunk_content_hash(text: str) -> str:
