@@ -154,6 +154,34 @@ def test_the_message_is_one_line():
     assert "\n" not in msg
 
 
+def test_every_field_is_flattened_not_only_the_cause():
+    """One-line has to hold for each interpolated field, not the one that was untrusted first.
+
+    `model_name` arrives straight from config, and `config._coerce` only `strip()`s it — which
+    removes surrounding whitespace but not an interior newline. A TOML multi-line string puts one
+    right in the middle of the message, and only the cause was being normalised.
+    """
+    exc = EmbeddingModelUnavailable(
+        "BAAI/\nbge-small-en-v1.5", RuntimeError("403\nForbidden"), "check\naccess",
+    )
+    assert "\n" not in str(exc)
+    assert len(str(exc).splitlines()) == 1
+
+
+def test_a_multiline_model_name_survives_the_real_config_path(tmp_path):
+    """Not hypothetical: this is what a valid `.codeintel.toml` can hand the indexer."""
+    from codeintel.config import load_config
+
+    (tmp_path / ".codeintel.toml").write_text(
+        'model = """BAAI/\nbge-small-en-v1.5"""\n', encoding="utf-8",
+    )
+    model = str(load_config(str(tmp_path)).get("model"))
+    assert "\n" in model, "config still normalises it — this guard can retire"
+
+    exc = EmbeddingModelUnavailable(model, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY)
+    assert "\n" not in str(exc)
+
+
 def test_a_causeless_exception_still_produces_a_message():
     """`str(exc)` is empty for a bare `Exception()`; the type name keeps the parenthetical from
     rendering as an empty '()'."""

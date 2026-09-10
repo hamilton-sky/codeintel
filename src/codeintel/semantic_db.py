@@ -28,6 +28,15 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 MODEL_HOST = "huggingface.co"
 MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
 
+def _one_line(text: str) -> str:
+    """Collapse any run of whitespace — newlines included — to single spaces.
+
+    `str.strip()` is not enough: it only touches the ends. Used on every field interpolated into
+    a message that is contractually one line.
+    """
+    return " ".join(str(text).split())
+
+
 class EmbeddingModelUnavailable(RuntimeError):
     """The embedding model could not be loaded, with the remedy that actually fits the cause.
 
@@ -55,13 +64,19 @@ class EmbeddingModelUnavailable(RuntimeError):
         self.model_name = model_name
         self.cause = cause
         self.remedy = remedy
-        # The type as well as the message: "403 Forbidden" alone does not say that a proxy refused
-        # it, and `ProxyError` is the word that sends the reader to the right place. Falls back to
-        # the bare type name when `str(cause)` is empty (e.g. `Exception()`), so the parenthetical
-        # never renders as an empty "()".
-        text = " ".join(str(cause).split())
+        # EVERY interpolated field is flattened, not just the cause. `model_name` reaches here
+        # straight from config, and `config._coerce` only `strip()`s it — which removes surrounding
+        # whitespace but not an interior newline, so a TOML multi-line string
+        # (`model = """BAAI/\nbge-small-en-v1.5"""`) put a line break in the middle of the
+        # promise this class makes about itself. A direct `Indexer(model_name=...)` caller can do
+        # the same. One-line is a contract with `onboarding`'s step table and the `index` CLI, so
+        # it has to hold for every field rather than the one that happened to be untrusted first.
+        text = _one_line(str(cause))
         detail = f"{type(cause).__name__}: {text}" if text else type(cause).__name__
-        super().__init__(f"could not load embedding model '{model_name}' ({detail}) — {remedy}")
+        super().__init__(
+            f"could not load embedding model '{_one_line(model_name)}' ({detail}) "
+            f"— {_one_line(remedy)}"
+        )
 
 
 def load_embedder(model_name: str):

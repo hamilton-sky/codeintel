@@ -28,6 +28,11 @@ All notable changes to codeintel are documented here. The format is based on
     list before any request — measured at 0.000s) points at the `model` config key; a
     `PermissionError` names the cache directory that cannot be written; everything else is the
     first-use download, with the host and `FASTEMBED_CACHE_PATH`.
+  - Every field interpolated into that message is flattened to one line, not just the cause.
+    `model_name` arrives straight from config and `config._coerce` only `strip()`s it — which
+    removes surrounding whitespace but not an interior newline, so a valid TOML multi-line string
+    (`model = """BAAI/\nbge-small-en-v1.5"""`) put a line break in the middle of a message the
+    class contractually keeps on one line, breaking `onboarding`'s step table and the `index` CLI.
   - The signal is always structural — an exception **type**, which is a contract — never the
     message text, which is not. A `ValueError` whose text happens to read like a network failure
     is still a configuration error, and a test pins exactly that.
