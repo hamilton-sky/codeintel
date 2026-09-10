@@ -151,6 +151,24 @@ def test_expired_entries_are_pruned_globally_not_only_on_their_own_lookup(tmp_pa
     assert _background_index_failure(str(tmp_path)) == "a new failure elsewhere"
 
 
+def test_a_lookup_also_prunes_roots_nobody_asks_about_again(tmp_path):
+    """The hole a write-only sweep leaves.
+
+    A burst of one-off roots fails, then failures stop — no later write ever arrives to trigger a
+    sweep, so every entry survives for the process lifetime. Pruning per-key on reads has the
+    mirror-image hole: it only touches roots someone asks about again. Sweeping on both closes
+    both, and this asserts the read half.
+    """
+    old_at = time.monotonic() - _BG_INDEX_COOLDOWN_S - 1
+    for i in range(5):
+        sem._BG_INDEX_FAILED[f"/burst/then/silence/{i}"] = (old_at, "ProxyError: 403")
+
+    # An ordinary lookup for an unrelated root — no failure is recorded anywhere.
+    assert _background_index_failure(str(tmp_path)) is None
+
+    assert [k for k in sem._BG_INDEX_FAILED if k.startswith("/burst/")] == []
+
+
 def test_pruning_does_not_evict_entries_that_are_still_live(tmp_path):
     """The sweep must not become its own cooldown bypass."""
     sem._BG_INDEX_FAILED["/still/cooling"] = (time.monotonic(), "ProxyError: 403")

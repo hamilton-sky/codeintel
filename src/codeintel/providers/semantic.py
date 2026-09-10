@@ -51,34 +51,41 @@ def _index_key(project_root: str) -> str:
         return project_root
 
 
+def _prune_expired_locked() -> None:
+    """Drop every entry whose cooldown has passed. Caller MUST hold `_BG_INDEX_LOCK`.
+
+    Called from BOTH the write and the read path, which is what actually bounds the registry.
+    Sweeping only on writes left a hole: a burst of one-off roots that fail and are never revisited
+    keeps every entry for the process lifetime if no LATER failure ever arrives to trigger a sweep.
+    Pruning per-key on reads has the mirror-image hole — it only ever touches roots someone asks
+    about again. Doing it on both closes both, and the set is small by construction (only roots
+    that failed inside one window), so the cost is nil on either path.
+    """
+    now = time.monotonic()
+    for stale in [k for k, (at, _) in _BG_INDEX_FAILED.items()
+                  if now - at >= _BG_INDEX_COOLDOWN_S]:
+        del _BG_INDEX_FAILED[stale]
+
+
 def _record_background_failure(key: str, cause: str) -> None:
     with _BG_INDEX_LOCK:
-        # Sweep every expired entry, not just this key's. Pruning only on lookup of the SAME root
-        # left a long-lived server accumulating one entry per one-off repo whose pass failed and
-        # which nobody ever queried again — a claim of cleanup that the code did not keep. Recording
-        # happens only on failure, so an O(n) sweep here costs nothing on the healthy path.
-        now = time.monotonic()
-        for stale in [k for k, (at, _) in _BG_INDEX_FAILED.items()
-                      if now - at >= _BG_INDEX_COOLDOWN_S]:
-            del _BG_INDEX_FAILED[stale]
-        _BG_INDEX_FAILED[key] = (now, cause)
+        _prune_expired_locked()
+        _BG_INDEX_FAILED[key] = (time.monotonic(), cause)
 
 
 def _unexpired_failure_locked(key: str) -> str | None:
-    """The standing failure for *key*, dropping it if its window has passed.
+    """The standing failure for *key*, or ``None`` once its window has passed.
 
     Callers MUST already hold `_BG_INDEX_LOCK`. It exists as a separate function precisely so the
     "is there a failure?" question and the "start a pass" decision can happen under one
     acquisition — see `_start_background_index`.
+
+    Expiry is handled by the sweep rather than per-key: after it, a key that is still present is
+    by definition still within its window, so the lookup needs no second time comparison.
     """
+    _prune_expired_locked()
     entry = _BG_INDEX_FAILED.get(key)
-    if entry is None:
-        return None
-    failed_at, cause = entry
-    if time.monotonic() - failed_at < _BG_INDEX_COOLDOWN_S:
-        return cause
-    del _BG_INDEX_FAILED[key]
-    return None
+    return None if entry is None else entry[1]
 
 
 def _background_index_failure(project_root: str) -> str | None:

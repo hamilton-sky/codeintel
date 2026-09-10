@@ -34,9 +34,12 @@ All notable changes to codeintel are documented here. The format is based on
     past. Concurrent polling, which is exactly what "retry shortly" tells an agent to do, could
     bypass the cooldown indefinitely. The helper now refuses while a failure stands, and the
     caller re-reads after a refusal so it cannot be reported as progress.
-  - **Expired entries are pruned globally when a failure is recorded**, not only on a later lookup
-    of the same root. Pruning per-key left a long-lived server holding one entry per one-off repo
-    whose pass failed and which nobody queried again — a cleanup claim the code did not keep.
+  - **Expired entries are swept on both the write and the read path**, which is what actually
+    bounds the registry. Each half alone leaves a hole: sweeping only on writes keeps every entry
+    from a burst of one-off roots for the process lifetime if no later failure ever arrives, and
+    pruning per-key on reads only ever touches roots someone asks about again. The set is small by
+    construction — only roots that failed inside one window — so the sweep costs nothing either
+    way.
   - **A failing `db.close()` cannot mask, replace, or invent a cause.** An exception raised in a
     `finally` REPLACES the one already propagating (the original is demoted to `__context__`), and
     `close()` runs in exactly that position. Three distinct wrong outcomes came out of it, all now
