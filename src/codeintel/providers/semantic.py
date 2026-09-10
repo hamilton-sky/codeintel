@@ -26,6 +26,22 @@ except ImportError:
 # project root so a trailing slash or a relative path can't be tracked as a second, independent job.
 _BG_INDEX_LOCK = threading.Lock()
 _BG_INDEX_STARTED: dict[str, float] = {}  # project_root (realpath) -> time.monotonic() at start
+# The last background pass that FAILED for a root: (time.monotonic() at failure, cause).
+#
+# Without this, a pass that fails is indistinguishable from one that has not run. The thread's
+# `finally` clears `_BG_INDEX_STARTED`, so the next request finds no index and no job in flight,
+# starts another pass, and answers `indexing-in-progress` again — forever, about work that keeps
+# dying, while the only actionable text goes to a server log the calling agent cannot see. An
+# agent told "indexing is in progress" retries; it does not go and fix its proxy.
+_BG_INDEX_FAILED: dict[str, tuple[float, str]] = {}
+
+# How long a recorded failure suppresses both the retry and the `indexing-in-progress` answer.
+# Sized to match `providers/lsp.py`'s `_COOLDOWN_SECONDS`, and deliberately the same shape as that
+# one rather than a second invention: a failed LSP boot is already remembered, reported, and
+# retried exactly once per window. The window is what makes a TRANSIENT failure self-clearing (the
+# next request after it elapses tries again) while a PERMANENT one stays legible instead of being
+# reported as progress.
+_BG_INDEX_COOLDOWN_S = 60.0
 
 
 def _index_key(project_root: str) -> str:
@@ -33,6 +49,31 @@ def _index_key(project_root: str) -> str:
         return os.path.realpath(project_root)
     except Exception:
         return project_root
+
+
+def _record_background_failure(key: str, cause: str) -> None:
+    with _BG_INDEX_LOCK:
+        _BG_INDEX_FAILED[key] = (time.monotonic(), cause)
+
+
+def _background_index_failure(project_root: str) -> str | None:
+    """The cause of the last background pass for *project_root*, while its cooldown holds.
+
+    ``None`` once the window has elapsed — which is what licenses exactly one retry, so a
+    transient failure (a proxy that came back, a disk that was freed) clears itself without
+    anyone intervening. The entry is dropped on expiry so a long-lived server does not accumulate
+    one per repo it has ever been pointed at.
+    """
+    key = _index_key(project_root)
+    with _BG_INDEX_LOCK:
+        entry = _BG_INDEX_FAILED.get(key)
+        if entry is None:
+            return None
+        failed_at, cause = entry
+        if time.monotonic() - failed_at < _BG_INDEX_COOLDOWN_S:
+            return cause
+        del _BG_INDEX_FAILED[key]
+        return None
 
 
 def _background_index_elapsed_s(project_root: str) -> float | None:
@@ -56,8 +97,13 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
         if key in _BG_INDEX_STARTED:
             return False
         _BG_INDEX_STARTED[key] = time.monotonic()
+        # Starting a pass clears any remembered failure: this call site only runs once the
+        # cooldown has expired, and leaving the old cause in place would let a stale entry answer
+        # for a pass that is currently in flight.
+        _BG_INDEX_FAILED.pop(key, None)
 
     def _run() -> None:
+        recorded = False
         try:
             from codeintel.indexer import Indexer
             from codeintel.semantic_db import SemanticDb
@@ -74,14 +120,27 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
                 # because nothing ever recorded that the pass had failed.
                 indexer = Indexer(db, **indexer_kwargs)
                 if indexer.index(project_root) < 0:
-                    logger.warning(
-                        "background cold index failed for %s: %s",
-                        project_root, indexer.last_error or "unrecoverable failure",
-                    )
+                    cause = indexer.last_error or "unrecoverable failure"
+                    logger.warning("background cold index failed for %s: %s", project_root, cause)
+                    # RECORDED, not just logged. The log reaches an operator; the caller of this
+                    # engine is an agent on the far side of MCP or HTTP, and the envelope is the
+                    # only channel it has.
+                    _record_background_failure(key, cause)
+                    recorded = True
             finally:
                 db.close()
         except Exception as exc:
             log_swallowed("SemanticProvider._start_background_index", exc)
+            # A crash before or around the pass is a failed pass too. `index()` itself never
+            # raises, but `db.init()` and the imports above it can, and a caller that gets
+            # `indexing-in-progress` forever cannot tell the two apart.
+            #
+            # Guarded, because `db.close()` in the `finally` above runs AFTER the real cause has
+            # been recorded and can itself raise. Landing here then would overwrite "could not
+            # load embedding model … check network/proxy access" with a database-close error —
+            # replacing the actionable cause with a downstream symptom of it.
+            if not recorded:
+                _record_background_failure(key, f"{type(exc).__name__}: {exc}")
         finally:
             with _BG_INDEX_LOCK:
                 _BG_INDEX_STARTED.pop(key, None)
@@ -95,6 +154,15 @@ def _not_indexed_probe(project_root: str, detail: str) -> dict:
     that gap is because a background cold-index is already filling it in (see
     `_start_background_index`), so `code.doctor`/`code.status` can say so instead of repeating
     'not indexed' unremediated on every check while it works."""
+    # Same order as the query path, and for the same reason: `doctor` saying "indexing in
+    # progress" about a pass that died is the diagnostic command repeating the misdiagnosis.
+    bg_error = _background_index_failure(project_root)
+    if bg_error is not None:
+        return {
+            "installed": True, "runnable": True, "repo_indexed": False,
+            "detail": f"a background index pass failed: {bg_error}",
+            "remediation": f"fix the cause above, then run: codeintel index {project_root}",
+        }
     elapsed = _background_index_elapsed_s(project_root)
     if elapsed is not None:
         return {
@@ -336,6 +404,23 @@ class SemanticProvider:
                 # it off in the background (deduped per project root — see `_start_background_index`)
                 # and return the safe-null envelope immediately so the caller can retry shortly
                 # instead of hanging with nothing.
+                #
+                # A pass that already FAILED for this repo is reported as a failure, not as
+                # progress. Checked before starting another one: the previous behaviour restarted
+                # the same doomed pass on every request and answered `indexing-in-progress` each
+                # time, so a repo whose model download is blocked told the caller work was
+                # underway forever while the cause sat in a log no agent can read. "Retry shortly"
+                # is advice an agent follows; it is not advice that fixes a proxy.
+                bg_error = _background_index_failure(project_root)
+                if bg_error is not None:
+                    return safe_null_result(
+                        op, target, engine="semantic", reason="index-failed",
+                        hint=(f"a background index pass ran for this repo and failed: {bg_error} "
+                              f"— this is NOT 'still indexing'. Nothing is retried for "
+                              f"{int(_BG_INDEX_COOLDOWN_S)}s; fix the cause, or run "
+                              f"`codeintel index {project_root}` to index synchronously with "
+                              f"progress output"),
+                    )
                 _start_background_index(project_root, db_path, indexer_kwargs)
                 elapsed = _background_index_elapsed_s(project_root) or 0.0
                 return safe_null_result(

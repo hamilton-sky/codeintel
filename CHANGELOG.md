@@ -6,6 +6,34 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A background index pass that failed stops reporting itself as in progress.** The cold-index
+  thread's `finally` clears `_BG_INDEX_STARTED`, so once a pass died the next request found no
+  index and no job in flight, started another doomed pass, and answered `indexing-in-progress`
+  again — forever, about work that kept dying, while the one actionable sentence went to a server
+  log the calling agent cannot read. An agent told "indexing is in progress" retries; it does not
+  go and fix its proxy.
+  - The failure is now remembered per project root with its cause, and served as `index-failed`
+    carrying that cause. `index-failed` is already in the gateway's `unreachable` set, so a
+    `context` fan-out where it is the only outcome says "this is NOT evidence the target does not
+    exist" rather than `no-result`.
+  - **The policy mirrors `providers/lsp.py`'s failed-boot cooldown rather than inventing a second
+    one.** For `_BG_INDEX_COOLDOWN_S` (60s) nothing is retried and the cause is reported; once the
+    window elapses exactly one retry is allowed. That is what makes a transient failure — a proxy
+    that came back, a disk that was freed — clear itself without anyone intervening, while a
+    permanent one stays legible instead of being dressed as progress. Expired entries are dropped
+    rather than accumulating, since a long-lived server sees many roots.
+  - **A crash on the thread is recorded too**, not only a `-1` return: `index()` never raises, but
+    `db.init()` and the imports around it can, and a caller stuck on `indexing-in-progress` cannot
+    tell the two apart.
+  - **A `db.close()` fault cannot overwrite the real cause.** `close()` runs in a `finally` after
+    the cause has been recorded and can itself raise; landing in the outer handler then replaced
+    "could not load embedding model … check network/proxy access" with a database-close error —
+    the actionable cause swapped for a downstream symptom of it. Found by re-reading the diff, and
+    pinned by a test verified against the unguarded version.
+  - `doctor` and `code.status` take the same branch in the same order — the diagnostic command
+    repeating the misdiagnosis is the one place that must not.
+
 ### Changed
 - **A failed embedding-model load is classified where the model is loaded, not inferred from the
   exception text afterwards.** The previous repair matched the raised exception against a list of
