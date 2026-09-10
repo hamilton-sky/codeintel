@@ -32,6 +32,13 @@ class ProxyError(Exception):
 # --------------------------------------------------------------------------------------------- #
 
 def test_searcher_records_why_a_search_could_not_run(monkeypatch):
+    """An UNCLASSIFIED embed failure: the type is kept, and no model story is invented.
+
+    The embedding-model explanation belongs only to `EmbeddingModelUnavailable`, which is raised
+    where the model is loaded — see `tests/test_index_failure_reason.py`. A raw transport error
+    from an embedder that already loaded is a different fault with a different fix, and attaching
+    the download story to it is exactly the false positive that classification removed.
+    """
     s = Searcher.__new__(Searcher)
     s.model_name = DEFAULT_MODEL
     s.last_query_error = None
@@ -43,11 +50,10 @@ def test_searcher_records_why_a_search_could_not_run(monkeypatch):
     assert s._embed_query("anything") is None
     assert s.last_query_error is not None
     assert "ProxyError: 403 Forbidden" in s.last_query_error
-    # and it carries the same naming the indexer's failure path grew
-    assert "huggingface.co" in s.last_query_error
     # Stage-qualified: two stages set this field and their fixes are unrelated, so "which step
     # failed" has to survive into the message a reader actually sees.
     assert "embedding the query failed" in s.last_query_error
+    assert "huggingface.co" not in s.last_query_error
 
 
 def test_a_faulted_vector_search_is_recorded_too(tmp_path, monkeypatch):

@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING
 
 from codeintel.containment import contained_path, real_root
 from codeintel.progress import ProgressSink, _Guard
-from codeintel.semantic_db import MAX_CHUNK_CHARS, chunk_content_hash, model_fetch_hint
+from codeintel.semantic_db import (
+    MAX_CHUNK_CHARS,
+    EmbeddingModelUnavailable,
+    chunk_content_hash,
+    load_embedder,
+)
 from codeintel.source_kind import (
     CODE_EXTS,
     load_gitattributes_globs,
@@ -247,8 +252,10 @@ class Indexer:
 
     def _get_embedder(self):
         if self._embedder is None:
-            from fastembed import TextEmbedding
-            self._embedder = TextEmbedding(model_name=self.model_name)
+            # `load_embedder` classifies a failed model load AT the load, raising
+            # EmbeddingModelUnavailable. See its docstring for why that beats inferring the same
+            # thing from the exception text afterwards.
+            self._embedder = load_embedder(self.model_name)
         return self._embedder
 
     def index(self, project_root: str) -> int:
@@ -265,15 +272,24 @@ class Indexer:
         nor the host it is fetched from, nor the variable that redirects the cache — so a reviewer
         who hit it on the very first command had to read the proxy's own logs to learn the host.
         This is the first command a new user runs, in a tool whose contract is that failures are
-        actionable; `model_fetch_hint` supplies the three missing facts when the exception looks
-        like that download, and stays silent when it does not.
+        actionable, so the one failure with a real remedy is raised already carrying it.
         """
         self.last_error = None
         try:
             return self._index(project_root)
+        except EmbeddingModelUnavailable as exc:
+            # Reported verbatim. It is already a complete, actionable sentence naming the model,
+            # the host and the remedy; prefixing it with the class name would bury the remedy
+            # behind noise, and `EmbeddingModelUnavailable:` tells the reader nothing the sentence
+            # does not already say.
+            logger.error("Indexer.index() unrecoverable failure: %s", exc)
+            self.last_error = str(exc)
+            return -1
         except Exception as exc:
-            hint = model_fetch_hint(exc, self.model_name)
-            detail = f"{type(exc).__name__}: {exc}" + (f" — {hint}" if hint else "")
+            # Unclassified: here the TYPE is the information (`PermissionError`, `OperationalError`
+            # …), so it is kept. Dropping it to match the branch above would make this a regression
+            # for every cause that is not the model.
+            detail = f"{type(exc).__name__}: {exc}"
             logger.error("Indexer.index() unrecoverable failure: %s", detail)
             self.last_error = detail
             return -1

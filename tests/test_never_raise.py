@@ -203,6 +203,89 @@ def test_semantic_provider_db_init_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Group 11b: EmbeddingModelUnavailable — a NEW raising path inside the boundary
+# ---------------------------------------------------------------------------
+#
+# `load_embedder` deliberately raises where the model is loaded, so that the failure can be
+# classified at the operation rather than guessed at from its text afterwards. Every caller of it
+# sits inside the never-raise contract, which means the new exception must be caught on each path
+# it can escape through — a classification that reaches the caller as a traceback would be a
+# strictly worse outcome than the bare "403 Forbidden" it replaces.
+
+def _model_unavailable(*_a, **_k):
+    from codeintel.semantic_db import DEFAULT_MODEL, EmbeddingModelUnavailable
+    # The `remedy` argument is REQUIRED. Omitting it raised TypeError here instead, which every
+    # boundary below caught anyway (they catch `Exception`) — so all four tests passed while
+    # exercising none of the path they exist to pin. A fault-injection test that injects the
+    # wrong fault is worse than no test: it reports coverage it does not have.
+    raise EmbeddingModelUnavailable(
+        DEFAULT_MODEL, RuntimeError("403 Forbidden"), "check network/proxy access",
+    )
+
+
+def _assert_is_model_unavailable():
+    """Guard the guard: prove the injected fault is the one these tests claim to inject."""
+    from codeintel.semantic_db import EmbeddingModelUnavailable
+    try:
+        _model_unavailable()
+    except EmbeddingModelUnavailable:
+        return
+    except BaseException as exc:  # pragma: no cover - only on a regression
+        raise AssertionError(f"injected {type(exc).__name__}, not EmbeddingModelUnavailable") from exc
+    raise AssertionError("nothing raised")
+
+
+def test_the_injected_fault_is_the_advertised_one():
+    _assert_is_model_unavailable()
+
+
+def test_indexer_index_absorbs_a_model_load_failure(monkeypatch, tmp_path):
+    from codeintel.indexer import Indexer
+
+    monkeypatch.setattr(Indexer, "_index", _model_unavailable)
+    indexer = Indexer.__new__(Indexer)
+    indexer.model_name = "BAAI/bge-small-en-v1.5"
+
+    assert indexer.index(str(tmp_path)) == -1      # returns, never raises
+    assert indexer.last_error
+
+
+def test_searcher_embed_absorbs_a_model_load_failure(monkeypatch):
+    from codeintel.searcher import Searcher
+
+    monkeypatch.setattr(Searcher, "_get_embedder", _model_unavailable)
+    s = Searcher.__new__(Searcher)
+    s.model_name = "BAAI/bge-small-en-v1.5"
+    s.last_query_error = None
+
+    assert s._embed_query("anything") is None      # returns, never raises
+    assert s.last_query_error
+
+
+def test_semantic_provider_absorbs_a_model_load_failure(monkeypatch):
+    """The full envelope path: the provider runs an inline index pass on a cold repo."""
+    from codeintel.indexer import Indexer
+
+    monkeypatch.setattr(_sem_mod, "_DEPS_OK", True)
+    monkeypatch.setattr(Indexer, "_index", _model_unavailable)
+    p = SemanticProvider()
+    r = p.build_result("search", "x", [], 0, "/tmp")
+    assert r["ok"] is True
+    assert r["result"] is None
+
+
+def test_reindexer_absorbs_a_model_load_failure(monkeypatch, tmp_path):
+    """The background pass runs on a daemon thread, where an escape is invisible AND fatal to the
+    pass — and the generation bump would still advance behind it."""
+    from codeintel.indexer import Indexer
+    from codeintel.reindexer import Reindexer
+
+    monkeypatch.setattr(Indexer, "_index", _model_unavailable)
+    r = Reindexer.__new__(Reindexer)
+    r._semantic_reindex(str(tmp_path))             # returns, never raises
+
+
+# ---------------------------------------------------------------------------
 # Group 12: HTTP handler — never-raise (Gateway.query raises; live server)
 # ---------------------------------------------------------------------------
 

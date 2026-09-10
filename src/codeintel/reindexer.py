@@ -154,7 +154,16 @@ class Reindexer:
         db = SemanticDb(db_path)
         try:
             db.init()
-            Indexer(
+            # Bound to a name, and its return CHECKED. `Indexer.index()` honours the never-raise
+            # contract: it swallows the cause and returns -1. Discarding that made the
+            # `except Exception` in `_do_reindex` unreachable for the single most likely
+            # background failure — a blocked model download on a machine that has never warmed
+            # the cache — so the pass logged nothing at all, while the generation bump in
+            # `_do_reindex`'s `finally` went on invalidating every cached answer in favour of an
+            # index that had not moved. The bump is right (it protects cache correctness); the
+            # silence was not. `_graph_reindex` below already surfaces its backend's failures for
+            # exactly this reason; this is the sibling that never got the same treatment.
+            indexer = Indexer(
                 db,
                 model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
                 window=int(cfg.get("window", 20)),
@@ -162,7 +171,12 @@ class Reindexer:
                 max_chunks=int(cfg.get("max_chunks", 500)),
                 max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
                 chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
-            ).index(project_root)
+            )
+            if indexer.index(project_root) < 0:
+                logger.warning(
+                    "semantic reindex failed for %s: %s",
+                    project_root, indexer.last_error or "unrecoverable failure",
+                )
         finally:
             db.close()
 

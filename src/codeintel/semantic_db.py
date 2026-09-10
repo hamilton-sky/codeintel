@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -28,48 +29,131 @@ DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 MODEL_HOST = "huggingface.co"
 MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
 
-# Substrings that mark an exception as a failed FETCH rather than a failed embed. Matched against
-# `"TypeName: message"` lowercased, so a bare status code like `403` is read in the company of the
-# exception type that carries it (`ProxyError`, `HTTPError`) rather than anywhere in free text.
-_MODEL_FETCH_SIGNALS = (
-    "proxy", "connection", "ssl", "certificate", "max retries", "timed out", "timeout",
-    "name resolution", "getaddrinfo", "network is unreachable", "temporary failure",
-    "403", "407", "502", "503", "huggingface", "hf_hub", "hf.co", "unauthorized", "forbidden",
+# Errnos that mean "the cache cannot be written", as opposed to "the fetch failed". Only
+# EACCES/EPERM get a dedicated Python exception class (`PermissionError`); a full disk, a
+# read-only filesystem and an exceeded quota all arrive as a bare `OSError`, which is why this
+# classification cannot be done with an `except` clause alone. EDQUOT is not defined on every
+# platform.
+_CACHE_WRITE_ERRNOS = frozenset(
+    n for n in (
+        getattr(errno, name, None)
+        for name in ("EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT", "ENOTDIR", "EISDIR")
+    )
+    if n is not None
 )
 
 
-def model_fetch_hint(exc: BaseException, model_name: str = DEFAULT_MODEL) -> str | None:
-    """Name the embedding-model download when *exc* looks like a blocked one, else ``None``.
+def _download_remedy() -> str:
+    """The first-use fetch remedy. One definition, because two call sites now emit it."""
+    return (
+        f"fastembed downloads it (~50 MB) from {MODEL_HOST} on first use and codeintel makes no "
+        f"other outbound request; check network/proxy access, or set {MODEL_CACHE_ENV} to a "
+        f"directory pre-seeded with the model on a connected machine (see docs/install.md, "
+        f"'Offline / air-gapped install'), then re-run"
+    )
 
-    Deliberately a HINT and not a diagnosis: this cannot prove the failure was the download rather
-    than some other network call, so it says "looks like" and hands over the three facts a blocked
-    user needs — that a model is being fetched, from which host, and which variable relocates the
-    cache. Returning ``None`` for anything unrecognised keeps an unrelated failure (an unwritable
-    cache dir, a corrupt db) from being explained wrongly, which would be worse than the bare
-    exception this augments.
 
-    Never raises: it is called from inside except-handlers that must not acquire a second failure.
+def _one_line(text: str) -> str:
+    """Collapse any run of whitespace — newlines included — to single spaces.
+
+    `str.strip()` is not enough: it only touches the ends. Used on every field interpolated into
+    a message that is contractually one line.
     """
-    try:
-        text = f"{type(exc).__name__}: {exc}".lower()
-        if not any(sig in text for sig in _MODEL_FETCH_SIGNALS):
-            return None
-        return (
-            f"this looks like a blocked download of the {model_name} embedding weights (~50 MB), "
-            f"which fastembed fetches from {MODEL_HOST} the first time the semantic engine runs. "
-            f"codeintel makes no other outbound request. Behind a proxy or air-gapped, set "
-            f"{MODEL_CACHE_ENV} to a directory pre-seeded with the model on a connected machine "
-            f"— see docs/install.md, 'Offline / air-gapped install'"
+    return " ".join(str(text).split())
+
+
+class EmbeddingModelUnavailable(RuntimeError):
+    """The embedding model could not be loaded, with the remedy that actually fits the cause.
+
+    Raised where the model is loaded, NOT inferred afterwards from the exception text. That
+    ordering is the point. An earlier version of this fix pattern-matched the raised exception
+    against a list of network-ish substrings ("proxy", "403", "max retries", …) and attached the
+    download story when one hit. It was wrong in both directions: an unrelated network failure
+    during a long index pass got the embedding-model explanation, and a genuine blocked download
+    whose message contained none of those words got nothing.
+
+    But "classify at the operation" is not "assume one cause". `TextEmbedding(...)` fails for
+    three materially different reasons, and telling someone whose *config* names a model fastembed
+    does not ship to go and check their proxy is the same defect wearing different clothes. The
+    remedy is therefore chosen from a STRUCTURAL signal — fastembed's own `ValueError` for an
+    unsupported model, a `PermissionError` for a cache it cannot write — never from reading the
+    message. Exception types are contracts; their text is not.
+
+    ``str(...)`` is deliberately ONE line — `last_error` is rendered inline by `onboarding`
+    (``f"indexing failed — {reason}"``), by the `index` CLI, and by the semantic engine's
+    `index-failed` envelope, and a newline breaks the step table that exists to make the failure
+    legible.
+    """
+
+    def __init__(self, model_name: str, cause: BaseException, remedy: str) -> None:
+        self.model_name = model_name
+        self.cause = cause
+        self.remedy = remedy
+        # EVERY interpolated field is flattened, not just the cause. `model_name` reaches here
+        # straight from config, and `config._coerce` only `strip()`s it — which removes surrounding
+        # whitespace but not an interior newline, so a TOML multi-line string
+        # (`model = """BAAI/\nbge-small-en-v1.5"""`) put a line break in the middle of the
+        # promise this class makes about itself. A direct `Indexer(model_name=...)` caller can do
+        # the same. One-line is a contract with `onboarding`'s step table and the `index` CLI, so
+        # it has to hold for every field rather than the one that happened to be untrusted first.
+        text = _one_line(str(cause))
+        detail = f"{type(cause).__name__}: {text}" if text else type(cause).__name__
+        super().__init__(
+            f"could not load embedding model '{_one_line(model_name)}' ({detail}) "
+            f"— {_one_line(remedy)}"
         )
-    except Exception:
-        return None
+
+
+def load_embedder(model_name: str):
+    """Construct fastembed's embedder, classifying a failed load at the operation.
+
+    The single place both the indexer and the searcher build one, so neither can grow its own
+    unclassified copy — the defect this replaces reached two call sites exactly that way.
+    """
+    from fastembed import TextEmbedding
+    try:
+        return TextEmbedding(model_name=model_name)
+    except ValueError as exc:
+        # fastembed's signal for a model it does not ship, raised from its own supported-model
+        # list before any network call (measured: 0.000s, no request attempted). This is a
+        # CONFIGURATION error — the `model` key names something that does not exist — and the
+        # download remedy is actively misleading for it: there is no proxy to fix and no cache to
+        # pre-seed, because nothing was ever going to be fetched.
+        raise EmbeddingModelUnavailable(
+            model_name, exc,
+            "that is not a model fastembed ships — check the `model` key in your codeintel "
+            "config; `TextEmbedding.list_supported_models()` lists the valid names",
+        ) from exc
+    except OSError as exc:
+        # The cache cannot be written. Also not a network problem: the download would succeed and
+        # then have nowhere to land.
+        #
+        # Keyed on errno, NOT on the exception class. `PermissionError` covers only EACCES/EPERM;
+        # a full disk (ENOSPC), a read-only filesystem (EROFS) and an exceeded quota (EDQUOT) all
+        # raise a plain `OSError` with no dedicated subclass, so catching the subclass alone sent
+        # someone whose disk was full off to check their proxy. And the reverse matters just as
+        # much: `ConnectionRefusedError` and `TimeoutError` ARE `OSError` subclasses, so a broad
+        # `except OSError` would swallow the genuine network failures this whole change exists to
+        # explain. The errno set is what separates the two.
+        if exc.errno not in _CACHE_WRITE_ERRNOS:
+            raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
+        raise EmbeddingModelUnavailable(
+            model_name, exc,
+            f"the fastembed cache at {model_cache_dir()} cannot be written — free space or fix "
+            f"permissions there, or point {MODEL_CACHE_ENV} at a writable directory with room "
+            f"for ~50 MB",
+        ) from exc
+    except Exception as exc:
+        # What is left is the first-use fetch: this is the one with the network remedy, and the
+        # one an external reviewer hit as a bare `403 Forbidden` naming neither model nor host.
+        raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
+
 
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
 # minified bundle or generated one-liner is one unsplittable chunk however large: a 20MB one-line
 # .py peaked at 3.4GB RSS through the embedder, on the reindexer's daemon thread inside the
 # long-lived MCP server. The head of a chunk carries its identifying content anyway.
 MAX_CHUNK_CHARS = 200_000
-
 
 
 def model_cache_dir() -> str:

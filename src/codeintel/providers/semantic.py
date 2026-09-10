@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import threading
@@ -9,6 +10,8 @@ from typing import Any
 from codeintel.loc import loc
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.source_kind import partition_by_corpus
+
+logger = logging.getLogger(__name__)
 
 try:
     import fastembed  # noqa: F401
@@ -62,7 +65,19 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
             db = SemanticDb(db_path)
             try:
                 db.init()
-                Indexer(db, **indexer_kwargs).index(project_root)
+                # The return is CHECKED, not discarded. `index()` honours the never-raise
+                # contract — it swallows the cause and returns -1 — so the `except` below can
+                # never see the most likely failure here, a blocked model download on a machine
+                # that has never warmed the cache. Discarding the result made this pass silent
+                # end to end: the request that started it had already returned
+                # `indexing-in-progress`, and every later query got the same answer forever,
+                # because nothing ever recorded that the pass had failed.
+                indexer = Indexer(db, **indexer_kwargs)
+                if indexer.index(project_root) < 0:
+                    logger.warning(
+                        "background cold index failed for %s: %s",
+                        project_root, indexer.last_error or "unrecoverable failure",
+                    )
             finally:
                 db.close()
         except Exception as exc:
