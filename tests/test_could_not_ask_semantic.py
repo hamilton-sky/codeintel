@@ -2,10 +2,12 @@
 
 Both are the same defect the `index-failed` reason was added to fix, in places it did not reach:
 
-* `Searcher.search()` returns `[]` for a query the embedder could not encode, exactly as it does
-  for a genuine miss. The provider read that as `below-floor` — "a non-empty index yielded no
-  match" — which an agent is told to read as "this code does not exist". A repo whose model cache
-  was cold behind a proxy answered every single query that way.
+* `Searcher.search()` returns `[]` for a search that FAULTED, exactly as it does for a genuine
+  miss. The provider read that as `below-floor` — "a non-empty index yielded no match" — which an
+  agent is told to read as "this code does not exist". Two stages can fault: the query embedding
+  (a cold model cache behind a proxy) and the vector search itself (a corrupt index, an unusable
+  sqlite-vec extension). Both were a confident claim about the repository from a query that
+  errored.
 * `doctor` asked "installed? runnable? is THIS repo indexed?" and reported "not indexed" whether
   nobody had run `index` yet or the weights every index pass needs had never been fetched and the
   host that serves them is unreachable. Two states, opposite fixes, one row.
@@ -43,6 +45,33 @@ def test_searcher_records_why_a_search_could_not_run(monkeypatch):
     assert "ProxyError: 403 Forbidden" in s.last_query_error
     # and it carries the same naming the indexer's failure path grew
     assert "huggingface.co" in s.last_query_error
+    # Stage-qualified: two stages set this field and their fixes are unrelated, so "which step
+    # failed" has to survive into the message a reader actually sees.
+    assert "embedding the query failed" in s.last_query_error
+
+
+def test_a_faulted_vector_search_is_recorded_too(tmp_path, monkeypatch):
+    """The KNN path: a corrupt index or unusable sqlite-vec is not "nothing matched"."""
+    s = Searcher.__new__(Searcher)
+    s.model_name = DEFAULT_MODEL
+    s.last_stale = s.last_unverifiable = 0
+    s.last_query_error = None
+    s._embedder = None
+    s._row_count = lambda root: 5                       # a non-empty index for this project
+    monkeypatch.setattr(Searcher, "_embed_query", lambda self, q: b"\x00" * 4)
+
+    class _Conn:
+        def execute(self, *a, **k):
+            raise RuntimeError("no such function: vec_distance_cosine")
+
+    s.db = type("_Db", (), {"conn": lambda self: _Conn()})()
+
+    assert s.search("where is auth handled", str(tmp_path)) == []
+    assert s.last_query_error is not None
+    assert "the vector search failed" in s.last_query_error
+    assert "vec_distance_cosine" in s.last_query_error   # the cause, not just the stage
+    # It must NOT be explained as a model download — that is the other stage's fix entirely.
+    assert "huggingface.co" not in s.last_query_error
 
 
 def test_a_previous_failure_does_not_leak_into_a_later_search(tmp_path, monkeypatch):
@@ -99,6 +128,21 @@ def test_an_unembeddable_query_is_query_failed_not_below_floor(monkeypatch, tmp_
     assert r["result"] is None
     assert r["reason"] == "query-failed"
     assert "403 Forbidden" in r["hint"]
+    assert "NOT evidence" in r["hint"]
+
+
+def test_the_provider_reports_either_failed_stage_the_same_way(monkeypatch, tmp_path):
+    """`query-failed` is the reason for both; the stage travels in the searcher's own message."""
+    p = _provider_with_searcher(
+        monkeypatch, tmp_path,
+        last_query_error=("the vector search failed — OperationalError: database disk image is "
+                          "malformed. The index may be unreadable"),
+    )
+    r = p.build_result("search", "parse_config", [], 0, str(tmp_path))
+
+    assert r["reason"] == "query-failed"
+    assert "the vector search failed" in r["hint"]
+    assert "malformed" in r["hint"]
     assert "NOT evidence" in r["hint"]
 
 

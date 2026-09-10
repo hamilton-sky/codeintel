@@ -378,20 +378,22 @@ class SemanticProvider:
                 # Both used to report `below-floor`, which reads as "this code does not exist" —
                 # the single most damaging thing to tell an agent about a repo it just edited.
                 #
-                # A query the embedder could not ENCODE is the third member of that family and was
-                # the last one still collapsed. `search()` returns `[]` for it exactly as it does
-                # for a genuine miss, so a repo whose model cache is cold behind a proxy answered
-                # every single query with `below-floor` — a confident, wrong statement about the
-                # repository, produced by an engine that was never able to ask it anything. It is
-                # checked FIRST because it outranks the others: staleness counts describe a search
-                # that ran, and this one did not.
+                # A search that FAULTED is the third member of that family and was the last one
+                # still collapsed. `search()` returns `[]` for it exactly as it does for a genuine
+                # miss, so a repo whose model cache is cold behind a proxy — or whose index is
+                # unreadable — answered every single query with `below-floor`: a confident, wrong
+                # statement about the repository, produced by an engine that was never able to ask
+                # it anything. It is checked FIRST because it outranks the others: staleness
+                # counts describe a search that ran, and this one did not.
+                #
+                # The message is stage-qualified by the searcher (embedding vs. vector search)
+                # because those have unrelated fixes; this layer does not need to know which.
                 if searcher.last_query_error:
                     return safe_null_result(
                         op, target, engine="semantic", reason="query-failed",
-                        hint=(f"the query could not be embedded, so no search ran: "
-                              f"{searcher.last_query_error}. This is NOT evidence that nothing "
-                              f"matches — run `codeintel doctor {project_root}` to check the "
-                              f"engine"),
+                        hint=(f"no search ran — {searcher.last_query_error}. This is NOT evidence "
+                              f"that nothing matches; run `codeintel doctor {project_root}` to "
+                              f"check the engine"),
                     )
                 if searcher.last_stale:
                     return safe_null_result(

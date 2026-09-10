@@ -178,11 +178,11 @@ Searcher(db).search(query, project_root, k=10, cosine_floor=0.25,
 - An empty index (zero rows in `chunk_hashes`) is surfaced as `reason: 'no-index'` — before any
   search runs. `below-floor` is reserved for a non-empty index that yielded no match above the
   cosine floor: a search that RAN and found nothing.
-- A query the embedder could not encode is `reason: 'query-failed'`, never `'below-floor'`. This
-  is the same distinction one step further along than `'index-failed'` below, and it was the last
-  place still collapsing it — `Searcher.search` returns `[]` for an unencodable query exactly as
-  it does for a genuine miss, so a repo whose model cache was cold behind a proxy answered every
-  query with "nothing was similar enough".
+- A search that faulted is `reason: 'query-failed'`, never `'below-floor'`. This is the same
+  distinction one step further along than `'index-failed'` below, and `Searcher.search` returns
+  `[]` for a fault exactly as it does for a genuine miss — so a repo whose model cache was cold
+  behind a proxy, or whose index had become unreadable, answered every query with "nothing was
+  similar enough". Both stages that can fault set it: the query embedding and the KNN itself.
 - An inline pass that **ran and failed** — a blocked model download, an unwritable cache — is
   `reason: 'index-failed'`, never `'no-index'`, and the failure's own message travels in the `hint`.
   The two license opposite next steps ("nothing to find here" versus "the engine could not be
@@ -275,7 +275,7 @@ returning nothing.
 | `'index-failed'` | An inline index pass ran and could not finish, so there is still no index. The `hint` carries the underlying cause. A **could-not-ask** reason, not a finding: it is in the gateway's `unreachable` set, so a fan-out where it is the only outcome summarises as `engines-unavailable` with "this is NOT evidence the target does not exist" rather than as `no-result`. `'no-index'` is deliberately *not* in that set — a completed pass that found nothing IS an answer about the repository |
 | `'indexing-in-progress'` | **Server transports only** (MCP stdio / HTTP): no index existed for this project, and a cold-index pass just started in the background rather than blocking this request. Not "nothing found" — retry shortly, or run `codeintel index <path>` to build it synchronously now. Never returned by the CLI, which indexes inline instead (see **Indexing** above) |
 | `'below-floor'` | A non-empty index yielded no match above the cosine floor |
-| `'query-failed'` | The query could not be embedded, so **no search ran** — most often a cold model cache on a machine that cannot reach `huggingface.co`. `Searcher.search` returns `[]` for this exactly as it does for a genuine miss, so it used to arrive as `'below-floor'`: a confident claim about the repository from an engine that never asked it anything. A **could-not-ask** reason, in the gateway's `unreachable` set alongside `'index-failed'`; the `hint` carries the underlying cause |
+| `'query-failed'` | A search **faulted, so none ran** — either the query could not be embedded (most often a cold model cache on a machine that cannot reach `huggingface.co`) or the vector search itself errored (a corrupt index, an unusable `sqlite-vec` extension, a locked database). `Searcher.search` returns `[]` for both exactly as it does for a genuine miss, so they used to arrive as `'below-floor'`: a confident claim about the repository from an engine that never asked it anything. A **could-not-ask** reason, in the gateway's `unreachable` set alongside `'index-failed'`. The `hint` is stage-qualified — `embedding the query failed …` vs `the vector search failed …` — because the two have unrelated fixes (re-download the model vs re-index) |
 | `'index-stale'` | Matches were found, but every one failed staleness verification — the files changed since indexing. Distinct from `'below-floor'`: the code may well exist, the index just no longer locates it. Re-index to restore. |
 | `'provider-error'` | Unexpected exception during indexing or searching |
 
