@@ -184,7 +184,19 @@ def _not_indexed_probe(project_root: str, detail: str) -> dict:
     bg_error = _background_index_failure(project_root)
     if bg_error is not None:
         return {
-            "installed": True, "runnable": True, "repo_indexed": False,
+            # NOT runnable. A pass ran and could not complete, which is the same kind of statement
+            # as "semantic cache present but unreadable" below — both of which this probe already
+            # reports as `runnable: False`. Reporting `True` beside "a background index pass
+            # failed: could not load embedding model … check network/proxy access" is a
+            # contradiction on the face of one payload, and `code.status` hands those raw fields
+            # to an agent that reads them rather than the prose.
+            #
+            # Scoped to the cooldown, like everything else here: once the entry expires this
+            # branch is not taken, the probe falls through to its normal answer, and `runnable`
+            # returns to True — the same one-retry policy the query path follows. The rolled-up
+            # status was already `fail` via `repo_indexed`, so this corrects the field a consumer
+            # reads directly, not the verdict.
+            "installed": True, "runnable": False, "repo_indexed": False,
             "detail": f"a background index pass failed: {bg_error}",
             "remediation": f"fix the cause above, then run: codeintel index {project_root}",
         }

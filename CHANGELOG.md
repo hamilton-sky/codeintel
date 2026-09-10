@@ -42,6 +42,13 @@ All notable changes to codeintel are documented here. The format is based on
     "could not load embedding model … check network/proxy access" with a database-close error —
     the actionable cause swapped for a downstream symptom of it. Found by re-reading the diff, and
     pinned by a test verified against the unguarded version.
+  - **The failed engine reports `runnable: false`**, matching the sibling case this probe already
+    reported that way ("semantic cache present but unreadable"). `runnable: true` beside "a
+    background index pass failed: could not load embedding model … check network/proxy access" is
+    a contradiction inside one payload, and `code.status` hands those raw fields to an agent that
+    reads them rather than the prose. Scoped to the cooldown, so the row goes green again with the
+    same one-retry policy the query path follows; the rolled-up status was already `fail` via
+    `repo_indexed`, so this corrects the field a consumer reads directly, not the verdict.
   - `doctor` and `code.status` take the same branch in the same order — the diagnostic command
     repeating the misdiagnosis is the one place that must not.
 

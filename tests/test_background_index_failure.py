@@ -281,6 +281,34 @@ def test_probe_reports_the_failure_rather_than_progress(monkeypatch, tmp_path):
     assert "codeintel index" in probe["remediation"]
 
 
+def test_a_failed_pass_is_reported_as_not_runnable(tmp_path):
+    """`runnable: true` beside a known execution failure is a contradiction in one payload.
+
+    `code.status` hands these raw fields to an agent that reads them rather than the prose, and
+    this probe already reports `runnable: False` for the sibling case ("semantic cache present but
+    unreadable"). The rolled-up status was already `fail` via `repo_indexed`, so this is about the
+    field a consumer reads directly.
+    """
+    from codeintel.doctor import _status_for
+
+    _record_background_failure(_index_key(str(tmp_path)), "ProxyError: 403 Forbidden")
+    probe = sem._not_indexed_probe(str(tmp_path), "no semantic index database yet")
+
+    assert probe["installed"] is True          # the deps are importable; that part is true
+    assert probe["runnable"] is False
+    assert _status_for(probe) == "fail"
+
+
+def test_runnable_returns_once_the_cooldown_expires(tmp_path):
+    """Scoped to the window, like the retry policy — a permanent red row would outlive its cause."""
+    key = _index_key(str(tmp_path))
+    sem._BG_INDEX_FAILED[key] = (time.monotonic() - _BG_INDEX_COOLDOWN_S - 1, "ProxyError: 403")
+
+    probe = sem._not_indexed_probe(str(tmp_path), "no semantic index database yet")
+    assert probe["runnable"] is True
+    assert "background index pass failed" not in probe["detail"]
+
+
 def test_probe_still_reports_a_genuinely_running_pass(monkeypatch, tmp_path):
     sem._BG_INDEX_STARTED[_index_key(str(tmp_path))] = time.monotonic()
 
