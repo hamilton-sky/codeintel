@@ -517,3 +517,30 @@ def test_the_recovery_lookup_cannot_escape_the_never_raise_boundary(monkeypatch,
 
     assert r["ok"] is True
     assert r["reason"] == "provider-error"
+
+
+def test_the_probe_reads_both_facts_under_one_lock(tmp_path, monkeypatch):
+    """A failure landing between two separate lookups let the probe report progress mid-cooldown.
+
+    Milder than the query-path race — nothing acts on it, where that one would have STARTED a pass
+    — but a diagnostic contradicting the query path about the same state is its own wrong answer,
+    and this is the command people run once they have stopped trusting the others.
+    """
+    key = _index_key(str(tmp_path))
+    sem._BG_INDEX_STARTED[key] = time.monotonic()
+
+    # Drive the interleaving: the failure lands during the read, exactly as the thread would
+    # record it between two separate lookups.
+    real = sem._unexpired_failure_locked
+
+    def _racy(k):
+        sem._BG_INDEX_FAILED[k] = (time.monotonic(), "ProxyError: 403 Forbidden")
+        return real(k)
+
+    monkeypatch.setattr(sem, "_unexpired_failure_locked", _racy)
+
+    probe = sem._not_indexed_probe(str(tmp_path), "no semantic index database yet")
+
+    assert "background index pass failed" in probe["detail"]
+    assert "indexing in progress" not in probe["detail"]
+    assert probe["runnable"] is False

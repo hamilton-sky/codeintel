@@ -99,6 +99,23 @@ def _background_index_failure(project_root: str) -> str | None:
         return _unexpired_failure_locked(_index_key(project_root))
 
 
+def _background_state(project_root: str) -> tuple[str | None, float | None]:
+    """``(failure cause, seconds since a pass started)`` read under ONE lock acquisition.
+
+    Two separate lookups are a race in the same family as the one `_start_background_index`
+    closes, though a much milder one: a failure landing between them lets a probe report "indexing
+    in progress" during an active cooldown. Nothing acts on that — unlike the query path, which
+    would have STARTED a pass — but a diagnostic that contradicts the query path about the same
+    state is its own small wrong answer, and this is the command people run precisely when they
+    have stopped trusting the others.
+    """
+    key = _index_key(project_root)
+    with _BG_INDEX_LOCK:
+        cause = _unexpired_failure_locked(key)
+        started = _BG_INDEX_STARTED.get(key)
+    return cause, (None if started is None else time.monotonic() - started)
+
+
 def _background_index_elapsed_s(project_root: str) -> float | None:
     """Seconds since a background cold-index for *project_root* started, or None if none is
     running. Used to make the in-progress state observable from `probe()` (doctor/status)."""
@@ -194,7 +211,9 @@ def _not_indexed_probe(project_root: str, detail: str) -> dict:
     'not indexed' unremediated on every check while it works."""
     # Same order as the query path, and for the same reason: `doctor` saying "indexing in
     # progress" about a pass that died is the diagnostic command repeating the misdiagnosis.
-    bg_error = _background_index_failure(project_root)
+    # Both facts come from ONE lock acquisition so the two cannot disagree — see
+    # `_background_state`.
+    bg_error, elapsed = _background_state(project_root)
     if bg_error is not None:
         return {
             # NOT runnable. A pass ran and could not complete, which is the same kind of statement
@@ -213,7 +232,6 @@ def _not_indexed_probe(project_root: str, detail: str) -> dict:
             "detail": f"a background index pass failed: {bg_error}",
             "remediation": f"fix the cause above, then run: codeintel index {project_root}",
         }
-    elapsed = _background_index_elapsed_s(project_root)
     if elapsed is not None:
         return {
             "installed": True, "runnable": True, "repo_indexed": False,

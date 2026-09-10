@@ -67,6 +67,12 @@ All notable changes to codeintel are documented here. The format is based on
     now reported, with no causation claimed between them: presenting a remembered model-download
     failure as the explanation for an unrelated setup error would be the same invented-explanation
     defect this work exists to remove.
+  - `doctor` and `code.status` read the failure and the in-flight marker under **one** lock
+    acquisition, so the two cannot disagree. Two separate lookups let a failure land between them
+    and the probe report "indexing in progress" mid-cooldown — milder than the query-path race
+    (nothing acts on it), but a diagnostic that contradicts the query path about the same state is
+    its own wrong answer, and this is the command people run once they have stopped trusting the
+    others.
   - `doctor` and `code.status` take the same branch in the same order — the diagnostic command
     repeating the misdiagnosis is the one place that must not.
 
