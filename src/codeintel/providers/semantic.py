@@ -660,4 +660,30 @@ class SemanticProvider:
             return attach_confidence(result, gaps)
         except Exception as exc:
             log_swallowed("SemanticProvider.build_result", exc)
+            # A recorded background failure outranks a bare `provider-error`. Setup — `db.init()`
+            # — runs long before the `no_index` branch that consults the registry, so a PERSISTENT
+            # cause (a SQLite lock, an unwritable cache) fails the background pass and then fails
+            # this request too, landing here. The caller would get `provider-error` with no hint
+            # at all while an actionable sentence sat in the registry unread.
+            #
+            # Both facts are reported, with no causation claimed between them: this request's own
+            # failure is named ALONGSIDE the recorded one, not replaced by it. Presenting a
+            # remembered model-download failure as the explanation for an unrelated setup error
+            # would be the same invented-explanation defect this whole line of work exists to
+            # remove.
+            #
+            # Wrapped, because this runs inside the never-raise boundary's own handler: a fault
+            # here would escape `build_result` entirely, which is the one thing it may never do.
+            try:
+                bg_error = _background_index_failure(project_root)
+            except Exception as lookup_exc:
+                log_swallowed("SemanticProvider.build_result.bg_lookup", lookup_exc)
+                bg_error = None
+            if bg_error is not None:
+                return safe_null_result(
+                    op, target, engine="semantic", reason="index-failed",
+                    hint=(f"the semantic engine could not start this request "
+                          f"({type(exc).__name__}), and a background index pass for this repo "
+                          f"failed with: {bg_error}"),
+                )
             return safe_null_result(op, target, engine="semantic", reason="provider-error")

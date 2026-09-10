@@ -436,3 +436,66 @@ def test_a_close_failure_alone_does_not_mark_the_pass_failed(monkeypatch, tmp_pa
     captured[0]()
 
     assert _background_index_failure(str(tmp_path)) is None
+
+
+def test_a_setup_failure_surfaces_the_recorded_cause_not_a_bare_provider_error(
+    monkeypatch, tmp_path,
+):
+    """`db.init()` runs long before the branch that consults the registry.
+
+    A persistent cause — a SQLite lock, an unwritable cache — fails the background pass and then
+    fails the request too, landing in the outer handler. That returned `provider-error` with no
+    hint at all, while an actionable sentence sat in the registry unread.
+    """
+    import codeintel.semantic_db as sdb
+
+    monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
+    monkeypatch.setattr(sdb.SemanticDb, "init",
+                        lambda self: (_ for _ in ()).throw(
+                            RuntimeError("database is locked")))
+    _record_background_failure(_index_key(str(tmp_path)), "OperationalError: database is locked")
+
+    r = SemanticProvider(blocking_index=False).build_result(
+        "search", "x", [], 0, str(tmp_path),
+    )
+
+    assert r["ok"] is True
+    assert r["reason"] == "index-failed"
+    assert "database is locked" in r["hint"]
+    # Both facts, no causation claimed between them.
+    assert "RuntimeError" in r["hint"]
+    assert "background index pass" in r["hint"]
+
+
+def test_a_setup_failure_with_no_recorded_cause_is_still_provider_error(monkeypatch, tmp_path):
+    """The new branch must not swallow the case it was carved out of, and must not invent a
+    background failure for a request that simply could not start."""
+    import codeintel.semantic_db as sdb
+
+    monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
+    monkeypatch.setattr(sdb.SemanticDb, "init",
+                        lambda self: (_ for _ in ()).throw(RuntimeError("something else")))
+
+    r = SemanticProvider(blocking_index=False).build_result(
+        "search", "x", [], 0, str(tmp_path),
+    )
+
+    assert r["reason"] == "provider-error"
+
+
+def test_the_recovery_lookup_cannot_escape_the_never_raise_boundary(monkeypatch, tmp_path):
+    """This runs inside `build_result`'s own handler — a fault there would escape the provider."""
+    import codeintel.semantic_db as sdb
+
+    monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
+    monkeypatch.setattr(sdb.SemanticDb, "init",
+                        lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(sem, "_background_index_failure",
+                        lambda root: (_ for _ in ()).throw(RuntimeError("lookup exploded")))
+
+    r = SemanticProvider(blocking_index=False).build_result(
+        "search", "x", [], 0, str(tmp_path),
+    )
+
+    assert r["ok"] is True
+    assert r["reason"] == "provider-error"

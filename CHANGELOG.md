@@ -57,6 +57,13 @@ All notable changes to codeintel are documented here. The format is based on
     reads them rather than the prose. Scoped to the cooldown, so the row goes green again with the
     same one-retry policy the query path follows; the rolled-up status was already `fail` via
     `repo_indexed`, so this corrects the field a consumer reads directly, not the verdict.
+  - **A recorded cause outranks a bare `provider-error`.** `db.init()` runs long before the branch
+    that consults the registry, so a persistent cause — a SQLite lock, an unwritable cache — fails
+    the background pass and then fails the request too, landing in the outer handler. That returned
+    `provider-error` with no hint at all while an actionable sentence sat unread. Both facts are
+    now reported, with no causation claimed between them: presenting a remembered model-download
+    failure as the explanation for an unrelated setup error would be the same invented-explanation
+    defect this work exists to remove.
   - `doctor` and `code.status` take the same branch in the same order — the diagnostic command
     repeating the misdiagnosis is the one place that must not.
 
