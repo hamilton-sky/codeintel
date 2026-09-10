@@ -6,6 +6,76 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A background index pass that failed stops reporting itself as in progress.** The cold-index
+  thread's `finally` clears `_BG_INDEX_STARTED`, so once a pass died the next request found no
+  index and no job in flight, started another doomed pass, and answered `indexing-in-progress`
+  again — forever, about work that kept dying, while the one actionable sentence went to a server
+  log the calling agent cannot read. An agent told "indexing is in progress" retries; it does not
+  go and fix its proxy.
+  - The failure is now remembered per project root with its cause, and served as `index-failed`
+    carrying that cause. `index-failed` is already in the gateway's `unreachable` set, so a
+    `context` fan-out where it is the only outcome says "this is NOT evidence the target does not
+    exist" rather than `no-result`.
+  - **The policy mirrors `providers/lsp.py`'s failed-boot cooldown rather than inventing a second
+    one.** For `_BG_INDEX_COOLDOWN_S` (60s) nothing is retried and the cause is reported; once the
+    window elapses exactly one retry is allowed. That is what makes a transient failure — a proxy
+    that came back, a disk that was freed — clear itself without anyone intervening, while a
+    permanent one stays legible instead of being dressed as progress. Expired entries are dropped
+    rather than accumulating, since a long-lived server sees many roots.
+  - **A crash on the thread is recorded too**, not only a `-1` return: `index()` never raises, but
+    `db.init()` and the imports around it can, and a caller stuck on `indexing-in-progress` cannot
+    tell the two apart.
+  - **The cooldown is enforced under the lock that marks the start, not by the caller's earlier
+    check.** A check in the caller is a check-then-act race with a real losing interleaving: a
+    request looks up the failure and sees none because the thread has not recorded yet; the thread
+    then records and clears `_BG_INDEX_STARTED`; the request, finding no job in flight, starts
+    another pass — and a defensive `pop` in the start helper destroyed the fresh cause on the way
+    past. Concurrent polling, which is exactly what "retry shortly" tells an agent to do, could
+    bypass the cooldown indefinitely. The helper now refuses while a failure stands, and the
+    caller re-reads after a refusal so it cannot be reported as progress.
+  - **Expired entries are swept on both the write and the read path**, which is what actually
+    bounds the registry. Each half alone leaves a hole: sweeping only on writes keeps every entry
+    from a burst of one-off roots for the process lifetime if no later failure ever arrives, and
+    pruning per-key on reads only ever touches roots someone asks about again. The set is small by
+    construction — only roots that failed inside one window — so the sweep costs nothing either
+    way.
+  - **A failing `db.close()` cannot mask, replace, or invent a cause.** An exception raised in a
+    `finally` REPLACES the one already propagating (the original is demoted to `__context__`), and
+    `close()` runs in exactly that position. Three distinct wrong outcomes came out of it, all now
+    pinned by tests verified against the unguarded version:
+    - a recorded "could not load embedding model … check network/proxy access" overwritten by a
+      database-close error — the actionable cause swapped for a downstream symptom;
+    - `db.init()`'s failure lost the same way, so the caller was told about the close instead of
+      what actually stopped the pass;
+    - and a pass that **succeeded** and merely failed to close its handle recorded as a failed
+      pass, suppressing every query for a whole cooldown over cleanup.
+    Guarding the close at its own site fixes all three at once, which is why no "already recorded"
+    flag is needed — nothing after the recording can raise. Swallowed but never silent: it still
+    goes through `log_swallowed`.
+  - **The failed engine reports `runnable: false`**, matching the sibling case this probe already
+    reported that way ("semantic cache present but unreadable"). `runnable: true` beside "a
+    background index pass failed: could not load embedding model … check network/proxy access" is
+    a contradiction inside one payload, and `code.status` hands those raw fields to an agent that
+    reads them rather than the prose. Scoped to the cooldown, so the row goes green again with the
+    same one-retry policy the query path follows; the rolled-up status was already `fail` via
+    `repo_indexed`, so this corrects the field a consumer reads directly, not the verdict.
+  - **A recorded cause outranks a bare `provider-error`.** `db.init()` runs long before the branch
+    that consults the registry, so a persistent cause — a SQLite lock, an unwritable cache — fails
+    the background pass and then fails the request too, landing in the outer handler. That returned
+    `provider-error` with no hint at all while an actionable sentence sat unread. Both facts are
+    now reported, with no causation claimed between them: presenting a remembered model-download
+    failure as the explanation for an unrelated setup error would be the same invented-explanation
+    defect this work exists to remove.
+  - `doctor` and `code.status` read the failure and the in-flight marker under **one** lock
+    acquisition, so the two cannot disagree. Two separate lookups let a failure land between them
+    and the probe report "indexing in progress" mid-cooldown — milder than the query-path race
+    (nothing acts on it), but a diagnostic that contradicts the query path about the same state is
+    its own wrong answer, and this is the command people run once they have stopped trusting the
+    others.
+  - `doctor` and `code.status` take the same branch in the same order — the diagnostic command
+    repeating the misdiagnosis is the one place that must not.
+
 ### Changed
 - **A failed embedding-model load is classified where the model is loaded, not inferred from the
   exception text afterwards.** The previous repair matched the raised exception against a list of
