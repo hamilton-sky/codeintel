@@ -38,12 +38,105 @@ class ProxyError(Exception):
     """Stands in for `requests.exceptions.ProxyError` without importing requests."""
 
 
+# The remedy the download path supplies. Spelled out here rather than imported so a change to the
+# wording is a deliberate test edit, not something that silently rewrites what these assert.
+_DOWNLOAD_REMEDY = (
+    f"fastembed downloads it (~50 MB) from {MODEL_HOST} on first use and codeintel makes no "
+    f"other outbound request; check network/proxy access, or set {MODEL_CACHE_ENV} to a "
+    f"directory pre-seeded with the model on a connected machine (see docs/install.md, "
+    f"'Offline / air-gapped install'), then re-run"
+)
+
+
+def _load_with(cause: BaseException, model_name: str = DEFAULT_MODEL):
+    """`load_embedder` with fastembed's constructor forced to raise *cause* — the real path."""
+    import builtins
+
+    import codeintel.semantic_db as sdb
+
+    real_import = builtins.__import__
+
+    def _fake(name, *a, **k):
+        if name == "fastembed":
+            class _TE:
+                def __init__(self, *_a, **_k):
+                    raise cause
+            return type("_M", (), {"TextEmbedding": _TE})
+        return real_import(name, *a, **k)
+
+    builtins.__import__ = _fake
+    try:
+        return sdb.load_embedder(model_name)
+    finally:
+        builtins.__import__ = real_import
+
+
+# --------------------------------------------------------------------------------------------- #
+# The remedy has to fit the cause — "classify at the operation" is not "assume one cause"
+# --------------------------------------------------------------------------------------------- #
+
+def test_an_unsupported_model_is_a_config_error_not_a_network_one():
+    """fastembed raises ValueError from its own model list before any request (measured: 0.000s).
+
+    Telling someone whose config names a model that does not exist to go and check their proxy is
+    the same defect this whole change exists to remove, pointed the other way: there is no proxy
+    to fix and no cache to pre-seed, because nothing was ever going to be fetched.
+    """
+    cause = ValueError("Model nonsense/x is not supported in TextEmbedding.")
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(cause, "nonsense/x")
+
+    msg = str(caught.value)
+    assert "check the `model` key" in msg
+    assert "list_supported_models" in msg
+    assert MODEL_HOST not in msg            # no invented network diagnosis
+    assert "proxy" not in msg.lower()
+    assert MODEL_CACHE_ENV not in msg       # nothing to pre-seed
+
+
+def test_an_unwritable_cache_names_the_cache_not_the_network(monkeypatch, tmp_path):
+    """The download would succeed and then have nowhere to land — a different fix entirely."""
+    monkeypatch.setenv(MODEL_CACHE_ENV, str(tmp_path / "cache"))
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(PermissionError("Permission denied"))
+
+    msg = str(caught.value)
+    assert "not writable" in msg
+    assert str(tmp_path / "cache") in msg   # WHICH directory
+    assert MODEL_HOST not in msg
+    assert "proxy" not in msg.lower()
+
+
+def test_everything_else_is_the_first_use_download():
+    """The remaining case, and the one an external reviewer met as a bare `403 Forbidden`."""
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(ProxyError("403 Forbidden"))
+
+    msg = str(caught.value)
+    assert MODEL_HOST in msg
+    assert MODEL_CACHE_ENV in msg
+    assert "docs/install.md" in msg
+
+
+def test_the_classification_reads_types_not_message_text():
+    """A ValueError whose text looks like a network failure is still a ValueError.
+
+    This is the line between classifying and guessing: exception TYPES are contracts, their text
+    is not. Matching on the words would put this one back in the download bucket — which is
+    precisely the machinery this change deleted.
+    """
+    cause = ValueError("proxy error 403 forbidden while contacting huggingface.co")
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(cause, "nonsense/x")
+    assert "check the `model` key" in str(caught.value)
+
+
 # --------------------------------------------------------------------------------------------- #
 # The message: the three things "403 Forbidden" left the reader to guess
 # --------------------------------------------------------------------------------------------- #
 
 def test_the_message_names_the_model_the_cause_and_a_next_step():
-    msg = str(EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden")))
+    msg = str(EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY))
     assert DEFAULT_MODEL in msg              # what was being downloaded
     assert MODEL_HOST in msg                 # from where
     assert MODEL_CACHE_ENV in msg            # and how to work around it
@@ -57,21 +150,21 @@ def test_the_message_is_one_line():
 
     A newline here breaks the step table that exists to make the failure legible.
     """
-    msg = str(EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden")))
+    msg = str(EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY))
     assert "\n" not in msg
 
 
 def test_a_causeless_exception_still_produces_a_message():
     """`str(exc)` is empty for a bare `Exception()`; the type name keeps the parenthetical from
     rendering as an empty '()'."""
-    msg = str(EmbeddingModelUnavailable(DEFAULT_MODEL, RuntimeError()))
+    msg = str(EmbeddingModelUnavailable(DEFAULT_MODEL, RuntimeError(), _DOWNLOAD_REMEDY))
     assert "()" not in msg
     assert "RuntimeError" in msg
 
 
 def test_it_reports_the_model_actually_configured():
     """A repo pointed at a different model must not be told the default's name."""
-    msg = str(EmbeddingModelUnavailable("BAAI/bge-base-en", ProxyError("407")))
+    msg = str(EmbeddingModelUnavailable("BAAI/bge-base-en", ProxyError("407"), _DOWNLOAD_REMEDY))
     assert "BAAI/bge-base-en" in msg
     assert DEFAULT_MODEL not in msg
 
@@ -80,32 +173,9 @@ def test_the_cause_is_chained_not_swallowed():
     """`raise ... from exc` — the original traceback stays reachable under CODEINTEL_DEBUG."""
     cause = ProxyError("403 Forbidden")
     with pytest.raises(EmbeddingModelUnavailable) as caught:
-        load_embedder_raising(cause)
+        _load_with(cause)
     assert caught.value.__cause__ is cause
     assert caught.value.cause is cause
-
-
-def load_embedder_raising(cause: BaseException):
-    """`load_embedder` with fastembed's constructor forced to fail — the real classification path."""
-    import codeintel.semantic_db as sdb
-
-    real_import = __import__
-
-    def _boom(name, *a, **k):
-        mod = real_import(name, *a, **k)
-        if name == "fastembed":
-            class _TE:
-                def __init__(self, *_a, **_k):
-                    raise cause
-            mod = type("_M", (), {"TextEmbedding": _TE})
-        return mod
-
-    import builtins
-    builtins.__import__ = _boom
-    try:
-        return sdb.load_embedder(DEFAULT_MODEL)
-    finally:
-        builtins.__import__ = real_import
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -144,7 +214,8 @@ def test_a_blocked_download_with_no_network_words_is_still_caught(monkeypatch, t
     monkeypatch.setattr(
         Indexer, "_index",
         lambda self, root: (_ for _ in ()).throw(
-            EmbeddingModelUnavailable(DEFAULT_MODEL, RuntimeError("request was denied by policy"))
+            EmbeddingModelUnavailable(DEFAULT_MODEL, RuntimeError("request was denied by policy"),
+                                      _DOWNLOAD_REMEDY)
         ),
     )
 
@@ -158,7 +229,7 @@ def test_last_error_reports_the_model_failure_verbatim(monkeypatch, tmp_path):
     `EmbeddingModelUnavailable:` buries the remedy behind noise."""
     from codeintel.indexer import Indexer
 
-    exc = EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"))
+    exc = EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY)
     indexer = Indexer.__new__(Indexer)
     indexer.model_name = DEFAULT_MODEL
     monkeypatch.setattr(Indexer, "_index", lambda self, root: (_ for _ in ()).throw(exc))
@@ -188,7 +259,7 @@ def test_the_searcher_reports_it_too(monkeypatch):
     """A query is the other way a cold cache is discovered — stage-qualified, message verbatim."""
     from codeintel.searcher import Searcher
 
-    exc = EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"))
+    exc = EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY)
     s = Searcher.__new__(Searcher)
     s.model_name = DEFAULT_MODEL
     s.last_query_error = None

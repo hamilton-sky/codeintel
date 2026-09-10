@@ -19,9 +19,18 @@ All notable changes to codeintel are documented here. The format is based on
     mattered most.
   - `semantic_db.load_embedder` now raises `EmbeddingModelUnavailable` from the one place both the
     indexer and the searcher construct an embedder, so neither can grow its own unclassified copy.
-    At that call site there is nothing to infer: we know the model is what was being loaded, and
-    that the first load is a ~50 MB network fetch. `_MODEL_FETCH_SIGNALS` and `model_fetch_hint`
-    are deleted — the classification carries strictly more information with less machinery.
+    `_MODEL_FETCH_SIGNALS` and `model_fetch_hint` are deleted — the classification carries strictly
+    more information with less machinery.
+  - **"Classify at the operation" is not "assume one cause."** `TextEmbedding(...)` fails for three
+    materially different reasons, and telling someone whose *config* names a model fastembed does
+    not ship to go and check their proxy is the same defect wearing different clothes. The remedy
+    is chosen per cause: an unsupported model (fastembed's own `ValueError`, raised from its model
+    list before any request — measured at 0.000s) points at the `model` config key; a
+    `PermissionError` names the cache directory that cannot be written; everything else is the
+    first-use download, with the host and `FASTEMBED_CACHE_PATH`.
+  - The signal is always structural — an exception **type**, which is a contract — never the
+    message text, which is not. A `ValueError` whose text happens to read like a network failure
+    is still a configuration error, and a test pins exactly that.
   - `last_error` reports that one exception **verbatim** (it is already a complete, actionable
     sentence; an `EmbeddingModelUnavailable:` prefix would bury the remedy behind noise) and keeps
     the `Type: message` form for every other cause, where the type is the information.

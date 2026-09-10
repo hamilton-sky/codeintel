@@ -29,54 +29,79 @@ MODEL_HOST = "huggingface.co"
 MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
 
 class EmbeddingModelUnavailable(RuntimeError):
-    """The embedding model could not be loaded — the one indexing/search failure with a real remedy.
+    """The embedding model could not be loaded, with the remedy that actually fits the cause.
 
-    Raised where the model is actually loaded, NOT inferred afterwards from the exception text.
-    That ordering is the whole point. The first version of this fix pattern-matched the raised
-    exception against a list of network-ish substrings ("proxy", "403", "max retries", …) and
-    attached the model story when one hit. It was wrong in both directions: an unrelated network
-    failure during a long index pass got the embedding-model explanation, and a genuine blocked
-    download whose message happened to contain none of those words got nothing. At the call site
-    there is nothing to infer — we know the model is what was being loaded, and that the first
-    load is a ~50 MB network fetch.
+    Raised where the model is loaded, NOT inferred afterwards from the exception text. That
+    ordering is the point. An earlier version of this fix pattern-matched the raised exception
+    against a list of network-ish substrings ("proxy", "403", "max retries", …) and attached the
+    download story when one hit. It was wrong in both directions: an unrelated network failure
+    during a long index pass got the embedding-model explanation, and a genuine blocked download
+    whose message contained none of those words got nothing.
 
-    Carries the model name and a next step, because the underlying exception routinely carries
-    neither: a blocked download surfaces as a bare `403 Forbidden`, attached to no visible
-    operation. ``str(...)`` is deliberately ONE line — `last_error` is rendered inline by
-    `onboarding` (``f"indexing failed — {reason}"``), by the `index` CLI, and by the semantic
-    engine's `index-failed` envelope, and a newline breaks the step table that exists to make the
-    failure legible.
+    But "classify at the operation" is not "assume one cause". `TextEmbedding(...)` fails for
+    three materially different reasons, and telling someone whose *config* names a model fastembed
+    does not ship to go and check their proxy is the same defect wearing different clothes. The
+    remedy is therefore chosen from a STRUCTURAL signal — fastembed's own `ValueError` for an
+    unsupported model, a `PermissionError` for a cache it cannot write — never from reading the
+    message. Exception types are contracts; their text is not.
+
+    ``str(...)`` is deliberately ONE line — `last_error` is rendered inline by `onboarding`
+    (``f"indexing failed — {reason}"``), by the `index` CLI, and by the semantic engine's
+    `index-failed` envelope, and a newline breaks the step table that exists to make the failure
+    legible.
     """
 
-    def __init__(self, model_name: str, cause: BaseException) -> None:
+    def __init__(self, model_name: str, cause: BaseException, remedy: str) -> None:
         self.model_name = model_name
         self.cause = cause
-        # The type as well as the message: "403 Forbidden" alone does not say that a proxy
-        # refused it, and `ProxyError` is the word that sends the reader to the right place.
-        # Falls back to the bare type name when `str(cause)` is empty (e.g. `Exception()`), so
-        # the parenthetical never renders as an empty "()".
-        text = str(cause).strip()
+        self.remedy = remedy
+        # The type as well as the message: "403 Forbidden" alone does not say that a proxy refused
+        # it, and `ProxyError` is the word that sends the reader to the right place. Falls back to
+        # the bare type name when `str(cause)` is empty (e.g. `Exception()`), so the parenthetical
+        # never renders as an empty "()".
+        text = " ".join(str(cause).split())
         detail = f"{type(cause).__name__}: {text}" if text else type(cause).__name__
-        super().__init__(
-            f"could not load embedding model '{model_name}' ({detail}) — fastembed downloads it "
-            f"(~50 MB) from {MODEL_HOST} on first use and codeintel makes no other outbound "
-            f"request; check network/proxy access, or set {MODEL_CACHE_ENV} to a directory "
-            f"pre-seeded with the model on a connected machine (see docs/install.md, "
-            f"'Offline / air-gapped install'), then re-run"
-        )
+        super().__init__(f"could not load embedding model '{model_name}' ({detail}) — {remedy}")
 
 
 def load_embedder(model_name: str):
-    """Construct fastembed's embedder, classifying a failed model load at the operation.
+    """Construct fastembed's embedder, classifying a failed load at the operation.
 
     The single place both the indexer and the searcher build one, so neither can grow its own
-    unclassified copy — the defect this replaces reached two call sites that way.
+    unclassified copy — the defect this replaces reached two call sites exactly that way.
     """
     from fastembed import TextEmbedding
     try:
         return TextEmbedding(model_name=model_name)
+    except ValueError as exc:
+        # fastembed's signal for a model it does not ship, raised from its own supported-model
+        # list before any network call (measured: 0.000s, no request attempted). This is a
+        # CONFIGURATION error — the `model` key names something that does not exist — and the
+        # download remedy is actively misleading for it: there is no proxy to fix and no cache to
+        # pre-seed, because nothing was ever going to be fetched.
+        raise EmbeddingModelUnavailable(
+            model_name, exc,
+            "that is not a model fastembed ships — check the `model` key in your codeintel "
+            "config; `TextEmbedding.list_supported_models()` lists the valid names",
+        ) from exc
+    except PermissionError as exc:
+        # The cache directory exists and cannot be written. Also not a network problem: the
+        # download would succeed and then have nowhere to land.
+        raise EmbeddingModelUnavailable(
+            model_name, exc,
+            f"the fastembed cache at {model_cache_dir()} is not writable — fix its permissions, "
+            f"or point {MODEL_CACHE_ENV} at a directory this user can write",
+        ) from exc
     except Exception as exc:
-        raise EmbeddingModelUnavailable(model_name, exc) from exc
+        # What is left is the first-use fetch: this is the one with the network remedy, and the
+        # one an external reviewer hit as a bare `403 Forbidden` naming neither model nor host.
+        raise EmbeddingModelUnavailable(
+            model_name, exc,
+            f"fastembed downloads it (~50 MB) from {MODEL_HOST} on first use and codeintel makes "
+            f"no other outbound request; check network/proxy access, or set {MODEL_CACHE_ENV} to "
+            f"a directory pre-seeded with the model on a connected machine (see docs/install.md, "
+            f"'Offline / air-gapped install'), then re-run",
+        ) from exc
 
 
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
