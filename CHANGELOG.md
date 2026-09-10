@@ -6,6 +6,51 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A blocked embedding-model download now says what it was downloading, from where, and how to
+  work around it.** The first command a new user runs failed with `Indexer.index() unrecoverable
+  failure: 403 Forbidden` — true, and a dead end. It names no model, no host, and no fix: an
+  external reviewer who hit it had to read their proxy's own logs to learn the refused host was
+  `huggingface.co`, and never completed a single query against the tool.
+  - **The project already knew.** `docs/install.md` has documented this exact failure — the
+    `ProxyError 403`, the empty index, the `FASTEMBED_CACHE_PATH` workaround — since the
+    2026-08-23 status eval. The knowledge simply never reached the runtime message, which is the
+    only text somebody in that situation reads. Nobody opens the install guide while the install
+    is what failed.
+  - **Carrying the exception was necessary but not sufficient.** `last_error` already propagated
+    the cause into `setup --all`'s step table and the semantic engine's `index-failed` envelope;
+    the cause it propagated was still `ProxyError: 403 Forbidden`. `semantic_db.model_fetch_hint`
+    appends the three missing facts — the model (`BAAI/bge-small-en-v1.5`, ~50 MB), the host, and
+    the cache variable that redirects it — to both the indexer's failure and the searcher's
+    query-embed warning.
+  - **It stays silent about failures it cannot explain.** An unwritable cache directory and a
+    corrupt database are real index failures with different fixes; attaching a network story to
+    them would send the reader to a proxy that was never the problem. Only exceptions carrying a
+    fetch signal are augmented, and the original exception text is never replaced.
+
+- **`boot-failed` no longer reports a cold `uvx` as a broken install.** The first LSP query
+  against a repo returned `boot-failed` with no hint at all while `uvx` was still resolving and
+  downloading serena-agent from git; run directly a minute later, the same serena booted fine with
+  29 tools. "Retry, this is a one-time install cost" and "go fix your machine" are opposite
+  instructions and were reaching the caller as the same word — and the README's own quickstart
+  invites a `query` three commands before anything has warmed serena.
+  - The hint now distinguishes the one case where "not finished yet" is a live reading: the first
+    boot attempt this process has made for the repo, *and* serena driven through `uvx` rather than
+    an installed binary. A respawn has a warm `uvx` cache, so `attempt > 1` gets the diagnostic
+    phrasing instead; the count is carried across the cooldown respawn so a persistent failure
+    cannot keep excusing itself as a cold cache.
+  - The hint names the exception **type** and not its message, for the reason
+    `_summarize_backend_error` already documents: a backend's own prose can carry instructions
+    addressed to a language model, and this provider does not forward it to an agent.
+
+### Changed
+- **The README stops promising "works out of the box" without saying which box.** The claim is
+  true where `huggingface.co` is reachable and false in restricted CI, on a corporate network, and
+  air-gapped — the difference between "pip install and go" and "pip install, then talk to your
+  network team". The caveat existed, ~450 lines below the quickstart, which is not where anyone
+  reads it. Both occurrences of the phrase now carry the network step and a link to the offline
+  install guide in the same paragraph, and a test enforces that they travel together.
+
 ## [0.23.0] — 2026-09-02
 
 ### Added

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from codeintel.containment import ContainmentError, open_contained
-from codeintel.semantic_db import chunk_content_hash
+from codeintel.semantic_db import chunk_content_hash, model_fetch_hint
 
 if TYPE_CHECKING:
     from codeintel.semantic_db import SemanticDb
@@ -102,7 +102,11 @@ class Searcher:
             vec = vecs[0]
             return struct.pack(f"{len(vec)}f", *vec)
         except Exception as exc:
-            logger.warning("query embedding failed: %s", exc)
+            # Same naming as the indexer's failure path: a query is the OTHER way a cold model
+            # cache is discovered, and `ProxyError: 403` is no more actionable here than it was
+            # there. The hint is silent unless the exception looks like the fetch.
+            hint = model_fetch_hint(exc, self.model_name)
+            logger.warning("query embedding failed: %s%s", exc, f" — {hint}" if hint else "")
             return None
 
     def _row_count(self, project_root_real: str) -> int:

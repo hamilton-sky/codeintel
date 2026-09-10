@@ -24,8 +24,13 @@
 pip install codecortex
 ```
 
-This installs the `codeintel` CLI; the **semantic** engine works out of the box. (On PyPI the
-distribution is `codecortex` because `codeintel` was taken; the CLI and import stay `codeintel`.)
+This installs the `codeintel` CLI; the **semantic** engine works out of the box — with one
+network step: `fastembed` downloads its ~50 MB embedding model from `huggingface.co` the first
+time you index, then runs fully offline. Behind a corporate proxy, in restricted CI, or
+air-gapped, that download is the one thing here that can fail — see
+[Offline / air-gapped install](docs/install.md#offline--air-gapped-install) for the
+`FASTEMBED_CACHE_PATH` workaround. (On PyPI the distribution is `codecortex` because `codeintel`
+was taken; the CLI and import stay `codeintel`.)
 
 **One command prepares the rest and indexes your repo:**
 
@@ -595,7 +600,8 @@ answer — and `deadcode` in particular is retired rather than merely caveated (
 something looks off please [report it](#reporting-a-problem) — an issue from someone who is not the
 author is the single most useful thing this project can receive right now.
 
-**Engine coverage depends on external binaries.** Semantic search works out of the box. The graph
+**Engine coverage depends on external binaries.** Semantic search works out of the box once its
+embedding model is cached ([offline install](docs/install.md#offline--air-gapped-install)). The graph
 engine needs `codebase-memory-mcp` and the LSP engine needs `uvx` on `PATH` — without them those
 engines safe-null and you get a fraction of the capability table above. `codeintel setup --all`
 installs what it can and `codeintel doctor` tells you exactly what is missing and how to fix it.

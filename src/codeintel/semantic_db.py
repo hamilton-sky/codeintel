@@ -15,6 +15,53 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
+# Where `fastembed` fetches those weights on a cold cache, and the environment variable that
+# redirects (or pre-seeds) the cache directory. Named here, beside the model itself, because the
+# reason they need naming is a RUNTIME message: the download is the one non-local step in an
+# otherwise local-first tool, and when a proxy blocks it the exception that surfaces is a bare
+# `ProxyError: 403 Forbidden` — which says nothing about an embedding model, names no host, and
+# offers no fix. docs/install.md has documented that exact failure, and the `FASTEMBED_CACHE_PATH`
+# workaround, since the 2026-08-23 status eval; the knowledge simply never reached the user who
+# was actually hitting it, because nobody reads the install doc while the install is what failed.
+MODEL_HOST = "huggingface.co"
+MODEL_CACHE_ENV = "FASTEMBED_CACHE_PATH"
+
+# Substrings that mark an exception as a failed FETCH rather than a failed embed. Matched against
+# `"TypeName: message"` lowercased, so a bare status code like `403` is read in the company of the
+# exception type that carries it (`ProxyError`, `HTTPError`) rather than anywhere in free text.
+_MODEL_FETCH_SIGNALS = (
+    "proxy", "connection", "ssl", "certificate", "max retries", "timed out", "timeout",
+    "name resolution", "getaddrinfo", "network is unreachable", "temporary failure",
+    "403", "407", "502", "503", "huggingface", "hf_hub", "hf.co", "unauthorized", "forbidden",
+)
+
+
+def model_fetch_hint(exc: BaseException, model_name: str = DEFAULT_MODEL) -> str | None:
+    """Name the embedding-model download when *exc* looks like a blocked one, else ``None``.
+
+    Deliberately a HINT and not a diagnosis: this cannot prove the failure was the download rather
+    than some other network call, so it says "looks like" and hands over the three facts a blocked
+    user needs — that a model is being fetched, from which host, and which variable relocates the
+    cache. Returning ``None`` for anything unrecognised keeps an unrelated failure (an unwritable
+    cache dir, a corrupt db) from being explained wrongly, which would be worse than the bare
+    exception this augments.
+
+    Never raises: it is called from inside except-handlers that must not acquire a second failure.
+    """
+    try:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if not any(sig in text for sig in _MODEL_FETCH_SIGNALS):
+            return None
+        return (
+            f"this looks like a blocked download of the {model_name} embedding weights (~50 MB), "
+            f"which fastembed fetches from {MODEL_HOST} the first time the semantic engine runs. "
+            f"codeintel makes no other outbound request. Behind a proxy or air-gapped, set "
+            f"{MODEL_CACHE_ENV} to a directory pre-seeded with the model on a connected machine "
+            f"— see docs/install.md, 'Offline / air-gapped install'"
+        )
+    except Exception:
+        return None
+
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
 # minified bundle or generated one-liner is one unsplittable chunk however large: a 20MB one-line
 # .py peaked at 3.4GB RSS through the embedder, on the reindexer's daemon thread inside the

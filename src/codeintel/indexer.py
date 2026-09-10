@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from codeintel.containment import contained_path, real_root
 from codeintel.progress import ProgressSink, _Guard
-from codeintel.semantic_db import MAX_CHUNK_CHARS, chunk_content_hash
+from codeintel.semantic_db import MAX_CHUNK_CHARS, chunk_content_hash, model_fetch_hint
 from codeintel.source_kind import (
     CODE_EXTS,
     load_gitattributes_globs,
@@ -259,13 +259,23 @@ class Indexer:
         printed in its step table, while the actual cause (a blocked model download, an unwritable
         cache directory) sat in a stderr line the user had already scrolled past and had no reason
         to connect to the row in front of them.
+
+        Carrying the exception was necessary but not sufficient. `ProxyError: 403 Forbidden` is a
+        faithful reason and still a dead end: it names neither the embedding model being fetched,
+        nor the host it is fetched from, nor the variable that redirects the cache — so a reviewer
+        who hit it on the very first command had to read the proxy's own logs to learn the host.
+        This is the first command a new user runs, in a tool whose contract is that failures are
+        actionable; `model_fetch_hint` supplies the three missing facts when the exception looks
+        like that download, and stays silent when it does not.
         """
         self.last_error = None
         try:
             return self._index(project_root)
         except Exception as exc:
-            logger.error("Indexer.index() unrecoverable failure: %s", exc)
-            self.last_error = f"{type(exc).__name__}: {exc}"
+            hint = model_fetch_hint(exc, self.model_name)
+            detail = f"{type(exc).__name__}: {exc}" + (f" — {hint}" if hint else "")
+            logger.error("Indexer.index() unrecoverable failure: %s", detail)
+            self.last_error = detail
             return -1
 
     def _load_gitignore(self, root: Path) -> set[str]:

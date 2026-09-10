@@ -24,6 +24,10 @@ def _make_fake_session(state: _State, cooldown_until: float = 0.0) -> Any:
     # states they were written to assert; the wait itself is covered separately below.
     s.settled = threading.Event()
     s.wait_until_settled.return_value = state
+    # Read by `_boot_failed_hint` on the FAILED path. A MagicMock would answer both of these with
+    # a Mock, which is not what a real session hands that method.
+    s.attempt = 1
+    s.boot_error = None
     return s
 
 
@@ -110,7 +114,7 @@ def test_lsp_provider_cooldown_expiry(monkeypatch):
         _loop = None
         _mcp_session = None
 
-        def __init__(self, project_root, cmd):
+        def __init__(self, project_root, cmd, attempt=1):
             started.append(project_root)
 
         def wait_until_settled(self, timeout_s):
@@ -424,3 +428,114 @@ def test_settled_is_set_on_a_failed_boot_so_a_waiter_is_not_stranded():
 
     assert sess.settled.is_set()
     assert sess.wait_until_settled(0.01) is lsp_mod._State.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — boot-failed says which kind of failure it is
+# ---------------------------------------------------------------------------
+#
+# `boot-failed` used to carry no hint at all, so the FIRST query against a repo — the one an
+# agent makes when it starts work — reported a broken engine while `uvx` was merely still
+# resolving and downloading serena-agent from git. Run a minute later, the same serena booted
+# fine with 29 tools. "Retry, this is a one-time install cost" and "go fix your machine" are
+# opposite instructions, and they were reaching the caller as the same word.
+
+def _failed_session(attempt: int = 1, boot_error: str | None = None) -> Any:
+    s = _make_fake_session(_State.FAILED, cooldown_until=time.monotonic() + 60)
+    s.attempt = attempt
+    s.boot_error = boot_error
+    return s
+
+
+def test_boot_failed_on_a_cold_uvx_first_attempt_reads_as_retry(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+                        lambda x: "/fake/uvx" if x == "uvx" else None)
+    p = LspProvider()
+    assert p._cmd == "uvx"
+    p._sessions["/my/repo"] = _failed_session(attempt=1)
+
+    r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
+    assert r["reason"] == "boot-failed"
+    hint = r["hint"].lower()
+    assert "retry" in hint
+    assert "not a broken install" in hint
+    assert "download" in hint
+
+
+def test_boot_failed_on_a_respawn_does_not_blame_a_cold_cache(monkeypatch):
+    """`uvx` populated its cache on the first attempt, so "still downloading" is only true once."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+                        lambda x: "/fake/uvx" if x == "uvx" else None)
+    p = LspProvider()
+    p._sessions["/my/repo"] = _failed_session(attempt=2)
+
+    r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
+    assert r["reason"] == "boot-failed"
+    assert "doctor --deep" in r["hint"]
+    assert "not a broken install" not in r["hint"].lower()
+
+
+def test_boot_failed_with_an_installed_serena_does_not_blame_uvx(monkeypatch):
+    """An installed binary downloads nothing, so a failed boot there is a real failure."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+                        lambda x: "/usr/bin/serena" if x == "serena" else None)
+    p = LspProvider()
+    assert p._cmd == "serena"
+    p._sessions["/my/repo"] = _failed_session(attempt=1)
+
+    r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
+    assert r["reason"] == "boot-failed"
+    assert "uvx" not in r["hint"]
+    assert "doctor --deep" in r["hint"]
+
+
+def test_boot_failed_hint_carries_the_exception_type_but_not_backend_prose(monkeypatch):
+    """The type is diagnostic; the message is not forwarded.
+
+    `_summarize_backend_error` explains at length why this provider never hands a backend's own
+    text to a calling agent — it can carry instructions addressed to a language model. A boot
+    failure is subject to the same rule, so the hint names the exception class and nothing else.
+    """
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+                        lambda x: "/fake/uvx" if x == "uvx" else None)
+    p = LspProvider()
+    p._sessions["/my/repo"] = _failed_session(attempt=2, boot_error="McpError")
+
+    r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
+    assert "McpError" in r["hint"]
+
+
+def test_a_session_built_by_new_still_answers_the_hint_fields():
+    """The `__new__` stub pattern used across these tests must not fault a failure handler."""
+    from codeintel.providers import lsp as lsp_mod
+
+    sess = lsp_mod._LspSession.__new__(lsp_mod._LspSession)
+    assert sess.attempt == 1
+    assert sess.boot_error is None
+
+
+def test_respawn_after_cooldown_increments_the_attempt_count(monkeypatch):
+    """Without this the second boot would keep excusing itself as a cold cache forever."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    created: list[int] = []
+
+    class FakeNewSession:
+        state = _State.WARMING
+        cooldown_until = 0.0
+        _lock = threading.Lock()
+        _loop = None
+        _mcp_session = None
+
+        def __init__(self, project_root, cmd, attempt=1):
+            created.append(attempt)
+
+        def wait_until_settled(self, timeout_s):
+            return self.state
+
+    monkeypatch.setattr("codeintel.providers.lsp._LspSession", FakeNewSession)
+    p = LspProvider()
+    p._sessions["/my/repo"] = _failed_session(attempt=3)
+    p._sessions["/my/repo"].cooldown_until = time.monotonic() - 1  # cooldown elapsed
+
+    p.build_result("symbol", "parse_result", [], 0, "/my/repo")
+    assert created == [4]

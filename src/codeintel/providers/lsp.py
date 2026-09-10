@@ -128,9 +128,24 @@ class _State(enum.Enum):
 
 
 class _LspSession:
-    def __init__(self, project_root: str, cmd: str) -> None:
+    # Class-level defaults so a session built via `__new__` (the test stubs do this) still answers
+    # these rather than raising AttributeError from inside a failure handler — the same reason
+    # `LspProvider._last_backend_error` carries one.
+    attempt: int = 1
+    boot_error: str | None = None
+
+    def __init__(self, project_root: str, cmd: str, attempt: int = 1) -> None:
         self.state = _State.WARMING
         self.cooldown_until: float = 0.0
+        # Which boot this is for this repo (1 = the first one this process has tried). Read by
+        # `_boot_failed_hint` to tell a cold `uvx` — which must resolve and download serena-agent
+        # from git before it can even start — apart from an install that is genuinely broken.
+        # Set once and never mutated, so it is safe to read without `_lock`.
+        self.attempt = attempt
+        # Exception TYPE that ended the boot, for the caller's hint. The type only: a boot failure
+        # can carry subprocess output, and `_summarize_backend_error` explains at length why this
+        # provider does not forward backend prose to an agent. The full exception is logged.
+        self.boot_error: str | None = None
         self._lock = threading.Lock()
         # Set once the boot resolves either way (READY or FAILED), so a caller can wait for the
         # outcome instead of polling the state behind `_lock`. See `wait_until_settled`.
@@ -158,8 +173,14 @@ class _LspSession:
     def _run(self, project_root: str, cmd: str) -> None:
         try:
             self._loop.run_until_complete(self._warmup(project_root, cmd))
-        except Exception:
+        except Exception as exc:
+            logger.warning("serena boot failed for %s (attempt %d): %s",
+                           project_root, self.attempt, exc)
             with self._lock:
+                # Written BEFORE the state. A reader takes `_lock` to learn the state and then
+                # reads `boot_error` without it; publishing FAILED first leaves a window where the
+                # cause is still None and the hint silently degrades to its generic form.
+                self.boot_error = type(exc).__name__
                 self.state = _State.FAILED
                 self.cooldown_until = time.monotonic() + _COOLDOWN_SECONDS
         finally:
@@ -218,6 +239,9 @@ class LspProvider:
     # instead of quietly rendering an empty section, and `build_result` turns them into the
     # envelope's `gaps` / `confidence`. Class-level default for the same __new__ reason as above.
     _pending_gaps: tuple[dict[str, Any], ...] = ()
+    # Same __new__ reason: `_boot_failed_hint` reads this, and a session injected straight into
+    # `_sessions` reaches it without `_detect_backend` having run.
+    _cmd: str | None = None
 
     def __init__(self) -> None:
         self._sessions: dict[str, _LspSession] = {}
@@ -256,17 +280,22 @@ class LspProvider:
 
     def _get_or_create_session(self, root: str) -> _LspSession:
         with self._sessions_lock:
+            # Counted across respawns rather than stored per-session, so a SECOND boot is never
+            # excused as a cold cache: `uvx` populates its cache on the first attempt, so the
+            # "still downloading" reading is only ever true once.
+            attempt = 1
             existing = self._sessions.get(root)
             if existing is not None:
                 with existing._lock:
                     if existing.state == _State.FAILED:
                         if time.monotonic() > existing.cooldown_until:
+                            attempt = existing.attempt + 1
                             del self._sessions[root]  # cooldown elapsed → allow one respawn
                         else:
                             return existing  # still cooling down — no per-request respawn
                     else:
                         return existing
-            session = _LspSession(root, self._cmd)  # type: ignore[arg-type]
+            session = _LspSession(root, self._cmd, attempt=attempt)  # type: ignore[arg-type]
             self._sessions[root] = session
             return session
 
@@ -421,6 +450,36 @@ class LspProvider:
                 "detail": f"serena did not reach READY within {int(timeout_s)}s (still warming)",
                 "remediation": "retry — first boot pulls serena via uvx and can be slow"}
 
+    def _boot_failed_hint(self, session: _LspSession) -> str:
+        """What a caller should do about a serena boot that did not finish.
+
+        `boot-failed` carried no hint at all, so the FIRST query against a repo — the one an agent
+        makes when it starts work — reported a broken engine while `uvx` was merely still
+        resolving and downloading serena-agent from git. Run again a minute later, the same serena
+        booted fine. A one-time install cost and a broken install are opposite conclusions (retry
+        vs. go fix your machine) and they were reaching the caller as the same word.
+
+        The distinction is exactly the two facts checked here: this is the first boot this process
+        has attempted for the repo, and serena is being driven through `uvx` rather than an
+        installed binary — the only combination in which "not finished yet" is a live reading.
+        A respawn (`attempt > 1`) has a warm `uvx` cache, so it gets the diagnostic phrasing.
+        """
+        detail = (f"the serena session did not start ({session.boot_error})"
+                  if session.boot_error else "the serena session did not start")
+        if session.attempt <= 1 and self._cmd == "uvx":
+            return (
+                f"{detail}. This was the first boot attempt for this repo and serena is being run "
+                f"through `uvx`, which resolves and downloads serena-agent from git on a cold "
+                f"cache — that is a one-time cost which can outlast this call, NOT a broken "
+                f"install. Retry the query in a minute, or run `codeintel setup --all <repo>` "
+                f"once to warm it. If it still fails, `codeintel doctor --deep` boots serena and "
+                f"reports why."
+            )
+        return (
+            f"{detail}, and this is not a cold cache — `codeintel doctor --deep` boots serena and "
+            f"reports why (set CODEINTEL_DEBUG=1 to pass serena's own stderr through)."
+        )
+
     def build_result(
         self,
         op: Any,
@@ -472,7 +531,8 @@ class LspProvider:
                         op_str, target_str, engine="lsp", reason="warming")
 
             if state == _State.FAILED:
-                return safe_null_result(op_str, target_str, engine="lsp", reason="boot-failed")
+                return safe_null_result(op_str, target_str, engine="lsp", reason="boot-failed",
+                                        hint=self._boot_failed_hint(session))
 
             # READY
             # Cleared through a method rather than a direct assignment: `_dispatch` sets this as a
