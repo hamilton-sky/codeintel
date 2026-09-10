@@ -37,11 +37,19 @@ All notable changes to codeintel are documented here. The format is based on
   - **Expired entries are pruned globally when a failure is recorded**, not only on a later lookup
     of the same root. Pruning per-key left a long-lived server holding one entry per one-off repo
     whose pass failed and which nobody queried again — a cleanup claim the code did not keep.
-  - **A `db.close()` fault cannot overwrite the real cause.** `close()` runs in a `finally` after
-    the cause has been recorded and can itself raise; landing in the outer handler then replaced
-    "could not load embedding model … check network/proxy access" with a database-close error —
-    the actionable cause swapped for a downstream symptom of it. Found by re-reading the diff, and
-    pinned by a test verified against the unguarded version.
+  - **A failing `db.close()` cannot mask, replace, or invent a cause.** An exception raised in a
+    `finally` REPLACES the one already propagating (the original is demoted to `__context__`), and
+    `close()` runs in exactly that position. Three distinct wrong outcomes came out of it, all now
+    pinned by tests verified against the unguarded version:
+    - a recorded "could not load embedding model … check network/proxy access" overwritten by a
+      database-close error — the actionable cause swapped for a downstream symptom;
+    - `db.init()`'s failure lost the same way, so the caller was told about the close instead of
+      what actually stopped the pass;
+    - and a pass that **succeeded** and merely failed to close its handle recorded as a failed
+      pass, suppressing every query for a whole cooldown over cleanup.
+    Guarding the close at its own site fixes all three at once, which is why no "already recorded"
+    flag is needed — nothing after the recording can raise. Swallowed but never silent: it still
+    goes through `log_swallowed`.
   - **The failed engine reports `runnable: false`**, matching the sibling case this probe already
     reported that way ("semantic cache present but unreadable"). `runnable: true` beside "a
     background index pass failed: could not load embedding model … check network/proxy access" is

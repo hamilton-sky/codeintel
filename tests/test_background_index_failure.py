@@ -385,3 +385,54 @@ def test_a_close_fault_does_not_overwrite_the_real_cause(monkeypatch, tmp_path):
     cause = _background_index_failure(str(tmp_path)) or ""
     assert "embedding model" in cause
     assert "close blew up" not in cause
+
+
+def test_a_setup_failure_survives_a_failing_close(monkeypatch, tmp_path):
+    """The other direction, and the one a "already recorded" flag could not cover.
+
+    An exception raised in a `finally` REPLACES the one already propagating, demoting it to
+    `__context__`. So `db.init()` raising and `db.close()` then raising handed the outer handler
+    the close error — recording a downstream symptom as the cause, and losing the only sentence
+    that says what to fix. Guarding the close at its own site fixes both directions at once.
+    """
+    import codeintel.semantic_db as sdb
+
+    monkeypatch.setattr(sdb.SemanticDb, "init",
+                        lambda self: (_ for _ in ()).throw(RuntimeError("the REAL cause")))
+    monkeypatch.setattr(sdb.SemanticDb, "close",
+                        lambda self: (_ for _ in ()).throw(OSError("close blew up")))
+
+    captured: list = []
+    monkeypatch.setattr(sem.threading, "Thread",
+                        lambda target, **kw: type("_T", (), {"start": lambda self: captured.append(target)})())
+
+    sem._start_background_index(str(tmp_path), ":memory:", {})
+    captured[0]()
+
+    cause = _background_index_failure(str(tmp_path)) or ""
+    assert "the REAL cause" in cause
+    assert "close blew up" not in cause
+
+
+def test_a_close_failure_alone_does_not_mark_the_pass_failed(monkeypatch, tmp_path):
+    """A pass that indexed successfully and then failed to close its handle DID succeed.
+
+    Recording it as a failed pass would suppress querying for a whole cooldown over cleanup.
+    """
+    import codeintel.semantic_db as sdb
+    from codeintel.indexer import Indexer
+
+    monkeypatch.setattr(sdb.SemanticDb, "init", lambda self: None)
+    monkeypatch.setattr(sdb.SemanticDb, "close",
+                        lambda self: (_ for _ in ()).throw(OSError("close blew up")))
+    monkeypatch.setattr(Indexer, "__init__", lambda self, db, **kw: None)
+    monkeypatch.setattr(Indexer, "index", lambda self, root: 7)      # a successful pass
+
+    captured: list = []
+    monkeypatch.setattr(sem.threading, "Thread",
+                        lambda target, **kw: type("_T", (), {"start": lambda self: captured.append(target)})())
+
+    sem._start_background_index(str(tmp_path), ":memory:", {})
+    captured[0]()
+
+    assert _background_index_failure(str(tmp_path)) is None

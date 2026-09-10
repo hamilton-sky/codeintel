@@ -128,7 +128,6 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
         _BG_INDEX_STARTED[key] = time.monotonic()
 
     def _run() -> None:
-        recorded = False
         try:
             from codeintel.indexer import Indexer
             from codeintel.semantic_db import SemanticDb
@@ -151,21 +150,28 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
                     # engine is an agent on the far side of MCP or HTTP, and the envelope is the
                     # only channel it has.
                     _record_background_failure(key, cause)
-                    recorded = True
             finally:
-                db.close()
+                # `close()` cannot be allowed to raise out of this `finally`. An exception raised
+                # in a `finally` REPLACES the one already propagating (the original is demoted to
+                # `__context__`), so a failing close would hand the handler below a database-close
+                # error in place of `db.init()`'s — recording a downstream symptom as the cause,
+                # and losing the only sentence that tells the caller what to fix. It would equally
+                # overwrite a cause already recorded above.
+                #
+                # Guarding the close at its own site fixes both directions at once, and is why no
+                # "already recorded" flag is needed: nothing after the recording can raise.
+                # Swallowed but never silent — a close that fails while the pass itself succeeded
+                # is still worth an operator seeing.
+                try:
+                    db.close()
+                except Exception as close_exc:
+                    log_swallowed("SemanticProvider._start_background_index.close", close_exc)
         except Exception as exc:
             log_swallowed("SemanticProvider._start_background_index", exc)
             # A crash before or around the pass is a failed pass too. `index()` itself never
             # raises, but `db.init()` and the imports above it can, and a caller that gets
             # `indexing-in-progress` forever cannot tell the two apart.
-            #
-            # Guarded, because `db.close()` in the `finally` above runs AFTER the real cause has
-            # been recorded and can itself raise. Landing here then would overwrite "could not
-            # load embedding model … check network/proxy access" with a database-close error —
-            # replacing the actionable cause with a downstream symptom of it.
-            if not recorded:
-                _record_background_failure(key, f"{type(exc).__name__}: {exc}")
+            _record_background_failure(key, f"{type(exc).__name__}: {exc}")
         finally:
             with _BG_INDEX_LOCK:
                 _BG_INDEX_STARTED.pop(key, None)
