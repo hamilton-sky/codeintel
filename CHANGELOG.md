@@ -7,6 +7,21 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **A vector search that faulted is `query-failed`, not `below-floor`.** The last `return []` in
+  `Searcher.search` still indistinguishable from a genuine miss: a corrupt index, an unusable
+  `sqlite-vec` extension or a locked database all landed in the KNN except-handler, logged a
+  warning, and returned an empty list — which the provider reported as "a non-empty index yielded
+  no match above the cosine floor". A confident claim about the repository, from a query that
+  errored.
+  - Found by auditing all seven `return []` sites in the module after the embed path was fixed;
+    the other five are honest empties (a blank query, no rows for this project, no candidate above
+    the floor) and are left alone.
+  - `last_query_error` is now **stage-qualified** — `embedding the query failed — …` vs `the
+    vector search failed — …` — because the two have unrelated fixes (re-download the model vs
+    re-index), and the field is now set from two places. The provider's hint stops presuming the
+    embed stage and passes the searcher's own message through.
+
+### Fixed
 - **A blocked embedding-model download now says what it was downloading, from where, and how to
   work around it.** The first command a new user runs failed with `Indexer.index() unrecoverable
   failure: 403 Forbidden` — true, and a dead end. It names no model, no host, and no fix: an

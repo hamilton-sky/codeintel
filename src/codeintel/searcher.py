@@ -87,9 +87,11 @@ class Searcher:
         self.last_stale = 0
         self.last_unverifiable = 0
         # Why the last search could not be RUN, as opposed to running and matching nothing. An
-        # empty result list is the same object either way, so without this a query the embedder
-        # could not encode — a cold model cache behind a proxy is the common case — reached the
-        # caller as `below-floor`, which an agent is told to read as "this code does not exist".
+        # empty result list is the same object either way, so without this a search that faulted —
+        # a query the embedder could not encode (a cold model cache behind a proxy), or a vector
+        # search that errored (a corrupt index, an unusable sqlite-vec) — reached the caller as
+        # `below-floor`, which an agent is told to read as "this code does not exist". Set by
+        # whichever stage failed, and stage-qualified because their fixes are unrelated.
         self.last_query_error: str | None = None
 
     def _get_embedder(self):
@@ -111,7 +113,12 @@ class Searcher:
             # cache is discovered, and `ProxyError: 403` is no more actionable here than it was
             # there. The hint is silent unless the exception looks like the fetch.
             hint = model_fetch_hint(exc, self.model_name)
-            self.last_query_error = f"{type(exc).__name__}: {exc}" + (f" — {hint}" if hint else "")
+            # Stage-qualified: `last_query_error` is now set from two places, and "which step of
+            # the search failed" is the first thing a reader needs — the fixes are unrelated.
+            self.last_query_error = (
+                f"embedding the query failed — {type(exc).__name__}: {exc}"
+                + (f" — {hint}" if hint else "")
+            )
             logger.warning("query embedding failed: %s", self.last_query_error)
             return None
 
@@ -369,7 +376,19 @@ class Searcher:
                 (query_vec, project_root_real, candidate_limit),
             ).fetchall()
         except Exception as exc:
-            logger.warning("KNN query failed: %s", exc)
+            # A vector search that FAULTED is a could-not-ask, not a miss — the same defect as the
+            # embed path above, one step further along, and the last `return []` in this method
+            # that was still indistinguishable from "nothing matched". A corrupt index, an
+            # unusable sqlite-vec extension or a locked database all land here, and all of them
+            # reached the caller as `below-floor`: "a non-empty index yielded no match above the
+            # cosine floor", which is a confident claim about the repository made by a query that
+            # errored. The cause is named rather than the stage alone, because the fix differs
+            # from the embed case (re-index, not re-download).
+            self.last_query_error = (
+                f"the vector search failed — {type(exc).__name__}: {exc}. The index may be "
+                f"unreadable, or the sqlite-vec extension unusable"
+            )
+            logger.warning("KNN query failed: %s", self.last_query_error)
             return []
 
         root = Path(project_root)
