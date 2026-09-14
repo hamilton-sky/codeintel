@@ -75,20 +75,31 @@ def safe_null_result(
     hint: str | None = None,
 ) -> Result:
     failed_reasons = {
-        "backend-error", "backend-incompatible", "boot-failed", "error", "index-failed",
-        "provider-error", "timeout", "unparsable",
+        "backend-error", "backend-incompatible", "boot-failed", "error", "gateway-error",
+        "handler-error", "index-failed", "provider-error", "query-failed", "timeout",
+        "unparsable",
     }
     unavailable_reasons = {
-        "engine-unavailable", "engines-unavailable", "indexing-in-progress", "no-engine",
-        "no-index", "no-project-root", "op-not-supported", "project-not-indexed",
-        "project-not-indexed-standalone", "unsupported-op", "warming",
+        "backend-unreachable", "engine-unavailable", "engines-unavailable", "indexing-in-progress",
+        "index-stale", "no-engine", "no-project-root", "op-not-allowed-for-role",
+        "op-not-supported", "op-withdrawn", "project-not-indexed",
+        "project-not-indexed-standalone", "root-not-allowed-for-role", "source-unreadable",
+        "unknown-engine", "unsupported-op", "warming",
+    }
+    not_found_reasons = {
+        "below-floor", "no-edges", "no-index", "no-result", "not-found", "not-in-graph",
     }
     if reason in failed_reasons:
         outcome = "failed"
     elif reason in unavailable_reasons:
         outcome = "unavailable"
-    else:
+    elif reason in not_found_reasons:
         outcome = "not_found"
+    else:
+        # New failure reasons must fail closed.  Defaulting every unknown string to ``not_found``
+        # turned a newly introduced ``source-unreadable`` reason into an assertion that the symbol
+        # was absent — exactly the ambiguity the explicit outcome field was added to remove.
+        outcome = "failed"
     r: Result = {
         "ok": True,
         "op": str(op or ""),

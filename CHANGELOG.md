@@ -6,6 +6,23 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.23.2] — 2026-09-14
+
+### Fixed
+- **Semantic indexing now fails closed when any source subtree cannot be enumerated.** Python's
+  default directory walk silently swallowed permission errors, allowing a macOS-protected
+  repository to report "Nothing new to index" at exit zero even though no source was inspected.
+  The original error and blocked path now reach the CLI as an indexing failure.
+- **Deep LSP status and symbol queries diagnose repository permissions before launching Serena.**
+  A protected project previously surfaced Serena's `ExceptionGroup` wrapper and incorrectly
+  recommended checking `uvx` or the network; it now returns `source-unreadable`, identifies the
+  unreadable root, and points to the host's filesystem/privacy permissions.
+- **Unknown safe-null reasons fail closed instead of becoming `not_found`.** The reason taxonomy
+  now classifies source access, backend reachability, stale indexes, authorization, and retired
+  operations explicitly; a future unclassified failure becomes `failed`, never evidence that a
+  symbol or relationship is absent. Fan-out merging consumes those explicit outcomes instead of
+  maintaining a second reason list that can drift and reclassify an unavailable engine as a miss.
+
 ## [0.23.1] — 2026-09-14
 
 ### Added

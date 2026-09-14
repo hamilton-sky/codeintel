@@ -390,7 +390,19 @@ class Indexer:
             root_real = real_root(str(root))
         except Exception:
             root_real = str(root)
-        for dirpath, dirnames, filenames in os.walk(root):
+        def fail_on_unreadable_tree(error: OSError) -> None:
+            """Do not turn an unreadable subtree into a successful empty index.
+
+            ``os.walk`` silently ignores directory-enumeration failures unless an ``onerror``
+            callback is supplied.  On macOS this is particularly dangerous for folders protected
+            by Files & Folders / Full Disk Access: the root can pass ``isdir`` while every source
+            directory raises ``EPERM``, leaving the CLI to report "Nothing new to index" at exit
+            zero.  Propagating the original error preserves its path and lets ``index()`` expose a
+            truthful, actionable failure.
+            """
+            raise error
+
+        for dirpath, dirnames, filenames in os.walk(root, onerror=fail_on_unreadable_tree):
             at_root = os.path.realpath(dirpath) == os.path.realpath(real_root_str)
             dirnames[:] = [
                 d for d in dirnames

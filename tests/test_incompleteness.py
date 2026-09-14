@@ -371,8 +371,13 @@ def test_null_result_outcome_is_machine_readable():
     from codeintel.provider import safe_null_result
 
     assert safe_null_result("x", "y", reason="not-in-graph")["outcome"] == "not_found"
+    assert safe_null_result("x", "y", reason="not-found")["outcome"] == "not_found"
+    assert safe_null_result("x", "y", reason="no-index")["outcome"] == "not_found"
     assert safe_null_result("x", "y", reason="engine-unavailable")["outcome"] == "unavailable"
     assert safe_null_result("x", "y", reason="backend-error")["outcome"] == "failed"
+    assert safe_null_result("x", "y", reason="source-unreadable")["outcome"] == "unavailable"
+    assert safe_null_result("x", "y", reason="backend-unreachable")["outcome"] == "unavailable"
+    assert safe_null_result("x", "y", reason="new-unclassified-reason")["outcome"] == "failed"
 
 
 def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
@@ -396,6 +401,31 @@ def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
     assert merged["confidence"] == "partial", "a half-answered fan-out is not complete"
     kinds = [g.get("kind") for g in merged["gaps"]]
     assert "engine-unavailable" in kinds, kinds
+
+
+def test_fan_out_preserves_source_unreadable_as_unavailable():
+    """The merge must consume the public outcome, not maintain another reason allow-list.  If all
+    engines could not answer, a newly introduced reason must never collapse back to ``not_found``.
+    """
+    from codeintel.gateway import Gateway
+    from codeintel.provider import safe_null_result
+
+    merged = Gateway()._merge(
+        {
+            "lsp": safe_null_result(
+                "context", "createSession", engine="lsp", reason="source-unreadable"
+            ),
+            "graph": safe_null_result(
+                "context", "createSession", engine="graph", reason="project-not-indexed"
+            ),
+        },
+        "context", "createSession",
+    )
+
+    assert merged["result"] is None
+    assert merged["reason"] == "engines-unavailable"
+    assert merged["outcome"] == "unavailable"
+    assert "NOT evidence" in merged["hint"]
 
 
 def test_a_constituent_gap_survives_the_merge():

@@ -6,6 +6,8 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from codeintel.outcome import Missing, Ok
 from codeintel.providers.lsp import LspProvider, _State
 from codeintel.server import code_status_handler
@@ -460,6 +462,32 @@ def test_boot_failed_on_a_cold_uvx_first_attempt_reads_as_retry(monkeypatch):
     assert "retry" in hint
     assert "not a broken install" in hint
     assert "download" in hint
+
+
+def test_an_unreadable_repository_never_launches_serena(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+                        lambda x: "/fake/uvx" if x == "uvx" else None)
+    monkeypatch.setattr("codeintel.providers.lsp.os.path.isdir", lambda root: True)
+    monkeypatch.setattr(
+        "codeintel.providers.lsp._project_access_failure",
+        lambda root: (
+            f"repository root is not readable by codeintel (PermissionError: {root})",
+            "grant repository access",
+        ),
+    )
+    p = LspProvider()
+    monkeypatch.setattr(
+        p, "_get_or_create_session",
+        lambda root: pytest.fail("an unreadable repository must not launch serena"),
+    )
+
+    r = p.build_result("symbol", "createSession", [], 1000, "/protected/repo")
+
+    assert r["result"] is None
+    assert r["reason"] == "source-unreadable"
+    assert r["outcome"] == "unavailable"
+    assert "PermissionError" in r["hint"]
+    assert "grant repository access" in r["hint"]
 
 
 def test_boot_failed_on_a_respawn_does_not_blame_a_cold_cache(monkeypatch):
