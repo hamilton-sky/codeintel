@@ -46,6 +46,8 @@ def _status_for(report: dict) -> str:
     # that matters. `None` (could not determine) makes no claim at all.
     if report.get("model_cached") is False:
         return "warn"
+    if report.get("source_readable") is False:
+        return "warn"
     return "ok"
 
 
@@ -297,7 +299,7 @@ def run_doctor(
     try:
         from codeintel.providers.semantic import SemanticProvider
         engines["semantic"] = _probe_engine(
-            "semantic", semantic, SemanticProvider, lambda p: p.probe(root), on_provider
+            "semantic", semantic, SemanticProvider, lambda p: p.probe(root, deep=deep), on_provider
         )
     except Exception:
         engines["semantic"] = {"engine": "semantic", "status": "fail", "installed": False,

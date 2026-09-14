@@ -34,6 +34,15 @@ def _mem_db() -> SemanticDb:
     return db
 
 
+def test_semantic_db_context_manager_closes_its_connection():
+    with SemanticDb(":memory:") as db:
+        db.init()
+        conn = db.conn()
+
+    with pytest.raises(Exception, match="closed"):
+        conn.execute("SELECT 1")
+
+
 class _ContentEmbedding:
     """Content-addressed stub: the vector depends on the text, so a chunk whose content changed
     yields a different embedding — lets a test detect whether a re-embed actually persisted

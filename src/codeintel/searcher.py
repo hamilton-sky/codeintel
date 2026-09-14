@@ -159,9 +159,11 @@ class Searcher:
             return "[refused: resolves outside the indexed root]"
         except FileNotFoundError:
             return "[file not found]"
+        except PermissionError:
+            return "[source unreadable: permission denied]"
         except Exception as exc:
             logger.debug("snippet read failed for %s:%d: %s", file_path, chunk_start, exc)
-            return "[file not found]"
+            return "[source unreadable]"
 
     def _read_chunk(
         self, root_real: str, file_path: Path, chunk_start: int, chunk_end: int | None = None
@@ -459,11 +461,18 @@ class Searcher:
                     if text is None
                     else "".join(text.splitlines(keepends=True)[:_SNIPPET_LINES]).rstrip()
                 )
-            results.append({
+            result = {
                 "path": c["path"],
                 "line": c["line"],
                 "symbol": c.get("symbol"),
                 "snippet": snippet,
                 "score": c["score"],
-            })
+            }
+            # A cached vector can still identify a likely location when macOS privacy, ACLs, or a
+            # transient filesystem failure prevents reading the current source. Preserve that
+            # location, but carry the missing-evidence state to the provider so it cannot label the
+            # answer complete merely because the embedding database itself was readable.
+            if c.get("text") is None:
+                result["source_unreadable"] = True
+            results.append(result)
         return results

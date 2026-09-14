@@ -1,6 +1,7 @@
 """`codeintel status` — engine readiness and index age at a glance."""
 
 import datetime
+import json
 import os
 from typing import Any
 
@@ -20,7 +21,43 @@ def run(args: Any) -> int:
     if problem:
         print(problem)
         return 1
-    status = server.code_status_handler({"project_root": project_root})
+    status = server.code_status_handler({
+        "project_root": project_root,
+        "deep": bool(getattr(args, "deep", False)),
+    })
+
+    from codeintel.config import load_config
+    from codeintel.semantic_db import SemanticDb, default_db_path
+
+    db_path = default_db_path(str(load_config(project_root).get("model") or ""))
+    indexed_at = None
+    semantic_readiness = (status.get("readiness") or {}).get("semantic") or {}
+    # Metadata can outlive every chunk after a failed/partial cleanup. An age attached to zero
+    # searchable rows makes an unindexed repo look recently indexed, so only surface it when the
+    # engine independently confirmed this repository has chunks.
+    if os.path.exists(db_path) and semantic_readiness.get("repo_indexed") is True:
+        db = SemanticDb(db_path)
+        try:
+            indexed_at = db.indexed_at(os.path.realpath(project_root))
+        finally:
+            db.close()
+
+    if getattr(args, "json", False):
+        payload = {
+            **status,
+            "project_root": project_root,
+            "semantic_index": {
+                "path": db_path,
+                "exists": os.path.exists(db_path),
+                "indexed_at": indexed_at,
+                "age_seconds": (
+                    max(0, int(datetime.datetime.now().timestamp() - indexed_at))
+                    if indexed_at is not None else None
+                ),
+            },
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
 
     readiness = status.get("readiness") or {}
     print("Engine status:")
@@ -42,10 +79,6 @@ def run(args: Any) -> int:
             "\n    restart the codeintel server (or the agent hosting it) to pick it up"
         )
 
-    from codeintel.config import load_config
-    from codeintel.semantic_db import default_db_path
-
-    db_path = default_db_path(str(load_config(project_root).get("model") or ""))
     if not os.path.exists(db_path):
         print(f"\nIndex: not found  ({db_path})")
         return 0
@@ -54,15 +87,6 @@ def run(args: Any) -> int:
     # so its mtime advances whenever any OTHER repository is indexed — which made a months-stale
     # index report as freshly built, and did so most convincingly when someone was checking it
     # precisely because an answer looked wrong.
-    from codeintel.semantic_db import SemanticDb
-
-    indexed_at = None
-    db = SemanticDb(db_path)
-    try:
-        indexed_at = db.indexed_at(os.path.realpath(project_root))
-    finally:
-        db.close()
-
     if indexed_at is None:
         # Either never indexed, or indexed before this was recorded. "Unknown" is the honest
         # answer; the previous number was worse than none because it looked authoritative.

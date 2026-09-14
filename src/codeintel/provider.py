@@ -31,6 +31,9 @@ class Result(TypedDict):
     result: Any | None
     engine: str
     cached: bool
+    # Transport success (``ok``) is deliberately separate from whether the question was answered.
+    # This field lets integrations branch without reverse-engineering ``reason`` and ``gaps``.
+    outcome: NotRequired[str]
     reason: NotRequired[str]
     hint: NotRequired[str]
     # Set when the answer was served while a reindex for its project was still running, i.e. it
@@ -71,6 +74,21 @@ def safe_null_result(
     reason: str = "no-engine",
     hint: str | None = None,
 ) -> Result:
+    failed_reasons = {
+        "backend-error", "backend-incompatible", "boot-failed", "error", "index-failed",
+        "provider-error", "timeout", "unparsable",
+    }
+    unavailable_reasons = {
+        "engine-unavailable", "engines-unavailable", "indexing-in-progress", "no-engine",
+        "no-index", "no-project-root", "op-not-supported", "project-not-indexed",
+        "project-not-indexed-standalone", "unsupported-op", "warming",
+    }
+    if reason in failed_reasons:
+        outcome = "failed"
+    elif reason in unavailable_reasons:
+        outcome = "unavailable"
+    else:
+        outcome = "not_found"
     r: Result = {
         "ok": True,
         "op": str(op or ""),
@@ -78,6 +96,7 @@ def safe_null_result(
         "result": None,
         "engine": engine,
         "cached": False,
+        "outcome": outcome,
         "reason": reason,
     }
     # Optional actionable breadcrumb (e.g. "not indexed → run codeintel index"); emit the key
@@ -107,7 +126,11 @@ def attach_confidence(result: Result, gaps: Any = ()) -> Result:
         if result.get("result") is None:
             return result
         items = [g for g in (gaps or ()) if isinstance(g, dict)]
-        out: Result = {**result, "confidence": "partial" if items else "complete"}
+        out: Result = {
+            **result,
+            "confidence": "partial" if items else "complete",
+            "outcome": "partial" if items else "answered",
+        }
         if items:
             out["gaps"] = items
         return out

@@ -17,7 +17,13 @@ import sys
 
 import pytest
 
-from codeintel.__main__ import _COMMAND_GROUPS, _COMMANDS, _suggest, render_help
+from codeintel.__main__ import (
+    _COMMAND_GROUPS,
+    _COMMANDS,
+    _NATIVE_RUNTIME_COMMANDS,
+    _suggest,
+    render_help,
+)
 
 
 def _run(*args, env_extra=None):
@@ -56,6 +62,10 @@ def test_every_advertised_command_has_a_description():
 
 def test_no_command_is_listed_in_two_groups():
     assert len(_COMMANDS) == len(set(_COMMANDS))
+
+
+def test_native_runtime_commands_cover_every_long_lived_or_embedding_entrypoint():
+    assert {"index", "query", "setup", "serve", "serve-http"} == _NATIVE_RUNTIME_COMMANDS
 
 
 # --------------------------------------------------------------------------- help screen

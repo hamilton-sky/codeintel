@@ -632,6 +632,57 @@ def test_status_degrades_instead_of_tracebacking(monkeypatch, capsys):
     assert "Status unavailable: boom" in capsys.readouterr().out
 
 
+def test_status_json_is_structured_and_includes_repo_index_age(monkeypatch, capsys, tmp_path):
+    import json
+
+    received = {}
+
+    def _status(args):
+        received.update(args)
+        return {"readiness": {"graph": {"status": "ok"}}, "healthy": True}
+
+    monkeypatch.setattr("codeintel.server.code_status_handler", _status)
+    monkeypatch.setattr(
+        "codeintel.semantic_db.default_db_path", lambda model: str(tmp_path / "none.db"))
+
+    args = _args(project_root=str(tmp_path), json=True, deep=True)
+    assert import_module("codeintel.commands.status").run(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["healthy"] is True
+    assert payload["project_root"] == str(tmp_path)
+    assert payload["semantic_index"] == {
+        "age_seconds": None,
+        "exists": False,
+        "indexed_at": None,
+        "path": str(tmp_path / "none.db"),
+    }
+    assert received == {"project_root": str(tmp_path), "deep": True}
+
+
+def test_status_hides_stale_index_age_when_repo_has_no_chunks(monkeypatch, capsys, tmp_path):
+    import json
+
+    from codeintel.semantic_db import SemanticDb
+
+    db_path = tmp_path / "semantic.db"
+    db = SemanticDb(str(db_path))
+    db.init()
+    db.mark_indexed(str(tmp_path.resolve()))
+    db.close()
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda model: str(db_path))
+    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+        "readiness": {"semantic": {"status": "fail", "repo_indexed": False}},
+        "healthy": False,
+    })
+
+    args = _args(project_root=str(tmp_path), json=True)
+    assert import_module("codeintel.commands.status").run(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["semantic_index"]["exists"] is True
+    assert payload["semantic_index"]["indexed_at"] is None
+    assert payload["semantic_index"]["age_seconds"] is None
+
+
 # --------------------------------------------------------------------------- index
 
 class _FakeDb:

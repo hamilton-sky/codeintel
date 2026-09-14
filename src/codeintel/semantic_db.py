@@ -149,6 +149,38 @@ def load_embedder(model_name: str):
         raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
 
 
+def release_embedder(embedder) -> None:
+    """Release fastembed/onnxruntime native state before interpreter finalization.
+
+    On macOS with Python 3.13 an otherwise successful one-shot ``codeintel index`` can abort while
+    CPython tears down ONNX's native mutexes. Explicitly severing the session and tokenizer owners
+    while the interpreter is fully alive makes their destructors run in the safe window. This is
+    best-effort and intentionally accepts a duck type so tests and future fastembed releases degrade
+    without turning cleanup into an index failure.
+    """
+    if embedder is None:
+        return
+    try:
+        worker = getattr(embedder, "model", None)
+        if worker is not None:
+            for attr in ("model", "tokenizer"):
+                if hasattr(worker, attr):
+                    try:
+                        setattr(worker, attr, None)
+                    except Exception:
+                        pass
+        for attr in ("model", "_model"):
+            if hasattr(embedder, attr):
+                try:
+                    setattr(embedder, attr, None)
+                except Exception:
+                    pass
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+
 # Cap on the characters a single chunk contributes. `_maybe_split` splits on line boundaries, so a
 # minified bundle or generated one-liner is one unsplittable chunk however large: a 20MB one-line
 # .py peaked at 3.4GB RSS through the embedder, on the reindexer's daemon thread inside the
@@ -275,6 +307,12 @@ class SemanticDb:
         # The vec0 embedding dimension, discovered lazily from the table / the first real vector
         # (see ensure_embeddings_table) rather than hardcoded — so any model's size just works.
         self.dimension: int | None = None
+
+    def __enter__(self) -> SemanticDb:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
 
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:

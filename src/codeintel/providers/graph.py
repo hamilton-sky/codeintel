@@ -35,6 +35,14 @@ def _cypher_literal(s: Any) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _int_or_zero(value: Any) -> int:
+    """Best-effort integer parsing for backend counts, which may arrive as JSON strings."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 # Every op _dispatch recognizes. Kept beside it so "unsupported op" and "op found nothing" stay
 # distinguishable — they were the same `None` before, and the resulting `unsupported-op` on a
 # perfectly supported `callers` was the most misleading string the never-raise envelope produced.
@@ -1518,8 +1526,20 @@ class GraphProvider:
         return (f"## {op.capitalize()} of {target} (0)\n(no {unit} survived name-collision filtering)"
                 + notes + self._name_resolution_note(wanted, selected, truncated))
 
-    def _op_callees(self, target: str, project: str, timeout_ms: int) -> str | None:
-        """What *target* calls or uses.
+    def _op_callees(
+        self,
+        target: str,
+        project: str,
+        timeout_ms: int,
+        *,
+        include_references: bool = False,
+    ) -> str | None:
+        """What *target* calls.
+
+        A direct ``callees`` query follows CALLS only. ``impact`` opts into USAGE and
+        CALL_REFERENCE as well because changing a symbol can affect non-call references. Keeping
+        those two questions distinct prevents a type annotation or constant mention from being
+        presented under a heading that promises executable calls.
 
         This keys on the UNQUALIFIED name, which is the honest limitation of the traversal: every
         node named `write_board_mirror` matches, and so do the edges out of all of them. Worse, the
@@ -1552,8 +1572,9 @@ class GraphProvider:
         to compare against.
         """
         wanted = _parse_symbol_target(target)
+        relationships = "CALLS|USAGE|CALL_REFERENCE" if include_references else "CALLS"
         cypher = (
-            f'MATCH (a)-[c:CALLS|USAGE|CALL_REFERENCE]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
+            f'MATCH (a)-[c:{relationships}]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
             "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), c.confidence, "
             "c.strategy AS strategy, "
             f"a.name, a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
@@ -1682,7 +1703,7 @@ class GraphProvider:
 
     def _op_impact(self, target: str, project: str, timeout_ms: int) -> str | None:
         callers = self._op_callers(target, project, timeout_ms)
-        callees = self._op_callees(target, project, timeout_ms)
+        callees = self._op_callees(target, project, timeout_ms, include_references=True)
         if callers is None and callees is None:
             return None
         # callers/callees already carry their own "## Callers of X (N)" header — don't wrap them
@@ -1836,11 +1857,87 @@ class GraphProvider:
                 return [f"- {it.get(key)}: {it.get(ckey)}" for it in items
                         if isinstance(it, dict) and it.get(key) is not None]
 
-            node_labels = _counts(raw.get("node_labels"), "label")
-            edge_types = _counts(raw.get("edge_types"), "type")
+            # Route extraction is intentionally high-recall upstream and can turn arbitrary path
+            # literals into synthetic ``Route`` nodes.  Daycap exposed the failure clearly: six
+            # test fixture paths (``/Users/alice/...``, ``/opt/homebrew/...``) were reported as HTTP
+            # routes even though none had a method or an incoming structural edge.  Do not repeat
+            # an unverified aggregate as architecture fact. Count only route nodes with incoming
+            # production-code evidence: either an HTTP_CALLS edge or a concrete route method. If
+            # the validation query itself fails, preserve the backend aggregate rather than
+            # silently subtracting unknown data.
+            raw_node_items = raw.get("node_labels")
+            node_items: list[Any] = raw_node_items if isinstance(raw_node_items, list) else []
+            declared_routes = 0
+            for item in node_items:
+                if isinstance(item, dict) and item.get("label") == "Route":
+                    declared_routes = _int_or_zero(item.get("count"))
+                    break
+            route_note = ""
+            if declared_routes:
+                route_query = (
+                    "MATCH (source)-[edge]->(route:Route) "
+                    "RETURN source.file_path, route.name, route.method, type(edge), "
+                    "count(DISTINCT source) AS evidence_count LIMIT 200"
+                )
+                route_rows = self._query_rows(route_query, project, timeout_ms)
+                if self._last_failure is None:
+                    verified_route_rows = [
+                        row for row in route_rows
+                        if is_code_path(str(row.get("source.file_path") or ""))
+                        and not self._is_noise({
+                            "file_path": str(row.get("source.file_path") or ""),
+                            "name": str(row.get("route.name") or row.get("name") or ""),
+                        })
+                        and (
+                            str(row.get("type(edge)") or "") == "HTTP_CALLS"
+                            or str(row.get("route.method") or "") not in {"", "-", "ANY", "None"}
+                        )
+                    ]
+                    verified_routes = len({
+                        str(row.get("route.name") or row.get("name"))
+                        for row in verified_route_rows
+                        if row.get("route.name") or row.get("name")
+                    })
+                    verified_http_calls = sum(
+                        _int_or_zero(row.get("evidence_count"))
+                        for row in verified_route_rows
+                        if str(row.get("type(edge)") or "") == "HTTP_CALLS"
+                    )
+                    if verified_routes != declared_routes:
+                        suppressed = max(0, declared_routes - verified_routes)
+                        node_items = [
+                            ({**item, "count": verified_routes}
+                             if isinstance(item, dict) and item.get("label") == "Route" else item)
+                            for item in node_items
+                            if not (isinstance(item, dict) and item.get("label") == "Route"
+                                    and verified_routes == 0)
+                        ]
+                        route_note = (
+                            f"> Route validation: ignored {suppressed} backend route candidate(s) "
+                            "without production-code structural evidence."
+                        )
+                        self._add_gap(
+                            "routes", "unverified-routes-dropped",
+                            f"{suppressed} backend route candidate(s) were excluded because they "
+                            "had no production-code structural evidence",
+                        )
+
+            node_labels = _counts(node_items, "label")
+            edge_items = raw.get("edge_types")
+            if declared_routes and self._last_failure is None and isinstance(edge_items, list):
+                edge_items = [
+                    ({**item, "count": verified_http_calls}
+                     if isinstance(item, dict) and item.get("type") == "HTTP_CALLS" else item)
+                    for item in edge_items
+                    if not (isinstance(item, dict) and item.get("type") == "HTTP_CALLS"
+                            and verified_http_calls == 0)
+                ]
+            edge_types = _counts(edge_items, "type")
             if node_labels:
                 parts.append("### Node types")
                 parts.extend(node_labels)
+            if route_note:
+                parts.append(route_note)
             if edge_types:
                 parts.append("### Edge types")
                 parts.extend(edge_types)

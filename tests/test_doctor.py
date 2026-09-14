@@ -210,6 +210,45 @@ def test_semantic_probe_real_db_indexed(tmp_path, monkeypatch):
     assert "codeintel index" in r2["remediation"]
 
 
+def test_semantic_deep_probe_verifies_source_readability(tmp_path, monkeypatch):
+    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    db_path = tmp_path / "semantic.db"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "f.py").write_text("def readable():\n    return True\n")
+    _make_db(db_path, os.path.realpath(str(repo)))
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+
+    r = SemanticProvider().probe(str(repo), deep=True)
+
+    assert r["source_readable"] is True
+    assert r["source_sampled"] == 1
+    assert r["source_unreadable"] == 0
+    assert doctor._status_for(r) == "ok"
+
+
+def test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read(tmp_path, monkeypatch):
+    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    db_path = tmp_path / "semantic.db"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "f.py").write_text("def blocked():\n    return True\n")
+    _make_db(db_path, os.path.realpath(str(repo)))
+    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    monkeypatch.setattr(
+        "codeintel.containment.open_contained",
+        lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    r = SemanticProvider().probe(str(repo), deep=True)
+
+    assert r["runnable"] is True and r["repo_indexed"] is True
+    assert r["source_readable"] is False
+    assert r["source_unreadable"] == 1
+    assert doctor._status_for(r) == "warn"
+    assert "permission" in r["remediation"].lower()
+
+
 def test_semantic_probe_no_db(tmp_path, monkeypatch):
     monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
     monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(tmp_path / "missing.db"))

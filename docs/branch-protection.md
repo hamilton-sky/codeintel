@@ -104,7 +104,7 @@ a numeric role ID into a file nobody will ever re-check.
 | **Block force pushes** (`non_fast_forward`) | A force push to `main` can silently orphan a commit that a published tag points at. |
 | **Block deletion** | Cheap; no legitimate use. |
 
-### The required checks — and the two that are deliberately *not* required
+### The required checks — and the one that is deliberately *not* required
 
 Required checks are matched by **job name**, exactly as it appears in the Checks tab. From
 `ci.yml`:
@@ -113,23 +113,20 @@ Required checks are matched by **job name**, exactly as it appears in the Checks
 Lint (ruff)
 Types (mypy)
 Release consistency
-test (3.11)   test (3.12)   test (3.13)
+test (3.11)   test (3.12)   test (3.13)   test (3.14)
 Graph backend contract (live, 0.9.*)
 Graph backend contract (live, 0.10.*)
-Build + verify the package
+LSP backend contract (live)
+Build + verify package (3.12)
+Build + verify package (3.13)
+Build + verify package (3.14)
 ```
 
-Two CI jobs are **omitted on purpose**:
-
-- `LSP backend contract (live)`
-- `LikeC4 model validates (live)`
-
-Both are declared `continue-on-error: true`, and their comments in `ci.yml` say exactly why: they
-fetch serena from a git HEAD this project does not control, and LikeC4 from npm. Making them
-required would convert someone else's outage into an unmergeable `main` — the failure mode those
-jobs were explicitly written to avoid. They still run, still show, and are still worth reading
-before a release; they just do not gate the merge button. If either becomes reliable enough to
-block on, drop its `continue-on-error` **and** add its context here in the same change.
+`LikeC4 model validates (live)` is **omitted on purpose**. It remains `continue-on-error: true`
+because it fetches LikeC4 from npm; a registry outage should not make `main` unmergeable. The LSP
+contract is now required: both CI and the provider launch the exact reviewed Serena commit, so an
+upstream change cannot silently alter the tested wire contract. When updating that pin, change the
+provider, CI warm command, and live-contract expectation together.
 
 The list also has to be re-checked whenever a job is renamed or the Python matrix moves: a required
 check whose name no longer exists is **never reported**, and the PR waits forever. Renaming

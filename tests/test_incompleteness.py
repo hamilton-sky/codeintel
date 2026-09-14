@@ -359,10 +359,20 @@ def test_confidence_helper_semantics():
     answered = {"ok": True, "op": "x", "target": "y", "result": "BODY",
                 "engine": "e", "cached": False}
     assert attach_confidence(answered)["confidence"] == "complete"
+    assert attach_confidence(answered)["outcome"] == "answered"
     partial = attach_confidence(answered, [{"section": "s", "kind": "k", "detail": "d"}])
     assert partial["confidence"] == "partial" and partial["gaps"]
+    assert partial["outcome"] == "partial"
     # A null result keeps `reason` as its whole story; stamping it would imply a body exists.
     assert "confidence" not in attach_confidence({**answered, "result": None})
+
+
+def test_null_result_outcome_is_machine_readable():
+    from codeintel.provider import safe_null_result
+
+    assert safe_null_result("x", "y", reason="not-in-graph")["outcome"] == "not_found"
+    assert safe_null_result("x", "y", reason="engine-unavailable")["outcome"] == "unavailable"
+    assert safe_null_result("x", "y", reason="backend-error")["outcome"] == "failed"
 
 
 def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
@@ -530,6 +540,17 @@ def test_code_hits_outrank_prose_and_the_mix_is_reported():
     code, prose = partition_by_corpus(hits)
     assert [m["path"] for m in code] == ["src/impl.py"]
     assert len(prose) == 8
+
+
+def test_semantic_corpus_count_describes_only_the_displayed_rows():
+    """A widened candidate pool may contain dozens of docs, but a ten-row answer must never
+    report an impossible diagnostic such as "37 of 10 hits are documentation"."""
+    from codeintel.providers.semantic import _displayed_prose_count
+
+    displayed = ([{"path": f"src/m{i}.py"} for i in range(7)]
+                 + [{"path": f"docs/d{i}.md"} for i in range(3)])
+    assert _displayed_prose_count(displayed) == 3
+    assert _displayed_prose_count(displayed) <= len(displayed)
 
 
 def test_an_all_prose_answer_says_no_code_matched():

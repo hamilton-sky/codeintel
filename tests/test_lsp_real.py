@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from codeintel.outcome import Missing, Ok
-from codeintel.providers.lsp import LspProvider, _serena_launch_args, _State
+from codeintel.providers.lsp import _SERENA_GIT, LspProvider, _serena_launch_args, _State
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -78,13 +78,14 @@ def _ready_session() -> Any:
 def test_launch_argv_uvx_matches_real_serena_invocation():
     args = _serena_launch_args("uvx", "/my/repo")
     assert args == [
-        "uvx", "--from", "git+https://github.com/oraios/serena", "serena",
+        "uvx", "--from", _SERENA_GIT, "serena",
         "start-mcp-server", "--context", "ide-assistant",
         "--enable-web-dashboard", "false", "--project", "/my/repo",
     ]
     # The old broken form must be gone.
     assert "--project_root" not in args
     assert args[1] != "serena"  # `uvx serena ...` (no --from) never worked
+    assert _SERENA_GIT.endswith("@949a27ef1e5fda1a6e7b561e777bcece345c6ffd")
 
 
 def test_launch_argv_direct_binary():

@@ -295,8 +295,30 @@ def _pct(v: float | None) -> str:
     return "  n/a" if v is None else f"{v * 100:4.0f}%"
 
 
+def _verify_target_sources(root: str, targets: list[tuple[str, str]]) -> None:
+    """Fail closed when the oracle cannot read the files that define its targets.
+
+    ``label_file`` treats an OSError like a syntax failure so one bad file can be skipped on a
+    normal repository. If the host is denied access to the whole tree, however, that policy turns
+    every truth set into an authoritative-looking zero with 100% coverage. Reading each definition
+    file up front distinguishes "there are no callers" from "the benchmark saw no source."
+    """
+    for rel_path, symbol in targets:
+        path = os.path.join(root, rel_path)
+        try:
+            with open(path, "rb") as source:
+                source.read(1)
+        except OSError as exc:
+            raise SystemExit(
+                f"benchmark refused to score `{symbol}`: cannot read its source file {path} "
+                f"({type(exc).__name__}: {exc}). Grant the host filesystem/privacy access and "
+                "run again; an unreadable oracle is not evidence of zero callers."
+            ) from exc
+
+
 def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
         language: str = "python") -> None:
+    _verify_target_sources(root, targets)
     lang = LANGUAGES[language]()
     lang.prepare(root)
     arms = ("graph", "lsp_raw", "lsp_classified")

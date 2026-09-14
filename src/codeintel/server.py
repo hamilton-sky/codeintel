@@ -210,8 +210,9 @@ def _code_status_handler_inner(args: dict) -> dict:
         role = str(args.get("role", "") or "")
         if not gw.allows_root(role, project_root):
             return dict(_STATUS_FALLBACK)
+        deep = bool(args.get("deep", False))
         report = _doctor.run_doctor(
-            project_root, deep=False, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,
+            project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,
             on_provider=gw.adopt_provider,
         )
         probes = report.get("engines", {}) if isinstance(report, dict) else {}
@@ -228,6 +229,10 @@ def _code_status_handler_inner(args: dict) -> dict:
                 "status": _probe(name).get("status", "fail"),
                 "detail": _probe(name).get("detail", ""),
                 "remediation": _probe(name).get("remediation"),
+                "model_cached": _probe(name).get("model_cached"),
+                "source_readable": _probe(name).get("source_readable"),
+                "source_sampled": _probe(name).get("source_sampled"),
+                "source_unreadable": _probe(name).get("source_unreadable"),
             }
             for name in ("graph", "lsp", "semantic")
         }
@@ -274,6 +279,7 @@ def _code_status_handler_inner(args: dict) -> dict:
             "indexed": indexed,
             "model": model,
             "healthy": bool(summary.get("healthy")),
+            "deep": deep,
             "readiness": readiness,
             "versions": report.get("versions", {}) if isinstance(report, dict) else {},
             # Null on the normal path. Non-null means every other field above describes the code
@@ -460,8 +466,12 @@ def run() -> None:
 
     async def _code_status(
         project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
+        deep: Annotated[bool, Field(description=(
+            "Also boot a live LSP session and sample indexed source files for readability. "
+            "Read-only, but slower; leave false for a quick check."
+        ))] = False,
     ) -> dict:
-        return code_status_handler({"project_root": project_root})
+        return code_status_handler({"project_root": project_root, "deep": deep})
 
     async def _code_doctor(
         project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",

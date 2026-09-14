@@ -9,7 +9,7 @@ from typing import Any
 
 from codeintel.loc import loc
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
-from codeintel.source_kind import partition_by_corpus
+from codeintel.source_kind import is_prose, partition_by_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +304,11 @@ def _preview(match: dict) -> str:
     return line
 
 
+def _displayed_prose_count(matches: list[dict]) -> int:
+    """Count prose in the bounded result set, never in the wider retrieval population."""
+    return sum(1 for match in matches if is_prose(str(match.get("path") or "")))
+
+
 def _first_meaningful_line(snippet: str) -> str:
     """The first line of *snippet* that says something.
 
@@ -332,11 +337,16 @@ class SemanticProvider:
     def available(self) -> bool:
         return _DEPS_OK
 
-    def probe(self, project_root: str) -> dict:
+    def probe(self, project_root: str, *, deep: bool = False) -> dict:
         """Never-raise health check for the doctor. READ-ONLY: it opens the db read-only and counts
         this repo's chunks — it must NOT call SemanticDb.init() (a schema write) or LOAD fastembed.
         It does resolve the project's ``model`` *name* (a cheap config read, no model load) to pick
-        the per-model cache file. ``repo_indexed`` is project-scoped (mirrors Searcher.has_index)."""
+        the per-model cache file. ``repo_indexed`` is project-scoped (mirrors Searcher.has_index).
+
+        A deep probe also samples indexed source files through the same containment boundary used
+        by search-result rendering. This catches a cache that is readable while the repository is
+        not (for example, a host process missing macOS privacy permission). It still does not load
+        the embedding model or mutate either the repository or the cache."""
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False,
@@ -382,6 +392,13 @@ class SemanticProvider:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM chunk_hashes WHERE project_root = ?", (real,)
                 ).fetchone()
+                paths = (
+                    [str(r[0]) for r in conn.execute(
+                        "SELECT DISTINCT file_path FROM chunk_hashes"
+                        " WHERE project_root = ? ORDER BY file_path LIMIT 20", (real,)
+                    ).fetchall()]
+                    if deep else []
+                )
             finally:
                 conn.close()
             count = int(row[0]) if row else 0
@@ -392,10 +409,40 @@ class SemanticProvider:
                 "remediation": f"codeintel reset {project_root} && codeintel index {project_root}",
             }, cached, named_model)
         if count > 0:
-            return _with_model_cache({
+            report = {
                 "installed": True, "runnable": True, "repo_indexed": True,
                 "detail": f"{count} indexed chunks for this repo", "remediation": None,
-            }, cached, named_model)
+            }
+            if deep:
+                from codeintel.containment import open_contained
+
+                unreadable = 0
+                for rel_path in paths:
+                    try:
+                        with open_contained(real, pathlib.Path(real) / rel_path, mode="rb") as src:
+                            src.read(1)
+                    except Exception:
+                        unreadable += 1
+                sampled = len(paths)
+                report.update({
+                    "source_readable": unreadable == 0 and sampled > 0,
+                    "source_sampled": sampled,
+                    "source_unreadable": unreadable,
+                })
+                if unreadable:
+                    report["detail"] = (
+                        f"{count} indexed chunks; {unreadable}/{sampled} sampled source files "
+                        "unreadable"
+                    )
+                    report["remediation"] = (
+                        "grant the codeintel host read access to the repository (including OS "
+                        "privacy/filesystem permissions), then run `codeintel status --deep` again"
+                    )
+                else:
+                    report["detail"] = (
+                        f"{count} indexed chunks; {sampled}/{sampled} sampled source files readable"
+                    )
+            return _with_model_cache(report, cached, named_model)
         return _with_model_cache(
             _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo"),
             cached, named_model,
@@ -417,6 +464,7 @@ class SemanticProvider:
         if not project_root:
             return safe_null_result(op, target, engine="semantic", reason="no-project-root")
 
+        db: Any = None
         try:
             from codeintel.config import load_config
             from codeintel.indexer import Indexer
@@ -432,6 +480,16 @@ class SemanticProvider:
             pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             db = SemanticDb(db_path)
             db.init()
+
+            def _finish(answer: Result) -> Result:
+                try:
+                    db.close()
+                except Exception as close_exc:
+                    # Cleanup must not replace an answer with `provider-error`. The background
+                    # index path already follows this rule: a close failure is worth logging, but
+                    # it neither invalidates completed work nor changes the query's outcome.
+                    log_swallowed("SemanticProvider.build_result.close", close_exc)
+                return answer
 
             searcher = Searcher(db, model_name=model)
 
@@ -504,30 +562,30 @@ class SemanticProvider:
                                   f"progress output"),
                         )
                 elapsed = _background_index_elapsed_s(project_root) or 0.0
-                return safe_null_result(
+                return _finish(safe_null_result(
                     op, target, engine="semantic", reason="indexing-in-progress",
                     hint=(f"first-time indexing of this repo started in the background "
                           f"~{elapsed:.0f}s ago (a cold pass can take several minutes on a large "
                           f"repo, plus a one-time embedding-model download) — retry this query "
                           f"shortly, or run `codeintel index {project_root}` to index synchronously "
                           f"with progress output"),
-                )
+                ))
 
             if not searcher.has_index(project_root):
                 if index_error:
                     # Distinct from `no-index` because it licenses a different conclusion: the
                     # engine was asked and could not answer, rather than asked and found nothing.
-                    return safe_null_result(
+                    return _finish(safe_null_result(
                         op, target, engine="semantic", reason="index-failed",
                         hint=(f"an inline index pass ran for this repo and failed: {index_error} "
                               f"— this is NOT 'never indexed'. Run `codeintel index "
                               f"{project_root}` to see the failure with progress output, or "
                               f"`codeintel doctor` to check the engine"),
-                    )
-                return safe_null_result(
+                    ))
+                return _finish(safe_null_result(
                     op, target, engine="semantic", reason="no-index",
                     hint=f"run: codeintel index {project_root}  (or: codeintel doctor)",
-                )
+                ))
 
             # Over-retrieve, then fill from the code corpus first. Partitioning the FINAL ten was
             # not enough: on a doc-heavy repository all ten candidates were prose, so re-ordering
@@ -577,7 +635,7 @@ class SemanticProvider:
                               f"check the engine"),
                     )
                 if searcher.last_stale:
-                    return safe_null_result(
+                    return _finish(safe_null_result(
                         op, target, engine="semantic", reason="index-stale",
                         # Phrased to avoid subject-verb agreement entirely rather than hardcoding
                         # one number's verb: `_plural` exists so these strings read as facts about
@@ -586,8 +644,9 @@ class SemanticProvider:
                         hint=f"withheld {_plural(searcher.last_stale, 'matching chunk')} that "
                              f"could not be verified against the current source; "
                              f"run: codeintel index {project_root}",
-                    )
-                return safe_null_result(op, target, engine="semantic", reason="below-floor")
+                    ))
+                return _finish(safe_null_result(
+                    op, target, engine="semantic", reason="below-floor"))
 
             # `m['line']` is the chunk's `chunk_start`, which is 0-based by construction in the
             # indexer (`start0 = max(0, start - 1)`). Emitting it raw put every semantic hit one
@@ -621,6 +680,11 @@ class SemanticProvider:
                 ordered = code_hits[:keep_code] + prose_hits[:_display_k - keep_code]
             else:
                 ordered = (code_hits + prose_hits)[:_display_k]
+            # Report the corpus mix of the rows we actually return, not the widened candidate
+            # population.  `prose_hits` can contain dozens of candidates while `ordered` is capped
+            # at ten; using the former produced impossible diagnostics such as "37 of 10 hits".
+            shown_prose = _displayed_prose_count(ordered)
+            shown_unreadable = sum(bool(m.get("source_unreadable")) for m in ordered)
             lines = [f"{loc(m['path'], m['line'])} | {_preview(m)}" for m in ordered]
             result: Result = {
                 "ok": True,
@@ -667,6 +731,16 @@ class SemanticProvider:
                               f"locations as unconfirmed — one re-index enables checking "
                               f"(codeintel index {project_root}).",
                 })
+            if shown_unreadable:
+                gaps.append({
+                    "section": "source",
+                    "kind": "source-unreadable",
+                    "detail": f"{shown_unreadable} of {len(ordered)} returned locations could not "
+                              f"be read from the current working tree. Their paths come from the "
+                              f"semantic index, but their source content and freshness could not "
+                              f"be verified. Check filesystem/privacy permissions, then re-run the "
+                              f"query (and re-index if the files changed).",
+                })
             if not code_hits and prose_hits:
                 gaps.append({
                     "section": "corpus",
@@ -675,15 +749,20 @@ class SemanticProvider:
                               f"documentation or fixtures. Absence of code hits here is NOT evidence "
                               f"the implementation is missing — try a symbol name, or `callers`.",
                 })
-            elif prose_hits and len(prose_hits) > len(code_hits):
+            elif shown_prose and len(prose_hits) > len(code_hits):
                 gaps.append({
                     "section": "corpus",
                     "kind": "prose-heavy",
-                    "detail": f"{len(prose_hits)} of {len(ordered)} hits are documentation rather "
+                    "detail": f"{shown_prose} of {len(ordered)} hits are documentation rather "
                               f"than code; code hits are listed first.",
                 })
-            return attach_confidence(result, gaps)
+            return _finish(attach_confidence(result, gaps))
         except Exception as exc:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
             log_swallowed("SemanticProvider.build_result", exc)
             # A recorded background failure outranks a bare `provider-error`. Setup — `db.init()`
             # — runs long before the `no_index` branch that consults the registry, so a PERSISTENT

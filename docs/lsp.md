@@ -15,8 +15,8 @@ contract never returns `ok: false`.
 - Preferred: install `serena` on `PATH` directly — the provider runs
   `serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`.
 - Fallback: install `uvx` (`pip install uv`) — most users land here, since serena isn't
-  pip-installable. The provider then fetches and runs serena from source:
-  `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`.
+  pip-installable. The provider then fetches and runs the reviewed Serena v1.7.0 commit:
+  `uvx --from git+https://github.com/oraios/serena@949a27ef1e5fda1a6e7b561e777bcece345c6ffd serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`.
   The **first** launch pulls serena via `uvx` and can take tens of seconds; later launches are fast.
 
 ## Supported ops

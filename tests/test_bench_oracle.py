@@ -21,6 +21,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 BENCH = pathlib.Path(__file__).resolve().parent.parent / "bench"
 sys.path.insert(0, str(BENCH))
 
@@ -34,9 +36,15 @@ from oracle_py import (
     target_from_definition,
     truth_for,
 )
+from score import _verify_target_sources
 
 CORPUS = str(BENCH / "fixtures" / "corpus")
 PKG = "src/corpuspkg"
+
+
+def test_benchmark_refuses_an_unreadable_or_missing_oracle_source(tmp_path) -> None:
+    with pytest.raises(SystemExit, match="unreadable oracle is not evidence of zero callers"):
+        _verify_target_sources(str(tmp_path), [("missing.py", "target")])
 
 
 def _truth(def_file: str, symbol: str) -> tuple[str, Truth]:

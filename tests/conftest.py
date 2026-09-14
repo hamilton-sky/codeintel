@@ -66,6 +66,34 @@ def _isolate_codeintel_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _close_semantic_databases(monkeypatch):
+    """Close every test-created SemanticDb, including terse one-shot constructions.
+
+    Production owners already close their databases, but tests intentionally use expressions such
+    as ``SemanticDb(path).conn().execute(...)`` while probing low-level behavior. The wrapper then
+    falls out of scope while its sqlite connection remains live until cyclic GC, producing dozens
+    of ResourceWarnings and making a real leak invisible in the noise. Holding each wrapper until
+    teardown preserves that idiom; closing all of them makes the resource lifetime deterministic.
+    """
+    from codeintel.semantic_db import SemanticDb
+
+    original_init = SemanticDb.__init__
+    opened = []
+
+    def _tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        opened.append(self)
+
+    monkeypatch.setattr(SemanticDb, "__init__", _tracked_init)
+    yield
+    for db in reversed(opened):
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@pytest.fixture(autouse=True)
 def _fresh_gateway():
     from codeintel import server
     server._reset_gateway()

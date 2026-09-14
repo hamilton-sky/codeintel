@@ -117,6 +117,22 @@ def test_provider_reports_the_omission_rather_than_hiding_it(tmp_path):
     assert "index" in freshness[0]["detail"], "the gap must say how to fix it"
 
 
+def test_provider_reports_unreadable_source_instead_of_claiming_complete(tmp_path):
+    (tmp_path / "app.py").write_text(_ORIGINAL)
+    with patch("fastembed.TextEmbedding", _FlatEmbedding), \
+            patch("codeintel.semantic_db._base_dir", lambda: tmp_path / "cache"):
+        provider = SemanticProvider()
+        provider.build_result("search", "charge", [], 2000, str(tmp_path))
+        with patch("codeintel.searcher.open_contained", side_effect=PermissionError):
+            result = provider.build_result("search", "charge", [], 2000, str(tmp_path))
+
+    assert result["outcome"] == "partial"
+    assert "[source unreadable: permission denied]" in result["result"]
+    source_gaps = [gap for gap in result["gaps"] if gap["kind"] == "source-unreadable"]
+    assert source_gaps
+    assert "privacy permissions" in source_gaps[0]["detail"]
+
+
 def test_all_hits_stale_is_reported_as_stale_not_as_absent(tmp_path):
     """`below-floor` reads as 'this code does not exist' — the worst thing to tell an agent here."""
     (tmp_path / "app.py").write_text(_ORIGINAL)

@@ -216,3 +216,13 @@ def test_code_doctor_schema_documents_deep(monkeypatch):
 
     deep_desc = schema["properties"]["deep"]["description"].lower()
     assert "slow" in deep_desc or "seconds" in deep_desc
+
+
+def test_code_status_schema_documents_deep_source_check(monkeypatch):
+    from mcp.server.mcpserver.tools import Tool
+
+    tools = _registered_tools(monkeypatch)
+    schema = Tool.from_function(tools["code.status"], name="code.status").parameters
+
+    deep_desc = schema["properties"]["deep"]["description"].lower()
+    assert "source" in deep_desc and ("slow" in deep_desc or "slower" in deep_desc)

@@ -16,7 +16,25 @@ import numpy as np
 from codeintel.indexer import Indexer
 from codeintel.reset import run_reset
 from codeintel.searcher import Searcher
-from codeintel.semantic_db import DEFAULT_MODEL, SemanticDb, default_db_path
+from codeintel.semantic_db import DEFAULT_MODEL, SemanticDb, default_db_path, release_embedder
+
+
+def test_release_embedder_severs_native_session_owners():
+    class _Worker:
+        model = object()
+        tokenizer = object()
+
+    class _Embedder:
+        model = _Worker()
+
+    embedder = _Embedder()
+    worker = embedder.model
+
+    release_embedder(embedder)
+
+    assert embedder.model is None
+    assert worker.model is None
+    assert worker.tokenizer is None
 
 
 def _fake(dim):
