@@ -276,6 +276,12 @@ class SemanticDb:
         # (see ensure_embeddings_table) rather than hardcoded — so any model's size just works.
         self.dimension: int | None = None
 
+    def __enter__(self) -> SemanticDb:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path)

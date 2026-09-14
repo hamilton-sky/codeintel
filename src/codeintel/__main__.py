@@ -442,6 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Project root directory (default: cwd)",
     )
+    status_parser.add_argument(
+        "--json", action="store_true", help="Emit the structured status and index-age report")
 
     # serve-http subcommand
     http_parser = subparsers.add_parser(

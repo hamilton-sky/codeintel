@@ -632,6 +632,28 @@ def test_status_degrades_instead_of_tracebacking(monkeypatch, capsys):
     assert "Status unavailable: boom" in capsys.readouterr().out
 
 
+def test_status_json_is_structured_and_includes_repo_index_age(monkeypatch, capsys, tmp_path):
+    import json
+
+    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+        "readiness": {"graph": {"status": "ok"}}, "healthy": True,
+    })
+    monkeypatch.setattr(
+        "codeintel.semantic_db.default_db_path", lambda model: str(tmp_path / "none.db"))
+
+    args = _args(project_root=str(tmp_path), json=True)
+    assert import_module("codeintel.commands.status").run(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["healthy"] is True
+    assert payload["project_root"] == str(tmp_path)
+    assert payload["semantic_index"] == {
+        "age_seconds": None,
+        "exists": False,
+        "indexed_at": None,
+        "path": str(tmp_path / "none.db"),
+    }
+
+
 # --------------------------------------------------------------------------- index
 
 class _FakeDb:

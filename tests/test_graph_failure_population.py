@@ -133,6 +133,24 @@ def test_an_answer_emptied_by_our_own_filter_is_not_reported_as_not_in_graph():
     assert "reason" not in env
 
 
+def test_direct_callees_query_follows_calls_only_but_impact_keeps_references():
+    queries: list[str] = []
+
+    def _rows(cypher, project, timeout_ms):
+        queries.append(cypher)
+        return []
+
+    gp = _gp(query_rows=_rows)
+    gp.build_result("callees", "target", [], 30000, "/tmp/x")
+    direct = next(q for q in queries if "MATCH (a)-[c:" in q)
+    assert "[c:CALLS]" in direct
+    assert "USAGE" not in direct and "CALL_REFERENCE" not in direct
+
+    queries.clear()
+    gp.build_result("impact", "target", [], 30000, "/tmp/x")
+    assert any("CALLS|USAGE|CALL_REFERENCE" in q for q in queries)
+
+
 # --------------------------------------------------------------------------------------------- #
 # T6 — a true negative and a failure are distinguishable.
 # --------------------------------------------------------------------------------------------- #

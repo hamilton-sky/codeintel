@@ -366,6 +366,64 @@ def test_overview_falls_back_to_the_backend_name_without_a_root(monkeypatch):
     assert gp._op_overview("", "backend-id", 1000, "").splitlines()[0] == "## Architecture: backend-id"
 
 
+def test_overview_does_not_repeat_unverified_path_literals_as_http_routes(monkeypatch):
+    gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
+    gp._backend._last_failure = None                                # type: ignore[attr-defined]
+    gp._pending_gaps = ()
+
+    def _run(method, payload, timeout_ms):
+        if method == "get_architecture":
+            return {
+                "project": "daycap", "total_nodes": 10, "total_edges": 9,
+                "node_labels": [{"label": "Function", "count": 4},
+                                {"label": "Route", "count": 6}],
+                "edge_types": [{"type": "CALLS", "count": 4},
+                               {"type": "HTTP_CALLS", "count": 7}],
+            }
+        assert method == "query_graph"
+        return {"columns": ["source.file_path", "route.name", "route.method", "type(edge)",
+                            "evidence_count"],
+                "rows": []}
+
+    monkeypatch.setattr(gp, "_run", _run)
+    out = gp._op_overview("", "daycap", 1000, "")
+
+    assert "Function: 4" in out
+    assert "Route:" not in out
+    assert "HTTP_CALLS:" not in out
+    assert "ignored 6 backend route candidate(s)" in out
+    assert any(g["kind"] == "unverified-routes-dropped" for g in gp._pending_gaps)
+
+
+def test_overview_keeps_routes_with_method_and_inbound_evidence(monkeypatch):
+    gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
+    gp._backend._last_failure = None                                # type: ignore[attr-defined]
+    gp._pending_gaps = ()
+
+    def _run(method, payload, timeout_ms):
+        if method == "get_architecture":
+            return {
+                "project": "api", "node_labels": [{"label": "Route", "count": 2}],
+                "edge_types": [{"type": "HTTP_CALLS", "count": 2}],
+            }
+        return {
+            "columns": ["source.file_path", "route.name", "route.method", "type(edge)",
+                        "evidence_count"],
+            "rows": [["src/api.py", "/health", "GET", "CALLS", "1"],
+                     ["src/client.py", "/users", "ANY", "HTTP_CALLS", "2"]],
+        }
+
+    monkeypatch.setattr(gp, "_run", _run)
+    out = gp._op_overview("", "api", 1000, "")
+
+    assert "Route: 2" in out
+    assert "HTTP_CALLS: 2" in out
+    assert "Route validation:" not in out
+    assert gp._pending_gaps == ()
+
+
 def test_result_lines_do_not_carry_the_backends_project_id(tmp_path):
     """The backend prefixes every qualified name with its project id — for a path-slug
     registration, the flattened ABSOLUTE PATH. Every result line therefore began

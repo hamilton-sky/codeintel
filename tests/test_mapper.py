@@ -618,8 +618,12 @@ def test_ranked_symbols_counts_calls_not_usage():
     MapGenerator(provider).generate("/repo")
 
     for q in (q for q in queries if "in_degree" in q):
-        assert "[:CALLS]" in q, f"fan-in must rank on CALLS alone: {q}"
+        assert ":CALLS]" in q, f"fan-in must rank on CALLS alone: {q}"
         assert "USAGE" not in q, f"USAGE inflates a caller count with bare-name mentions: {q}"
+        assert "edge.confidence >= 0.8" in q, f"unverified edges must not drive map rankings: {q}"
+        assert 'caller.file_path STARTS WITH "test/"' in q, (
+            f"test callers must not define production importance: {q}")
+        assert "count(DISTINCT caller)" in q, f"duplicate edges must not inflate caller counts: {q}"
 
 
 def test_ranked_symbols_drops_a_framework_decorator_bound_to_a_spec_file():

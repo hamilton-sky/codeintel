@@ -66,8 +66,12 @@ def _fan_in_cypher(label: str) -> str:
     ranks a real population rather than an arbitrary slice — the truncation bug `_op_hotspots` was
     reinstated to fix. *label* is a module-controlled constant, never caller input."""
     return (
-        f"MATCH (caller)-[:CALLS]->(fn:{label}) WHERE fn.name IS NOT NULL "
-        "RETURN fn.name, fn.qualified_name, fn.file_path, count(caller) AS in_degree "
+        f"MATCH (caller)-[edge:CALLS]->(fn:{label}) WHERE fn.name IS NOT NULL "
+        "AND edge.confidence >= 0.8 "
+        "AND NOT caller.file_path STARTS WITH \"test/\" "
+        "AND NOT caller.file_path STARTS WITH \"tests/\" "
+        "RETURN fn.name, fn.qualified_name, fn.file_path, "
+        "count(DISTINCT caller) AS in_degree "
         "ORDER BY in_degree DESC LIMIT 40"
     )
 
