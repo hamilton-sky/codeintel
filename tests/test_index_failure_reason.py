@@ -326,6 +326,31 @@ def test_other_failures_keep_their_type_prefix(monkeypatch, tmp_path):
     assert indexer.last_error == "PermissionError: read-only file system"
 
 
+def test_an_unreadable_subtree_is_not_a_successful_empty_walk(monkeypatch, tmp_path):
+    """``os.walk`` ignores enumeration errors by default.  A macOS-protected repository could
+    therefore scan as zero files and make the CLI print "Nothing new to index" at exit zero even
+    though no source was readable.  The original permission error, including its path, must escape
+    the walk so ``Indexer.index`` can report it as an unrecoverable failure.
+    """
+    import codeintel.indexer as indexer_module
+    from codeintel.indexer import Indexer
+
+    protected = tmp_path / "protected-repo"
+
+    def denied_walk(root, *, onerror=None):
+        assert onerror is not None
+        onerror(PermissionError(1, "Operation not permitted", str(protected)))
+        return []
+
+    monkeypatch.setattr(indexer_module.os, "walk", denied_walk)
+    monkeypatch.setattr(indexer_module, "load_gitattributes_globs", lambda root: [])
+    indexer = Indexer.__new__(Indexer)
+    monkeypatch.setattr(indexer, "_load_gitignore", lambda root: set())
+
+    with pytest.raises(PermissionError, match="protected-repo"):
+        list(indexer._walk_files(tmp_path))
+
+
 def test_the_searcher_reports_it_too(monkeypatch):
     """A query is the other way a cold cache is discovered — stage-qualified, message verbatim."""
     from codeintel.searcher import Searcher

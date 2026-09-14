@@ -316,6 +316,27 @@ def test_lsp_probe_deep_boot_failure_is_bounded(monkeypatch):
     assert r["runnable"] in (False, None)  # failed to boot (or timed out) — never True
 
 
+def test_lsp_probe_reports_repository_access_before_blaming_network(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr(
+        "codeintel.providers.lsp.os.scandir",
+        lambda root: (_ for _ in ()).throw(PermissionError(1, "denied", str(root))),
+    )
+    p = LspProvider()
+    monkeypatch.setattr(
+        p, "_get_or_create_session",
+        lambda root: pytest.fail("an unreadable repository must not launch serena"),
+    )
+
+    r = p.probe("/protected/repo", deep=True)
+
+    assert r["runnable"] is False
+    assert "PermissionError" in r["detail"]
+    assert "/protected/repo" in r["detail"]
+    assert "Privacy & Security" in r["remediation"]
+    assert "network" not in r["remediation"].lower()
+
+
 # --------------------------------------------------------------------------- #
 # handler + hint plumbing
 # --------------------------------------------------------------------------- #

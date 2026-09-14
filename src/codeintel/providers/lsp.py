@@ -127,6 +127,29 @@ def _serena_launch_args(cmd: str, project_root: str) -> list[str]:
     return [cmd, *common]
 
 
+def _project_access_failure(project_root: str) -> tuple[str, str] | None:
+    """Return a safe diagnosis when the host cannot enumerate the project root.
+
+    Serena's stdio transport wraps an early subprocess exit in an ``ExceptionGroup``.  When the
+    real cause is a macOS Files & Folders denial, reporting that wrapper as a network/bootstrap
+    failure sends the user in exactly the wrong direction.  A one-entry scan is cheap, local, and
+    establishes the prerequisite Serena itself needs without forwarding any backend-controlled
+    prose to the calling agent.
+    """
+    try:
+        with os.scandir(project_root) as entries:
+            next(entries, None)
+    except OSError as exc:
+        location = str(getattr(exc, "filename", None) or project_root)
+        detail = f"repository root is not readable by codeintel ({type(exc).__name__}: {location})"
+        remediation = (
+            "grant the codeintel host read access to the repository, then retry; on macOS check "
+            "System Settings > Privacy & Security > Files and Folders (or Full Disk Access)"
+        )
+        return detail, remediation
+    return None
+
+
 class _State(enum.Enum):
     WARMING = "WARMING"
     READY = "READY"
@@ -433,6 +456,12 @@ class LspProvider:
                     "detail": "serena session is warming for this repo", "remediation": None}
 
         # deep: boot (or reuse) a session and poll to a hard deadline — never hangs.
+        access_failure = _project_access_failure(project_root)
+        if access_failure is not None:
+            detail, remediation = access_failure
+            return {"installed": True, "runnable": False, "repo_indexed": None,
+                    "detail": detail, "remediation": remediation}
+
         session = self._get_or_create_session(project_root)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -501,6 +530,21 @@ class LspProvider:
 
             if not self.available:
                 return safe_null_result(op_str, target_str, engine="lsp", reason="engine-unavailable")
+
+            # A protected macOS folder can still satisfy ``isdir`` while denying enumeration.
+            # Detect that locally before spawning Serena: otherwise its early exit is wrapped by
+            # the MCP transport as a generic boot failure and the first-query hint talks about a
+            # cold uvx cache instead of the permission the user actually needs to grant.  Keep the
+            # ``isdir`` guard so synthetic/nonexistent roots used by embedders retain the existing
+            # never-raise backend behaviour.
+            if os.path.isdir(root_str):
+                access_failure = _project_access_failure(root_str)
+                if access_failure is not None:
+                    detail, remediation = access_failure
+                    return safe_null_result(
+                        op_str, target_str, engine="lsp", reason="source-unreadable",
+                        hint=f"{detail}; {remediation}",
+                    )
 
             try:
                 budget_ms = int(budget) if budget else 0

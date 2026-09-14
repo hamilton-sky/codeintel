@@ -373,6 +373,9 @@ def test_null_result_outcome_is_machine_readable():
     assert safe_null_result("x", "y", reason="not-in-graph")["outcome"] == "not_found"
     assert safe_null_result("x", "y", reason="engine-unavailable")["outcome"] == "unavailable"
     assert safe_null_result("x", "y", reason="backend-error")["outcome"] == "failed"
+    assert safe_null_result("x", "y", reason="source-unreadable")["outcome"] == "unavailable"
+    assert safe_null_result("x", "y", reason="backend-unreachable")["outcome"] == "unavailable"
+    assert safe_null_result("x", "y", reason="new-unclassified-reason")["outcome"] == "failed"
 
 
 def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
