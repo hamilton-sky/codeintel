@@ -297,8 +297,16 @@ class Gateway:
             # ``source-unreadable``, was correctly marked unavailable by LSP and then collapsed
             # back to ``not_found`` by this merge.  Failed and unavailable both mean no engine was
             # able to answer; an actual miss is the explicit ``not_found`` outcome.
-            all_unreachable = bool(results) and all(
-                r.get("outcome") in ("unavailable", "failed") for r in results.values()
+            # Older/custom providers may not have adopted ``outcome`` yet. Route their reason
+            # through the SAME central classifier rather than reintroducing a local allow-list.
+            classified = [
+                r.get("outcome") or safe_null_result(
+                    op_str, target_str, engine=eng, reason=reasons[eng]
+                ).get("outcome")
+                for eng, r in results.items()
+            ]
+            all_unreachable = bool(classified) and all(
+                outcome in ("unavailable", "failed") for outcome in classified
             )
             summary = "engines-unavailable" if all_unreachable else "no-result"
             detail = ", ".join(f"{eng}: {why}" for eng, why in sorted(reasons.items()))
