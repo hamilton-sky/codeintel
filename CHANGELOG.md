@@ -20,7 +20,8 @@ All notable changes to codeintel are documented here. The format is based on
 - **Unknown safe-null reasons fail closed instead of becoming `not_found`.** The reason taxonomy
   now classifies source access, backend reachability, stale indexes, authorization, and retired
   operations explicitly; a future unclassified failure becomes `failed`, never evidence that a
-  symbol or relationship is absent.
+  symbol or relationship is absent. Fan-out merging consumes those explicit outcomes instead of
+  maintaining a second reason list that can drift and reclassify an unavailable engine as a miss.
 
 ## [0.23.1] — 2026-09-14
 

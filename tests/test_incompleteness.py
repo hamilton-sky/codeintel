@@ -401,6 +401,31 @@ def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
     assert "engine-unavailable" in kinds, kinds
 
 
+def test_fan_out_preserves_source_unreadable_as_unavailable():
+    """The merge must consume the public outcome, not maintain another reason allow-list.  If all
+    engines could not answer, a newly introduced reason must never collapse back to ``not_found``.
+    """
+    from codeintel.gateway import Gateway
+    from codeintel.provider import safe_null_result
+
+    merged = Gateway()._merge(
+        {
+            "lsp": safe_null_result(
+                "context", "createSession", engine="lsp", reason="source-unreadable"
+            ),
+            "graph": safe_null_result(
+                "context", "createSession", engine="graph", reason="project-not-indexed"
+            ),
+        },
+        "context", "createSession",
+    )
+
+    assert merged["result"] is None
+    assert merged["reason"] == "engines-unavailable"
+    assert merged["outcome"] == "unavailable"
+    assert "NOT evidence" in merged["hint"]
+
+
 def test_a_constituent_gap_survives_the_merge():
     from codeintel.gateway import Gateway
 
