@@ -21,14 +21,21 @@ def run(args: Any) -> int:
     if problem:
         print(problem)
         return 1
-    status = server.code_status_handler({"project_root": project_root})
+    status = server.code_status_handler({
+        "project_root": project_root,
+        "deep": bool(getattr(args, "deep", False)),
+    })
 
     from codeintel.config import load_config
     from codeintel.semantic_db import SemanticDb, default_db_path
 
     db_path = default_db_path(str(load_config(project_root).get("model") or ""))
     indexed_at = None
-    if os.path.exists(db_path):
+    semantic_readiness = (status.get("readiness") or {}).get("semantic") or {}
+    # Metadata can outlive every chunk after a failed/partial cleanup. An age attached to zero
+    # searchable rows makes an unindexed repo look recently indexed, so only surface it when the
+    # engine independently confirmed this repository has chunks.
+    if os.path.exists(db_path) and semantic_readiness.get("repo_indexed") is True:
         db = SemanticDb(db_path)
         try:
             indexed_at = db.indexed_at(os.path.realpath(project_root))

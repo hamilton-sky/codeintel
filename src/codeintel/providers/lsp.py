@@ -47,7 +47,13 @@ _WARM_WAIT_S = 8.0
 # work ("Package `serena` does not provide any executables"). The working invocation — verified
 # against the installed serena and the machine's own serena MCP config — pulls it straight from
 # the upstream repo and starts the stdio MCP server, binding the project via `--project`.
-_SERENA_GIT = "git+https://github.com/oraios/serena"
+#
+# Pin the commit, not a tag or git HEAD. Serena is a live wire dependency: command names and MCP
+# payloads have changed upstream, and an unreviewed update can otherwise break every LSP answer in
+# an already-released codeintel build. v1.7.0 resolves to this commit; bump only with the live
+# contract job green against the replacement.
+_SERENA_REV = "949a27ef1e5fda1a6e7b561e777bcece345c6ffd"
+_SERENA_GIT = f"git+https://github.com/oraios/serena@{_SERENA_REV}"
 
 
 # Prefixes serena uses when a tool call fails. Checked in addition to the MCP `isError` flag,
@@ -443,8 +449,8 @@ class LspProvider:
             if st == _State.FAILED:
                 return {"installed": True, "runnable": False, "repo_indexed": None,
                         "detail": "serena failed to boot",
-                        "remediation": "check uvx + network: `uvx --from "
-                                       "git+https://github.com/oraios/serena serena start-mcp-server`"}
+                        "remediation": f"check uvx + network: `uvx --from {_SERENA_GIT} "
+                                       "serena start-mcp-server`"}
             time.sleep(0.5)
         return {"installed": True, "runnable": None, "repo_indexed": None,
                 "detail": f"serena did not reach READY within {int(timeout_s)}s (still warming)",

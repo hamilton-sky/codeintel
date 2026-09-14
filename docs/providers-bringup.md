@@ -70,8 +70,8 @@ Live — **there is nothing to index**; it reads the workspace through language 
 
 **Bring-up**
 1. **Install `uv`** (provides `uvx`): `pip install uv`. That is the only dependency you install —
-   serena itself is fetched on first use straight from git, via
-   `uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`
+   serena itself is fetched on first use at the reviewed v1.7.0 commit, via
+   `uvx --from git+https://github.com/oraios/serena@949a27ef1e5fda1a6e7b561e777bcece345c6ffd serena start-mcp-server --context ide-assistant --enable-web-dashboard false --project <root>`
    (plain `uvx serena` does NOT work — the package ships no `serena` executable of that name).
 2. **Warm it once:** `codeintel setup --warm`. The first launch pulls serena via uvx and boots a
    language server for the repo's language, which is slow; after that it is cached. Without warming,
@@ -84,7 +84,7 @@ actually boots it.)
 **Failure modes → fix**
 - `installed: false` — no `uv`/`uvx` → `pip install uv`.
 - Slow/failed first query — cold serena boot → warm it ahead of time (`setup --warm`); if it never
-  reaches READY, check `uvx --from git+https://github.com/oraios/serena serena start-mcp-server
+  reaches READY, check `uvx --from git+https://github.com/oraios/serena@949a27ef1e5fda1a6e7b561e777bcece345c6ffd serena start-mcp-server
   --context ide-assistant --enable-web-dashboard false --help` runs and that the network can reach
   GitHub.
 - No answers for a given language — serena needs a language server for that language; a repo in an

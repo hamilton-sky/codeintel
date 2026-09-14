@@ -6,7 +6,47 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.23.1] — 2026-09-14
+
+### Added
+- **Every query envelope now carries an explicit outcome:** `answered`, `partial`, `not_found`,
+  `unavailable`, or `failed`. Consumers no longer have to infer whether `ok: true` means the
+  repository was searched successfully; `reason`, `confidence`, and `gaps` remain available for
+  the supporting detail.
+- **`codeintel status --json` exposes the complete machine-readable readiness contract.** Its new
+  `--deep` mode also boots LSP and samples indexed files through the source-containment boundary,
+  warning when the cache is readable but the host process cannot read the repository.
+
+### Changed
+- **Architecture rankings now count distinct, high-confidence production `CALLS` edges.** Test
+  nodes and weaker usage/reference edges no longer inflate the map's "most called" list. Direct
+  `callees` queries are likewise call-only; the broader `impact` operation intentionally retains
+  reference evidence.
+- **Serena is pinned to the reviewed v1.7.0 commit and its live contract now blocks releases.**
+  Clean-wheel canaries also run with a cold model cache on Python 3.12, 3.13, and 3.14, while the
+  full test matrix now includes Python 3.14.
+
 ### Fixed
+- **Unreadable source is reported as an explicit gap, not rendered as if code were returned.**
+  This covers privacy/sandbox failures where an index can be queried but its repository cannot be
+  opened, and `status --deep` now diagnoses the same condition before a query depends on it.
+- **Semantic prose diagnostics report file counts as file counts.** A partial scan now says, for
+  example, "4 of 10 files" rather than accidentally substituting a chunk total such as "37 of
+  10".
+- **Route validation rejects test and false-positive route nodes**, keeping generated architecture
+  summaries from presenting incidental strings as application endpoints.
+- **Semantic database lifetimes are deterministic** in production and tests, eliminating the
+  accumulated unclosed-SQLite warnings that obscured genuine resource leaks. A close failure is
+  logged without replacing a completed query answer with `provider-error`.
+- **An old metadata timestamp no longer gives an unindexed repository an "index age."** Status
+  surfaces the timestamp only after the semantic probe confirms that the repository still has
+  searchable chunks.
+- **The accuracy benchmark refuses to score an unreadable oracle.** A host-wide filesystem denial
+  can no longer collapse every truth set to zero callers with a misleading 100% coverage score.
+- **One-shot indexing releases ONNX before interpreter shutdown.** Native-runtime CLI commands also
+  flush their completed output and exit without running unsafe ONNX finalizers. This prevents an
+  intermittent Python 3.13/macOS abort (`recursive_mutex lock failed`) after a successful command.
+
 - **A background index pass that failed stops reporting itself as in progress.** The cold-index
   thread's `finally` clears `_BG_INDEX_STARTED`, so once a pass died the next request found no
   index and no job in flight, started another doomed pass, and answered `indexing-in-progress`

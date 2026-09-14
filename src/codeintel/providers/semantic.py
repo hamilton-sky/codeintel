@@ -337,11 +337,16 @@ class SemanticProvider:
     def available(self) -> bool:
         return _DEPS_OK
 
-    def probe(self, project_root: str) -> dict:
+    def probe(self, project_root: str, *, deep: bool = False) -> dict:
         """Never-raise health check for the doctor. READ-ONLY: it opens the db read-only and counts
         this repo's chunks — it must NOT call SemanticDb.init() (a schema write) or LOAD fastembed.
         It does resolve the project's ``model`` *name* (a cheap config read, no model load) to pick
-        the per-model cache file. ``repo_indexed`` is project-scoped (mirrors Searcher.has_index)."""
+        the per-model cache file. ``repo_indexed`` is project-scoped (mirrors Searcher.has_index).
+
+        A deep probe also samples indexed source files through the same containment boundary used
+        by search-result rendering. This catches a cache that is readable while the repository is
+        not (for example, a host process missing macOS privacy permission). It still does not load
+        the embedding model or mutate either the repository or the cache."""
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False,
@@ -387,6 +392,13 @@ class SemanticProvider:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM chunk_hashes WHERE project_root = ?", (real,)
                 ).fetchone()
+                paths = (
+                    [str(r[0]) for r in conn.execute(
+                        "SELECT DISTINCT file_path FROM chunk_hashes"
+                        " WHERE project_root = ? ORDER BY file_path LIMIT 20", (real,)
+                    ).fetchall()]
+                    if deep else []
+                )
             finally:
                 conn.close()
             count = int(row[0]) if row else 0
@@ -397,10 +409,40 @@ class SemanticProvider:
                 "remediation": f"codeintel reset {project_root} && codeintel index {project_root}",
             }, cached, named_model)
         if count > 0:
-            return _with_model_cache({
+            report = {
                 "installed": True, "runnable": True, "repo_indexed": True,
                 "detail": f"{count} indexed chunks for this repo", "remediation": None,
-            }, cached, named_model)
+            }
+            if deep:
+                from codeintel.containment import open_contained
+
+                unreadable = 0
+                for rel_path in paths:
+                    try:
+                        with open_contained(real, pathlib.Path(real) / rel_path, mode="rb") as src:
+                            src.read(1)
+                    except Exception:
+                        unreadable += 1
+                sampled = len(paths)
+                report.update({
+                    "source_readable": unreadable == 0 and sampled > 0,
+                    "source_sampled": sampled,
+                    "source_unreadable": unreadable,
+                })
+                if unreadable:
+                    report["detail"] = (
+                        f"{count} indexed chunks; {unreadable}/{sampled} sampled source files "
+                        "unreadable"
+                    )
+                    report["remediation"] = (
+                        "grant the codeintel host read access to the repository (including OS "
+                        "privacy/filesystem permissions), then run `codeintel status --deep` again"
+                    )
+                else:
+                    report["detail"] = (
+                        f"{count} indexed chunks; {sampled}/{sampled} sampled source files readable"
+                    )
+            return _with_model_cache(report, cached, named_model)
         return _with_model_cache(
             _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo"),
             cached, named_model,
@@ -440,7 +482,13 @@ class SemanticProvider:
             db.init()
 
             def _finish(answer: Result) -> Result:
-                db.close()
+                try:
+                    db.close()
+                except Exception as close_exc:
+                    # Cleanup must not replace an answer with `provider-error`. The background
+                    # index path already follows this rule: a close failure is worth logging, but
+                    # it neither invalidates completed work nor changes the query's outcome.
+                    log_swallowed("SemanticProvider.build_result.close", close_exc)
                 return answer
 
             searcher = Searcher(db, model_name=model)

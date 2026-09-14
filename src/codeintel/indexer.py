@@ -16,6 +16,7 @@ from codeintel.semantic_db import (
     EmbeddingModelUnavailable,
     chunk_content_hash,
     load_embedder,
+    release_embedder,
 )
 from codeintel.source_kind import (
     CODE_EXTS,
@@ -293,6 +294,12 @@ class Indexer:
             logger.error("Indexer.index() unrecoverable failure: %s", detail)
             self.last_error = detail
             return -1
+        finally:
+            # Indexer instances are one-pass owners. Releasing ONNX here keeps its C++ destructor
+            # out of interpreter shutdown, where Python 3.13/macOS can abort after a successful CLI
+            # run with `recursive_mutex lock failed`.
+            release_embedder(getattr(self, "_embedder", None))
+            self._embedder = None
 
     def _load_gitignore(self, root: Path) -> set[str]:
         """Best-effort ``.gitignore``: collect simple name/dir patterns to skip. This is

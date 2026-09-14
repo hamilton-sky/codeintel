@@ -1,5 +1,6 @@
 import argparse
 import difflib
+import os
 import shutil
 import sys
 from importlib import import_module
@@ -13,6 +14,21 @@ from codeintel.query_ops import QUERY_OPS
 # pinned to the gateway's set by test_cli_help.py, which is where the guard belongs: importing
 # gateway here just to assert at module scope would pull it into every CLI startup.
 QUERY_ENGINES: tuple[str, ...] = ("auto", "graph", "lsp", "semantic", "both", "all")
+
+# These commands can load onnxruntime through fastembed. On Python 3.13/macOS, letting CPython
+# finalize that native runtime has intermittently aborted an otherwise successful command after it
+# printed its result. The work and output are already complete when run() returns, so exit from the
+# same post-verdict boundary the test suite uses rather than letting native finalizers rewrite a
+# successful exit code. Other commands retain ordinary SystemExit behavior.
+_NATIVE_RUNTIME_COMMANDS = frozenset({"index", "query", "setup", "serve", "serve-http"})
+
+
+def _native_safe_exit(status: int) -> NoReturn:
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(int(status))
 
 # Commands grouped by what you are trying to DO. argparse lists them in declaration order with no
 # grouping, which turns "what can this thing do?" into reading twelve lines to find the one verb you
@@ -444,6 +460,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument(
         "--json", action="store_true", help="Emit the structured status and index-age report")
+    status_parser.add_argument(
+        "--deep", action="store_true",
+        help="Boot LSP and sample indexed source readability (slower, read-only)")
 
     # serve-http subcommand
     http_parser = subparsers.add_parser(
@@ -654,7 +673,10 @@ def main() -> None:
         print(render_help())    # "help" (`codeintel --no-color help`) — both skip the early-return
                                  # above because argv[0] is the flag, not the command/"help" itself
         sys.exit(0)
-    sys.exit(import_module(f"codeintel.commands.{module}").run(args))
+    status = int(import_module(f"codeintel.commands.{module}").run(args))
+    if args.command in _NATIVE_RUNTIME_COMMANDS:
+        _native_safe_exit(status)
+    sys.exit(status)
 
 
 if __name__ == "__main__":
