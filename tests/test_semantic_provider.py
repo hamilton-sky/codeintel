@@ -478,4 +478,5 @@ def test_a_fanout_where_the_repo_is_merely_unindexed_keeps_its_ordinary_summary(
     r = gw.query(op="context", target="make_widget", engine="all", project_root="/x")
 
     assert r["reason"] == "no-result"
+    assert r["outcome"] == "not_found"
     assert "NOT evidence" not in (r.get("hint") or "")

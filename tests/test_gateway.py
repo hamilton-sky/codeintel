@@ -548,6 +548,7 @@ def test_a_fanout_where_engines_ran_and_found_nothing_still_reports_no_result():
                  lsp=_NullProvider("lsp", "not-found"))
     r = gw.query(op="context", target="nope", engine="both")
     assert r["reason"] == "no-result"
+    assert r["outcome"] == "not_found"
     assert "NOT evidence" not in (r.get("hint") or "")
 
 

@@ -371,6 +371,8 @@ def test_null_result_outcome_is_machine_readable():
     from codeintel.provider import safe_null_result
 
     assert safe_null_result("x", "y", reason="not-in-graph")["outcome"] == "not_found"
+    assert safe_null_result("x", "y", reason="not-found")["outcome"] == "not_found"
+    assert safe_null_result("x", "y", reason="no-index")["outcome"] == "not_found"
     assert safe_null_result("x", "y", reason="engine-unavailable")["outcome"] == "unavailable"
     assert safe_null_result("x", "y", reason="backend-error")["outcome"] == "failed"
     assert safe_null_result("x", "y", reason="source-unreadable")["outcome"] == "unavailable"

@@ -81,12 +81,14 @@ def safe_null_result(
     }
     unavailable_reasons = {
         "backend-unreachable", "engine-unavailable", "engines-unavailable", "indexing-in-progress",
-        "index-stale", "no-engine", "no-index", "no-project-root", "op-not-allowed-for-role",
+        "index-stale", "no-engine", "no-project-root", "op-not-allowed-for-role",
         "op-not-supported", "op-withdrawn", "project-not-indexed",
         "project-not-indexed-standalone", "root-not-allowed-for-role", "source-unreadable",
         "unknown-engine", "unsupported-op", "warming",
     }
-    not_found_reasons = {"below-floor", "no-edges", "no-result", "not-in-graph"}
+    not_found_reasons = {
+        "below-floor", "no-edges", "no-index", "no-result", "not-found", "not-in-graph",
+    }
     if reason in failed_reasons:
         outcome = "failed"
     elif reason in unavailable_reasons:
