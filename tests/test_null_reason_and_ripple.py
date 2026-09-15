@@ -150,6 +150,70 @@ def test_an_all_guesses_answer_is_cross_checked_against_the_lsp():
     assert any(g["kind"] == "cross-checked-with-lsp" for g in env["gaps"]), env["gaps"]
 
 
+def test_a_file_qualified_graph_miss_is_cross_checked_against_the_lsp():
+    target = "createSession@backend/src/session.handler.ts"
+    graph = {
+        "ok": True,
+        "op": "callers",
+        "target": target,
+        "engine": "graph",
+        "result": "## Callers\nNo matching file-qualified symbol has callers in this index.",
+        "confidence": "partial",
+        "gaps": [{
+            "section": "callers",
+            "kind": "target-hint-unmatched",
+            "detail": "the exact symbol has no bound caller edge",
+        }],
+    }
+    lsp = {
+        "ok": True,
+        "result": f"## Symbol: {target}\n**Method** — backend/src/session.handler.ts:139\n"
+                  "```\nbody\n```\n\n## References (1)\n"
+                  "- backend/src/gateway.ts:613  (Gateway/routeMessage)\n",
+        "engine": "lsp",
+        "confidence": "complete",
+    }
+    calls: list[tuple[str, str]] = []
+
+    class _RecordingLsp(_StubLsp):
+        def build_result(self, op, asked_target, files, budget, project_root, **kw):
+            calls.append((op, asked_target))
+            return super().build_result(op, asked_target, files, budget, project_root, **kw)
+
+    gw = Gateway(graph=_StubGraph(graph), lsp=_RecordingLsp(lsp))
+    env = gw.query("callers", target, engine="auto", project_root=ROOT, budget=30000)
+
+    assert calls == [("symbol", target)]
+    assert "backend/src/gateway.ts:613" in env["result"]
+    assert "file-qualified symbol" in env["result"]
+    assert any(g["kind"] == "cross-checked-with-lsp" for g in env["gaps"])
+
+
+def test_an_unresolved_lsp_definition_does_not_claim_zero_references():
+    target = "createSession@backend/src/session.handler.ts"
+    graph = {
+        "ok": True, "op": "callers", "target": target, "engine": "graph",
+        "result": "No bound graph caller.", "confidence": "partial",
+        "gaps": [{"section": "callers", "kind": "target-hint-unmatched"}],
+    }
+    lsp = {
+        "ok": True, "engine": "lsp", "confidence": "partial",
+        "result": "## Symbol\nNo matching definition.\n\n## References — not retrieved",
+        "gaps": [{
+            "section": "references", "kind": "not-asked",
+            "detail": "the exact file-qualified definition was not resolved",
+        }],
+    }
+
+    env = Gateway(graph=_StubGraph(graph), lsp=_StubLsp(lsp)).query(
+        "callers", target, engine="auto", project_root=ROOT, budget=30000
+    )
+
+    assert "Cross-check unavailable" in env["result"]
+    assert "(no references reported)" not in env["result"]
+    assert any(g["kind"] == "cross-check-unavailable" for g in env["gaps"])
+
+
 def test_a_healthy_graph_answer_is_never_sent_to_the_lsp():
     """The escalation is for the collision signature only. Firing it on ordinary answers would
     double every callers query's cost for nothing."""

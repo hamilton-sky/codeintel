@@ -163,6 +163,64 @@ def test_lsp_provider_ready_symbol(monkeypatch):
     assert "parse_result" in r["result"]
 
 
+def test_file_qualified_symbol_selects_the_matching_definition(monkeypatch):
+    """A graph file hint must survive the LSP cross-check instead of selecting a same-name method."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    calls: list[tuple[str, dict]] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append((tool, args))
+        if tool == "find_symbol":
+            return Ok('[{"name_path":"Other/createSession","kind":"Method",'
+                      '"relative_path":"src/other.ts","body_location":{"start_line":1,'
+                      '"end_line":2},"body":"wrong"},{"name_path":"WsSessionHandler/createSession",'
+                      '"kind":"Method","relative_path":"backend/src/session.handler.ts",'
+                      '"body_location":{"start_line":138,"end_line":177},"body":"right"}]')
+        if tool == "find_referencing_symbols":
+            assert args["name_path"] == "WsSessionHandler/createSession"
+            assert args["relative_path"] == "backend/src/session.handler.ts"
+            return Ok('{"backend/src/gateway.ts":{"Method":[{"name_path":"Gateway/routeMessage",'
+                      '"content_around_reference":"> 612: await handler.createSession()"}]}}')
+        return Missing("backend-error", "unstubbed tool")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "createSession@backend/src/session.handler.ts", [], 30000, "/my/repo"
+    )
+
+    assert r["confidence"] == "complete"
+    assert "right" in r["result"] and "wrong" not in r["result"]
+    assert "backend/src/gateway.ts:613" in r["result"]
+    assert calls[0][1]["name_path_pattern"] == "createSession"
+    assert calls[0][1]["max_matches"] == 50
+
+
+def test_file_qualified_symbol_does_not_use_a_definition_from_another_file(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    calls: list[str] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append(tool)
+        return Ok('[{"name_path":"Other/createSession","kind":"Method",'
+                  '"relative_path":"src/other.ts","body_location":{"start_line":1,'
+                  '"end_line":2},"body":"wrong"}]')
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "createSession@backend/src/session.handler.ts", [], 30000, "/my/repo"
+    )
+
+    assert r["confidence"] == "partial"
+    assert "found no definition" in r["result"] and "wrong" not in r["result"]
+    assert "References — not retrieved" in r["result"]
+    assert calls == ["find_symbol"]
+    assert any(g["section"] == "references" and g["kind"] == "not-asked" for g in r["gaps"])
+
+
 # ---------------------------------------------------------------------------
 # Group 8 — Unsupported op when READY
 # ---------------------------------------------------------------------------

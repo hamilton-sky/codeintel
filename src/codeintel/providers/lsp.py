@@ -67,6 +67,30 @@ _BACKEND_ERROR_MARKERS = (
 )
 
 
+def _split_target_file_hint(target: str) -> tuple[str, str]:
+    """Return Serena's symbol pattern and an optional repo-relative file hint.
+
+    Graph operations accept ``name@path`` to disambiguate duplicate symbols. The gateway may pass
+    that exact target to the LSP for an independent reference cross-check, but Serena understands
+    only the name-path portion. Keep the syntax aligned here without coupling the LSP provider to
+    graph.py's private target parser.
+    """
+    raw = str(target or "").strip()
+    if "@" not in raw:
+        return raw, ""
+    head, _, tail = raw.rpartition("@")
+    if not head.strip() or not tail.strip():
+        return raw, ""
+    return head.strip(), tail.strip()
+
+
+def _file_hint_matches(file_path: Any, hint: str) -> bool:
+    """Match a file hint on path-segment boundaries, consistently with the graph provider."""
+    have = str(file_path or "").replace("\\", "/").strip().strip("/").lower()
+    want = str(hint or "").replace("\\", "/").strip().strip("/").lower()
+    return bool(have and want and (have == want or have.endswith("/" + want)))
+
+
 def _looks_like_backend_error(text: str) -> bool:
     """Whether *text* is a backend failure message rather than a result.
 
@@ -773,10 +797,18 @@ class LspProvider:
         self, session: _LspSession, target: str, root: str, timeout_s: float
     ) -> str | None:
         try:
+            symbol_target, file_hint = _split_target_file_hint(target)
             def_out = self._call_tool(
                 session,
                 "find_symbol",
-                {"name_path_pattern": target, "include_body": True, "max_matches": 5},
+                {
+                    "name_path_pattern": symbol_target,
+                    "include_body": True,
+                    # A file hint exists specifically because the name is ambiguous. Retrieve
+                    # enough definitions to find the requested file instead of silently selecting
+                    # whichever five Serena happens to return first.
+                    "max_matches": 50 if file_hint else 5,
+                },
                 timeout_s,
             )
             if isinstance(def_out, Missing):
@@ -789,6 +821,21 @@ class LspProvider:
             def_raw = def_out.value
             def_text = self._extract_text(def_raw)
             matches = self._loads(def_text)
+            if isinstance(matches, list) and file_hint:
+                matches = [
+                    match for match in matches
+                    if isinstance(match, dict)
+                    and _file_hint_matches(match.get("relative_path"), file_hint)
+                ]
+                if not matches:
+                    # Do not fall through and render the original JSON containing definitions
+                    # from other files. More importantly, the reference lookup below must remain
+                    # "not asked", rather than turning an unresolved exact definition into a
+                    # confident zero-reference answer.
+                    def_text = (
+                        f"> The language server found no definition for `{symbol_target}` in "
+                        f"`{file_hint}`."
+                    )
 
             first: dict | None = None
             if isinstance(matches, list) and matches:
