@@ -6,6 +6,19 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.23.4] — 2026-09-15
+
+### Fixed
+- **Mixed-confidence qualified caller answers now receive an exact LSP cross-check.** A few
+  structurally resolved rows can no longer prevent automatic `callers` and `impact` queries from
+  checking a much larger population of unverified name-matched edges. The graph result remains
+  partial and its edges remain explicitly unproven; exact language-server references are appended
+  as separate evidence only when the target is qualified.
+- **Combined `Class.method@file` targets resolve through the language server.** CodeIntel asks
+  Serena for the leaf method name and then filters all definitions to the exact file before
+  requesting references. This recovers TypeScript property-method checks without allowing an
+  adversarial same-named method in another file to satisfy the lookup.
+
 ## [0.23.3] — 2026-09-15
 
 ### Fixed

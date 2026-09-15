@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from codeintel.gateway import Gateway
 from codeintel.providers.graph import GraphProvider
 
@@ -229,6 +231,123 @@ def test_a_healthy_graph_answer_is_never_sent_to_the_lsp():
     assert calls == [], calls
 
 
+@pytest.mark.parametrize("kind", ["all-rows-name-resolved", "target-hint-unmatched"])
+def test_impact_does_not_cross_check_callee_only_gaps(kind):
+    calls: list[str] = []
+
+    class _Counting(_StubLsp):
+        def build_result(self, op, target, files, budget, project_root, **kw):
+            calls.append(op)
+            return super().build_result(op, target, files, budget, project_root, **kw)
+
+    graph = _graph_env([{"section": "callees", "kind": kind, "detail": "d"}])
+    gw = Gateway(graph=_StubGraph(graph), lsp=_Counting({"ok": True, "result": "x"}))
+    gw.query("impact", "describe", engine="auto", project_root=ROOT, budget=30000)
+
+    assert calls == []
+
+
+def test_a_mixed_confidence_qualified_answer_is_cross_checked_against_exact_lsp_symbol():
+    """One good row must not mask dozens of suffix matches for a qualified property method."""
+    target = "StrategyChain.resolve@backend/src/agents/core/strategy-chain.ts"
+    graph = {
+        "ok": True, "op": "callers", "target": target, "engine": "graph",
+        "result": "## Callers (48)\n- two real rows\n- forty-six guesses",
+        "confidence": "partial",
+        "gaps": [{
+            "section": "callers", "kind": "low-confidence-edges",
+            "detail": "43 of 48 rows use suffix_match",
+        }],
+    }
+    lsp = {
+        "ok": True, "engine": "lsp", "confidence": "complete",
+        "result": f"## Symbol: {target}\n**Method** — backend/src/agents/core/strategy-chain.ts:58\n"
+                  "```\nbody\n```\n\n## References (2)\n"
+                  "- backend/src/agents/workflow-step-agent.ts:126  (tryDeterministicPath)\n"
+                  "- backend/src/agents/general-chat-agent.ts:107  (tryDeterministicPath)\n",
+    }
+    calls: list[tuple[str, str]] = []
+
+    class _RecordingLsp(_StubLsp):
+        def build_result(self, op, asked_target, files, budget, project_root, **kw):
+            calls.append((op, asked_target))
+            return super().build_result(op, asked_target, files, budget, project_root, **kw)
+
+    env = Gateway(graph=_StubGraph(graph), lsp=_RecordingLsp(lsp)).query(
+        "callers", target, engine="auto", project_root=ROOT, budget=30000
+    )
+
+    assert calls == [("symbol", target)]
+    assert "LSP references" in env["result"]
+    assert "qualified graph answer contains unverified" in env["result"]
+    assert env["confidence"] == "partial"
+    assert any(g["kind"] == "low-confidence-edges" for g in env["gaps"])
+    assert any(g["kind"] == "cross-checked-with-lsp" for g in env["gaps"])
+
+
+def test_impact_callee_confidence_gap_does_not_trigger_a_caller_reference_check():
+    calls: list[str] = []
+
+    class _Counting(_StubLsp):
+        def build_result(self, op, target, files, budget, project_root, **kw):
+            calls.append(op)
+            return super().build_result(op, target, files, budget, project_root, **kw)
+
+    graph = {
+        "ok": True, "op": "impact", "target": "StrategyChain.resolve", "engine": "graph",
+        "result": "## Impact\nCallers are verified; one outgoing call is guessed.",
+        "confidence": "partial",
+        "gaps": [{
+            "section": "callees", "kind": "low-confidence-edges",
+            "detail": "one outgoing edge uses suffix_match",
+        }],
+    }
+    gw = Gateway(graph=_StubGraph(graph), lsp=_Counting({"ok": True, "result": "x"}))
+
+    env = gw.query("impact", "StrategyChain.resolve", engine="auto",
+                   project_root=ROOT, budget=30000)
+
+    assert calls == []
+    assert env["confidence"] == "partial"
+
+
+def test_qualified_target_without_exact_file_does_not_trigger_cross_check():
+    calls: list[str] = []
+
+    class _Counting(_StubLsp):
+        def build_result(self, op, target, files, budget, project_root, **kw):
+            calls.append(op)
+            return super().build_result(op, target, files, budget, project_root, **kw)
+
+    graph = _graph_env([{
+        "section": "callers", "kind": "low-confidence-edges", "detail": "suffix match"
+    }])
+    gw = Gateway(graph=_StubGraph(graph), lsp=_Counting({"ok": True, "result": "x"}))
+
+    gw.query("callers", "core.Group.invoke", engine="auto", project_root=ROOT, budget=30000)
+
+    assert calls == []
+
+
+def test_basename_only_file_hint_does_not_trigger_cross_check():
+    calls: list[str] = []
+
+    class _Counting(_StubLsp):
+        def build_result(self, op, target, files, budget, project_root, **kw):
+            calls.append(op)
+            return super().build_result(op, target, files, budget, project_root, **kw)
+
+    graph = _graph_env([{
+        "section": "callers", "kind": "low-confidence-edges", "detail": "suffix match"
+    }])
+    gw = Gateway(graph=_StubGraph(graph), lsp=_Counting({"ok": True, "result": "x"}))
+
+    gw.query("callers", "StrategyChain.resolve@strategy-chain.ts", engine="auto",
+             project_root=ROOT, budget=30000)
+
+    assert calls == []
+
+
 def test_a_pinned_engine_is_never_second_guessed():
     """`--engine graph` is the caller saying which engine they want. Appending another engine's
     answer to it would make the flag mean something other than what it says."""
@@ -257,6 +376,62 @@ def test_a_warming_language_server_is_reported_as_retryable_not_as_agreement():
     assert gap["reason"] == "warming"
     assert gap.get("retry_after_s")
     assert "had not finished booting" in env["result"]
+
+
+def test_a_retryable_cross_check_miss_is_not_cached():
+    graph = _StubGraph(_graph_env([{
+        "section": "callers", "kind": "all-rows-name-resolved", "detail": "d"
+    }]))
+    answers = [
+        {"ok": True, "result": None, "reason": "warming"},
+        {"ok": True, "engine": "lsp", "confidence": "complete",
+         "result": "## Symbol: describe\nbody\n\n## References (1)\n- src/live.py:7  (run)"},
+    ]
+    calls: list[str] = []
+
+    class _EventuallyReady(_StubLsp):
+        def build_result(self, op, target, files, budget, project_root, **kw):
+            calls.append(op)
+            return answers.pop(0)
+
+    gw = Gateway(graph=graph, lsp=_EventuallyReady({}))
+    first = gw.query("callers", "describe-retryable", engine="auto",
+                     project_root=ROOT, budget=30000)
+    second = gw.query("callers", "describe-retryable", engine="auto",
+                      project_root=ROOT, budget=30000)
+
+    assert "Cross-check unavailable" in first["result"]
+    assert "src/live.py:7" in second["result"]
+    assert calls == ["symbol", "symbol"]
+
+
+def test_a_retryable_first_boot_failure_is_not_cached():
+    graph = _StubGraph(_graph_env([{
+        "section": "callers", "kind": "all-rows-name-resolved", "detail": "d"
+    }]))
+    answers = [
+        {"ok": True, "result": None, "reason": "boot-failed", "retry_after_s": 60},
+        {"ok": True, "engine": "lsp", "confidence": "complete",
+         "result": "## Symbol: describe\nbody\n\n## References (1)\n- src/live.py:7  (run)"},
+    ]
+    calls: list[str] = []
+
+    class _EventuallyReady(_StubLsp):
+        def build_result(self, op, target, files, budget, project_root, **kw):
+            calls.append(op)
+            return answers.pop(0)
+
+    gw = Gateway(graph=graph, lsp=_EventuallyReady({}))
+    first = gw.query("callers", "describe-boot-retry", engine="auto",
+                     project_root=ROOT, budget=30000)
+    second = gw.query("callers", "describe-boot-retry", engine="auto",
+                      project_root=ROOT, budget=30000)
+
+    gap = next(g for g in first["gaps"] if g["kind"] == "cross-check-unavailable")
+    assert gap["reason"] == "boot-failed"
+    assert gap["retry_after_s"] == 60
+    assert "src/live.py:7" in second["result"]
+    assert calls == ["symbol", "symbol"]
 
 
 # --------------------------------------------------------------------------- #

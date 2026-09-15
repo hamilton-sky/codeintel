@@ -50,6 +50,13 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
                     "completed pass; re-ask shortly if you have just changed this code"}
 
 
+def _is_retryable(result: Result) -> bool:
+    return bool(result.get("retry_after_s")) or any(
+        isinstance(gap, dict) and bool(gap.get("retry_after_s"))
+        for gap in (result.get("gaps") or [])
+    )
+
+
 class Gateway:
     def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None,
                  reindexer: Reindexer | None = None, oneshot: bool = False):
@@ -198,17 +205,44 @@ class Gateway:
             if result.get("result") is None or self.lsp is None:
                 return result
             gaps = result.get("gaps") or []
-            kinds = {
-                str(g.get("kind") or "") for g in gaps if isinstance(g, dict)
-            }
-            all_name_resolved = "all-rows-name-resolved" in kinds
-            exact_target_unbound = "target-hint-unmatched" in kinds
-            if not (all_name_resolved or exact_target_unbound):
+            all_name_resolved = any(
+                isinstance(gap, dict)
+                and gap.get("kind") == "all-rows-name-resolved"
+                and gap.get("section") == "callers"
+                for gap in gaps
+            )
+            exact_target_unbound = any(
+                isinstance(gap, dict)
+                and gap.get("kind") == "target-hint-unmatched"
+                and gap.get("section") == "callers"
+                for gap in gaps
+            )
+            # A file-qualified target is supposed to identify one definition. If its
+            # answer still contains low-confidence name matches, the backend has selected the
+            # destination node but has not proven the incoming property-call bindings. This is the
+            # mixed variant of ``all-rows-name-resolved``: a handful of structural rows can mask a
+            # much larger suffix-match population, so the old all-or-nothing signature missed it.
+            # Only auto mode reaches this method, and only an already-partial answer carrying an
+            # exact file hint pays for the LSP check; healthy graph answers still make no extra
+            # engine call. A dotted target without a file is intentionally not escalated because
+            # module identity is represented differently across Serena language servers.
+            caller_edges_unverified = any(
+                isinstance(gap, dict)
+                and gap.get("kind") == "low-confidence-edges"
+                and gap.get("section") == "callers"
+                for gap in gaps
+            )
+            _, has_at, hinted_path = target.rpartition("@")
+            exact_file_hint = bool(has_at and "/" in hinted_path.replace("\\", "/"))
+            narrowed_target_unverified = caller_edges_unverified and exact_file_hint
+            if not (all_name_resolved or exact_target_unbound or narrowed_target_unverified):
                 return result
             graph_problem = (
                 "every graph row was resolved by name"
                 if all_name_resolved
                 else "the graph found no caller edge for the file-qualified symbol"
+                if exact_target_unbound
+                else "the qualified graph answer contains unverified name-resolved caller edges"
             )
             probe = self._dispatch_single(
                 self.lsp, "symbol", target, budget, project_root, "lsp")
@@ -229,7 +263,8 @@ class Gateway:
                     str(reference_gap.get("kind") or "not-asked")
                     if reference_gap is not None else str(probe.get("reason") or "no-result")
                 )
-                warming = unavailable_reason in {"warming", "timeout"}
+                retry_after_s = probe.get("retry_after_s")
+                retryable = unavailable_reason in {"warming", "timeout"} or bool(retry_after_s)
                 why = (
                     "the language server had not finished booting"
                     if unavailable_reason == "warming"
@@ -238,7 +273,7 @@ class Gateway:
                     else "the LSP engine reported nothing for this symbol"
                 )
                 nxt = (" Ask again once it is warm and this section will be filled in."
-                       if warming else
+                       if retryable else
                        " Check it yourself with `--engine lsp --op symbol`.")
                 return {**result, "gaps": [*gaps, {
                     "section": op, "kind": "cross-check-unavailable",
@@ -246,8 +281,8 @@ class Gateway:
                     "reason": unavailable_reason,
                     "detail": f"{graph_problem} and the LSP could not provide an independent "
                               f"reference check ({why}), so the graph answer remains unverified"
-                              + (" — retry" if warming else ""),
-                    **({"retry_after_s": 2} if warming else {}),
+                              + (" — retry" if retryable else ""),
+                    **({"retry_after_s": retry_after_s or 2} if retryable else {}),
                 }], "result": str(result["result"]) + (
                     f"\n\n> Cross-check unavailable: {graph_problem}, and "
                     f"{why}, so nothing here has been confirmed against a second engine.{nxt}"
@@ -333,12 +368,18 @@ class Gateway:
             )
             summary = "engines-unavailable" if all_unreachable else "no-result"
             detail = ", ".join(f"{eng}: {why}" for eng, why in sorted(reasons.items()))
-            return safe_null_result(
+            merged_null = safe_null_result(
                 op_str, target_str, engine=engine_str, reason=summary,
                 hint=(f"no engine produced an answer — {detail}"
                       + ("; this is NOT evidence the target does not exist"
                          if all_unreachable else "")),
             )
+            retry_after = max(
+                (float(r.get("retry_after_s") or 0) for r in results.values()), default=0
+            )
+            if retry_after:
+                merged_null["retry_after_s"] = retry_after
+            return merged_null
 
         # A fan-out answer is only as whole as its parts. This used to hand-build a six-key envelope
         # and drop both `confidence` and `gaps` on the floor — so a `context` request (the DEFAULT
@@ -357,6 +398,8 @@ class Gateway:
                     "detail": f"the {eng} engine contributed nothing to this answer "
                               f"({r.get('reason') or 'no-result'})",
                     "engine": eng,
+                    **({"retry_after_s": r["retry_after_s"]}
+                       if r.get("retry_after_s") else {}),
                 })
         return attach_confidence({
             "ok": True,
@@ -538,7 +581,7 @@ class Gateway:
                 engines = ["graph", "lsp"] if engine_str == "both" else ["graph", "lsp", "semantic"]
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
-                if not uncacheable:
+                if not uncacheable and not _is_retryable(result):
                     self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
                 return _mark_reindexing(result, reindexing)
 
@@ -577,7 +620,7 @@ class Gateway:
             result = self._cross_check_name_resolved(
                 result, op_str, target_str, budget, project_root, was_auto)
 
-            if not uncacheable:
+            if not uncacheable and not _is_retryable(result):
                 self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
             return _mark_reindexing(result, reindexing)
 

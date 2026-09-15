@@ -19,6 +19,7 @@ from mcp.client.stdio import stdio_client
 from codeintel.loc import loc, span
 from codeintel.outcome import Missing, Ok, Outcome
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
+from codeintel.providers.graph import _FILE_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ _BACKEND_ERROR_MARKERS = (
 )
 
 
-def _split_target_file_hint(target: str) -> tuple[str, str]:
+def _split_target_file_hint(target: str) -> tuple[str, str, str]:
     """Return Serena's symbol pattern and an optional repo-relative file hint.
 
     Graph operations accept ``name@path`` to disambiguate duplicate symbols. The gateway may pass
@@ -77,11 +78,45 @@ def _split_target_file_hint(target: str) -> tuple[str, str]:
     """
     raw = str(target or "").strip()
     if "@" not in raw:
-        return raw, ""
+        return raw, "", ""
     head, _, tail = raw.rpartition("@")
     if not head.strip() or not tail.strip():
-        return raw, ""
-    return head.strip(), tail.strip()
+        return raw, "", ""
+    symbol, file_hint = head.strip(), tail.strip()
+    # Query broadly by leaf and filter client-side. Serena splits module identity differently by
+    # language, while the file hint and complete symbol-path suffix together are stable.
+    suffix = symbol.rpartition(".")[2].lower()
+    qualified_hint = (
+        symbol.replace(".", "/")
+        if "." in symbol and suffix not in _FILE_EXTENSIONS
+        else ""
+    )
+    leaf = symbol.rpartition(".")[2] if qualified_hint else symbol
+    return leaf, file_hint, qualified_hint
+
+
+def _name_path_suffix_score(name_path: Any, qualified_hint: str) -> int:
+    """Number of trailing graph/Serena symbol segments that agree."""
+    have = str(name_path or "").strip("/").split("/")
+    want = str(qualified_hint or "").strip("/").split("/")
+    score = 0
+    for left, right in zip(reversed(have), reversed(want), strict=False):
+        if left != right:
+            break
+        score += 1
+    return score
+
+
+def _qualified_definition_score(match: dict, qualified_hint: str) -> int:
+    """Score a Serena symbol path within an already exact-file-filtered candidate set."""
+    symbol_score = _name_path_suffix_score(match.get("name_path"), qualified_hint)
+    name_parts = str(match.get("name_path") or "").strip("/").split("/")
+    # The whole Serena name path must be a suffix of the graph qualifier. An extra enclosing symbol
+    # is never a module and would make selection ambiguous. Require container + leaf: accepting a
+    # top-level ``resolve`` would leave ``MissingClass`` entirely unverified.
+    wanted_parts = str(qualified_hint or "").strip("/").split("/")
+    return (symbol_score if symbol_score == len(name_parts) == len(wanted_parts)
+            and symbol_score >= 2 else 0)
 
 
 def _file_hint_matches(file_path: Any, hint: str) -> bool:
@@ -287,25 +322,53 @@ class LspProvider:
 
     # Class-level default so a provider built via `__new__` (the test stubs do this) still has it
     # rather than raising AttributeError inside the never-raise handler.
-    _last_backend_error: str | None = None
+    _backend_error_state = threading.local()
+    _backend_missing_state = threading.local()
     # Sections of the current answer that are known to be short of an answer. An op appends here
     # instead of quietly rendering an empty section, and `build_result` turns them into the
     # envelope's `gaps` / `confidence`. Class-level default for the same __new__ reason as above.
-    _pending_gaps: tuple[dict[str, Any], ...] = ()
+    _gap_state = threading.local()
     # Same __new__ reason: `_boot_failed_hint` reads this, and a session injected straight into
     # `_sessions` reaches it without `_detect_backend` having run.
     _cmd: str | None = None
+
+    @property
+    def _last_backend_error(self) -> str | None:
+        value = getattr(self._backend_error_state, "value", None)
+        return value if isinstance(value, str) else None
+
+    @_last_backend_error.setter
+    def _last_backend_error(self, value: str | None) -> None:
+        self._backend_error_state.value = value
+
+    @property
+    def _pending_gaps(self) -> tuple[dict[str, Any], ...]:
+        value = getattr(self._gap_state, "value", ())
+        return value if isinstance(value, tuple) else ()
+
+    @_pending_gaps.setter
+    def _pending_gaps(self, value: tuple[dict[str, Any], ...]) -> None:
+        self._gap_state.value = value
 
     def __init__(self) -> None:
         self._sessions: dict[str, _LspSession] = {}
         self._sessions_lock = threading.Lock()
         self._last_backend_error = None
+        self._set_backend_missing(None)
         self._pending_gaps = ()
         self._detect_backend()
 
     def _clear_backend_error(self) -> None:
         self._last_backend_error = None
+        self._set_backend_missing(None)
         self._pending_gaps = ()
+
+    def _set_backend_missing(self, missing: Missing | None) -> None:
+        self._backend_missing_state.value = missing
+
+    def _get_backend_missing(self) -> Missing | None:
+        value = getattr(self._backend_missing_state, "value", None)
+        return value if isinstance(value, Missing) else None
 
     def _add_gap(self, section: str, missing: Missing) -> None:
         """Record that a named part of the answer could not be retrieved. The body text says so
@@ -605,8 +668,13 @@ class LspProvider:
                         op_str, target_str, engine="lsp", reason="warming")
 
             if state == _State.FAILED:
-                return safe_null_result(op_str, target_str, engine="lsp", reason="boot-failed",
-                                        hint=self._boot_failed_hint(session))
+                failed = safe_null_result(
+                    op_str, target_str, engine="lsp", reason="boot-failed",
+                    hint=self._boot_failed_hint(session),
+                )
+                if session.attempt <= 1 and self._cmd == "uvx":
+                    failed["retry_after_s"] = 60
+                return failed
 
             # READY
             # Cleared through a method rather than a direct assignment: `_dispatch` sets this as a
@@ -618,12 +686,18 @@ class LspProvider:
                 # A backend failure is not an unsupported op. Reporting it as one sends the agent
                 # looking for a different tool when the language server simply did not start —
                 # the same misleading string the graph provider already had to stop emitting.
-                if self._last_backend_error:
-                    return safe_null_result(
-                        op_str, target_str, engine="lsp", reason="backend-error",
-                        hint=f"{self._last_backend_error} — run `codeintel doctor --deep` to boot-"
+                missing = self._get_backend_missing()
+                if self._last_backend_error or missing:
+                    failed = safe_null_result(
+                        op_str, target_str, engine="lsp",
+                        reason=missing.kind if missing is not None else "backend-error",
+                        hint=f"{missing.describe() if missing else self._last_backend_error} — "
+                             f"run `codeintel doctor --deep` to boot-"
                              f"check serena; the full backend message is in the server log",
                     )
+                    if missing is not None and missing.retry_after_s is not None:
+                        failed["retry_after_s"] = missing.retry_after_s
+                    return failed
                 return safe_null_result(op_str, target_str, engine="lsp", reason="unsupported-op")
 
             envelope: Result = {
@@ -797,31 +871,46 @@ class LspProvider:
         self, session: _LspSession, target: str, root: str, timeout_s: float
     ) -> str | None:
         try:
-            symbol_target, file_hint = _split_target_file_hint(target)
+            deadline = time.monotonic() + timeout_s
+
+            def remaining() -> float:
+                return max(0.001, deadline - time.monotonic())
+
+            symbol_target, file_hint, qualified_hint = _split_target_file_hint(target)
             def_out = self._call_tool(
                 session,
                 "find_symbol",
                 {
                     "name_path_pattern": symbol_target,
-                    "include_body": True,
+                    "include_body": not (file_hint or qualified_hint),
                     # A file hint exists specifically because the name is ambiguous. Retrieve
                     # enough definitions to find the requested file instead of silently selecting
                     # whichever five Serena happens to return first.
-                    "max_matches": 50 if file_hint else 5,
+                    "max_matches": 500 if (file_hint or qualified_hint) else 5,
                 },
-                timeout_s,
+                remaining(),
             )
             if isinstance(def_out, Missing):
                 # The tool call itself failed or timed out. Rendering "(not found)" here — which is
                 # what this did — states that the symbol does not exist, on no evidence whatsoever.
                 # For an agent deciding whether to create something, "I could not ask" and "it is
                 # not there" are opposite answers.
+                self._set_backend_missing(def_out)
                 self._last_backend_error = def_out.describe()
                 return None
             def_raw = def_out.value
             def_text = self._extract_text(def_raw)
             matches = self._loads(def_text)
-            if isinstance(matches, list) and file_hint:
+            candidate_page_capped = bool(
+                isinstance(matches, list) and (file_hint or qualified_hint) and len(matches) >= 500
+            )
+            if candidate_page_capped:
+                matches = []
+                def_text = (
+                    f"> The language server returned the maximum 500 definitions for `{target}`; "
+                    "the exact definition cannot be proven from a truncated candidate page."
+                )
+            if isinstance(matches, list) and file_hint and not candidate_page_capped:
                 matches = [
                     match for match in matches
                     if isinstance(match, dict)
@@ -836,7 +925,75 @@ class LspProvider:
                         f"> The language server found no definition for `{symbol_target}` in "
                         f"`{file_hint}`."
                     )
-
+            if isinstance(matches, list) and qualified_hint and not candidate_page_capped:
+                scored = [
+                    (match, _qualified_definition_score(match, qualified_hint))
+                    for match in matches if isinstance(match, dict)
+                ]
+                best = max((score for _, score in scored), default=0)
+                # `_qualified_definition_score` admits a leaf-only symbol match only when every
+                # remaining qualifier segment was proven against the definition's relative path.
+                matches = [match for match, score in scored if score == best and score > 0]
+                if not matches:
+                    def_text = (
+                        f"> The language server found no definition matching the qualified symbol "
+                        f"`{target}`."
+                    )
+            if isinstance(matches, list) and matches and (file_hint or qualified_hint):
+                identities = {
+                    (str(match.get("relative_path") or ""),
+                     str(match.get("name_path") or ""),
+                     json.dumps(match.get("body_location"), sort_keys=True))
+                    for match in matches
+                }
+                if len(identities) != 1:
+                    matches = []
+                    def_text = (
+                        f"> The language server found multiple definitions matching `{target}`; "
+                        "the file hint is not specific enough to request exact references."
+                    )
+            if isinstance(matches, list) and matches and (file_hint or qualified_hint):
+                selected = matches[0]
+                body_out = self._call_tool(
+                    session,
+                    "find_symbol",
+                    {
+                        "name_path_pattern": selected.get("name_path") or symbol_target,
+                        "relative_path": selected.get("relative_path"),
+                        "include_body": True,
+                        "max_matches": 500,
+                    },
+                    remaining(),
+                )
+                if isinstance(body_out, Missing):
+                    self._set_backend_missing(body_out)
+                    self._last_backend_error = body_out.describe()
+                    return None
+                body_text = self._extract_text(body_out.value)
+                body_matches = self._loads(body_text)
+                if isinstance(body_matches, list) and body_matches:
+                    exact_body_matches = [
+                        match for match in body_matches
+                        if isinstance(match, dict)
+                        and match.get("name_path") == selected.get("name_path")
+                        and match.get("relative_path") == selected.get("relative_path")
+                        and (
+                            selected.get("body_location") is None
+                            or match.get("body_location") == selected.get("body_location")
+                        )
+                    ]
+                    if exact_body_matches:
+                        matches = exact_body_matches
+                    else:
+                        self._last_backend_error = (
+                            "the exact definition body lookup returned no matching definition"
+                        )
+                        return None
+                else:
+                    self._last_backend_error = (
+                        "the exact definition body lookup returned no usable definition list"
+                    )
+                    return None
             first: dict | None = None
             if isinstance(matches, list) and matches:
                 def_section, first = self._format_matches(target, matches)
@@ -874,7 +1031,7 @@ class LspProvider:
                     "name_path": first.get("name_path") or target,
                     "relative_path": first.get("relative_path"),
                 },
-                timeout_s,
+                remaining(),
             )
             miss: Missing | None = None
             parsed: object = None

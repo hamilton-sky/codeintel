@@ -36,6 +36,7 @@ class Result(TypedDict):
     outcome: NotRequired[str]
     reason: NotRequired[str]
     hint: NotRequired[str]
+    retry_after_s: NotRequired[float]
     # Set when the answer was served while a reindex for its project was still running, i.e. it
     # reflects the last COMPLETED index rather than the current source. Optional, and the MCP
     # tools deliberately return plain `dict` so this never becomes a required schema field.
