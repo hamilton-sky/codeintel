@@ -6,6 +6,20 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.23.3] — 2026-09-15
+
+### Fixed
+- **File-qualified caller misses are independently checked through the language server.** When the
+  graph finds callers for same-named symbols but cannot bind an edge to the requested `name@file`,
+  automatic `callers` and `impact` queries now retain that partial graph answer and append the
+  exact definition's LSP references. This recovers TypeScript property calls such as Bright Sky's
+  `WsSessionHandler.createSession` without presenting a reference as a proven call edge.
+- **LSP symbol lookups understand the graph's `name@file` disambiguation syntax.** Serena receives
+  the symbol name it expects, while CodeIntel filters its definitions to the requested repository
+  path before asking for references. If that exact definition cannot be resolved, the result stays
+  partial and reports the reference check as unavailable rather than claiming zero references or
+  silently selecting a same-named symbol from another file.
+
 ## [0.23.2] — 2026-09-14
 
 ### Fixed

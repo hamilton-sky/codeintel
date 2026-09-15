@@ -174,7 +174,7 @@ class Gateway:
         self, result: Result, op: str, target: str, budget: Any,
         project_root: Any, was_auto: bool,
     ) -> Result:
-        """Ask the LSP when the graph's whole answer was resolved by name rather than by import.
+        """Ask the LSP when the graph's caller answer carries a known binding failure.
 
         This closes the routing gap that let the worst failure through. `_AUTO_ENGINE` is a static
         op→engine map, not a cascade: `callers` goes to the graph and, uniquely among the ops, has
@@ -185,48 +185,71 @@ class Gateway:
         being confidently wrong is a bug; no second engine ever being consulted is the design that
         let it reach the caller.
 
-        Deliberately narrow. It fires only when the graph itself raised `all-rows-name-resolved` —
-        every row a name guess, across enough rows for the pattern to mean something — which is the
-        collision signature and not the ordinary case of one unverified row among several. It
-        APPENDS rather than replaces: the LSP answers a related but different question (references,
-        not call edges), so presenting its list as the graph's would substitute one over-claim for
-        another. And it never fires for an explicitly pinned `--engine graph`, where the caller has
-        said which engine they want."""
+        Deliberately narrow. It fires when every graph row was name-resolved, or when a caller used
+        a file hint and the graph found same-named symbols but no edge for that exact definition.
+        The latter catches property calls that the TypeScript graph resolver failed to bind, while
+        avoiding an LSP call for ordinary healthy answers. It APPENDS rather than replaces: the LSP
+        answers a related but different question (references, not call edges), so presenting its
+        list as the graph's would substitute one over-claim for another. And it never fires for an
+        explicitly pinned `--engine graph`, where the caller has said which engine they want."""
         try:
             if not was_auto or op not in self._CROSS_CHECKED_OPS:
                 return result
             if result.get("result") is None or self.lsp is None:
                 return result
             gaps = result.get("gaps") or []
-            if not any(g.get("kind") == "all-rows-name-resolved"
-                       for g in gaps if isinstance(g, dict)):
+            kinds = {
+                str(g.get("kind") or "") for g in gaps if isinstance(g, dict)
+            }
+            all_name_resolved = "all-rows-name-resolved" in kinds
+            exact_target_unbound = "target-hint-unmatched" in kinds
+            if not (all_name_resolved or exact_target_unbound):
                 return result
+            graph_problem = (
+                "every graph row was resolved by name"
+                if all_name_resolved
+                else "the graph found no caller edge for the file-qualified symbol"
+            )
             probe = self._dispatch_single(
                 self.lsp, "symbol", target, budget, project_root, "lsp")
             body = probe.get("result")
-            if not body:
+            probe_gaps = probe.get("gaps") or []
+            reference_gap = next((
+                gap for gap in probe_gaps
+                if isinstance(gap, dict) and gap.get("section") == "references"
+            ), None)
+            if not body or reference_gap is not None:
                 # Silence from the LSP is not agreement. Say which check did not happen — and
                 # separate "not yet booted" from "had nothing", because only the first is fixed by
                 # asking again. A one-shot CLI process meets a cold serena on every invocation; the
                 # long-lived MCP server keeps the session warm and takes this branch once at most.
                 # Waiting here is deliberately NOT done: it would hold back a graph answer that is
                 # already complete, to append a section that is only advisory.
-                warming = probe.get("reason") == "warming"
-                why = ("the language server had not finished booting"
-                       if warming else "the LSP engine reported nothing for this symbol")
+                unavailable_reason = (
+                    str(reference_gap.get("kind") or "not-asked")
+                    if reference_gap is not None else str(probe.get("reason") or "no-result")
+                )
+                warming = unavailable_reason in {"warming", "timeout"}
+                why = (
+                    "the language server had not finished booting"
+                    if unavailable_reason == "warming"
+                    else str(reference_gap.get("detail") or "the reference lookup did not answer")
+                    if reference_gap is not None
+                    else "the LSP engine reported nothing for this symbol"
+                )
                 nxt = (" Ask again once it is warm and this section will be filled in."
                        if warming else
                        " Check it yourself with `--engine lsp --op symbol`.")
                 return {**result, "gaps": [*gaps, {
                     "section": op, "kind": "cross-check-unavailable",
                     "engine": "lsp",
-                    "reason": probe.get("reason") or "no-result",
-                    "detail": f"every graph row was name-resolved and the LSP could not confirm "
-                              f"them ({why}), so they remain unverified"
+                    "reason": unavailable_reason,
+                    "detail": f"{graph_problem} and the LSP could not provide an independent "
+                              f"reference check ({why}), so the graph answer remains unverified"
                               + (" — retry" if warming else ""),
                     **({"retry_after_s": 2} if warming else {}),
                 }], "result": str(result["result"]) + (
-                    f"\n\n> Cross-check unavailable: every row above was resolved by name, and "
+                    f"\n\n> Cross-check unavailable: {graph_problem}, and "
                     f"{why}, so nothing here has been confirmed against a second engine.{nxt}"
                 )}
             refs = self._reference_lines(str(body))
@@ -236,15 +259,15 @@ class Gateway:
             merged = (
                 f"{result['result']}\n\n## Cross-check — LSP references to `{target}` "
                 f"({len(refs)})\n"
-                f"_The rows above were all resolved by NAME by the graph engine. These come from the "
-                f"language server, which resolves through the file's imports. A caller listed above "
-                f"but absent here is very likely a name collision; a location here but missing above "
-                f"is a call the graph could not bind._\n" + listing + more
+                f"_The graph answer has a known binding gap: {graph_problem}. These locations come "
+                f"from the language server, which resolves the exact definition. A caller listed "
+                f"above but absent here is likely a name collision; a location here but missing "
+                f"above is a reference the graph could not bind._\n" + listing + more
             )
             return {**result, "result": merged, "gaps": [*gaps, {
                 "section": op, "kind": "cross-checked-with-lsp",
                 "engine": "lsp",
-                "detail": f"every graph row was name-resolved, so the LSP was consulted "
+                "detail": f"{graph_problem}, so the LSP was consulted "
                           f"independently and reported {len(refs)} reference location(s); the two "
                           f"lists answer related but different questions and are shown separately",
             }]}
