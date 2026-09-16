@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 
@@ -47,6 +48,10 @@ from oracle_py import CALL, UNDECIDABLE, Truth
 _ROW = re.compile(r"^- (?P<label>.+?)(?P<badges>(?: \[[^\]]+\])*)(?: \((?P<file>[^)]+)\))?$")
 _MODULE_SCOPE = re.compile(r"^- module scope of (?P<file>\S+)")
 _LSP_REF = re.compile(r"^- (?P<file>[^\s:]+):(?P<line>\d+)")
+
+# The checkout this benchmark ships inside — used only to notice that the `codeintel` on
+# PATH is a DIFFERENT build from the source tree the reader is editing.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @dataclass
@@ -316,8 +321,95 @@ def _verify_target_sources(root: str, targets: list[tuple[str, str]]) -> None:
             ) from exc
 
 
+def _git_facts(root: str) -> str:
+    """``branch @ sha (clean)`` for *root*, or a plain note when it is not a checkout."""
+    def _git(*args: str) -> str | None:
+        try:
+            # `git` by name on purpose: the fact being recorded is what the reader's own
+            # PATH resolves, and pinning an absolute path would describe a different tool
+            # than the documented command uses.
+            proc = subprocess.run(("git", "-C", root, *args),  # noqa: S607
+                                  capture_output=True, text=True, timeout=15)
+        except Exception:
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    sha = _git("rev-parse", "--short", "HEAD")
+    if sha is None:
+        return "not a git checkout — the commit this was scored against cannot be recorded"
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD") or "(detached)"
+    # Only TRACKED modifications count. An untracked `.DS_Store` does not change what was scored,
+    # and flagging that tree as dirty would teach a reader to ignore the flag that matters.
+    porcelain = _git("status", "--porcelain", "--untracked-files=no") or ""
+    dirty = len([line for line in porcelain.splitlines() if line.strip()])
+    state = "clean" if not dirty else f"{dirty} tracked file(s) MODIFIED — not a reproducible tree"
+    return f"{branch} @ {sha}  ({state})"
+
+
+def _checkout_version() -> str | None:
+    """The version declared by the source tree this file lives in, or None."""
+    path = os.path.join(_CHECKOUT, "src", "codeintel", "__init__.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            found = re.search(r'__version__\s*=\s*"([^"]+)"', fh.read())
+    except OSError:
+        return None
+    return found.group(1) if found else None
+
+
+def _provenance(root: str, exe: str) -> None:
+    """Print what this run is measuring, before it measures it.
+
+    A table of percentages is a measurement only when the pair (engine build, repository commit)
+    that produced it can be named. This harness names neither by itself: it shells out to whatever
+    `codeintel` is on PATH — not necessarily the checkout the reader is standing in — and it scores
+    whatever is at *root*, which is whatever branch that clone happens to sit on.
+
+    Both moved without anyone noticing. A re-run of this file against a fresh clone of the same
+    repository scored graph precision nine points under the table in `bench/README.md` and looked
+    like a regression; it was not one. The clone was a different branch with more `_broadcast`
+    sites, so the judged population grew from 6 proven non-callers to 11 and the percentage moved
+    on its own. Establishing that took a separate investigation, and until it was done a day of
+    measurement was unreportable — not wrong, just unattributable, which costs the same.
+
+    Two subprocesses remove the whole class, so this prints on every run, and it is what belongs
+    beside any number copied out of one.
+    """
+    print("provenance — what this run measured")
+    print(f"  scored tree  {root}")
+    print(f"               {_git_facts(root)}")
+
+    resolved = shutil.which(exe) or exe
+    installed = None
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)
+        installed = (proc.stdout or proc.stderr).strip() or None
+    except Exception as exc:
+        installed = f"could not run `{exe} --version` ({type(exc).__name__})"
+    print(f"  engine       {installed}  ->  {resolved}")
+
+    try:
+        report = subprocess.run([exe, "doctor", root, "--json"],
+                                capture_output=True, text=True, timeout=120)
+        versions = (json.loads(report.stdout or "{}").get("versions") or {})
+    except Exception:
+        versions = {}
+    backends = ", ".join(f"{k} {v}" for k, v in versions.items()
+                         if v and k != "codeintel") or "unknown — `codeintel doctor --json` failed"
+    print(f"  backends     {backends}")
+
+    # The skew that this project's own re-runs actually hit: the reader edits the checkout, runs the
+    # benchmark, and scores a build installed weeks ago. Nothing else in the output would say so.
+    declared, running = _checkout_version(), (versions.get("codeintel") or "")
+    if declared and running and declared != running:
+        print(f"  !! the checkout at {_CHECKOUT} declares {declared}, but the `codeintel` on PATH "
+              f"is {running}.\n"
+              f"     This run measures the INSTALLED build, not your working tree.")
+    print()
+
 def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
         language: str = "python") -> None:
+    _provenance(root, exe)
     _verify_target_sources(root, targets)
     lang = LANGUAGES[language]()
     lang.prepare(root)

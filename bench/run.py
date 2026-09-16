@@ -35,6 +35,9 @@ PATHLY = os.path.expanduser(
 SNITCH = os.path.expanduser(
     os.environ.get("CODEINTEL_BENCH_SNITCH",
                    "/Users/shammaihamilton/Documents/snitch-simulator"))
+DAYCAP = os.path.expanduser(
+    os.environ.get("CODEINTEL_BENCH_DAYCAP",
+                   "/Users/shammaihamilton/Documents/project/daycap"))
 
 # (file where it is DEFINED, symbol) — never a dotted string, because `src.pkg.mod.f` and
 # `pkg.mod.f` name the same function and only one of them appears in any import statement. The
@@ -83,8 +86,36 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
         ("services/simulator/src/snitch_simulator/config.py", "load_config"),
     ], "python"),
 
+    # A REAL TypeScript repository, which bench/README.md called the largest thing still open: the
+    # table was Python-only, and the worst failure this project has ever seen is TypeScript. daycap
+    # is 23 source files with a tsconfig and a serena config already correct, so the arm runs
+    # without the setup archaeology a monorepo needs — and it is small enough that every truth here
+    # was read by hand before it was scored.
+    #
+    # Stratified on the same doctrine as the lists above, NOT sampled. Note what that means here:
+    # this repository has no name collisions worth the word, so the population is honest about
+    # daycap and says nothing about a tree where twelve classes each define `resolve`. That case is
+    # real and it is measured nowhere in this file — see the note under the table in README.md.
+    "daycap": (DAYCAP, [
+        # Control: unique name, imported directly, called directly.
+        ("src/app/meter.ts", "buildSnapshot"),
+        ("src/adapters/source/resolve.ts", "resolveSource"),
+        ("src/app/latch.ts", "evaluateLatch"),
+
+        # Short/common names — the population where bare-name binding does its damage.
+        ("src/adapters/notify/notifier.ts", "scrub"),
+        ("src/app/alert.ts", "isTrusted"),
+        ("src/adapters/render/table.ts", "isUnusable"),
+
+        # A wrapper: usually handed a callback rather than called plainly.
+        ("src/adapters/source/timeout.ts", "withTimeout"),
+
+        # The CLI entry point's argument parser.
+        ("src/bin/daycap.ts", "parseArgs"),
+    ], "typescript"),
+
     # The checked-in TypeScript corpus. Small, and it is a SMOKE TEST of the arm end to end rather
-    # than a measurement — 19 files written to have a known answer cannot say anything about a real
+    # than a measurement — 20 files written to have a known answer cannot say anything about a real
     # codebase. Its value is that the whole path runs without a private clone: oracle, scorer, and
     # both engines through codeintel's own envelope.
     "corpus-ts": (CORPUS_TS, [
@@ -117,7 +148,8 @@ def main() -> int:
         # Say so, rather than scoring every arm against an empty repository. A silent run of zeros
         # is the failure mode this benchmark keeps finding in the tools it measures.
         env = {"pathly-adapters": "CODEINTEL_BENCH_PATHLY",
-               "snitch-simulator": "CODEINTEL_BENCH_SNITCH"}.get(key, "CODEINTEL_BENCH_TS")
+               "snitch-simulator": "CODEINTEL_BENCH_SNITCH",
+               "daycap": "CODEINTEL_BENCH_DAYCAP"}.get(key, "CODEINTEL_BENCH_TS")
         print(f"'{key}' is not checked out at {root}.\n"
               f"Point {env} at your clone, or run the checked-in corpus instead:\n"
               f"    pytest tests/test_bench_oracle.py")
