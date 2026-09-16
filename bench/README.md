@@ -61,6 +61,16 @@ happens to sit on. A re-run that recorded neither produced numbers
 nine points off this table and could not say why; the finding below is what that cost to establish.
 Copy this block beside any number you copy out of a run.
 
+When that last line fires, `CODEINTEL_BENCH_EXE` is how you act on it — point it at a wrapper that
+runs your working tree and the benchmark scores your edits instead of the build you installed weeks
+ago:
+
+```bash
+printf '#!/bin/sh\nexec env PYTHONPATH="$PWD/src" python -m codeintel "$@"\n' > /tmp/codeintel-src
+chmod +x /tmp/codeintel-src
+CODEINTEL_BENCH_EXE=/tmp/codeintel-src python bench/run.py corpus-ts
+```
+
 ## What it measures
 
 Three arms, per **question**, because the questions have opposite failure costs:
@@ -318,16 +328,16 @@ Re-measured 2026-09-17, after `codeintel index bench/fixtures/corpus_ts`:
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
 | `graph` | 50% | 80% | 50% | 50% | 0 / 3 |
-| `lsp_raw` | n/a | 0% | n/a | 0% | **1 / 3** |
-| `lsp_classified` | n/a | 0% | n/a | 0% | **1 / 3** |
+| `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **3 unanswered** |
+| `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **3 unanswered** |
 
-Oracle coverage 79% mean. The `graph` row is a smoke test and nothing more — 20 files written
-to have a known answer cannot measure an engine — with one exception worth naming: **`describe` now
+Oracle coverage 79% mean. The `graph` row is a smoke test and nothing more — 20 files written to
+have a known answer cannot measure an engine — with one exception worth naming: **`describe` now
 claims 1 caller where the failure that motivated this entire arm claimed 32.** One spurious against
 one proven non-caller is still a spurious, but that class is no longer what it was.
 
-The two LSP rows are not a measurement of the LSP at all. They are this benchmark catching the
-deletion trap in the act, and the cause is the fixture.
+The two LSP rows say `unanswered` rather than a number, and getting them to say that is the whole
+story below. They read `1 / 3 wrongly silent` until the run before this one.
 
 ### The corpus has no `tsconfig.json`, and that is load-bearing in both directions
 
@@ -335,33 +345,58 @@ That absence is deliberate — it is what the oracle's unresolvable-specifier gu
 Its second effect was not designed. Without a project file, `tsserver` treats every file as its own
 inferred project and cannot see across files, so it returns each definition and an **empty reference
 list**. `forwardReleasedItem` is imported and called in four of the 20 files, and
-`--engine lsp --op symbol` answers:
+`--engine lsp --op symbol` used to answer:
 
 ```text
 ## References (0)
 (the language server reports no references to this symbol)
 ```
 
-at `confidence: complete`, with `gaps: null`. On that same directory, `codeintel doctor --deep`
-reported `3 / 3 engines ready`. Copy the tree, drop in a plain `tsconfig.json`, ask again: **17
-references.** Nothing else changed.
+at `confidence: complete`, with no gap. On that same directory, `codeintel doctor --deep` reported
+`3 / 3 engines ready`. Copy the tree, drop in a plain `tsconfig.json`, ask again: **17 references.**
+Nothing else changed.
 
 The empty list was never the language server failing. It was the language server correctly answering
-a question about a project that did not exist, and three layers relaying it as fact — green health
-check included. The scorer charged both arms a `wrongly silent`, which is exactly right, and is why
-that column is counted on its own rather than averaged into precision.
+a question about a project that did not exist, and every layer above it relaying that as fact —
+green health check included.
 
-**Fixed:** `doctor` now asks the second half of the question it was already asking. A tree that
-serves `typescript` and has no `tsconfig.json` anywhere reports `lsp` **not runnable** and names the
-symptom, beside the existing check for a language `.serena/project.yml` never mentioned. Both answer
-*will it answer for this repo's code?*, which is the question `READY` does not.
+Both halves are now closed, and they had to be closed separately because they are read by different
+people:
 
-**Not fixed:** the envelope. An empty reference list still renders at `confidence: complete` with no
-gap, so an agent that never runs `doctor` still receives a confident "nothing references this" — the
-one sentence [`outcome.py`](../src/codeintel/outcome.py) was written to make unsayable. Closing it
-means deciding that *empty from the LSP* is a `Missing`-shaped state rather than an `Ok([])` one.
-That is a change to the contract, and it deserves its own measurement rather than a quiet edit made
-while updating a README.
+**`doctor`** asks the second half of the question it was already asking. A tree that serves
+`typescript` with no `tsconfig.json` anywhere reports `lsp` **not runnable** and names the symptom,
+beside the existing check for a language `.serena/project.yml` never mentioned. Both answer *will it
+answer for this repo's code?*, which is the question `READY` does not.
+
+**The envelope** no longer asserts the emptiness. [`outcome.py`](../src/codeintel/outcome.py) gained
+a `Missing` kind, `unresolvable`, for the state its original rule did not have a name for: `Ok([])`
+means "asked, and there is nothing" only when the backend was **in a position to know**. Where it
+was not, the same query now answers
+
+```text
+## References — not retrieved
+> the language server returned no references, but no tsconfig.json covers the 20 TypeScript files
+> in this repository — … so this is UNKNOWN rather than none. …
+```
+
+at `confidence: partial`, carrying a `references` gap of kind `unresolvable`. The doubt is scoped to
+the *file the symbol was found in*, not to the repository: a polyglot tree with loose TypeScript and
+no tsconfig must not cast doubt on a Python answer that resolved perfectly well, because a gap that
+appears on correct answers is one nobody reads.
+
+Two consequences visible in the numbers above, and one that is deliberately invisible:
+
+* The scorer now excludes both arms as **unanswered** instead of charging them `1 / 3 wrongly
+  silent`. That is not the benchmark going easier on the engine — it is the engine no longer making
+  a claim. Scoring an honest "I cannot tell you" as a wrong answer would punish exactly the
+  disclosure this project keeps asking its engines to make, and `score.py` treats `unresolvable`
+  the way it already treats `not-asked`.
+* `bench/run.py daycap` — a real TypeScript repository **with** a tsconfig — is byte-identical
+  before and after: 100% / 100% direct, 0 / 8 wrongly silent. A fix for a false "none" that made
+  correct repositories noisier would be a bad trade, and the measurement is what shows it did not.
+* `## References (0)` still exists and still means what it says. It is what a correctly configured
+  repository returns for a symbol nothing references, and keeping that answer at `complete` is what
+  keeps `partial` worth reading.
 
 ---
 

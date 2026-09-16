@@ -49,6 +49,14 @@ TS_REPO = os.path.expanduser(os.environ.get("CODEINTEL_BENCH_TS", ""))
 
 CORPUS_TS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "corpus_ts")
 
+# Which `codeintel` to measure. The default is whatever the reader's PATH resolves, because that is
+# what the documented command runs — but the provenance header prints a warning when that build is
+# not the checkout, and until now there was no way to act on the warning short of reinstalling the
+# tool. Point this at a wrapper (or `python -m codeintel`) to score your working tree:
+#
+#     CODEINTEL_BENCH_EXE=./scripts/codeintel-src python bench/run.py corpus-ts
+EXE = os.environ.get("CODEINTEL_BENCH_EXE", "codeintel")
+
 REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
     "pathly-adapters": (PATHLY, [
         # Plainly resolvable: direct import, direct call. The control group — an engine that gets
@@ -154,7 +162,7 @@ def main() -> int:
               f"Point {env} at your clone, or run the checked-in corpus instead:\n"
               f"    pytest tests/test_bench_oracle.py")
         return 2
-    run(root, targets, language=language)
+    run(root, targets, exe=EXE, language=language)
     return 0
 
 

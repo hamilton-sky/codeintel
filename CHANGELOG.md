@@ -40,6 +40,27 @@ All notable changes to codeintel are documented here. The format is based on
   only, and any project file anywhere in the tree satisfies it, so ordinary JavaScript repositories
   and per-package monorepos are not flagged.
 
+- **An empty reference list is no longer asserted as "nothing references this" when the backend
+  could not have known.** `outcome.py`'s rule — `Ok([])` is a real answer meaning *asked, and there
+  is nothing* — had an unstated precondition: that the backend was in a position to know. A
+  TypeScript language server with no `tsconfig.json` answers every cross-file lookup with an empty
+  list, which is not an error, not a timeout, and byte-identical to the truth. Rendered as
+  `## References (0)` at `confidence: complete` it was the 2026-08-17 bug reached from the other
+  direction: that version could not tell a failure from an empty answer, this one could not tell an
+  empty answer from an uninformed one. There is now a `Missing` kind for it, `unresolvable`, and
+  such a lookup returns `## References — not retrieved` at `confidence: partial` with a
+  `references` gap. The doubt is scoped to the file the symbol was found in, not to the repository,
+  so a Python answer in a polyglot tree is unaffected; a correctly configured repository still
+  answers `## References (0)` at `complete` for a symbol nothing references. `bench/run.py daycap`
+  is byte-identical before and after (100% / 100% direct, 0 / 8 wrongly silent), and
+  `bench/run.py corpus-ts` moves its two LSP arms from `1 / 3 wrongly silent` to `3 unanswered` —
+  a confident falsehood becoming a disclosed non-answer.
+
+### Added
+- **`CODEINTEL_BENCH_EXE` selects which `codeintel` the call-edge benchmark measures.** The harness
+  shells out to whatever is on `PATH`, and its new provenance header warns when that build is not
+  the checkout — but there was no way to act on the warning short of reinstalling the tool.
+
 ## [0.23.4] — 2026-09-15
 
 ### Fixed

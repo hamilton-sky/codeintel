@@ -225,14 +225,18 @@ def lsp_answers(root: str, target_name: str, target_qn: str, exe: str,
     # and the arm scores 0% recall for a reason that has nothing to do with LSP quality.
     # The envelope already says so exactly: a `references` gap of kind `not-asked`.
     gaps = env.get("gaps") or []
-    not_asked = any(
-        isinstance(g, dict) and g.get("section") == "references"
-        and g.get("kind") in ("not-asked", "engine-unavailable", "warming")
-        for g in gaps)
-    if not body or not_asked or "## References" not in body:
+    # `unresolvable` joins these: it is the engine saying its EMPTY answer carries no information,
+    # which is a non-answer however confident the count looks. Scoring it would charge an arm a
+    # `wrongly silent` for declining honestly — the precise inverse of the reason that column
+    # exists, and it would punish the engine for the disclosure this benchmark asked it to make.
+    ref_gap = next((g for g in gaps
+                    if isinstance(g, dict) and g.get("section") == "references"
+                    and g.get("kind") in ("not-asked", "engine-unavailable", "warming",
+                                          "unresolvable")), None)
+    if not body or ref_gap is not None or "## References" not in body:
         raw.unavailable = classified.unavailable = True
-        why = ("references not-asked: the language server did not resolve this symbol"
-               if not_asked else "lsp-served-no-references")
+        why = (f"references {ref_gap.get('kind')}: {ref_gap.get('detail') or ''}".strip()
+               if ref_gap is not None else "lsp-served-no-references")
         raw.reason = classified.reason = env.get("reason") or why
         return raw, classified
     in_refs = False

@@ -19,6 +19,20 @@ This is that abstraction, written once.
 Rule: a helper returns ``Missing`` when it could not answer, and ``Ok`` when it did — including
 ``Ok`` of an empty collection, which is a real and useful answer meaning "asked, and there is
 nothing". Never conflate the two.
+
+That rule has a precondition it did not originally state, and the gap cost a second confident false
+statement. ``Ok([])`` means "asked, and there is nothing" only when the backend was **in a position
+to know**. A TypeScript language server with no ``tsconfig.json`` resolves each file in isolation
+and answers every cross-file reference query with an empty list — not an error, not a timeout, and
+byte-identical to the truth. Rendered as ``## References (0)`` at ``confidence: complete`` it is the
+same sentence as the 2026-08-17 bug, arrived at from the other direction: the first version could
+not tell a failure from an empty answer, and this one could not tell an empty answer from an
+uninformed one.
+
+So there is a kind for it. When the emptiness itself is unsound — the call returned nothing and the
+repository is not configured for nothing to mean anything — the outcome is ``Missing`` and not
+``Ok([])``, because what a caller can conclude from it is exactly what it can conclude from a
+timeout: nothing at all.
 """
 
 from __future__ import annotations
@@ -36,6 +50,9 @@ MissingKind = Literal[
     "backend-error",  # the backend answered, and the answer was an error
     "unparsable",     # the backend answered, and the payload could not be read
     "unsupported",    # this backend cannot answer this question at all
+    "unresolvable",   # the backend answered EMPTY, and the repository is not configured for that
+                      # emptiness to carry information — distinct from `unsupported`, which is a
+                      # capability limit with nothing to fix, and from `not-asked`, which never ran
 ]
 
 _DETAIL: dict[str, str] = {
@@ -44,6 +61,8 @@ _DETAIL: dict[str, str] = {
     "backend-error": "the backend returned an error instead of an answer",
     "unparsable": "the backend's response could not be parsed",
     "unsupported": "this engine cannot answer that",
+    "unresolvable": ("the backend returned an empty result, and this repository is not configured "
+                     "for an empty result to mean there is nothing — treat it as unknown"),
 }
 
 

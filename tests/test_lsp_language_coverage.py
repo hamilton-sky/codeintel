@@ -181,3 +181,51 @@ def test_the_tsproject_walk_survives_an_unreadable_tree(tmp_path):
         LspProvider()._no_tsproject_note(root)   # must not raise
     finally:
         os.chmod(tmp_path / "src", 0o755)  # noqa: S103
+
+
+# ── The same finding, on the path that actually reaches a caller ──────────────────────────────
+#
+# `doctor` is advisory and an agent need never run it. `_empty_references_unsound` is the half that
+# reaches whoever asked: it decides whether an EMPTY reference list is the answer "nothing
+# references this" or the non-answer "this backend was never in a position to tell you".
+
+
+def test_an_empty_reference_list_with_no_tsproject_is_unknown_not_none(tmp_path):
+    root = _repo(tmp_path, ["typescript"], {".ts": 19})
+    missing = LspProvider()._empty_references_unsound(root, "src/f1.ts")
+    assert missing is not None
+    assert missing.kind == "unresolvable"
+    # It has to deny the reading that makes the emptiness dangerous, not merely mention tsconfig.
+    assert "UNKNOWN rather than none" in missing.describe()
+    assert "tsconfig.json" in missing.describe()
+
+
+def test_an_empty_reference_list_with_a_tsproject_is_a_real_answer(tmp_path):
+    root = _repo(tmp_path, ["typescript"], {".ts": 19})
+    (tmp_path / "tsconfig.json").write_text('{"include": ["src/**/*.ts"]}', encoding="utf-8")
+    assert LspProvider()._empty_references_unsound(root, "src/f1.ts") is None
+
+
+def test_doubt_is_scoped_to_the_language_that_could_not_resolve(tmp_path):
+    """A polyglot tree with loose TypeScript and no tsconfig must not cast doubt on a PYTHON answer.
+
+    The unsound emptiness belongs to the language whose server could not resolve, not to the
+    repository. Scoping this to the repo would attach a scary gap to answers that were resolved
+    perfectly well — and a gap that appears on correct answers is one nobody reads."""
+    root = _repo(tmp_path, ["typescript", "python"], {".ts": 19, ".py": 20})
+    assert LspProvider()._empty_references_unsound(root, "src/thing.py") is None
+    assert LspProvider()._empty_references_unsound(root, "src/thing.ts") is not None
+
+
+def test_an_unserved_typescript_repo_raises_no_reference_doubt(tmp_path):
+    root = _repo(tmp_path, ["python"], {".ts": 40})
+    assert LspProvider()._empty_references_unsound(root, "src/f1.ts") is None
+
+
+def test_the_unsound_check_survives_an_unreadable_tree(tmp_path):
+    root = _repo(tmp_path, ["typescript"], {".ts": 10})
+    os.chmod(tmp_path / "src", 0o000)
+    try:
+        LspProvider()._empty_references_unsound(root, "src/f1.ts")   # must not raise
+    finally:
+        os.chmod(tmp_path / "src", 0o755)  # noqa: S103
