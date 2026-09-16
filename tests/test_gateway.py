@@ -112,6 +112,35 @@ def test_engine_both_graph_unavailable_returns_lsp_alone():
     assert "graph-data" not in r["result"]
 
 
+def test_retryable_fanout_failure_is_not_cached():
+    graph = _StubProvider("graph", "graph-data")
+
+    class _EventuallyReady(_StubProvider):
+        def build_result(self, op, target, files, budget, project_root) -> Result:
+            self.call_count += 1
+            if self.call_count == 1:
+                return {
+                    "ok": True, "op": op, "target": target, "result": None,
+                    "engine": "lsp", "cached": False, "outcome": "failed",
+                    "reason": "boot-failed", "retry_after_s": 60,
+                }
+            return {
+                "ok": True, "op": op, "target": target, "result": "lsp-data",
+                "engine": "lsp", "cached": False,
+            }
+
+    lsp = _EventuallyReady("lsp", "lsp-data")
+    gw = Gateway(graph=graph, lsp=lsp)
+
+    first = gw.query(op="context", target="x", engine="both")
+    second = gw.query(op="context", target="x", engine="both")
+
+    assert any(gap.get("retry_after_s") == 60 for gap in first["gaps"])
+    assert "lsp-data" in second["result"]
+    assert graph.call_count == 2
+    assert lsp.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Test 6: engine=all merges all three
 # ---------------------------------------------------------------------------

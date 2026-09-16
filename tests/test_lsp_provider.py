@@ -1,6 +1,7 @@
 """LspProvider tests: never-raise invariant and state-machine correctness."""
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from codeintel.outcome import Missing, Ok
-from codeintel.providers.lsp import LspProvider, _State
+from codeintel.providers.lsp import LspProvider, _split_target_file_hint, _State
 from codeintel.server import code_status_handler
 
 
@@ -194,7 +195,346 @@ def test_file_qualified_symbol_selects_the_matching_definition(monkeypatch):
     assert "right" in r["result"] and "wrong" not in r["result"]
     assert "backend/src/gateway.ts:613" in r["result"]
     assert calls[0][1]["name_path_pattern"] == "createSession"
-    assert calls[0][1]["max_matches"] == 50
+    assert calls[0][1]["max_matches"] == 500
+
+
+def test_qualified_and_file_hinted_symbol_uses_leaf_name_and_exact_file(monkeypatch):
+    """Graph-qualified names must not disable the exact LSP reference cross-check."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    calls: list[tuple[str, dict]] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append((tool, args))
+        if tool == "find_symbol":
+            return Ok('[{"name_path":"Other/resolve","kind":"Method",'
+                      '"relative_path":"src/strategy-chain.ts","body":"same-file-wrong"},'
+                      '{"name_path":"StrategyChain/resolve","kind":"Method",'
+                      '"relative_path":"src/strategy-chain.ts","body":"right"}]')
+        assert tool == "find_referencing_symbols"
+        assert args["name_path"] == "StrategyChain/resolve"
+        return Ok("{}")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "StrategyChain.resolve@src/strategy-chain.ts", [], 30000, "/my/repo"
+    )
+
+    assert calls[0][1]["name_path_pattern"] == "resolve"
+    assert "relative_path" not in calls[0][1]
+    assert calls[0][1]["max_matches"] == 500
+    assert "right" in r["result"] and "same-file-wrong" not in r["result"]
+    assert "References (0)" in r["result"]
+
+
+def test_suffix_file_hint_is_not_passed_to_serena_as_an_exact_path(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    seen: list[dict] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        if tool == "find_symbol":
+            seen.append(args)
+            return Ok('[{"name_path":"StrategyChain/resolve","kind":"Method",'
+                      '"relative_path":"src/api/strategy-chain.ts","body":"right"}]')
+        return Ok("{}")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "StrategyChain.resolve@api/strategy-chain.ts", [], 30000, "/my/repo"
+    )
+
+    assert "relative_path" not in seen[0]
+    assert "right" in r["result"]
+
+
+def test_nested_container_name_path_is_accepted_when_fully_matched(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        if tool == "find_symbol":
+            return Ok('[{"name_path":"Outer/Inner/run","kind":"Method",'
+                      '"relative_path":"src/x.py","body":"right"}]')
+        return Ok("{}")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result("symbol", "Outer.Inner.run@src/x.py", [], 30000, "/my/repo")
+
+    assert "right" in r["result"]
+
+
+
+
+def test_qualified_method_does_not_accept_a_top_level_leaf_in_the_file(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        return Ok('[{"name_path":"resolve","kind":"Function",'
+                  '"relative_path":"src/x.ts","body":"wrong"}]')
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result("symbol", "MissingClass.resolve@src/x.ts", [], 30000, "/my/repo")
+
+    assert "no definition matching the qualified symbol" in r["result"]
+    assert "wrong" not in r["result"]
+    assert "References — not retrieved" in r["result"]
+
+
+def test_qualified_method_does_not_accept_unverified_module_prefix(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        return Ok('[{"name_path":"StrategyChain/resolve","kind":"Method",'
+                  '"relative_path":"src/core/strategy-chain.ts","body":"wrong"}]')
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "other.StrategyChain.resolve@src/core/strategy-chain.ts", [], 30000, "/my/repo"
+    )
+
+    assert "no definition matching the qualified symbol" in r["result"]
+    assert "wrong" not in r["result"]
+
+
+def test_ambiguous_suffix_file_hint_does_not_choose_an_arbitrary_definition(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    calls: list[str] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append(tool)
+        return Ok('[{"name_path":"StrategyChain/resolve","kind":"Method",'
+                  '"relative_path":"frontend/strategy-chain.ts","body":"one"},'
+                  '{"name_path":"StrategyChain/resolve","kind":"Method",'
+                  '"relative_path":"backend/strategy-chain.ts","body":"two"}]')
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "StrategyChain.resolve@strategy-chain.ts", [], 30000, "/my/repo"
+    )
+
+    assert calls == ["find_symbol"]
+    assert "multiple definitions" in r["result"]
+    assert "References — not retrieved" in r["result"]
+
+
+def test_capped_candidate_page_cannot_prove_an_exact_definition(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    definitions = [
+        {"name_path": "Other/resolve", "kind": "Method",
+         "relative_path": f"src/other-{i}.ts", "body": "wrong"}
+        for i in range(499)
+    ]
+    definitions.append({
+        "name_path": "StrategyChain/resolve", "kind": "Method",
+        "relative_path": "src/strategy-chain.ts", "body": "would-look-exact",
+    })
+    calls: list[str] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append(tool)
+        return Ok(json.dumps(definitions))
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "StrategyChain.resolve@src/strategy-chain.ts", [], 30000, "/my/repo"
+    )
+
+    assert calls == ["find_symbol"]
+    assert "maximum 500 definitions" in r["result"]
+    assert "would-look-exact" not in r["result"]
+    assert "References — not retrieved" in r["result"]
+
+
+def test_broad_qualified_lookup_fetches_metadata_before_one_exact_body(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    calls: list[tuple[str, dict]] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append((tool, args))
+        if tool == "find_symbol" and len(calls) == 1:
+            return Ok('[{"name_path":"StrategyChain/resolve","kind":"Method",'
+                      '"relative_path":"src/strategy-chain.ts"}]')
+        if tool == "find_symbol":
+            return Ok('[{"name_path":"StrategyChain/resolve","kind":"Method",'
+                      '"relative_path":"src/strategy-chain.ts","body":"exact body"}]')
+        return Ok("{}")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result(
+        "symbol", "StrategyChain.resolve@src/strategy-chain.ts", [], 30000, "/my/repo"
+    )
+
+    assert calls[0][0] == "find_symbol"
+    assert calls[0][1]["include_body"] is False
+    assert calls[0][1]["max_matches"] == 500
+    assert calls[1] == ("find_symbol", {
+        "name_path_pattern": "StrategyChain/resolve",
+        "relative_path": "src/strategy-chain.ts",
+        "include_body": True,
+        "max_matches": 500,
+    })
+    assert "exact body" in r["result"]
+
+
+def test_overloaded_same_name_and_file_is_ambiguous(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    calls: list[str] = []
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        calls.append(tool)
+        return Ok('[{"name_path":"Widget/run","relative_path":"src/widget.ts",'
+                  '"body_location":{"start_line":1,"end_line":2}},'
+                  '{"name_path":"Widget/run","relative_path":"src/widget.ts",'
+                  '"body_location":{"start_line":5,"end_line":6}}]')
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+    r = p.build_result("symbol", "Widget.run@src/widget.ts", [], 30000, "/my/repo")
+
+    assert calls == ["find_symbol"]
+    assert "multiple definitions" in r["result"]
+    assert "References — not retrieved" in r["result"]
+
+
+def test_unusable_exact_body_lookup_fails_closed(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    replies = [
+        Ok('[{"name_path":"Widget/run","relative_path":"src/widget.ts"}]'),
+        Ok("not json"),
+    ]
+    monkeypatch.setattr(p, "_call_tool", lambda *args, **kwargs: replies.pop(0))
+
+    r = p.build_result("symbol", "Widget.run@src/widget.ts", [], 30000, "/my/repo")
+
+    assert r["result"] is None
+    assert r["outcome"] == "failed"
+    assert "usable definition list" in r["hint"]
+
+
+def test_exact_body_timeout_preserves_retryability(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    replies = [
+        Ok('[{"name_path":"Widget/run","relative_path":"src/widget.ts"}]'),
+        Missing("timeout", "body lookup timed out", retry_after_s=5),
+    ]
+    monkeypatch.setattr(p, "_call_tool", lambda *args, **kwargs: replies.pop(0))
+
+    r = p.build_result("symbol", "Widget.run@src/widget.ts", [], 30000, "/my/repo")
+
+    assert r["result"] is None
+    assert r["reason"] == "timeout"
+    assert r["retry_after_s"] == 5
+
+
+def test_metadata_timeout_preserves_retryability(monkeypatch):
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.READY)
+    monkeypatch.setattr(
+        p, "_call_tool",
+        lambda *args, **kwargs: Missing("timeout", "metadata timed out", retry_after_s=5),
+    )
+
+    r = p.build_result("symbol", "Widget.run@src/widget.ts", [], 30000, "/my/repo")
+
+    assert r["result"] is None
+    assert r["reason"] == "timeout"
+    assert r["retry_after_s"] == 5
+
+
+def test_filename_like_symbol_is_not_split_as_a_qualifier():
+    assert _split_target_file_hint("use-toast.ts@src/widgets.ts") == (
+        "use-toast.ts", "src/widgets.ts", ""
+    )
+
+
+def test_retryable_missing_state_is_thread_local():
+    p = LspProvider.__new__(LspProvider)
+    ready = threading.Barrier(2)
+    release = threading.Barrier(2)
+    seen: list[Missing | None] = []
+
+    def _timed_out_request():
+        p._set_backend_missing(Missing("timeout", "slow", retry_after_s=5))
+        ready.wait()
+        release.wait()
+        seen.append(p._get_backend_missing())
+
+    worker = threading.Thread(target=_timed_out_request)
+    worker.start()
+    ready.wait()
+    p._set_backend_missing(None)
+    release.wait()
+    worker.join()
+
+    assert seen and seen[0] is not None
+    assert seen[0].kind == "timeout"
+    assert p._get_backend_missing() is None
+
+
+def test_backend_error_text_is_thread_local():
+    p = LspProvider.__new__(LspProvider)
+    ready = threading.Barrier(2)
+    release = threading.Barrier(2)
+    seen: list[str | None] = []
+
+    def _failed_request():
+        p._last_backend_error = "request-a"
+        ready.wait()
+        release.wait()
+        seen.append(p._last_backend_error)
+
+    worker = threading.Thread(target=_failed_request)
+    worker.start()
+    ready.wait()
+    p._last_backend_error = None
+    release.wait()
+    worker.join()
+
+    assert seen == ["request-a"]
+    assert p._last_backend_error is None
+
+
+def test_pending_gaps_are_thread_local():
+    p = LspProvider.__new__(LspProvider)
+    ready = threading.Barrier(2)
+    release = threading.Barrier(2)
+    seen: list[tuple[dict[str, Any], ...]] = []
+
+    def _partial_request():
+        p._pending_gaps = ({"section": "references", "kind": "timeout"},)
+        ready.wait()
+        release.wait()
+        seen.append(p._pending_gaps)
+
+    worker = threading.Thread(target=_partial_request)
+    worker.start()
+    ready.wait()
+    p._pending_gaps = ()
+    release.wait()
+    worker.join()
+
+    assert seen == [({"section": "references", "kind": "timeout"},)]
+    assert p._pending_gaps == ()
 
 
 def test_file_qualified_symbol_does_not_use_a_definition_from_another_file(monkeypatch):
