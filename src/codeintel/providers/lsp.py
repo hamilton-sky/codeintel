@@ -452,6 +452,8 @@ class LspProvider:
         "__pycache__", ".mypy_cache", ".pytest_cache", "vendor", "target", ".next",
     })
     _UNSERVED_FILE_FLOOR = 5      # below this, a stray file is not a language the repo is written in
+    _TS_SOURCE_EXTS: ClassVar[tuple[str, ...]] = (".ts", ".tsx")
+    _TS_PROJECT_FILES: ClassVar[tuple[str, ...]] = ("tsconfig.json", "jsconfig.json")
 
     def _language_coverage(self, project_root: str) -> tuple[list[str], dict[str, int]]:
         """Which languages serena is configured to serve here, and which the repo actually contains.
@@ -521,6 +523,61 @@ class LspProvider:
             f"{missing[0][0]} symbols",
         )
 
+    def _no_tsproject_note(self, project_root: str) -> tuple[str, str] | None:
+        """`(detail_suffix, remediation)` when TypeScript is served but has no project to resolve in.
+
+        `_unserved_note` catches the language serena was never told to serve. This is the other half
+        of the same question — "will it answer for this repo's code?" — and it is much quieter. The
+        language IS configured, serena boots, `symbol` returns the definition with its source, and
+        every reference lookup comes back EMPTY, because `tsserver` with no `tsconfig.json` treats
+        each file as its own inferred project and cannot see across files.
+
+        An empty reference list is not an error, and by the time it reaches a caller it is not
+        distinguishable from the truth: it renders as `## References (0) — (the language server
+        reports no references to this symbol)` at `confidence: complete`, with no gap. That is a
+        confident "nothing references this" about the one question asked immediately before deleting
+        code, and `outcome.py` exists because this project has already shipped that sentence once.
+
+        Measured on `bench/fixtures/corpus_ts`, whose 19 files deliberately ship no tsconfig so the
+        oracle's unresolvable-specifier guard has something to bite on: `forwardReleasedItem` is
+        imported and called in four of them, the LSP reported 0 references, and `doctor --deep`
+        reported `3 / 3 engines ready`. Copying the tree and adding a plain tsconfig turned the same
+        query into 17 references — so the gap is the config, and the health check was green across
+        it. `.ts`/`.tsx` only: a handful of loose `.js` files is not a TypeScript project, and
+        flagging those would teach a reader to ignore the line.
+        """
+        try:
+            configured, _census = self._language_coverage(project_root)
+            if "typescript" not in configured:
+                return None                    # unserved entirely — `_unserved_note` owns that case
+            ts_files = 0
+            for _dirpath, dirnames, filenames in os.walk(project_root):
+                dirnames[:] = [d for d in dirnames
+                               if d not in self._SKIP_DIRS and not d.startswith(".")]
+                for fn in filenames:
+                    # Any project file anywhere is enough to stop guessing. A monorepo keeps them
+                    # per-package, and claiming a repo has none because the root has none would be
+                    # the same false-confidence move this check exists to catch, pointed the other
+                    # way.
+                    if fn in self._TS_PROJECT_FILES or (
+                            fn.startswith("tsconfig.") and fn.endswith(".json")):
+                        return None
+                    if fn.endswith(self._TS_SOURCE_EXTS):
+                        ts_files += 1
+            if ts_files < self._UNSERVED_FILE_FLOOR:
+                return None
+        except Exception as exc:
+            log_swallowed("LspProvider._no_tsproject_note", exc)
+            return None
+        return (
+            f" — but no tsconfig.json covers the {ts_files} TypeScript files here, so the language "
+            f"server resolves each one alone: `symbol` returns the definition and an EMPTY "
+            f"reference list, which reads as 'nothing references this'",
+            "add a tsconfig.json whose `include` covers the TypeScript sources (or point "
+            "--project-root at the directory that already has one) and re-run; until then use "
+            "`--engine graph` for callers, and do not read 0 references as 0 callers",
+        )
+
     def probe(self, project_root: str, deep: bool = False, timeout_s: float = 20.0) -> dict:
         """Never-raise health check for the doctor. Shallow (default) is FREE — PATH presence
         plus any existing session's live state. Deep boots serena and polls until READY/FAILED,
@@ -544,7 +601,8 @@ class LspProvider:
             with existing._lock:
                 st = existing.state
             if st == _State.READY:
-                unserved = self._unserved_note(project_root)
+                unserved = (self._unserved_note(project_root)
+                            or self._no_tsproject_note(project_root))
                 return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
                         "detail": "serena session is READY for this repo" + (
                             unserved[0] if unserved else ""),
@@ -571,7 +629,8 @@ class LspProvider:
             if st == _State.READY:
                 # READY is a fact about the PROCESS. Whether it will answer for this repo's code is
                 # a separate question, and the one the caller is actually asking.
-                unserved = self._unserved_note(project_root)
+                unserved = (self._unserved_note(project_root)
+                            or self._no_tsproject_note(project_root))
                 return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
                         "detail": f"serena booted via `{cmd}` and reached READY" + (
                             unserved[0] if unserved else ""),

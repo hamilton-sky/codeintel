@@ -98,3 +98,86 @@ def test_the_walk_survives_an_unreadable_tree(tmp_path):
         LspProvider()._unserved_note(root)   # must not raise
     finally:
         os.chmod(tmp_path / "src", 0o755)  # noqa: S103
+
+
+# ── The other half of "will it answer for this repo's code?" ──────────────────────────────────
+#
+# The tests above cover a language the config never names. These cover the quieter shape: the
+# language IS served and the server IS ready, but `tsserver` has no project to resolve in, so it
+# returns each definition and an EMPTY reference list. That empty list reaches a caller as
+# `## References (0)` at `confidence: complete` — a confident "nothing references this" about the
+# question asked just before deleting code. Reproduced on `bench/fixtures/corpus_ts`, where the
+# same query returned 0 references with `doctor --deep` reporting `3 / 3 engines ready`, and 17
+# references once a plain tsconfig was dropped in.
+
+
+def test_typescript_without_a_project_is_named_with_its_weight(tmp_path):
+    root = _repo(tmp_path, ["typescript"], {".ts": 19})
+    note = LspProvider()._no_tsproject_note(root)
+    assert note is not None
+    detail, remediation = note
+    assert "19 TypeScript files" in detail
+    # The symptom has to be spelled out. "No tsconfig" alone reads as a lint nit; "references come
+    # back empty and that is not the same as none" is the fact that changes what a reader does.
+    assert "EMPTY" in detail and "nothing references this" in detail
+    assert "tsconfig.json" in remediation
+
+
+def test_a_tsconfig_settles_it(tmp_path):
+    root = _repo(tmp_path, ["typescript"], {".ts": 19})
+    (tmp_path / "tsconfig.json").write_text('{"include": ["src/**/*.ts"]}', encoding="utf-8")
+    assert LspProvider()._no_tsproject_note(root) is None
+
+
+def test_a_project_file_anywhere_is_enough(tmp_path):
+    """A monorepo keeps tsconfigs per package. Calling such a repo unconfigured because the ROOT
+    has none would be the same false confidence this check exists to catch, aimed the other way."""
+    root = _repo(tmp_path, ["typescript"], {".ts": 19})
+    pkg = tmp_path / "packages" / "app"
+    pkg.mkdir(parents=True)
+    (pkg / "tsconfig.build.json").write_text("{}", encoding="utf-8")
+    assert LspProvider()._no_tsproject_note(root) is None
+
+
+def test_a_handful_of_loose_files_is_not_a_typescript_project(tmp_path):
+    assert LspProvider()._no_tsproject_note(_repo(tmp_path, ["typescript"], {".ts": 2})) is None
+
+
+def test_plain_javascript_is_not_charged_for_a_missing_tsconfig(tmp_path):
+    """`.js` without a jsconfig is how most JavaScript repositories look, and a warning that fires
+    on ordinary repositories is one nobody reads. Only `.ts`/`.tsx` count."""
+    assert LspProvider()._no_tsproject_note(_repo(tmp_path, ["typescript"], {".js": 40})) is None
+
+
+def test_an_unserved_typescript_repo_is_not_double_reported(tmp_path):
+    """When the config does not serve typescript at all, `_unserved_note` already says so and says
+    something more useful. Two findings about one cause is how a remediation gets ignored."""
+    root = _repo(tmp_path, ["python"], {".ts": 40})
+    assert LspProvider()._no_tsproject_note(root) is None
+
+
+def test_a_missing_typescript_project_makes_the_deep_probe_not_runnable(tmp_path, monkeypatch):
+    """`runnable` is what the doctor's green tick reads, so this has to reach that field."""
+    root = _repo(tmp_path, ["typescript"], {".ts": 19})
+    p = LspProvider()
+    if not p.available:
+        pytest.skip("neither serena nor uvx on PATH")
+
+    class _Ready:
+        state = __import__("codeintel.providers.lsp", fromlist=["_State"])._State.READY
+        _lock = __import__("threading").Lock()
+
+    monkeypatch.setattr(p, "_get_or_create_session", lambda root: _Ready())
+    out = p.probe(root, deep=True, timeout_s=1.0)
+    assert out["runnable"] is False, out
+    assert "tsconfig.json" in (out["remediation"] or "")
+
+
+def test_the_tsproject_walk_survives_an_unreadable_tree(tmp_path):
+    """Never-raise is the contract for everything the doctor calls."""
+    root = _repo(tmp_path, ["typescript"], {".ts": 10})
+    os.chmod(tmp_path / "src", 0o000)
+    try:
+        LspProvider()._no_tsproject_note(root)   # must not raise
+    finally:
+        os.chmod(tmp_path / "src", 0o755)  # noqa: S103
