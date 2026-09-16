@@ -403,14 +403,28 @@ def test_a_planted_symlink_cannot_smuggle_a_file_out_of_an_indexed_root(tmp_path
     db = SemanticDb(str(tmp_path / "db.sqlite"))
     db.init()
     try:
-        Indexer(db).index(str(allowed))
-        from codeintel.searcher import Searcher
-        hits = {h.get("path") for h in Searcher(db).search("stolen secret", str(allowed))}
+        # The containment decision happens in `_walk_files`, BEFORE anything is embedded, so assert
+        # it there: this half needs no embedding model and therefore runs on every machine — behind
+        # a proxy, in air-gapped CI — which is the only place a security guard is worth asserting.
+        # Driving it end to end through `search` alone meant the whole test, security claim
+        # included, failed-not-skipped wherever the ~50 MB weights could not be downloaded, and the
+        # bypass this pins would have gone unchecked exactly where it is most likely to matter.
+        walked = {p.name for p in Indexer(db)._walk_files(allowed)}
+        assert "planted.py" not in walked, "a symlink escaped the indexed root"
+        assert "fine.py" in walked, "the guard must not also drop legitimate in-root files"
+
+        # And the same property end to end, once the weights are actually present. Kept rather
+        # than replaced: `_walk_files` is an internal seam, and only this half proves the smuggled
+        # content never reaches a rendered search snippet.
+        from codeintel.semantic_db import DEFAULT_MODEL, model_is_cached
+        if model_is_cached(DEFAULT_MODEL) is True:
+            Indexer(db).index(str(allowed))
+            from codeintel.searcher import Searcher
+            hits = {h.get("path") for h in Searcher(db).search("stolen secret", str(allowed))}
+            assert "planted.py" not in hits, "a symlink escaped the indexed root"
+            assert "fine.py" in hits, "the guard must not also drop legitimate in-root files"
     finally:
         db.close()
-
-    assert "planted.py" not in hits, "a symlink escaped the indexed root"
-    assert "fine.py" in hits, "the guard must not also drop legitimate in-root files"
 
 
 def test_a_blank_project_root_is_denied_rather_than_meaning_the_server_cwd(tmp_path, monkeypatch):

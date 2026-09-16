@@ -624,3 +624,70 @@ def test_a_fanout_result_is_marked_stale_during_a_reindex():
     gw = _reindexing_gateway()
     r = gw.query(op="context", target="x", engine="both", project_root="/repo")
     assert r.get("reindexing") is True
+
+
+# ---------------------------------------------------------------------------
+# An `engine-unavailable` answer has to be ACTIONABLE, not merely well-formed
+#
+# README (Quickstart): "If the graph engine isn't installed it safe-nulls with a reason and a hint
+# rather than failing — that is the contract, visible on your first call." It was not: every one
+# of the four paths below returned `reason` with no `hint`, on `--op callers`, which is the exact
+# command the Quickstart tells a new user to run first. `doctor` knew the remedy the whole time.
+#
+# The two gateway arms matter more than the provider ones, because `_dispatch_single` short-
+# circuits on `available is False` and `server._build_gateway` leaves an absent engine's slot
+# None — so in production neither provider's own `build_result` is ever reached, and fixing only
+# the providers would have left the user-visible symptom exactly as it was.
+# ---------------------------------------------------------------------------
+
+def test_an_unavailable_provider_still_yields_an_actionable_hint():
+    gw = Gateway(graph=_UnavailableProvider("graph", "graph-data"))
+    r = gw.query(op="callers", target="x", engine="graph")
+    assert r.get("reason") == "engine-unavailable"
+    assert r.get("hint"), "an unavailable engine must say what would make it available"
+
+
+def test_an_unattached_engine_reports_the_providers_own_remediation():
+    """The None-slot arm. The text must come from the provider module rather than a copy here,
+    so the envelope and `doctor` cannot drift apart — assert the identity, not a substring."""
+    from codeintel.providers.graph import GraphProvider
+
+    gw = Gateway(graph=None)
+    r = gw.query(op="callers", target="x", engine="graph")
+    assert r.get("reason") == "engine-unavailable"
+    assert r.get("hint") == GraphProvider.unavailable_hint
+
+
+def test_every_engine_has_an_unavailable_hint_wired_to_the_gateway():
+    """A fourth engine added later inherits the behaviour only if it declares the attribute; this
+    fails the day one is added without it, which is the point."""
+    from codeintel.gateway import _unattached_hint
+
+    for engine in ("graph", "lsp", "semantic"):
+        gw = Gateway()
+        r = gw.query(op="symbol", target="x", engine=engine)
+        assert r.get("hint"), f"{engine} produced a hintless engine-unavailable envelope"
+        assert r["hint"] == _unattached_hint(engine)
+
+
+def test_an_unavailable_hint_never_reads_as_evidence_of_absence():
+    """The reason this hint exists at all: an agent that receives an empty `callers` answer and no
+    explanation concludes the symbol has none, and deletes code. Each engine's text has to deny
+    that reading explicitly — the same discipline `index-failed` already applies."""
+    from codeintel.gateway import _unattached_hint
+
+    for engine in ("graph", "lsp", "semantic"):
+        assert "NOT evidence" in (_unattached_hint(engine) or ""), engine
+
+
+def test_the_query_hint_is_the_same_remediation_doctor_prints():
+    """One source of truth per engine. These were two copies of the same sentence before, and the
+    query path's copy was the empty string."""
+    from codeintel.providers.graph import GraphProvider
+
+    gp = GraphProvider()
+    gp.available = False        # the documented test seam; independent of what is on this PATH
+    probe = gp.probe("/nonexistent-root")
+    assert probe["installed"] is False
+    assert probe["remediation"] in GraphProvider.unavailable_hint
+    assert probe["detail"] in GraphProvider.unavailable_hint

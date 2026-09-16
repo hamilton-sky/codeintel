@@ -6,6 +6,26 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **An `engine-unavailable` answer now carries the hint that makes it actionable**, restoring the
+  documented contract ("safe-nulls with a reason *and a hint*") on `--op callers` — the first
+  command the Quickstart tells a new user to run. The fix is in `Gateway._dispatch_single`, not
+  only in the providers: it short-circuits on `available is False`, and `_build_gateway` leaves an
+  absent engine's slot `None` for `adopt_provider`, so neither provider's `build_result` is
+  reached on this path. Each engine's remediation is now a module constant read by both the
+  envelope and `doctor`, so the two cannot drift, and each hint denies the reading that makes a
+  null dangerous ("NOT evidence the symbol has no callers"). A provider declaring
+  `unavailable_hint` is all a fourth engine needs.
+
+- **Four tests reported a missing prerequisite as a failing suite**, conflating *could not ask*
+  with *wrong answer* wherever `huggingface.co` is unreachable. `importorskip("fastembed")` asked
+  whether the package imports; an indexing test needs the ~50 MB weights. The new
+  `embedding_model` fixture reuses `semantic_db.model_is_cached` — what `doctor` reports
+  `model_cached` from — and skips with the remedy. The symlink RBAC test now asserts containment
+  against `Indexer._walk_files`, before any embedding, so the smuggling claim is checked on every
+  machine rather than failing where it matters most; its end-to-end half still runs where the
+  weights exist.
+
 ## [0.23.4] — 2026-09-15
 
 ### Fixed

@@ -20,6 +20,15 @@ try:
 except ImportError:
     _DEPS_OK = False
 
+# The "semantic dependencies are missing" remediation, stated ONCE — see the matching block in
+# providers/graph.py for why the query envelope and `doctor` must not keep separate copies.
+_UNAVAILABLE_DETAIL = "fastembed / sqlite-vec not importable"
+_UNAVAILABLE_REMEDIATION = "pip install fastembed sqlite-vec  (or: pip install -e .)"
+_UNAVAILABLE_HINT = (
+    f"{_UNAVAILABLE_DETAIL}; {_UNAVAILABLE_REMEDIATION}. "
+    "This is NOT evidence the repository holds no match: the engine was never asked."
+)
+
 # Cold-index background bookkeeping, module-level (not per-instance): `code.status`/`code.doctor`
 # build their own ephemeral `SemanticProvider` to probe, and they must see the SAME in-flight job
 # the query path started, not an empty dict on a throwaway instance. Keyed by the realpath of the
@@ -333,6 +342,10 @@ class SemanticProvider:
         # client tool timeout, so it must return promptly instead of blocking the request thread.
         self._blocking_index = bool(blocking_index)
 
+    # Read by `Gateway._dispatch_single`, which short-circuits on `available is False` and so never
+    # reaches this provider's `build_result`. See the note on GraphProvider.unavailable_hint.
+    unavailable_hint = _UNAVAILABLE_HINT
+
     @property
     def available(self) -> bool:
         return _DEPS_OK
@@ -351,8 +364,8 @@ class SemanticProvider:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False,
                 "model_cached": None,  # fastembed is absent — its cache is not the gap to report
-                "detail": "fastembed / sqlite-vec not importable",
-                "remediation": "pip install fastembed sqlite-vec  (or: pip install -e .)",
+                "detail": _UNAVAILABLE_DETAIL,
+                "remediation": _UNAVAILABLE_REMEDIATION,
             }
         import os
         import sqlite3
@@ -460,7 +473,10 @@ class SemanticProvider:
         if op not in ("search", "context"):
             return safe_null_result(op, target, engine="semantic", reason="op-not-supported")
         if not self.available:
-            return safe_null_result(op, target, engine="semantic", reason="engine-unavailable")
+            return safe_null_result(
+                op, target, engine="semantic", reason="engine-unavailable",
+                hint=_UNAVAILABLE_HINT,
+            )
         if not project_root:
             return safe_null_result(op, target, engine="semantic", reason="no-project-root")
 

@@ -50,6 +50,31 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
                     "completed pass; re-ask shortly if you have just changed this code"}
 
 
+def _unattached_hint(engine: str) -> str | None:
+    """The remediation for an engine that is not attached to this gateway at all.
+
+    ``server._build_gateway`` deliberately leaves a slot None when its backend is absent, so that
+    ``adopt_provider`` can fill it later once ``doctor`` finds one — and that drops the provider
+    instance carrying ``unavailable_hint`` with it. The text belongs to the provider module, so
+    read it off the class rather than keeping a second copy here that would drift out of step with
+    the one ``doctor`` prints. Lazy and never-raise: these imports pull in optional third-party
+    dependencies, which is the very condition being reported on.
+    """
+    try:
+        if engine == "graph":
+            from codeintel.providers.graph import GraphProvider
+            return GraphProvider.unavailable_hint
+        if engine == "lsp":
+            from codeintel.providers.lsp import LspProvider
+            return LspProvider.unavailable_hint
+        if engine == "semantic":
+            from codeintel.providers.semantic import SemanticProvider
+            return SemanticProvider.unavailable_hint
+    except Exception as exc:  # pragma: no cover — an import failure here is itself the diagnosis
+        log_swallowed("gateway._unattached_hint", exc)
+    return None
+
+
 def _is_retryable(result: Result) -> bool:
     return bool(result.get("retry_after_s")) or any(
         isinstance(gap, dict) and bool(gap.get("retry_after_s"))
@@ -419,10 +444,24 @@ class Gateway:
         project_root,
         engine_str: str,
     ) -> Result:
+        # Both arms short-circuit BEFORE `build_result`, so the provider's own unavailable-hint is
+        # never reached from here — which is exactly how the documented contract ("safe-nulls with
+        # a reason AND a hint", README) came to be broken on the first call the Quickstart tells a
+        # new user to make. The provider supplies the text; this stays generic so a fourth engine
+        # inherits the behaviour by declaring the attribute.
         if provider is None:
-            return safe_null_result(op_str, target_str, engine=engine_str, reason="engine-unavailable")
+            return safe_null_result(
+                op_str, target_str, engine=engine_str, reason="engine-unavailable",
+                hint=_unattached_hint(engine_str)
+                or f"the {engine_str} engine is not attached to this gateway — run "
+                   f"`codeintel doctor` to see which engines are available for this repo",
+            )
         if not getattr(provider, "available", True):
-            return safe_null_result(op_str, target_str, engine=engine_str, reason="engine-unavailable")
+            return safe_null_result(
+                op_str, target_str, engine=engine_str, reason="engine-unavailable",
+                hint=getattr(provider, "unavailable_hint", None)
+                or f"the {engine_str} engine is not available — run `codeintel doctor` for why",
+            )
         try:
             r = provider.build_result(op_str, target_str, [], budget or 0, project_root or "")
             if r is not None:

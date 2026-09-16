@@ -218,6 +218,12 @@ def test_semantic_deep_probe_verifies_source_readability(tmp_path, monkeypatch):
     (repo / "f.py").write_text("def readable():\n    return True\n")
     _make_db(db_path, os.path.realpath(str(repo)))
     monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    # This test's subject is SOURCE READABILITY, so every other input to the rollup has to be
+    # pinned or it is not testing what it names. `model_cached` was not: on a machine that has
+    # never downloaded the weights `_status_for` correctly returns "warn" (see its own comment —
+    # an uncached model is a pending download, not a fault), and the assertion below failed for a
+    # reason that has nothing to do with readability. Pin it to the state this test means.
+    monkeypatch.setattr("codeintel.semantic_db.model_is_cached", lambda *a, **k: True)
 
     r = SemanticProvider().probe(str(repo), deep=True)
 

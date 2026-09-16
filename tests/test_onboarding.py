@@ -10,8 +10,6 @@ import io
 import os
 import time
 
-import pytest
-
 from codeintel import onboarding
 
 
@@ -51,9 +49,9 @@ def test_guidance_for_missing_graph():
     assert "codebase-memory-mcp" in guidance
 
 
-def test_setup_index_real_db(tmp_path, monkeypatch):
-    pytest.importorskip("fastembed")
-
+def test_setup_index_real_db(tmp_path, monkeypatch, embedding_model):
+    # `embedding_model` (conftest), not `importorskip("fastembed")`: this test runs a REAL index
+    # pass, so the prerequisite is the weights on disk, not the package being importable.
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.py").write_text("def greet():\n    return 'hello'\n")
