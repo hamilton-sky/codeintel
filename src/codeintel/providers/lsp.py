@@ -452,6 +452,8 @@ class LspProvider:
         "__pycache__", ".mypy_cache", ".pytest_cache", "vendor", "target", ".next",
     })
     _UNSERVED_FILE_FLOOR = 5      # below this, a stray file is not a language the repo is written in
+    _TS_SOURCE_EXTS: ClassVar[tuple[str, ...]] = (".ts", ".tsx")
+    _TS_PROJECT_FILES: ClassVar[tuple[str, ...]] = ("tsconfig.json", "jsconfig.json")
 
     def _language_coverage(self, project_root: str) -> tuple[list[str], dict[str, int]]:
         """Which languages serena is configured to serve here, and which the repo actually contains.
@@ -521,6 +523,98 @@ class LspProvider:
             f"{missing[0][0]} symbols",
         )
 
+    def _ts_project_files(self, project_root: str) -> int | None:
+        """``.ts``/``.tsx`` count when this tree has TypeScript that no project file covers.
+
+        ``None`` means there is nothing to report — the config does not serve typescript, a project
+        file exists somewhere, or there is too little TypeScript here to call it a TypeScript
+        repository. One walk, shared by the two callers below so the health check and the query
+        envelope cannot drift apart on what counts as "no project": #32 made each engine's
+        remediation a single constant for exactly that reason, and a predicate is the same problem.
+        """
+        try:
+            configured, _census = self._language_coverage(project_root)
+            if "typescript" not in configured:
+                return None                    # unserved entirely — `_unserved_note` owns that case
+            ts_files = 0
+            for _dirpath, dirnames, filenames in os.walk(project_root):
+                dirnames[:] = [d for d in dirnames
+                               if d not in self._SKIP_DIRS and not d.startswith(".")]
+                for fn in filenames:
+                    # Any project file anywhere is enough to stop guessing. A monorepo keeps them
+                    # per-package, and claiming a repo has none because the root has none would be
+                    # the same false-confidence move this check exists to catch, pointed the other
+                    # way.
+                    if fn in self._TS_PROJECT_FILES or (
+                            fn.startswith("tsconfig.") and fn.endswith(".json")):
+                        return None
+                    if fn.endswith(self._TS_SOURCE_EXTS):
+                        ts_files += 1
+            return ts_files if ts_files >= self._UNSERVED_FILE_FLOOR else None
+        except Exception as exc:
+            log_swallowed("LspProvider._ts_project_files", exc)
+            return None
+
+    def _no_tsproject_note(self, project_root: str) -> tuple[str, str] | None:
+        """`(detail_suffix, remediation)` when TypeScript is served but has no project to resolve in.
+
+        `_unserved_note` catches the language serena was never told to serve. This is the other half
+        of the same question — "will it answer for this repo's code?" — and it is much quieter. The
+        language IS configured, serena boots, `symbol` returns the definition with its source, and
+        every reference lookup comes back EMPTY, because `tsserver` with no `tsconfig.json` treats
+        each file as its own inferred project and cannot see across files.
+
+        Measured on `bench/fixtures/corpus_ts`, whose 20 files deliberately ship no tsconfig so the
+        oracle's unresolvable-specifier guard has something to bite on: `forwardReleasedItem` is
+        imported and called in four of them, the LSP reported 0 references, and `doctor --deep`
+        reported `3 / 3 engines ready`. Copying the tree and adding a plain tsconfig turned the same
+        query into 17 references — so the gap is the config, and the health check was green across
+        it. `.ts`/`.tsx` only: a handful of loose `.js` files is not a TypeScript project, and
+        flagging those would teach a reader to ignore the line.
+        """
+        ts_files = self._ts_project_files(project_root)
+        if ts_files is None:
+            return None
+        return (
+            f" — but no tsconfig.json covers the {ts_files} TypeScript files here, so the language "
+            f"server resolves each one alone: `symbol` returns the definition and an EMPTY "
+            f"reference list, which reads as 'nothing references this'",
+            "add a tsconfig.json whose `include` covers the TypeScript sources (or point "
+            "--project-root at the directory that already has one) and re-run; until then use "
+            "`--engine graph` for callers, and do not read 0 references as 0 callers",
+        )
+
+    def _empty_references_unsound(self, project_root: str, rel_path: str) -> Missing | None:
+        """Why an EMPTY reference list here carries no information, or ``None`` if it does.
+
+        This is the query-path half of `_no_tsproject_note`, and the more important half: `doctor`
+        is advisory and an agent need never run it, while this reaches whoever actually asked. An
+        empty list from a language server with no project to resolve in is not "nothing references
+        this" — it is "this backend was never in a position to tell you", which is what
+        `outcome.py` now has a kind for.
+
+        Scoped to the file the symbol was actually found in, NOT to the repository. A polyglot tree
+        with loose TypeScript and no tsconfig must not cast doubt on a Python answer that was
+        resolved perfectly well; the unsound emptiness belongs only to the language whose server
+        could not resolve.
+        """
+        try:
+            if not rel_path.lower().endswith(self._TS_SOURCE_EXTS):
+                return None
+            ts_files = self._ts_project_files(project_root)
+            if ts_files is None:
+                return None
+        except Exception as exc:
+            log_swallowed("LspProvider._empty_references_unsound", exc)
+            return None
+        return Missing(
+            "unresolvable",
+            f"the language server returned no references, but no tsconfig.json covers the "
+            f"{ts_files} TypeScript files in this repository — with no project it resolves each "
+            f"file alone and answers every cross-file lookup empty, so this is UNKNOWN rather than "
+            f"none. Add a tsconfig.json covering the sources, or use `--engine graph` for callers",
+        )
+
     def probe(self, project_root: str, deep: bool = False, timeout_s: float = 20.0) -> dict:
         """Never-raise health check for the doctor. Shallow (default) is FREE — PATH presence
         plus any existing session's live state. Deep boots serena and polls until READY/FAILED,
@@ -544,7 +638,8 @@ class LspProvider:
             with existing._lock:
                 st = existing.state
             if st == _State.READY:
-                unserved = self._unserved_note(project_root)
+                unserved = (self._unserved_note(project_root)
+                            or self._no_tsproject_note(project_root))
                 return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
                         "detail": "serena session is READY for this repo" + (
                             unserved[0] if unserved else ""),
@@ -571,7 +666,8 @@ class LspProvider:
             if st == _State.READY:
                 # READY is a fact about the PROCESS. Whether it will answer for this repo's code is
                 # a separate question, and the one the caller is actually asking.
-                unserved = self._unserved_note(project_root)
+                unserved = (self._unserved_note(project_root)
+                            or self._no_tsproject_note(project_root))
                 return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
                         "detail": f"serena booted via `{cmd}` and reached READY" + (
                             unserved[0] if unserved else ""),
@@ -1077,10 +1173,19 @@ class LspProvider:
                 if ref_lines:
                     ref_section = f"## References ({len(ref_lines)})\n" + "\n".join(ref_lines)
                 else:
-                    # Asked, answered, genuinely nothing. Distinct wording from the branch above
-                    # so the two states are distinguishable in the body text as well as in `gaps`.
-                    ref_section = ("## References (0)\n"
-                                   "(the language server reports no references to this symbol)")
+                    # Asked, answered, nothing came back — which is a real answer only when the
+                    # backend was in a position to know. Where it was not, the emptiness carries no
+                    # information and must not be rendered as though it did; see `outcome.py`.
+                    unsound = self._empty_references_unsound(
+                        root, str(first.get("relative_path") or ""))
+                    if unsound is not None:
+                        self._add_gap("references", unsound)
+                        ref_section = (f"## References — not retrieved\n> {unsound.describe()}.")
+                    else:
+                        # Distinct wording from the branch above so the two states are
+                        # distinguishable in the body text as well as in `gaps`.
+                        ref_section = ("## References (0)\n"
+                                       "(the language server reports no references to this symbol)")
 
             return f"{def_section}\n\n{ref_section}"
         except Exception as exc:

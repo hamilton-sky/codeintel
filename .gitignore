@@ -14,6 +14,16 @@ build/
 # Serena LSP project cache (regenerable, created by the lsp engine backend)
 .serena/
 
+# …except inside the fixture corpora, where `project.yml` is SOURCE rather than cache: it is the
+# file that tells serena which language to serve, and without it both LSP arms of
+# `python bench/run.py corpus-ts` report `n/a` on a fresh clone. The arm this repo advertises as
+# needing "nothing" was reproducible on one laptop only, for exactly this reason. The cache under
+# it stays ignored — that part really is regenerable.
+!bench/fixtures/*/.serena/
+!bench/fixtures/*/.serena/project.yml
+bench/fixtures/*/.serena/cache/
+bench/fixtures/*/.serena/project.local.yml
+
 # uv lockfile from `uv run` during local test/dev
 uv.lock
 
@@ -50,3 +60,9 @@ pathly/**/*.diagrams.json
 # and these hold security review findings for unrelated private codebases plus
 # local absolute paths. Local working material, like experiments/ above.
 reports/
+
+# `codeintel index` writes a CODE_INTEL.md into whatever repository it indexes, and bench/README.md
+# tells you to index the fixture corpora. The root CODE_INTEL.md above is committed deliberately;
+# one inside a corpus is a generated file in a tree whose whole value is that every file in it was
+# written on purpose and has a known answer.
+bench/fixtures/*/CODE_INTEL.md

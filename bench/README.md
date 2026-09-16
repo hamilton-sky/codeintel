@@ -15,18 +15,61 @@ same evidence produced opposite designs.
 CODEINTEL_BENCH_PATHLY=~/src/pathly-adapters python bench/run.py pathly-adapters
 CODEINTEL_BENCH_SNITCH=~/src/snitch-simulator python bench/run.py snitch-simulator
 
-# Against a real TypeScript repository — set the path, then list its disputed symbols in run.py.
+# Against a real TypeScript repository.
+CODEINTEL_BENCH_DAYCAP=~/src/daycap python bench/run.py daycap
+
+# Against a DIFFERENT TypeScript repository — set the path, then list its disputed symbols in run.py.
 CODEINTEL_BENCH_TS=~/src/some-app python bench/run.py typescript
 
 # Against the checked-in corpora — needs nothing, runs in CI, pins both oracles.
 pytest tests/test_bench_oracle.py tests/test_bench_oracle_ts.py
-python bench/run.py corpus-ts        # the TypeScript arm end to end, on 19 known files
+python bench/run.py corpus-ts        # the TypeScript arm end to end, on 20 known files
 ```
 
 The repository paths used to be hardcoded to one laptop, which meant the artifact that turns this
 project's accuracy arguments into arithmetic could be reproduced by nobody and re-run by nobody after
 a backend release. They come from the environment now, and a missing clone says so instead of scoring
 every arm against an empty tree.
+
+## Before you trust a run of this
+
+**The two LSP arms need the clone's own `.serena/project.yml` to name the language being scored.**
+serena gets one config per project and that config names a fixed list of language servers; a
+language missing from it produces empty `symbol` bodies rather than errors, so both LSP arms report
+`n/a` for a reason that has nothing to do with the LSP. Nothing said so here until a re-run lost
+both arms to it. Run `codeintel doctor --deep` inside the clone first — it names the gap and the
+edit that closes it. A TypeScript clone needs a `tsconfig.json` as well, for a sharper reason given
+under [the TypeScript arm](#the-typescript-arm).
+
+**Every run now prints what it measured, before it measures it:**
+
+```text
+provenance — what this run measured
+  scored tree  /Users/…/pathly-adapters
+               fix/board-lifecycle-telemetry @ c1def41b  (clean)
+  engine       codeintel 0.23.3  ->  /Users/…/.local/bin/codeintel
+  backends     codebase-memory-mcp 0.10.8, uv 0.12.1, fastembed 0.8.0, sqlite-vec 0.1.9
+  !! the checkout at /Users/…/codeintel declares 0.23.4, but the `codeintel` on PATH is 0.23.3.
+     This run measures the INSTALLED build, not your working tree.
+```
+
+That header exists because this harness names neither half of its own provenance by itself. It
+shells out to whatever `codeintel` is on `PATH` — which is **not** necessarily the checkout you are
+reading; on the machine that produced the table below it was the checkout minus exactly one commit,
+and that commit was `2905ea2`, a *caller-resolution* fix — and it scores whatever branch the clone
+happens to sit on. A re-run that recorded neither produced numbers
+nine points off this table and could not say why; the finding below is what that cost to establish.
+Copy this block beside any number you copy out of a run.
+
+When that last line fires, `CODEINTEL_BENCH_EXE` is how you act on it — point it at a wrapper that
+runs your working tree and the benchmark scores your edits instead of the build you installed weeks
+ago:
+
+```bash
+printf '#!/bin/sh\nexec env PYTHONPATH="$PWD/src" python -m codeintel "$@"\n' > /tmp/codeintel-src
+chmod +x /tmp/codeintel-src
+CODEINTEL_BENCH_EXE=/tmp/codeintel-src python bench/run.py corpus-ts
+```
 
 ## What it measures
 
@@ -99,15 +142,27 @@ purpose.
 
 ## Findings so far
 
-Ten Python symbols in `pathly-adapters` and six in `snitch-simulator`, against
-`codebase-memory-mcp 0.10.8`, **under proven-negative truth** — re-measured 2026-09-03 with the two
-commands at the top of this file, which is what reproduces the table:
+Ten Python symbols in `pathly-adapters` and six in `snitch-simulator`, **under proven-negative
+truth** — re-measured **2026-09-17** with the two commands at the top of this file, which is what
+reproduces the table:
 
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
 | `graph` | 80% | 100% | 78% | 100% | 0 / 10 |
 | `lsp_raw` | 65% | 100% | 65% | 100% | 0 / 10 |
 | `lsp_classified` | **100%** | 100% | 84% | 100% | 0 / 10 |
+
+Measured with `codeintel 0.23.3` — the checkout minus `2905ea2` — against
+`codebase-memory-mcp 0.10.8`, on `pathly-adapters` at `c1def41b` (branch
+`fix/board-lifecycle-telemetry`, clean) and `snitch-simulator` at `373b6dd` (branch
+`simulator-with-schema-builder`, clean). That the engine was one commit behind the checkout is worth
+recording rather than fixing silently: `2905ea2` is a caller-resolution fix, so the table is a
+floor for the current source, not a reading of it.
+
+**Nothing in the table moved between 2026-09-03 and 2026-09-17**, and neither did the per-symbol
+counts underneath it: `_broadcast` 4 claimed against 6 proven non-callers, `_claude_tokens` 1 against
+2, `snitch-simulator` 38% / 33% / 60% with 6 of 6 LSP symbols unanswered. Two weeks and a backend
+untouched is the boring outcome, and the reason it is stated at all is the section below.
 
 `snitch-simulator` is reported separately rather than averaged in, because its arms did not answer
 the same question: `graph` scores **38% direct precision, 33% impact precision and 60% impact
@@ -128,9 +183,43 @@ Three things worth stating plainly:
    positives-only truth those sites left the population and every arm scored 100%. This is also a
    result *about 0.10.8*, which fixed the Python attribution defect; 0.9.x would look materially
    worse.
-3. **The table is Python only.** The worst failure ever observed here (`describe`, 32 fabricated
-   callers) is TypeScript. The arm to measure it exists — see below — but pointing it at a real
-   TypeScript repository is still open, and nothing in this table speaks to that failure.
+3. **This table is Python.** The worst failure ever observed here (`describe`, 32 fabricated
+   callers) is TypeScript. A real TypeScript repository is now measured too — see
+   [daycap](#a-real-typescript-repository-daycap) below — but it is a *different* repository with a
+   different shape, and neither table can be read as the other's result.
+
+### A number here belongs to a tree, not only to an engine
+
+A re-run in the intervening fortnight reported `graph` at **71% direct / 70% impact** and read as a
+nine-point regression. It was not one, and establishing that took longer than the re-run did.
+
+That run scored a fresh `--depth 1` clone of `pathly-adapters`. The table above scores the working
+tree `bench/run.py` defaults to, which is two weeks older, and `_broadcast` — the symbol that
+dominates this score — grew in between:
+
+| tree | `_broadcast` proven non-callers | true calls, all ten targets |
+|---|---|---|
+| `c1def41b`, 2026-08-24 — the table above | 6 | 32 |
+| `1371485`, 2026-09-03 — the fresh clone | 11 | 30 |
+
+Those two populations are re-derived here by running the oracle alone, which needs no backend, over
+both trees. The claim counts and the 71% are from that run's own output rather than re-measured, and
+they reconcile exactly: 32 true against 8 false is 80%; 30 true against 12 false is 71%. **The engine
+did not move. The denominator did**, and precision is a ratio over a population that the repository
+owns.
+
+Two things follow, and the second is the uncomfortable one.
+
+1. A percentage in this file is comparable only against the same commit, which is why every run now
+   prints one. A re-run that disagrees with this table should be diffed **per symbol** against the
+   per-symbol counts recorded above before it is read as a trend — the totals cannot distinguish a
+   worse engine from a bigger repository, and on this occasion they did not.
+2. **Stratification makes this worse, not better.** `_broadcast` is on the target list precisely
+   because short common names are where fabrication lives, so the one symbol carrying most of the
+   score is also the one whose site count moves fastest in an active repository. The bias that makes
+   the list honest is the same property that makes the number restless. That is a fact about the
+   measurement rather than about the tool, and it is not fixed by choosing gentler targets — it is
+   fixed by pinning the commit, which is now recorded rather than assumed.
 
 A number here is only as current as the run that produced it. Re-run both commands rather than
 quoting the table after a backend release; the previous version of this table survived a backend
@@ -164,10 +253,10 @@ Stated re-exports are followed transitively (`export { x } from`, including `exp
 imports are tracked under their new spelling — scanning only for the target's own name finds the
 import and none of its callers — and a property access on a value stays an abstention, as in Python.
 
-`bench/fixtures/corpus_ts` is 19 files covering all of it, and `python bench/run.py corpus-ts` drives
+`bench/fixtures/corpus_ts` is 20 files covering all of it, and `python bench/run.py corpus-ts` drives
 the whole path — oracle, scorer and both engines through codeintel's own envelope. It is a **smoke
 test, not a measurement**: files written to have a known answer cannot say anything about real code.
-The real measurement needs a real TypeScript repository, which is the largest thing still open.
+The real measurement it could not supply is below.
 
 **Index the corpus standalone before reading anything into that run.** It lives inside this
 checkout, so unless `codeintel index bench/fixtures/corpus_ts` has been run, the backend answers
@@ -182,6 +271,132 @@ Also open: the oracle abstains on property accesses on values, which is exactly 
 names live. Proven negatives raise coverage on the shadowing cases; the receiver case is untouched
 and is harder, because resolving a receiver's type means type inference — which reintroduces the
 circularity the oracle exists to avoid.
+
+### A real TypeScript repository: daycap
+
+`python bench/run.py daycap` — eight symbols, 23 source files, `codeintel 0.23.3` against
+`codebase-memory-mcp 0.10.8`, tree at `main @ 71502b8` (clean), 2026-09-17:
+
+| arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
+|---|---|---|---|---|---|
+| `graph` | **100%** | 100% | **100%** | 95% | 0 / 8 |
+| `lsp_raw` | 77% | 100% | 81% | 100% | 0 / 8 |
+| `lsp_classified` | **100%** | 100% | 81% | 100% | 0 / 8 |
+
+Oracle coverage 100% mean. The single impact miss is `resolveSource`, where the graph reported the
+three calls and not the one non-call reference — the `forward_released_item` shape, and the reason
+impact is scored separately from direct callers.
+
+**Read this table narrowly, because its population is easy and that is a fact about daycap.**
+`bench/run.py`'s other lists are stratified onto disputed cases; here there was almost nothing to
+dispute. daycap has 23 source files, a `tsconfig.json`, a correct `.serena/project.yml`, and
+essentially no name collisions — `scrub`, `isTrusted` and `isUnusable` went on the list as the short
+common names and each turned out to be unique in the index. A repository that hands the resolver an
+unambiguous name gets an unambiguous answer, and 100% is what that looks like. It is a real result
+and it is not a general one.
+
+### The shape this table does not contain
+
+Hand-checked on a third repository in the same tree — 1,483 TypeScript files, a monorepo — and not
+scored by this harness, so it is reported as an observation rather than a row:
+
+`codeintel query --op callers --target StrategyChain.resolve` returns **48 direct callers and 2
+usages, capped at 50 rows and therefore truncated**. In that entire repository, exactly **five files
+mention `StrategyChain` at all** — its definition, a barrel re-export, a spec, and the two agents
+that use it. The true production callers are two: `GeneralChatAgent.tryDeterministicPath` and
+`WorkflowStepAgent.tryDeterministicPath`.
+
+What matters is what the answer looks like underneath the headline:
+
+* the envelope is `confidence: partial`, and its gaps say **"43 of 50 row(s) were resolved by name
+  matching (`suffix_match`), not by following an import or a language-server binding"**, plus
+  `row-cap-reached` and `non-call-relationships`;
+* only **7 rows carry no confidence badge**, and the **first two of those are exactly the two true
+  callers**. The other 43 are badged `[?0.28]` or `[?0.55]`.
+
+So the ranking and the disclosure both work, and the headline count is still wrong by more than an
+order of magnitude. An agent that reads `gaps` and prefers unbadged rows gets the right answer; one
+that reads "48 callers" and starts editing does not. That gap between *what the envelope says* and
+*what the first line says* is the finding, and it is the one shape this file has never scored:
+**a qualified method target whose leaf name collides across a large tree.** Adding it needs a
+repository whose truth is establishable, which is why it is an observation here and not a table.
+
+### What `corpus-ts` reports today
+
+Re-measured 2026-09-17, after `codeintel index bench/fixtures/corpus_ts`:
+
+| arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
+|---|---|---|---|---|---|
+| `graph` | 50% | 80% | 50% | 50% | 0 / 3 |
+| `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **3 unanswered** |
+| `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **3 unanswered** |
+
+Oracle coverage 79% mean. The `graph` row is a smoke test and nothing more — 20 files written to
+have a known answer cannot measure an engine — with one exception worth naming: **`describe` now
+claims 1 caller where the failure that motivated this entire arm claimed 32.** One spurious against
+one proven non-caller is still a spurious, but that class is no longer what it was.
+
+The two LSP rows say `unanswered` rather than a number, and getting them to say that is the whole
+story below. They read `1 / 3 wrongly silent` until the run before this one.
+
+### The corpus has no `tsconfig.json`, and that is load-bearing in both directions
+
+That absence is deliberate — it is what the oracle's unresolvable-specifier guard exists to bite on.
+Its second effect was not designed. Without a project file, `tsserver` treats every file as its own
+inferred project and cannot see across files, so it returns each definition and an **empty reference
+list**. `forwardReleasedItem` is imported and called in four of the 20 files, and
+`--engine lsp --op symbol` used to answer:
+
+```text
+## References (0)
+(the language server reports no references to this symbol)
+```
+
+at `confidence: complete`, with no gap. On that same directory, `codeintel doctor --deep` reported
+`3 / 3 engines ready`. Copy the tree, drop in a plain `tsconfig.json`, ask again: **17 references.**
+Nothing else changed.
+
+The empty list was never the language server failing. It was the language server correctly answering
+a question about a project that did not exist, and every layer above it relaying that as fact —
+green health check included.
+
+Both halves are now closed, and they had to be closed separately because they are read by different
+people:
+
+**`doctor`** asks the second half of the question it was already asking. A tree that serves
+`typescript` with no `tsconfig.json` anywhere reports `lsp` **not runnable** and names the symptom,
+beside the existing check for a language `.serena/project.yml` never mentioned. Both answer *will it
+answer for this repo's code?*, which is the question `READY` does not.
+
+**The envelope** no longer asserts the emptiness. [`outcome.py`](../src/codeintel/outcome.py) gained
+a `Missing` kind, `unresolvable`, for the state its original rule did not have a name for: `Ok([])`
+means "asked, and there is nothing" only when the backend was **in a position to know**. Where it
+was not, the same query now answers
+
+```text
+## References — not retrieved
+> the language server returned no references, but no tsconfig.json covers the 20 TypeScript files
+> in this repository — … so this is UNKNOWN rather than none. …
+```
+
+at `confidence: partial`, carrying a `references` gap of kind `unresolvable`. The doubt is scoped to
+the *file the symbol was found in*, not to the repository: a polyglot tree with loose TypeScript and
+no tsconfig must not cast doubt on a Python answer that resolved perfectly well, because a gap that
+appears on correct answers is one nobody reads.
+
+Two consequences visible in the numbers above, and one that is deliberately invisible:
+
+* The scorer now excludes both arms as **unanswered** instead of charging them `1 / 3 wrongly
+  silent`. That is not the benchmark going easier on the engine — it is the engine no longer making
+  a claim. Scoring an honest "I cannot tell you" as a wrong answer would punish exactly the
+  disclosure this project keeps asking its engines to make, and `score.py` treats `unresolvable`
+  the way it already treats `not-asked`.
+* `bench/run.py daycap` — a real TypeScript repository **with** a tsconfig — is byte-identical
+  before and after: 100% / 100% direct, 0 / 8 wrongly silent. A fix for a false "none" that made
+  correct repositories noisier would be a bad trade, and the measurement is what shows it did not.
+* `## References (0)` still exists and still means what it says. It is what a correctly configured
+  repository returns for a symbol nothing references, and keeping that answer at `complete` is what
+  keeps `partial` worth reading.
 
 ---
 

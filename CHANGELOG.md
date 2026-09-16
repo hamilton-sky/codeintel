@@ -26,6 +26,41 @@ All notable changes to codeintel are documented here. The format is based on
   machine rather than failing where it matters most; its end-to-end half still runs where the
   weights exist.
 
+- **`doctor` now reports a TypeScript repository with no `tsconfig.json` as not runnable for the
+  LSP engine.** `tsserver` without a project file treats every file as its own inferred project and
+  cannot see across files, so it returns each definition and an **empty reference list**. That list
+  reaches a caller as `## References (0)` at `confidence: complete` with no gap — a confident
+  "nothing references this" about the question asked immediately before deleting code, which is the
+  sentence `outcome.py` exists to make unsayable. Boot readiness could not see it: on
+  `bench/fixtures/corpus_ts`, `doctor --deep` reported `3 / 3 engines ready` while the language
+  server reported 0 references for a symbol imported and called in four of that corpus's files; the
+  same query against a copy with a plain `tsconfig.json` returned 17. The check sits beside the
+  existing one for a language `.serena/project.yml` never names, because both answer the same
+  question — *will this engine answer for this repo's code* — which `READY` does not. `.ts`/`.tsx`
+  only, and any project file anywhere in the tree satisfies it, so ordinary JavaScript repositories
+  and per-package monorepos are not flagged.
+
+- **An empty reference list is no longer asserted as "nothing references this" when the backend
+  could not have known.** `outcome.py`'s rule — `Ok([])` is a real answer meaning *asked, and there
+  is nothing* — had an unstated precondition: that the backend was in a position to know. A
+  TypeScript language server with no `tsconfig.json` answers every cross-file lookup with an empty
+  list, which is not an error, not a timeout, and byte-identical to the truth. Rendered as
+  `## References (0)` at `confidence: complete` it was the 2026-08-17 bug reached from the other
+  direction: that version could not tell a failure from an empty answer, this one could not tell an
+  empty answer from an uninformed one. There is now a `Missing` kind for it, `unresolvable`, and
+  such a lookup returns `## References — not retrieved` at `confidence: partial` with a
+  `references` gap. The doubt is scoped to the file the symbol was found in, not to the repository,
+  so a Python answer in a polyglot tree is unaffected; a correctly configured repository still
+  answers `## References (0)` at `complete` for a symbol nothing references. `bench/run.py daycap`
+  is byte-identical before and after (100% / 100% direct, 0 / 8 wrongly silent), and
+  `bench/run.py corpus-ts` moves its two LSP arms from `1 / 3 wrongly silent` to `3 unanswered` —
+  a confident falsehood becoming a disclosed non-answer.
+
+### Added
+- **`CODEINTEL_BENCH_EXE` selects which `codeintel` the call-edge benchmark measures.** The harness
+  shells out to whatever is on `PATH`, and its new provenance header warns when that build is not
+  the checkout — but there was no way to act on the warning short of reinstalling the tool.
+
 ## [0.23.4] — 2026-09-15
 
 ### Fixed

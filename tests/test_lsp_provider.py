@@ -965,3 +965,76 @@ def test_respawn_after_cooldown_increments_the_attempt_count(monkeypatch):
 
     p.build_result("symbol", "parse_result", [], 0, "/my/repo")
     assert created == [4]
+
+
+# ---------------------------------------------------------------------------
+# Group 12 — an empty reference list is an answer only when the backend could know
+# ---------------------------------------------------------------------------
+
+def _ts_repo(tmp_path, *, tsconfig: bool):
+    """A TypeScript tree serena is configured to serve, with or without a project file."""
+    serena = tmp_path / ".serena"
+    serena.mkdir()
+    (serena / "project.yml").write_text(
+        "project_name: t\nlanguage_servers:\n- typescript\nencoding: utf-8\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(19):
+        (src / f"f{i}.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    if tsconfig:
+        (tmp_path / "tsconfig.json").write_text('{"include":["src/**/*.ts"]}', encoding="utf-8")
+    return str(tmp_path)
+
+
+def _stub_empty_references(p, monkeypatch):
+    def _fake_call_tool(session, tool, args, timeout_s):
+        if tool == "find_symbol":
+            return Ok('[{"name_path":"forwardReleasedItem","kind":"Function",'
+                      '"relative_path":"src/f0.ts","body_location":{"start_line":1,"end_line":2},'
+                      '"body":"export function forwardReleasedItem() {}"}]')
+        if tool == "find_referencing_symbols":
+            return Ok("{}")          # asked, answered, and the answer is empty
+        return Missing("backend-error", "unstubbed tool")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+
+
+def test_empty_references_without_a_tsproject_are_disclosed_not_asserted(tmp_path, monkeypatch):
+    """The deletion trap, closed at the point of use.
+
+    `tsserver` with no `tsconfig.json` resolves each file alone and answers every cross-file lookup
+    empty. Rendered as `## References (0)` at `confidence: complete` that is a confident "nothing
+    references this" about the question asked immediately before deleting code — the same sentence
+    outcome.py was written to make unsayable, reached from the other side."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    root = _ts_repo(tmp_path, tsconfig=False)
+    p = LspProvider()
+    p._sessions[root] = _make_fake_session(_State.READY)
+    _stub_empty_references(p, monkeypatch)
+
+    r = p.build_result("symbol", "forwardReleasedItem", [], 30000, root)
+
+    assert r["confidence"] == "partial", r
+    gap = next(g for g in (r.get("gaps") or []) if g["section"] == "references")
+    assert gap["kind"] == "unresolvable"
+    assert "UNKNOWN rather than none" in gap["detail"]
+    # The body must say it too. A machine-readable gap beside prose asserting the opposite is how
+    # the first version of this bug survived review.
+    assert "## References — not retrieved" in r["result"]
+    assert "## References (0)" not in r["result"]
+
+
+def test_empty_references_with_a_tsproject_remain_a_real_answer(tmp_path, monkeypatch):
+    """The other half, and the one that keeps `partial` worth reading: where the backend COULD
+    know, an empty list still means there is nothing, and still says so at complete confidence."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    root = _ts_repo(tmp_path, tsconfig=True)
+    p = LspProvider()
+    p._sessions[root] = _make_fake_session(_State.READY)
+    _stub_empty_references(p, monkeypatch)
+
+    r = p.build_result("symbol", "forwardReleasedItem", [], 30000, root)
+
+    assert r["confidence"] == "complete", r
+    assert not [g for g in (r.get("gaps") or []) if g["section"] == "references"]
+    assert "## References (0)" in r["result"]

@@ -216,3 +216,27 @@ def test_the_scorer_reads_both_oracles_through_one_seam() -> None:
     assert lang.truth(CORPUS, qn).negatives == {(f"{SRC}/jestGlobals.ts", "<module>")}
     assert lang.enclosing(CORPUS, f"{SRC}/callerDirect.ts", 4) == "send"
     assert lang.kinds_at(CORPUS, f"{SRC}/jestGlobals.ts", 9, qn) == {NOT_TARGET}
+
+
+def test_the_readme_states_this_corpus_size_correctly():
+    """`bench/README.md` counts these files in prose, four times, and the count had drifted.
+
+    The corpus gained a file and the sentences describing it did not, so the document explaining
+    what the arm covers was describing a tree one file smaller than the one on disk. That is the
+    same defect `tests/test_docs_ci_claims.py` guards for the CI claims — a hand-written number
+    about a machine-readable fact, with nothing checking the two still agree — and it is worth one
+    assertion here because the corpus is the thing those sentences exist to describe.
+
+    The count is DERIVED, never typed: a hand-written expectation is what is being guarded against.
+    """
+    import re
+
+    readme = (BENCH / "README.md").read_text(encoding="utf-8")
+    on_disk = len(list((BENCH / "fixtures" / "corpus_ts" / "src").glob("*.ts")))
+    claimed = {int(n) for n in re.findall(r"(\d+) (?:known )?files", readme)}
+    # Only the corpus-sized claims are ours to police; the `pathly-adapters` row counts thousands.
+    corpus_claims = {n for n in claimed if n < 100}
+    assert corpus_claims == {on_disk}, (
+        f"bench/README.md claims {sorted(corpus_claims)} file(s) for corpus_ts; "
+        f"there are {on_disk} on disk"
+    )
