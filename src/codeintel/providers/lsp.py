@@ -56,6 +56,18 @@ _WARM_WAIT_S = 8.0
 _SERENA_REV = "949a27ef1e5fda1a6e7b561e777bcece345c6ffd"
 _SERENA_GIT = f"git+https://github.com/oraios/serena@{_SERENA_REV}"
 
+# The "LSP toolchain is not installed" remediation, stated ONCE — see the matching block in
+# providers/graph.py for why the query envelope and `doctor` must not keep separate copies.
+_UNAVAILABLE_DETAIL = "neither `serena` nor `uvx` found on PATH"
+_UNAVAILABLE_REMEDIATION = (
+    "install uv (provides uvx): `codeintel setup --install-uv` (or `brew install uv` / "
+    "`pip install uv`) — serena is then fetched on first use"
+)
+_UNAVAILABLE_HINT = (
+    f"{_UNAVAILABLE_DETAIL}; {_UNAVAILABLE_REMEDIATION}. "
+    "This is NOT evidence the symbol is absent: the engine was never asked."
+)
+
 
 # Prefixes serena uses when a tool call fails. Checked in addition to the MCP `isError` flag,
 # which is not set by every server or version — and the cost of missing one is that a failure is
@@ -320,6 +332,10 @@ class LspProvider:
     Finding references therefore needs two steps: locate the symbol, then query with its path.
     """
 
+    # Read by `Gateway._dispatch_single`, which short-circuits on `available is False` and so never
+    # reaches this provider's `build_result`. See the note on GraphProvider.unavailable_hint.
+    unavailable_hint = _UNAVAILABLE_HINT
+
     # Class-level default so a provider built via `__new__` (the test stubs do this) still has it
     # rather than raising AttributeError inside the never-raise handler.
     _backend_error_state = threading.local()
@@ -513,10 +529,8 @@ class LspProvider:
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": None,
-                "detail": "neither `serena` nor `uvx` found on PATH",
-                "remediation": "install uv (provides uvx): `codeintel setup --install-uv` "
-                               "(or `brew install uv` / `pip install uv`) — serena is then "
-                               "fetched on first use",
+                "detail": _UNAVAILABLE_DETAIL,
+                "remediation": _UNAVAILABLE_REMEDIATION,
             }
         cmd = self._cmd
         if not deep:
@@ -616,7 +630,10 @@ class LspProvider:
             root_str = str(project_root or "")
 
             if not self.available:
-                return safe_null_result(op_str, target_str, engine="lsp", reason="engine-unavailable")
+                return safe_null_result(
+                    op_str, target_str, engine="lsp", reason="engine-unavailable",
+                    hint=_UNAVAILABLE_HINT,
+                )
 
             # A protected macOS folder can still satisfy ``isdir`` while denying enumeration.
             # Detect that locally before spawning Serena: otherwise its early exit is wrapped by

@@ -132,6 +132,34 @@ def console_script(monkeypatch) -> str:
     return resolved
 
 
+@pytest.fixture
+def embedding_model() -> str:
+    """Skip unless the embedding WEIGHTS are on disk, not merely importable.
+
+    ``pytest.importorskip("fastembed")`` — which these tests used — asks the wrong question. The
+    package is a declared dependency, so it imports in any installed environment; what an indexing
+    test actually needs is the ~50 MB model, and fastembed fetches that from huggingface.co on
+    first use. Behind a proxy, in restricted CI or air-gapped, the import succeeds and the download
+    then fails, so the test reported a RED SUITE for a missing prerequisite — the precise
+    confusion between "could not ask" and "wrong answer" that `doctor`'s fourth question and the
+    whole `index-failed` taxonomy exist to prevent. A suite that cannot tell them apart cannot be
+    the thing that proves the product does.
+
+    Reuses `semantic_db.model_is_cached`, which is what `doctor` reports `model_cached` from, so
+    there is one definition of "the weights are here" rather than a second one that can drift.
+    ``None`` from it means "could not determine" (an unreadable cache) — treated as unavailable,
+    because a test that needs the weights should not be the thing that discovers it cannot look.
+    """
+    from codeintel.semantic_db import DEFAULT_MODEL, MODEL_CACHE_ENV, model_is_cached
+    if model_is_cached(DEFAULT_MODEL) is not True:
+        pytest.skip(
+            f"embedding weights for {DEFAULT_MODEL} are not cached — this test indexes for real. "
+            f"Run any `codeintel index` on a connected machine to fetch them, or point "
+            f"{MODEL_CACHE_ENV} at a pre-seeded cache (docs/install.md, 'Offline / air-gapped')."
+        )
+    return DEFAULT_MODEL
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _release_embedding_runtimes():
     """Destroy every fastembed/onnxruntime session while the interpreter is still healthy.

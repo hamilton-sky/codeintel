@@ -276,6 +276,22 @@ _INCOMPATIBLE_HINT = (
     "This is NOT a statement about whether your repository is indexed."
 )
 
+# The "backend is not installed" remediation, stated ONCE. `probe` hands it to `doctor` as a
+# structured row; the query path puts it in the envelope's `hint`. Both readers need it and they
+# used to have only one supplier: an agent making its first `code.query` — the exact call the
+# README tells a new user to run — received a bare `engine-unavailable` with nothing to act on,
+# while `doctor` three lines away knew the fix. A second copy of the text would drift, so the
+# envelope reads this one.
+_UNAVAILABLE_DETAIL = "codebase-memory-mcp not found on PATH"
+_UNAVAILABLE_REMEDIATION = (
+    "put the codebase-memory-mcp binary on PATH — it's an external native backend (see "
+    "docs/graph.md); once present it self-updates via `codebase-memory-mcp update`"
+)
+_UNAVAILABLE_HINT = (
+    f"{_UNAVAILABLE_DETAIL}; {_UNAVAILABLE_REMEDIATION}. The graph engine is optional: "
+    "`--op search` answers with no backend at all. This is NOT evidence the symbol has no callers."
+)
+
 
 def _language_coverage_note(rows: list[dict]) -> str:
     """Warn when a ranking is dominated by one file type.
@@ -687,6 +703,12 @@ class GraphProvider:
     def available(self, value: bool) -> None:
         self._backend.available = value
 
+    # Read by `Gateway._dispatch_single`, which short-circuits on `available is False` and so never
+    # reaches this provider's own `build_result`. Without it the gateway had no way to ask WHY an
+    # engine was unavailable and emitted a hintless envelope — the defect this attribute closes.
+    # A plain attribute rather than a method so a stub provider in a test can set it in one line.
+    unavailable_hint = _UNAVAILABLE_HINT
+
     @property
     def _cmd(self) -> str | None:
         return self._backend._cmd
@@ -798,10 +820,8 @@ class GraphProvider:
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False, "project": None,
-                "detail": "codebase-memory-mcp not found on PATH",
-                "remediation": "put the codebase-memory-mcp binary on PATH — it's an external "
-                               "native backend (see docs/graph.md); once present it self-updates "
-                               "via `codebase-memory-mcp update`",
+                "detail": _UNAVAILABLE_DETAIL,
+                "remediation": _UNAVAILABLE_REMEDIATION,
             }
         raw = self._run("list_projects", {}, timeout_ms)
         if raw is None:
@@ -2244,7 +2264,10 @@ class GraphProvider:
             root_str = str(project_root or "")
 
             if not self.available:
-                return safe_null_result(op_str, target_str, engine="graph", reason="engine-unavailable")
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason="engine-unavailable",
+                    hint=_UNAVAILABLE_HINT,
+                )
 
             try:
                 budget_ms = int(budget) if budget else 0

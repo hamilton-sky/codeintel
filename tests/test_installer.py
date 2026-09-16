@@ -471,7 +471,14 @@ def test_doctor_reports_a_stale_absolute_command(tmp_path, monkeypatch):
     assert "codex" not in regs                    # not registered ⇒ not reported
 
 
-def test_doctor_reports_a_live_registration_as_runnable(tmp_path, monkeypatch):
+def test_doctor_reports_a_live_registration_as_runnable(tmp_path, monkeypatch, console_script):
+    """`console_script` (conftest) is what makes this deterministic rather than a reading of the
+    host. `resolve_command` records `shutil.which("codeintel") or "codeintel"`, and doctor then
+    resolves a bare name back through PATH — so on any environment where the console script is not
+    on PATH (a bare `python -m pytest`, CI before an editable install) BOTH steps degrade and a
+    perfectly correct doctor reported `runnable: False`. That is a missing prerequisite, not a
+    regression, and the fixture states which by pinning PATH to this checkout's script or skipping.
+    """
     from codeintel.doctor import collect_registrations
 
     monkeypatch.setenv("HOME", str(tmp_path))
