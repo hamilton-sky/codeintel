@@ -396,7 +396,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 - **[Install & registration](docs/install.md)** — what each agent host actually reads, why the registered command is an absolute path, and the three levels of proof that registration worked.
 - **[Query flow](docs/query-flow.md)** — request lifecycle, engine selection, fan-out & merge, and why it never throws.
 - **[Map file](docs/map-file.md)** — the static `CODE_INTEL.md` orientation layer for hosts with no MCP support.
-- **[Benchmarks](docs/benchmarks.md)** — real numbers at scale: 25 k chunks indexed in ~8 min, ~235 ms warm queries, 60 MB index.
+- **[Benchmarks](docs/benchmarks.md)** — real numbers at scale: 30 k chunks indexed in ~10 min, ~233 ms warm queries, 68 MB index.
 - Engine references: **[graph](docs/graph.md)** · **[lsp](docs/lsp.md)** · **[semantic](docs/semantic.md)**.
 
 ## CLI reference
