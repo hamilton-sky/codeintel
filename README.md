@@ -13,6 +13,10 @@
 > been pointed at an unfamiliar codebase it has found real bugs. **Use it locally, on a developer
 > machine, for a single user** — that is the case it is built and tested for. Before relying on it
 > for anything beyond that, read **[Project status](#project-status)**.
+>
+> **New here? Read [docs/trust.md](docs/trust.md) first** — what each engine's answer is worth, a
+> five-minute check on a symbol whose callers you already know, and the eight states your
+> repository can be in with one command for each.
 
 ![codeintel's own call graph — an interactive, self-contained HTML view with force / radial / layered / module layouts, complexity-sized nodes, and click-to-inspect metrics.](docs/images/graph-codeintel.png)
 
