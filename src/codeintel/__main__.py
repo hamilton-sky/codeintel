@@ -462,7 +462,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the structured status and index-age report")
     status_parser.add_argument(
         "--deep", action="store_true",
-        help="Boot LSP and sample indexed source readability (slower, read-only)")
+        help="Put a real query to each engine and require an answer, boot the LSP, and sample "
+             "indexed source readability (slower, read-only)")
 
     # serve-http subcommand
     http_parser = subparsers.add_parser(
@@ -575,7 +576,9 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor", help=_DESCRIPTIONS["doctor"], description=_DESCRIPTIONS["doctor"])
     doctor_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     doctor_parser.add_argument("--deep", action="store_true",
-                               help="Also boot-check serena (slower; first boot pulls it via uvx)")
+                               help="Ask each engine one REAL query and require content — a "
+                                    "process that starts is not one that answers. Also boots "
+                                    "serena (slower; first boot pulls it via uvx)")
     doctor_parser.add_argument("--json", action="store_true",
                                help="Emit the structured JSON report instead of the table")
 

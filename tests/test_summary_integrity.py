@@ -306,15 +306,21 @@ def _summary_sites() -> list[_Site]:
 # summary they just added — naming a test function would tell them only where to paste.
 _VERIFIED_BY: dict[tuple[str, str], str] = {
     # ── capability: "it will answer" ⟹ a real query on that repo returns content ──────────────
+    # Two tiers. The shallow tier asserts the roll-up refuses a repository the engine cannot
+    # answer about; the deep tier asserts `--deep` PUTS A REAL QUESTION and requires content, which
+    # is what makes `runnable` mean "will answer" rather than "started".
     ("claim", "GraphProvider.probe"):
         "a booted backend that answers nothing is not runnable — "
-        "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable",
+        "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable, and under --deep "
+        "test_a_graph_project_that_resolves_but_holds_nothing_is_not_deep_runnable",
     ("claim", "LspProvider.probe"):
         "a booted backend that answers nothing is not runnable — "
-        "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable",
+        "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable, and under --deep "
+        "test_a_ready_language_server_that_answers_nothing_is_not_deep_runnable",
     ("claim", "SemanticProvider.probe"):
         "a booted backend that answers nothing is not runnable — "
-        "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable",
+        "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable, and under --deep "
+        "test_semantic_chunks_without_vectors_are_not_a_working_index",
     ("claim", "semantic._not_indexed_probe"):
         "the not-indexed state claims no readiness — "
         "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable",
@@ -575,7 +581,16 @@ def test_every_registry_entry_names_a_verifier_that_exists():
     subject of the file. So the names are resolved, not trusted: a verifier that is renamed or
     deleted takes its registry entry red with it.
     """
+    # Verifiers may live in a sibling module — the deep-probe ones belong with the doctor tests,
+    # beside the shallow probes they strengthen. Resolve against both rather than forcing a test
+    # into the wrong file to satisfy a guard.
+    import ast
+
     defined = {name for name in globals() if name.startswith("test_")}
+    for sibling in ("test_doctor.py",):
+        tree = ast.parse((pathlib.Path(__file__).parent / sibling).read_text())
+        defined |= {n.name for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")}
     for source, entries in (("_VERIFIED_BY", _VERIFIED_BY), ("_UNCENSUSED", _UNCENSUSED)):
         for key, referent in entries.items():
             assert len(referent) > 40, f"{source}[{key}]'s referent is too thin to act on: {referent!r}"
