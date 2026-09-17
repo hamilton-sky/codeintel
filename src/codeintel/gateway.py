@@ -426,6 +426,15 @@ class Gateway:
                     **({"retry_after_s": r["retry_after_s"]}
                        if r.get("retry_after_s") else {}),
                 })
+        # `rows` and `evidence` are deliberately NOT merged in, and this is the decision rather than
+        # the oversight the paragraph above records having shipped once already. `evidence.returned`
+        # means "the rows this body printed", and a fan-out body is two engines' bodies concatenated
+        # — the graph half's rows under a heading the lsp half also prints `- ` lines beneath. A
+        # merged `rows` would be a subset of the answer's rows presented as the answer's rows, which
+        # is the aggregate defect this repository keeps finding, arriving through the field added to
+        # prevent it. An agent that wants structured rows asks the op that produces them
+        # (`callers`, `callees`, `impact`) rather than a fan-out that quotes it.
+        # Pinned by test_a_fanout_answer_claims_no_structured_rows.
         return attach_confidence({
             "ok": True,
             "op": op_str,

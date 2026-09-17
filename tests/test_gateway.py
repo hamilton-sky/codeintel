@@ -691,3 +691,35 @@ def test_the_query_hint_is_the_same_remediation_doctor_prints():
     assert probe["installed"] is False
     assert probe["remediation"] in GraphProvider.unavailable_hint
     assert probe["detail"] in GraphProvider.unavailable_hint
+
+
+def test_a_fanout_answer_claims_no_structured_rows():
+    """A fan-out body is two engines' bodies concatenated, so no row summary of it can be true.
+
+    `evidence.returned` means "the rows this body printed". Merging the graph half's `rows` into an
+    envelope whose body also contains the lsp half's lines would present a subset of the answer's
+    rows as the answer's rows — the aggregate defect, arriving through the field added to prevent
+    it. The omission is the decision; this is what keeps it one, because the merge site hand-builds
+    its envelope and has already dropped `confidence` and `gaps` that way once.
+
+    `context` is the op that matters here: it is the DEFAULT fan-out, so this is the shape a caller
+    reaches without asking for it.
+    """
+    class _RowProvider(_StubProvider):
+        def build_result(self, op, target, files, budget, project_root) -> Result:
+            env = super().build_result(op, target, files, budget, project_root)
+            env["rows"] = [{"relation": "caller", "name": "c0", "verified": True}]
+            env["evidence"] = {"verified": 1, "possible": 0, "unstated": 0, "returned": 1,
+                               "total": 1, "truncated": False, "safe_for_destructive": True}
+            return env
+
+    graph = _RowProvider("graph", "## Callers of x (1)\n- pkg.c0 (src/c0.py)")
+    lsp = _StubProvider("lsp", "## References (1)\n- src/other.py:4")
+    merged = Gateway(graph=graph, lsp=lsp).query("context", "x", engine="both")
+
+    assert "rows" not in merged, (
+        "a merged body's rows are not the graph half's rows; see the comment at the merge site")
+    assert "evidence" not in merged, merged
+    # The single-engine route is where the structured form lives, and it must still carry it.
+    direct = Gateway(graph=graph, lsp=lsp).query("callers", "x", engine="graph")
+    assert direct["rows"] and direct["evidence"], direct

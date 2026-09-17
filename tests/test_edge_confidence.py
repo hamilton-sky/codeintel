@@ -161,9 +161,19 @@ def test_both_edge_ops_disclose_identically(monkeypatch, op, rows_key):
 # that actually misleads.
 
 
+def _breakdown(body: str) -> str:
+    """The evidence headline, found by what it says rather than by where it sits.
+
+    It used to be line 1 of every answer. The first screen now sits above it, and a test that
+    encodes the offset would fail on placement rather than on the breakdown — which is the thing
+    these tests are about. `test_the_breakdown_appears_above_the_rows` is where position is pinned.
+    """
+    return next(ln for ln in body.splitlines() if "resolved ·" in ln)
+
+
 def test_the_heading_breaks_its_count_down_by_how_rows_were_resolved(monkeypatch):
     env = _callers(monkeypatch, _rows("0.95", "0.90", "0.75", "0.38"))
-    head = env["result"].splitlines()[1]
+    head = _breakdown(env["result"])
     assert "2 resolved" in head, head
     assert "2 name-matched" in head, head
     # It has to deny the reading that makes the count dangerous, not merely list the tiers.
@@ -199,7 +209,7 @@ def test_a_backend_that_never_scores_gets_no_breakdown(monkeypatch):
 def test_the_breakdown_counts_every_row_it_was_given(monkeypatch):
     """Arithmetic, because a breakdown that does not sum to the answer is worse than none."""
     env = _callers(monkeypatch, _rows("0.95", "0.90", "0.75", "0.38", "0.30"))
-    head = env["result"].splitlines()[1]
+    head = _breakdown(env["result"])
     counted = sum(int(part.strip().split()[0])
                   for part in head.split("**")[1].rstrip(".").split("·"))
     assert counted == 5, head
@@ -342,3 +352,304 @@ def test_the_settle_note_counts_the_rows_it_sends_you_to_check():
 
     assert f"{len(matched)} name-matched caller" in body, body
     assert f"The {len(files)} file(s) to check against" in body, body
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# The same answer as FIELDS — `rows` and `evidence` on the envelope
+#
+# Everything above makes the prose honest. An agent that has to parse that prose to act on it is
+# reading markdown this project reserves the right to reword, so the same facts ride the envelope
+# in a shape it can branch on. The tests here are all one question: does the structured form agree
+# with the body it came from? A structured summary that disagrees with its own rows would be this
+# repository's recurring defect arriving through the field added to prevent it.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+_LIMIT = 50           # _EDGE_ROW_LIMIT: at or above it, the backend's list is capped
+_CANDIDATES = 12      # _CANDIDATE_CAP: same-named symbols rendered before the rest are withheld
+
+
+def _edge(i: int, *, strategy: str, confidence: str, qn: str = "pkg.target",
+          tfile: str = "src/t.py") -> dict:
+    """One caller row, with the provenance the bucketing actually reads."""
+    return {"a.name": f"c{i}", "a.qualified_name": f"pkg.c{i}", "a.file_path": f"src/c{i}.py",
+            "labels(a)": "Function", "type(c)": "CALLS", "c.confidence": confidence,
+            "strategy": strategy,
+            "b.name": "target", "b.qualified_name": qn, "b.file_path": tfile}
+
+
+def _verified(n: int, start: int = 0, **kw) -> list[dict]:
+    return [_edge(i, strategy="import_map", confidence="0.95", **kw) for i in range(start, start + n)]
+
+
+def _possible(n: int, start: int = 0, **kw) -> list[dict]:
+    return [_edge(i, strategy="suffix_match", confidence="0.55", **kw) for i in range(start, start + n)]
+
+
+def _sided(monkeypatch, callers: list[dict], callees: list[dict]) -> GraphProvider:
+    """A provider whose two edge queries answer differently, so `impact` has two real halves.
+
+    `_provider` returns one row set to every query, which makes an impact answer whose callees are
+    its callers. That is fine for the single-op tests above and useless for the one thing impact is
+    tested for here — that the envelope summarises BOTH halves of a body containing both."""
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        LIST_PROJECTS if method == "list_projects" else None))
+    monkeypatch.setattr(p, "_query_rows", lambda cypher, project, timeout_ms: (
+        list(callers) if 'WHERE b.name=' in cypher else list(callees)))
+    return p
+
+
+def _row_lines(body: str) -> list[str]:
+    """Every line the body offers as a result row — and exactly what `bench/score.py` reads."""
+    return [ln for ln in body.splitlines() if ln.startswith("- ")]
+
+
+def _shape(monkeypatch, shape: str) -> tuple[dict, bool]:
+    """(envelope, the backend's own row cap was hit) for one answer shape."""
+    if shape == "clean":
+        return _callers(monkeypatch, _verified(4)), False
+    if shape == "name-matched":
+        return _callers(monkeypatch, _possible(6)), False
+    if shape == "mixed":
+        return _callers(monkeypatch, _verified(3) + _possible(5, start=3)), False
+    if shape == "row-cap":
+        return _callers(monkeypatch, _verified(_LIMIT)), True
+    if shape == "candidate-cap":
+        # One row under each of thirteen distinct symbols sharing the name: twelve are rendered,
+        # the thirteenth is withheld and counted.
+        rows = [_verified(1, start=i, qn=f"pkg.m{i}.target", tfile=f"src/t{i}.py")[0]
+                for i in range(_CANDIDATES + 1)]
+        return _callers(monkeypatch, rows), False
+    if shape == "impact":
+        p = _sided(monkeypatch, _verified(3), _possible(4, start=3))
+        return p.build_result("impact", "target", [], 30000, ROOT), False
+    raise AssertionError(shape)
+
+
+@pytest.mark.parametrize(
+    "shape", ["clean", "name-matched", "mixed", "row-cap", "candidate-cap", "impact"])
+def test_the_evidence_summary_agrees_with_the_rows_it_summarises(monkeypatch, shape):
+    """THE verifier for `evidence`, which is a summary and therefore owed one.
+
+    Its referent is not a number the renderer happens to have: it is the rows the body PRINTED.
+    Four things have to hold at once, and each one is a way this summary has been wrong in some
+    other shape already in this repository.
+
+    * the three buckets partition `returned` — a breakdown that does not add up to its own list;
+    * `returned` is the rows the body actually printed — a count true of what was retrieved and
+      false of what was shown (`impact` recorded one of its two halves before this was fixed);
+    * `total` is `None` EXACTLY when the backend's cap was hit — unknown stated as known is how a
+      capped list comes to read as a complete one;
+    * `truncated` is set whenever the printed list is not all of it, from either cap.
+    """
+    env, backend_capped = _shape(monkeypatch, shape)
+    ev, rows, body = env["evidence"], env["rows"], env["result"]
+
+    assert ev["verified"] + ev["possible"] + ev["unstated"] == ev["returned"], (
+        f"the breakdown does not partition its own list: {ev}")
+    assert len(rows) == ev["returned"], f"{len(rows)} structured rows summarised as {ev}"
+    assert len(_row_lines(body)) == ev["returned"], (
+        f"the body printed {len(_row_lines(body))} rows, the summary claims {ev['returned']}")
+    for bucket, count in (("resolved", ev["verified"]), ("name-matched", ev["possible"]),
+                          ("unstated", ev["unstated"])):
+        assert sum(1 for r in rows if r["evidence"] == bucket) == count, (bucket, ev)
+
+    assert (ev["total"] is None) is backend_capped, (
+        f"`total` is the one field that says the size is UNKNOWN; {shape} reports {ev['total']}")
+    if ev["total"] is not None:
+        assert ev["total"] >= ev["returned"], ev
+    assert ev["truncated"] == bool(backend_capped or ev["total"] != ev["returned"]), ev
+
+
+def test_a_capped_answer_counts_the_rows_it_withheld_rather_than_forgetting_them(monkeypatch):
+    """The two caps are not the same fact and must not be reported as one.
+
+    The backend's cap leaves the total unknown. Ours leaves it known — those rows were retrieved,
+    we simply did not print them — and reporting `None` there would understate what is in hand as
+    firmly as reporting `returned` would overstate it."""
+    env, _ = _shape(monkeypatch, "candidate-cap")
+    ev = env["evidence"]
+
+    assert ev["returned"] == _CANDIDATES, ev
+    assert ev["total"] == _CANDIDATES + 1, ev
+    assert ev["truncated"] is True, ev
+    assert "+1 more symbol(s) with this name, not shown" in env["result"]
+
+
+def test_a_structured_row_never_disagrees_with_the_line_it_was_rendered_from(monkeypatch):
+    """`verified` and `confidence` are per-row claims, and the row is printed inches away.
+
+    The badge is the reader's channel and the field is the agent's. They are derived from the same
+    `_bucket` on the same dict, so the only way they diverge is a change to one of them — which is
+    exactly the commit this should fail on."""
+    env = _callers(monkeypatch, _verified(3) + _possible(4, start=3))
+    rows, lines = env["rows"], _row_lines(env["result"])
+    assert len(rows) == len(lines)
+
+    for row, line in zip(rows, lines, strict=True):
+        badged = "[?" in line
+        assert row["verified"] is not badged, (
+            f"{row['name']}: verified={row['verified']} but the printed line says {line!r}")
+        assert row["verified"] == (row["evidence"] == "resolved"), row
+        if row["confidence"] is not None and badged:
+            assert f"{row['confidence']:.2f}" in line, (row, line)
+    # And the row's own name is the one on the line, so a filter never returns a row a reader
+    # cannot find in the answer.
+    for row, line in zip(rows, lines, strict=True):
+        assert row["qualified_name"] in line or row["name"] in line, (row, line)
+
+
+def test_an_agent_can_filter_on_structured_fields_alone(monkeypatch):
+    """Phase 3's first acceptance criterion, stated as the thing an agent would actually do.
+
+    Filtering `rows` on `verified` has to produce the same set as reading the badges out of the
+    prose, or the structured form is a second opinion rather than the same answer."""
+    env = _callers(monkeypatch, _verified(3) + _possible(5, start=3))
+    rows, ev = env["rows"], env["evidence"]
+
+    kept = [r for r in rows if r["verified"]]
+    assert len(kept) == ev["verified"] == 3, ev
+    assert all(r["evidence"] == "resolved" and r["strategy"] == "import_map" for r in kept)
+    # Every field the readiness doc asks for, present on every row, with no `None` standing in for
+    # a fact the row does have.
+    for r in rows:
+        assert set(r) >= {"relation", "name", "qualified_name", "file", "edge", "verified",
+                          "evidence", "strategy", "confidence", "why"}, r
+        assert r["relation"] == "caller", r
+        assert r["edge"] == "CALLS", r
+        assert r["why"], r
+    # The dropped rows are the ones the prose warns about, not a different population.
+    assert len([r for r in rows if not r["verified"]]) == ev["possible"] == 5
+
+
+def test_qualified_caller_queries_show_verified_results_before_possible_ones(monkeypatch):
+    """Phase 3's second acceptance criterion. A reader who stops after the first few rows should
+    be stopping on the evidence, not on whichever guess the backend returned first."""
+    # Interleaved on the way in, so passing this cannot be an accident of input order.
+    incoming = []
+    for i in range(0, 8, 2):
+        incoming += [_possible(1, start=i)[0], _verified(1, start=i + 1)[0]]
+    env = _callers(monkeypatch, incoming)
+
+    verdicts = [r["verified"] for r in env["rows"]]
+    assert verdicts == sorted(verdicts, reverse=True), verdicts
+    assert [("[?" in ln) for ln in _row_lines(env["result"])] == [not v for v in verdicts], (
+        "the printed order has to be the structured order, or they are two different answers")
+
+
+def test_truncation_cannot_be_mistaken_for_completeness(monkeypatch):
+    """Phase 3's third acceptance criterion, checked in all four channels that could claim it."""
+    env, _ = _shape(monkeypatch, "row-cap")
+    ev = env["evidence"]
+
+    assert ev["truncated"] is True and ev["total"] is None, ev
+    assert ev["safe_for_destructive"] is False, ev
+    assert env["confidence"] == "partial", env
+    assert any(g["kind"] == "row-cap-reached" for g in env["gaps"]), env["gaps"]
+    assert "> Truncated: yes — 50 shown, total unknown" in env["result"], env["result"][:400]
+
+
+def test_the_envelope_never_calls_an_answer_safe_while_calling_it_partial(monkeypatch):
+    """The cross-check between the two summaries, and the reason `safe_for_destructive` is settled
+    after the body rather than inside it.
+
+    `target-ambiguous` and `non-call-relationships` are recorded by the renderer AFTER its rows are
+    printed, and `ancestor-scope` after the renderer has returned. A verdict computed at render
+    time reads a gap list that is not yet the answer's — measured, before this was split apart: an
+    answer over two same-named symbols came back `partial`, `gaps: [target-ambiguous]`, and
+    `safe_for_destructive: true`, which is the envelope contradicting itself in the one direction
+    that ends in a deletion."""
+    ambiguous = (_verified(2, qn="pkg.a.target", tfile="src/a.py")
+                 + _verified(2, start=2, qn="pkg.b.target", tfile="src/b.py"))
+    env = _callers(monkeypatch, ambiguous)
+
+    assert env["confidence"] == "partial"
+    assert [g["kind"] for g in env["gaps"]] == ["target-ambiguous"]
+    assert env["evidence"]["safe_for_destructive"] is False, env["evidence"]
+
+    for shape in ("clean", "name-matched", "mixed", "row-cap", "candidate-cap", "impact"):
+        each, _ = _shape(monkeypatch, shape)
+        if each["evidence"]["safe_for_destructive"]:
+            assert each["confidence"] == "complete", (shape, each["evidence"], each.get("gaps"))
+            assert not each.get("gaps"), (shape, each["gaps"])
+
+
+def test_an_impact_answer_summarises_both_of_its_halves(monkeypatch):
+    """`impact` renders callers and callees into one body, so one of them being summarised is the
+    aggregate defect with the rows still in hand. `relation` is what keeps the merged list usable:
+    without it "what calls this" and "what this calls" are one undifferentiated array."""
+    env, _ = _shape(monkeypatch, "impact")
+    rows, ev = env["rows"], env["evidence"]
+
+    assert ev["returned"] == 7, ev
+    assert len(_row_lines(env["result"])) == 7
+    assert [r["relation"] for r in rows].count("caller") == 3
+    assert [r["relation"] for r in rows].count("callee") == 4
+    # One banner over the whole answer, not one per half.
+    assert env["result"].count("> Safe for destructive decisions:") == 1, env["result"][:600]
+
+
+def test_a_clean_answer_gets_no_first_screen(monkeypatch):
+    """Silence is the point. A banner printed over every result is furniture, and furniture is not
+    read — the same argument the evidence headline makes for its own silence."""
+    env, _ = _shape(monkeypatch, "clean")
+
+    assert env["evidence"]["safe_for_destructive"] is True, env["evidence"]
+    assert env["confidence"] == "complete"
+    assert not [ln for ln in env["result"].splitlines() if ln.startswith("> ")], env["result"]
+    assert env["result"].startswith("## Callers of target"), env["result"][:200]
+
+
+def test_the_first_screen_says_the_same_thing_the_envelope_does(monkeypatch):
+    """Two renderings of one verdict. The banner is what a model reads; `evidence` is what an
+    integration branches on; a reader given different answers by the two has no way to tell which
+    one the tool meant."""
+    env, _ = _shape(monkeypatch, "mixed")
+    banner = [ln for ln in env["result"].splitlines() if ln.startswith("> ")]
+    ev = env["evidence"]
+
+    assert banner[0] == f"> **Confidence: {env['confidence']}**", banner
+    assert (f"> Verified callers: {ev['verified']} · possible: {ev['possible']} · "
+            f"unstated: {ev['unstated']}") in banner, banner
+    assert banner[-1] == "> Safe for destructive decisions: **no**", banner
+    assert env["result"].startswith("> **Confidence:"), "the first screen is not first"
+
+
+def test_the_first_screen_can_never_be_read_as_result_rows(monkeypatch):
+    """The same cross-component contract the settle lines are pinned against: `bench/score.py::
+    graph_answer` parses this body back into caller keys and takes every line starting with `- ` as
+    a row. A banner line in that shape would be scored as a fabricated caller — the benchmark
+    measuring the disclosure instead of the engine."""
+    for shape in ("name-matched", "mixed", "row-cap", "candidate-cap", "impact"):
+        env, _ = _shape(monkeypatch, shape)
+        banner = [ln for ln in env["result"].splitlines() if ln.startswith("> ")]
+        assert banner, shape
+        for line in banner:
+            assert not line.startswith("- "), (shape, line)
+        # And it adds no row lines of its own: the body's row count is still the summary's.
+        assert len(_row_lines(env["result"])) == env["evidence"]["returned"], shape
+
+
+def test_the_evidence_class_follows_the_rows_and_not_only_the_op(monkeypatch):
+    """The end-to-end half of `evidence_class`: two `callers` answers, same op, different class.
+
+    This is the distinction Phase 3 item 2 asks for, and the reason it could not be a constant
+    printed per op. The 48-row `StrategyChain.resolve` answer and a four-row import-resolved one
+    are both `callers`; only one of them settles anything, and an agent choosing whether to delete
+    reads the envelope, not the op it typed."""
+    clean, _ = _shape(monkeypatch, "clean")
+    assert clean["evidence_class"] == "evidence", clean["evidence_class"]
+    assert clean["evidence"]["safe_for_destructive"] is True
+
+    for shape in ("name-matched", "mixed", "row-cap", "candidate-cap"):
+        env, _ = _shape(monkeypatch, shape)
+        assert env["evidence_class"] == "advisory", (shape, env["evidence_class"])
+
+    # `impact` is advisory whatever its rows say — it is a blast-radius judgement assembled from
+    # two traversals plus non-call reference edges. Its rows still carry `verified`, so the
+    # evidence-grade subset is reachable; the WHOLE answer is not evidence.
+    impact, _ = _shape(monkeypatch, "impact")
+    assert impact["evidence_class"] == "advisory", impact["evidence_class"]
+    assert any(r["verified"] for r in impact["rows"]), "the per-row verdict is still there"

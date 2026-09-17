@@ -27,6 +27,20 @@ engine is.
 | **Semantic** | `search` | **Discovery.** It finds candidates. | Similarity is not reachability. A high score means "reads like your query", never "calls this". |
 | **Pattern** | `pattern` | **Discovery**, same as above. | It is a graph-augmented grep. |
 
+**The same three words are on the envelope.** `evidence_class` is `evidence`, `discovery` or
+`advisory` on every answered result, and it is decided by the answer rather than by the op: a
+`callers` result is `evidence` only when every row followed a real binding and nothing is disclosed
+missing, and `advisory` otherwise. Nothing `partial` is ever `evidence`. `impact`, `context` and
+`chain` are always `advisory` — they are assembled from heuristics, and their per-row `verified`
+flag is where the evidence-grade subset lives.
+
+So the table above is now something you can branch on rather than something you have to have read:
+
+```jsonc
+// before deleting or renaming
+if (env.evidence_class !== "evidence") { /* verify first — do not delete */ }
+```
+
 Two consequences worth stating on their own:
 
 **A caller count is a count of ROWS, not of callers.** The heading tells you the split:
@@ -57,6 +71,10 @@ lookup did not answer*. The envelope distinguishes them, and you must too:
   part as **unknown**, never as none.
 - `result: null` with a `reason` — nothing was answered at all. `reason` says why and `hint` says
   what to do.
+- `evidence.safe_for_destructive` — `true` only when there are rows, every one of them followed a
+  real binding, the list is not truncated and nothing is disclosed missing. It is deliberately
+  strict; if you want a looser rule, `evidence` gives you `verified` / `possible` / `unstated` and
+  you can write it yourself.
 
 If you read one thing from this page, read that list.
 
@@ -84,11 +102,19 @@ codeintel query --op callers --target YourSymbol --project-root .
 
 Now read it in this order:
 
-1. **The heading.** Is the count what you expected? If it is much larger, look at the second line.
-2. **The second line** — the `resolved · name-matched · unstated` split. Are your known callers in
-   the unbadged rows?
-3. **`Settle it:`** if it appears. Run the command. Files absent from its output are not callers.
-4. **`confidence`** on the envelope (`--json` shows it). `partial` means read `gaps`.
+1. **The `>` block above the heading**, if there is one. It is the whole verdict in four lines, and
+   it is printed only when there is something to warn about — a clean answer starts at the heading.
+
+   ```text
+   > **Confidence: partial**
+   > Verified callers: 2 · possible: 43 · unstated: 5
+   > Safe for destructive decisions: **no**
+   ```
+
+2. **The heading.** Is the count what you expected? If it is much larger, look at the line below it.
+3. **The `resolved · name-matched · unstated` split.** Are your known callers in the unbadged rows?
+4. **`Settle it:`** if it appears. Run the command. Files absent from its output are not callers.
+5. **`confidence`** on the envelope (`--json` shows it). `partial` means read `gaps`.
 
 You have verified the tool when **your known callers appear as `resolved` rows**. If they appear
 only as `name-matched`, the graph is guessing about your code too, and you should prefer
@@ -200,7 +226,9 @@ Then **restart the agent** — a running host does not reload its MCP config.
 Two things to say to whoever you send it to, because neither is discoverable:
 
 1. **Read `confidence` and `gaps`, and treat a caller count as a lead rather than an authority.**
-   Only the `resolved` rows followed a real binding.
+   Only the `resolved` rows followed a real binding. An agent can skip the prose entirely:
+   `evidence_class` says what the answer supports, and `rows[]` carries per-row `verified`,
+   `strategy`, `confidence` and `why` — so it can filter instead of parse.
 2. **Run §2 on a symbol you already know before trusting anything else.** Measured accuracy here is
    bimodal, and the discriminator is knowable in advance: a symbol whose leaf name is unique in the
    index resolves essentially exactly; a colliding method name in a large tree does not — and says

@@ -394,7 +394,18 @@ _MCP_INSTRUCTIONS = (
     "A NON-null `result` is not a promise that the answer is whole. Check `confidence`: when it is "
     "`partial`, a named part of the answer could not be retrieved — `gaps` says which section and "
     "why, and the body text says so too. Treat a partial reference list as 'unknown', never as "
-    "'none': the difference decides whether deleting or changing a symbol is safe."
+    "'none': the difference decides whether deleting or changing a symbol is safe.\n\n"
+    "Nor is a non-null result a promise that the answer is PROOF. `evidence_class` says which of "
+    "three an answer is: `evidence` — a real binding was followed, act on it; `discovery` — ranked "
+    "or matched candidates, a place to look; `advisory` — assembled from heuristics, verify before "
+    "acting. Before a destructive edit (deleting, renaming, changing a signature) require "
+    "`evidence`, and when you do not have it, verify first — re-ask with `engine=\"lsp\"`, or run "
+    "the `Settle it:` command the answer prints.\n\n"
+    "`callers`/`callees`/`impact` also return the answer as FIELDS, so you never parse the prose: "
+    "`rows[]` carries per-row `relation`, `verified`, `evidence`, `strategy`, `confidence` and "
+    "`why`, and `evidence[]` carries `verified`/`possible`/`unstated`/`returned`/`total`/"
+    "`truncated`/`safe_for_destructive`. Filter on `rows[].verified`; `evidence.total` is null when "
+    "the row cap was hit, which means the size is UNKNOWN, not that `returned` is all of them."
 )
 
 
@@ -411,17 +422,28 @@ _QueryOp = Literal[
 ]
 _QueryEngine = Literal["auto", "graph", "lsp", "semantic", "both", "all"]
 
+# Each op carries what its answer can be USED for, because that is chosen here — before any
+# envelope exists to be read. `[evidence]` is the CEILING, not a promise: a `callers` answer whose
+# rows were matched by name comes back `evidence_class: "advisory"`, and the envelope is the
+# authority. See `_OP_CEILING` in provider.py, which these words are pinned against.
 _OP_FIELD_DESCRIPTION = (
-    "search(target) — find code by meaning or name; use instead of grep. "
-    "symbol(target) — definition/signature/docstring (LSP). "
-    "callers(target) / callees(target) — direct in/out call edges. "
-    "impact(target) — callers+callees together; run before changing a symbol. "
-    "context(target) — impact PLUS the LSP definition, merged; the fullest single-symbol view. "
-    "chain(target=\"A->B\") — call path between two symbols, risk-labeled. "
-    "pattern(target) — literal/regex match ranked by graph importance (graph-augmented grep). "
-    "overview() — this repo's architecture; `target` is IGNORED. "
-    "changed() — impact of your uncommitted git edits; `target` is IGNORED. "
-    "hotspots() — highest fan-in/complexity symbols; `target` is IGNORED."
+    "Each op is marked with what its answer supports: [evidence] a real binding was followed — "
+    "act on it; [discovery] ranked candidates — a place to look; [advisory] assembled from "
+    "heuristics — verify before acting. Before deleting or renaming, require `evidence_class: "
+    "\"evidence\"` on the envelope. "
+    "search(target) [discovery] — find code by meaning or name; use instead of grep. "
+    "symbol(target) [evidence] — definition/signature/docstring (LSP). "
+    "callers(target) / callees(target) [evidence when every row resolved, else advisory] — direct "
+    "in/out call edges. "
+    "impact(target) [advisory] — callers+callees together; run before changing a symbol. "
+    "context(target) [advisory] — impact PLUS the LSP definition, merged; the fullest "
+    "single-symbol view. "
+    "chain(target=\"A->B\") [advisory] — call path between two symbols, risk-labeled. "
+    "pattern(target) [discovery] — literal/regex match ranked by graph importance "
+    "(graph-augmented grep). "
+    "overview() [discovery] — this repo's architecture; `target` is IGNORED. "
+    "changed() [discovery] — impact of your uncommitted git edits; `target` is IGNORED. "
+    "hotspots() [discovery] — highest fan-in/complexity symbols; `target` is IGNORED."
 )
 _TARGET_FIELD_DESCRIPTION = (
     "The symbol name or natural-language query. Ignored by `overview`/`changed`/`hotspots` — "
