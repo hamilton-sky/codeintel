@@ -126,7 +126,8 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             r"_EDGE_CONFIDENCE_FLOOR",
             r"providers/graph\.py",
         ),
-        provenance="rg -n '_EDGE_CONFIDENCE_FLOOR' -> src/codeintel/providers/graph.py:398 = 0.85",
+        provenance=("rg -n '^_EDGE_CONFIDENCE_FLOOR' src/codeintel/providers/graph.py "
+                    "-> the constant is defined there, = 0.85"),
         canned_answer=(
             "The floor is 0.85, held in the constant _EDGE_CONFIDENCE_FLOOR, defined in "
             "src/codeintel/providers/graph.py at line 398."
@@ -143,7 +144,7 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             r"_RANK_LABELS", r"Function", r"Method", r"Class", r"Interface", r"Route",
         ),
         provenance=(
-            "src/codeintel/mapper.py:55 -> "
+            "rg -n '^_RANK_LABELS' src/codeintel/mapper.py -> "
             "_RANK_LABELS = ('Function','Method','Class','Interface','Route')"
         ),
         canned_answer=(
@@ -160,7 +161,9 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             "which one means the pass ran and failed?"
         ),
         must_include=(r"index-failed", r"no-index"),
-        provenance="src/codeintel/providers/semantic.py:297 'index-failed'; :304 'no-index'",
+        provenance=("rg -n 'reason=\"index-failed\"|reason=\"no-index\"' "
+                    "src/codeintel/providers/semantic.py -> both strings are constructed "
+                    "there; `index-failed` is the pass that ran and failed"),
         canned_answer=(
             "The two strings are \"no-index\" (nothing was ever indexed) and \"index-failed\" (a pass ran and failed). "
             "index-failed is the one meaning the pass ran and failed."
@@ -174,7 +177,8 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             "which file defines it?"
         ),
         must_include=(r"safe_null_result", r"provider\.py"),
-        provenance="rg -n 'def safe_null_result' -> src/codeintel/provider.py:67",
+        provenance=("rg -n '^def safe_null_result' src/codeintel/provider.py "
+                    "-> defined there, and nowhere else in the package"),
         canned_answer=(
             "The function is safe_null_result, defined in src/codeintel/provider.py at line 67."
         ),
