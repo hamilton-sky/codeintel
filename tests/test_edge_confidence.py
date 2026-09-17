@@ -149,3 +149,60 @@ def test_both_edge_ops_disclose_identically(monkeypatch, op, rows_key):
     env = _provider(monkeypatch, _rows("0.38")).build_result(op, "target", [], 30000, ROOT)
     assert "[?0.38]" in env["result"], (op, env["result"])
     assert env["confidence"] == "partial"
+
+
+# ---------------------------------------------------------------------------
+# The heading, which is the line a reader actually acts on
+# ---------------------------------------------------------------------------
+#
+# Every assertion above is about the badge on a row or the note beneath the rows. Both are correct
+# and both are BELOW the count. Asking a 1,483-file monorepo for `callers` of `StrategyChain.resolve`
+# answers `(48 direct, 2 other reference(s))` where five files in the whole repository mention
+# `StrategyChain` and the truth is two; the note saying 43 of 50 rows were name-matched sits under
+# fifty rows. `_render_edge_answer` already refuses one number when the rows are different KINDS of
+# fact — "48 direct, 2 other reference(s)" is that refusal — and this is the same rule on the axis
+# that actually misleads.
+
+
+def test_the_heading_breaks_its_count_down_by_how_rows_were_resolved(monkeypatch):
+    env = _callers(monkeypatch, _rows("0.95", "0.90", "0.75", "0.38"))
+    head = env["result"].splitlines()[1]
+    assert "2 resolved" in head, head
+    assert "2 name-matched" in head, head
+    # It has to deny the reading that makes the count dangerous, not merely list the tiers.
+    assert "counts rows, not confirmed callers" in head
+
+
+def test_the_breakdown_appears_above_the_rows(monkeypatch):
+    """Placement is the entire fix. The same facts already existed underneath a fifty-row list."""
+    lines = _callers(monkeypatch, _rows("0.95", "0.38"))["result"].splitlines()
+    first_row = next(i for i, line in enumerate(lines) if line.startswith("- "))
+    breakdown = next(i for i, line in enumerate(lines) if "name-matched" in line)
+    assert breakdown < first_row, lines[:4]
+
+
+def test_a_single_bucket_keeps_the_plain_heading(monkeypatch):
+    """The counterweight, and the reason this is keyed on buckets rather than on badges: when every
+    row was resolved the same way, one number IS honest, and a breakdown reading `3 resolved` is
+    noise. A line that fires on good answers is how a real one stops being read."""
+    body = _callers(monkeypatch, _rows("0.95", "0.90", "0.95"))["result"]
+    assert "resolved ·" not in body and "name-matched" not in body, body
+    body = _callers(monkeypatch, _rows("0.38", "0.38"))["result"]
+    assert "resolved ·" not in body, body
+
+
+def test_a_backend_that_never_scores_gets_no_breakdown(monkeypatch):
+    """A generation that does not return the confidence column stamps every row the same way, which
+    is the single-bucket case above. Reporting `3 unstated` on every answer a 0.9.x backend produces
+    would be a fact about the backend restated once per query."""
+    body = _callers(monkeypatch, _rows(None, None, None))["result"]
+    assert "unstated" not in body, body
+
+
+def test_the_breakdown_counts_every_row_it_was_given(monkeypatch):
+    """Arithmetic, because a breakdown that does not sum to the answer is worse than none."""
+    env = _callers(monkeypatch, _rows("0.95", "0.90", "0.75", "0.38", "0.30"))
+    head = env["result"].splitlines()[1]
+    counted = sum(int(part.strip().split()[0])
+                  for part in head.split("**")[1].rstrip(".").split("·"))
+    assert counted == 5, head

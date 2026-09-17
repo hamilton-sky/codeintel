@@ -360,6 +360,14 @@ _DIRECT_KIND = "CALLS"
 # Classified by prefix because the vocabulary is open — `lsp_direct`, `lsp_ts_method`,
 # `lsp_callable_alias`, `lsp_builtin_constructor` and a dozen more are all the same class of
 # evidence, and enumerating them would go stale on the backend's next release.
+# The three buckets a caller row can fall into, which is what the heading counts. Deliberately
+# COARSER than `_evidence_class` above: a reader deciding whether to trust a count needs to know
+# whether a binding was followed, not which of nine lsp strategies followed it. The fine grain stays
+# on the row badge and in the note beneath.
+_RESOLVED = "resolved"
+_NAME_MATCHED = "name-matched"
+_UNSTATED = "unstated"
+
 _TRUSTED_EVIDENCE: tuple[str, ...] = ("lsp", "import_map", "same_module")
 _GUESS_EVIDENCE: tuple[str, ...] = ("unique_name", "suffix_match", "fuzzy", "qualified_suffix")
 
@@ -1420,11 +1428,13 @@ class GraphProvider:
                 if evidence == "name-guess":
                     r["_low_confidence"] = _edge_confidence(r)
                     r["_evidence"] = evidence
+                    r["_bucket"] = _NAME_MATCHED
                     guessed_by.add(str(r.get("strategy") or "").strip())
                     unverified += 1
                     continue
                 if evidence in ("lsp", "import", "same-module"):
                     r["_evidence"] = evidence
+                    r["_bucket"] = _RESOLVED
                     continue
                 conf = _edge_confidence(r)
                 if conf is None:
@@ -1433,16 +1443,24 @@ class GraphProvider:
                     # the column at all; a row whose key is present but empty is an edge that
                     # backend declined to score. The first says nothing about this answer, the
                     # second says this specific edge's provenance is unknown.
+                    r["_bucket"] = _UNSTATED
                     if "c.confidence" in r:
                         unstamped += 1
                     else:
                         no_column += 1
                 elif conf <= _EDGE_CONFIDENCE_WEAK:
                     r["_low_confidence"] = conf
+                    r["_bucket"] = _NAME_MATCHED
                     weak += 1
                 elif conf < _EDGE_CONFIDENCE_FLOOR:
                     r["_low_confidence"] = conf
+                    r["_bucket"] = _NAME_MATCHED
                     unverified += 1
+                else:
+                    # At or above the floor with no strategy reported: the cascade consulted the
+                    # file's imports to get here, which is the same class of evidence as a stated
+                    # `import_map`, so it is counted as resolved rather than as a third silence.
+                    r["_bucket"] = _RESOLVED
         if not (weak or unverified or unstamped):
             return ""
         # A backend that never returns the column at all is not producing partial answers — it is a
@@ -1626,6 +1644,40 @@ class GraphProvider:
             "callees", "callee", target, wanted, selected,
             ("b.name", "b.qualified_name", "b.file_path"), truncated, notes)
 
+    @staticmethod
+    def _evidence_headline(groups: list[_EdgeGroup], unit: str) -> str:
+        """The heading's count, broken out by how the rows were resolved — or `""`.
+
+        `_render_edge_answer` already refuses a single number when the rows are different KINDS of
+        fact ("48 direct, 2 other reference(s)"). This is the same rule on the other axis, and it is
+        the axis that actually misleads. Asking a 1,483-file monorepo for `callers` of
+        `StrategyChain.resolve` answers `(48 direct, 2 other reference(s))` when five files in the
+        repository mention `StrategyChain` at all and the true answer is two. Both true callers are
+        in the list and the note beneath says 43 of 50 rows were name-matched — but the note is
+        beneath FIFTY rows, and the first line a reader sees is the one that says 48.
+
+        So the breakdown goes above the rows, where the misleading number is.
+
+        Silent in the two cases where it would be noise rather than news: when every row falls in
+        one bucket the plain heading is already honest, and a backend generation that reports no
+        confidence column at all stamps every row `unstated`, which is that same single-bucket case
+        and not a finding about this answer.
+        """
+        counts: dict[str, int] = {}
+        for g in groups:
+            for r in g.rows:
+                bucket = str(r.get("_bucket") or "")
+                if bucket:
+                    counts[bucket] = counts.get(bucket, 0) + 1
+        present = [(b, counts[b]) for b in (_RESOLVED, _NAME_MATCHED, _UNSTATED) if counts.get(b)]
+        if len(present) < 2:
+            return ""
+        tally = " · ".join(f"{n} {b}" for b, n in present)
+        return (
+            f"**{tally}.** The heading counts rows, not confirmed {unit}s — only the `{_RESOLVED}` "
+            f"rows followed an import or a language-server binding. Per-row detail below.\n"
+        )
+
     def _render_edge_answer(
         self, op: str, unit: str, target: str, wanted: _SymbolTarget,
         groups: list[_EdgeGroup], row_keys: tuple[str, str, str], truncated: bool,
@@ -1652,6 +1704,7 @@ class GraphProvider:
         head = (f"## {op.capitalize()} of {target} ({kept})\n" if not others
                 else f"## {op.capitalize()} of {target} "
                      f"({direct} direct, {others} other reference(s))\n")
+        head += self._evidence_headline(answered, unit)
 
         if len(answered) == 1:
             body = head + "\n".join(self._display(r, name_key, qn_key, file_key)

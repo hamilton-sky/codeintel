@@ -57,6 +57,21 @@ All notable changes to codeintel are documented here. The format is based on
   a confident falsehood becoming a disclosed non-answer.
 
 ### Added
+- **A `callers`/`callees` heading breaks its count down by how the rows were resolved.** The count
+  was one number over rows that are not one kind of fact. Asking a 1,483-file monorepo for callers
+  of `StrategyChain.resolve` answered `(48 direct, 2 other reference(s))` where five files in the
+  whole repository mention `StrategyChain` and the true answer is two — both of which were in the
+  list, correctly badged, under a note saying 43 of 50 rows were name-matched. The badges and the
+  note were already right; they sat beneath fifty rows, while the first line said 48. The heading
+  now reads `**2 resolved · 43 name-matched · 5 unstated.** The heading counts rows, not confirmed
+  callers …` directly above them. Buckets come from the same classifier that badges each row, so
+  the heading and the note cannot disagree, and they are coarser than `_evidence_class` on purpose:
+  a reader deciding whether to trust a count needs to know whether a binding was followed, not
+  which of nine LSP strategies followed it. Silent when every row falls in one bucket — including
+  on a backend generation that reports no confidence column, where the breakdown would restate a
+  fact about the backend once per query — because one number really is honest there, and a line
+  that fires on good answers is how a real warning stops being read.
+
 - **`CODEINTEL_BENCH_EXE` selects which `codeintel` the call-edge benchmark measures.** The harness
   shells out to whatever is on `PATH`, and its new provenance header warns when that build is not
   the checkout — but there was no way to act on the warning short of reinstalling the tool.
