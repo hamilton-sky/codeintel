@@ -120,8 +120,17 @@ def test_overview_falls_back_to_lsp_when_graph_unavailable():
 
 
 # --------------------------------------------------------------------------- reindex="never" wiring
+#
+# Both of these opt out of `conftest.py::_no_background_reindex`, because the scheduling decision
+# IS what they assert. Neither does real work: each intercepts `_executor.submit`, so the pass is
+# counted and never runs.
+#
+# The negative one has to opt in for a second reason, and it is the reason this whole suite of
+# guards exists. Under the stub `maybe_reindex` does nothing, so `submitted == []` holds no matter
+# what the config says — the assertion would pass while testing the stub instead of the gate. True
+# about the call, false about the thing it claims to check.
 
-def test_reindexer_honors_reindex_never(tmp_path, monkeypatch):
+def test_reindexer_honors_reindex_never(tmp_path, monkeypatch, background_reindex):
     from codeintel.reindexer import Reindexer
     (tmp_path / ".codeintel.toml").write_text('reindex = "never"\n')
     rx = Reindexer(debounce_seconds=0)
@@ -131,7 +140,7 @@ def test_reindexer_honors_reindex_never(tmp_path, monkeypatch):
     assert submitted == []  # reindex="never" → no background pass scheduled
 
 
-def test_reindexer_schedules_by_default(tmp_path, monkeypatch):
+def test_reindexer_schedules_by_default(tmp_path, monkeypatch, background_reindex):
     from codeintel.reindexer import Reindexer
     monkeypatch.setenv("CODEINTEL_REINDEX", "on")
     rx = Reindexer(debounce_seconds=0)  # no .codeintel.toml → default "on-demand"
@@ -184,3 +193,83 @@ def test_graph_positive_lookup_is_cached(monkeypatch):
 
 def test_log_swallowed_never_raises():
     log_swallowed("unit-test", RuntimeError("boom"))  # must not raise
+
+
+# --------------------------------------------------------------------------- the suite's own limits
+
+def test_no_test_can_run_indefinitely():
+    """The suite claims a per-test ceiling. This checks the claim rather than the intention.
+
+    Wired in `pyproject.toml`, so a merge that drops the setting — or an environment where
+    pytest-timeout is not installed and the key is silently ignored — leaves every test able to hang
+    again. That was the shape of the stall: nothing was broken, something just never finished, and
+    the only signal was a person's patience running out.
+    """
+    import pathlib
+    import tomllib
+
+    import pytest_timeout  # noqa: F401  — the key is inert without the plugin
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    with open(root / "pyproject.toml", "rb") as fh:
+        cfg = tomllib.load(fh)["tool"]["pytest"]["ini_options"]
+
+    assert isinstance(cfg.get("timeout"), int), "no per-test timeout is configured"
+    assert 0 < cfg["timeout"] <= 600, f"a {cfg['timeout']}s ceiling is not a ceiling"
+    # `thread` kills the whole session, which turns one overrun into the same unexplained death
+    # partway through that the ceiling exists to replace.
+    assert cfg.get("timeout_method") == "signal", cfg.get("timeout_method")
+
+
+def test_the_timeout_fails_one_test_and_lets_the_session_finish(tmp_path):
+    """A ceiling that takes the session down with it is not an improvement on a hang."""
+    import subprocess
+    import sys
+
+    probe = tmp_path / "test_probe.py"
+    probe.write_text(
+        "import time\n"
+        "def test_slow():\n    time.sleep(30)\n"
+        "def test_fast():\n    assert True\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--no-cov", "-p", "no:cacheprovider",
+         "-o", "timeout=2", "-o", "timeout_method=signal", str(probe)],
+        capture_output=True, text=True, timeout=120,
+    )
+    out = result.stdout + result.stderr
+    assert "Timeout (>2.0s)" in out, out
+    # The point: the run still reported, and the test after the slow one still ran.
+    assert "1 failed, 1 passed" in out, out
+
+
+def test_every_test_server_that_shuts_down_also_closes_its_socket():
+    """`shutdown()` stops the serve loop. `server_close()` releases the listening socket.
+
+    Sixteen teardowns called the first and none called the second, so every HTTP test leaked its
+    listener and the suite reported a `ResourceWarning` per test. That is the readiness doc's P2
+    item, and its name — "SQLite resource warnings" — was the misleading part: not one of the
+    warnings came from sqlite. `SemanticDb` has had `close()` and a context manager throughout;
+    the leak was sockets, plus one unclosed template file.
+
+    A rule, not sixteen fixes: the next HTTP test will be written by copying an existing one, and
+    that is exactly how all sixteen came to look alike.
+    """
+    import pathlib
+    import re
+
+    tests_dir = pathlib.Path(__file__).resolve().parent
+    offenders: list[str] = []
+    for path in sorted(tests_dir.glob("test_*.py")):
+        source = path.read_text()
+        for match in re.finditer(r"^[ \t]*(\w+)\.shutdown\(\)[ \t]*$", source, re.M):
+            server = match.group(1)
+            line = source[:match.start()].count("\n") + 1
+            # The close may come on the next line or later in the same teardown; requiring only
+            # that the same name is closed somewhere in the file keeps this from dictating layout.
+            if not re.search(rf"^[ \t]*{re.escape(server)}\.server_close\(\)", source, re.M):
+                offenders.append(f"{path.name}:{line} — {server}.shutdown() with no "
+                                 f"{server}.server_close()")
+    assert not offenders, (
+        "these stop a server's loop without releasing its listening socket:\n  "
+        + "\n  ".join(offenders))

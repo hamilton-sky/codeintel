@@ -230,7 +230,7 @@ def test_a_live_silent_server_still_reports_a_real_timeout(tmp_path):
 def test_the_reason_is_recorded_by_the_reader_that_knows_it(tmp_path):
     """`gave_up` exists because only the read loop can tell EOF from an expired deadline. Pinned
     directly so a refactor cannot quietly drop the distinction and leave `_why_no_reply` guessing."""
-    from codeintel.verify import _Conn
+    from codeintel.verify import _Conn, _reap
 
     argv = _script(tmp_path, "import os, time\nos.close(1)\ntime.sleep(30)")
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -242,7 +242,7 @@ def test_the_reason_is_recorded_by_the_reader_that_knows_it(tmp_path):
         assert conn.gave_up == "closed"
         assert proc.poll() is None            # and it really is still alive
     finally:
-        proc.kill()
+        _reap(proc)          # kill() alone leaves the child unwaited and its pipes open
 
     proc2 = subprocess.Popen(_script(tmp_path, "import time; time.sleep(30)"),
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -253,4 +253,4 @@ def test_the_reason_is_recorded_by_the_reader_that_knows_it(tmp_path):
         assert conn2.await_id(1) is None
         assert conn2.gave_up == "deadline"
     finally:
-        proc2.kill()
+        _reap(proc2)

@@ -53,7 +53,8 @@ Changelog = "https://github.com/hamilton-sky/codeintel/blob/main/CHANGELOG.md"
 codeintel = "codeintel.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov>=5", "numpy>=1.24", "ruff>=0.16", "mypy>=1.11"]
+dev = ["pytest>=8", "pytest-cov>=5", "pytest-timeout>=2.3", "numpy>=1.24", "ruff>=0.16",
+       "mypy>=1.11"]
 
 # `bench/agent_bench.py` only. Deliberately NOT in `dev`, and emphatically not a runtime dependency:
 # codeintel's own code makes zero outbound HTTP calls and that claim is load-bearing in the README.
@@ -161,3 +162,34 @@ follow_imports = "skip"
 # case in CI, and that costs ~0.4 points. A floor pinned to today's measurement would go red on a
 # runner's toolchain rather than on a real coverage regression. Ratchet it up deliberately.
 addopts = "--cov=codeintel --cov-report=term-missing:skip-covered --cov-fail-under=83"
+
+# No test may run indefinitely. The ceiling is deliberately far above any legitimate test rather
+# than tuned to the current slowest: its job is to convert a hang into a named failure, not to
+# police performance. Measured worst cases after the background-reindex guard landed —
+# `test_cold_process` spawns real cold interpreters at ~60s, `test_hard_exit` runs nested pytest
+# sessions at ~12s — so 180s leaves room for a slow CI runner and still fails in three minutes
+# instead of never.
+#
+# `signal` rather than `thread`: SIGALRM fails the ONE test that overran and lets the session carry
+# on to a normal report. pytest-timeout's `thread` method kills the whole process, which would
+# reproduce the thing being fixed — an unexplained death partway through — with better provenance
+# but no more information. A test that needs longer says so with
+# `@pytest.mark.timeout(<seconds>)` and, ideally, why.
+timeout = 180
+timeout_method = "signal"
+
+# A leaked socket, pipe or file handle is a defect, not a note. Promoted to an error once the
+# suite's own leaks were closed — sixteen HTTP listeners kept open by `shutdown()` without
+# `server_close()`, a template file, eight bare `open(...).read()` calls in `test_mapper`, and two
+# MCP children killed without being waited on or having their pipes closed. Leaving it at
+# `warning` is what let all of those accumulate: the count was in every run's output and had been
+# for months.
+#
+# `default::ResourceWarning:_pytest.unraisableexception` is NOT an exemption for our own leaks —
+# pytest surfaces a garbage-collected leak through that module rather than from the test that
+# caused it, and as an error it fails whichever unrelated test happened to trigger the collection.
+# Our leaks are caught at their own site by the first rule; this keeps the blame accurate.
+filterwarnings = [
+    "error::ResourceWarning",
+    "default::ResourceWarning:_pytest.unraisableexception",
+]

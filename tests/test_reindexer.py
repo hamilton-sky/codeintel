@@ -9,6 +9,13 @@ import pytest
 
 from codeintel.reindexer import Reindexer
 
+# The background pass IS the subject here, so this module opts out of the suite-wide guard that
+# stubs `maybe_reindex` (see `tests/conftest.py::_no_background_reindex`). Safe because every test
+# below drives a Reindexer it constructed itself, against `/tmp/test` or a nonexistent path, with
+# `Indexer` and `SemanticDb` patched — and `_drain` joins the executor rather than leaving a daemon
+# thread running, which is the property the guard exists to enforce everywhere else.
+pytestmark = pytest.mark.usefixtures("background_reindex")
+
 
 @pytest.fixture(autouse=True)
 def _clear_reindex_env(monkeypatch):

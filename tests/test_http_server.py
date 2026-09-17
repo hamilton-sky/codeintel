@@ -25,6 +25,7 @@ def server():
         yield srv, port
     finally:
         srv.shutdown()
+        srv.server_close()
 
 
 def _post(port: int, path: str, body: bytes, content_type: str = "application/json") -> tuple[int, dict]:

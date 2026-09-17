@@ -35,6 +35,7 @@ def test_healthz_ok_and_unauthenticated_even_with_token():
         assert status == 200 and json.loads(body)["status"] == "ok"
     finally:
         s.shutdown()
+        s.server_close()
 
 
 def test_readyz_reports_ready():
@@ -44,6 +45,7 @@ def test_readyz_reports_ready():
         assert status == 200 and json.loads(body)["status"] == "ready"
     finally:
         s.shutdown()
+        s.server_close()
 
 
 def test_readyz_unauthenticated_even_with_token():
@@ -52,6 +54,7 @@ def test_readyz_unauthenticated_even_with_token():
         assert _get(port, "/readyz")[0] == 200
     finally:
         s.shutdown()
+        s.server_close()
 
 
 # --------------------------------------------------------------------------- /metrics endpoint
@@ -67,6 +70,7 @@ def test_metrics_exposition_format():
         assert 'path="/healthz"' in body  # the earlier request was counted
     finally:
         s.shutdown()
+        s.server_close()
 
 
 def test_metrics_is_auth_gated_when_token_set():
@@ -76,6 +80,7 @@ def test_metrics_is_auth_gated_when_token_set():
         assert _get(port, "/metrics", {"Authorization": "Bearer secret"})[0] == 200
     finally:
         s.shutdown()
+        s.server_close()
 
 
 # --------------------------------------------------------------------------- metrics registry

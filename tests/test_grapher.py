@@ -6,6 +6,7 @@ backend returns (search_graph result dicts, query_graph column→value row dicts
 from __future__ import annotations
 
 import json
+import pathlib
 
 from codeintel import grapher
 from codeintel.providers.graph import GraphProvider, ProjectResolution
@@ -100,7 +101,7 @@ def test_render_html_escapes_script_close():
 def test_viewer_template_has_no_innerhtml_sink():
     # Regression for the DOM-XSS finding: untrusted symbol/directory names must NEVER reach
     # `.innerHTML` — the viewer builds every label via createElement + textContent.
-    tpl = open(grapher._template_path(), encoding="utf-8").read()
+    tpl = pathlib.Path(grapher._template_path()).read_text(encoding="utf-8")
     assert ".innerHTML=" not in tpl and ".innerHTML =" not in tpl
 
 
