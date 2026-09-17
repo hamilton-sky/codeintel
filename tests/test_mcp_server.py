@@ -226,3 +226,39 @@ def test_code_status_schema_documents_deep_source_check(monkeypatch):
 
     deep_desc = schema["properties"]["deep"]["description"].lower()
     assert "source" in deep_desc and ("slow" in deep_desc or "slower" in deep_desc)
+
+
+def test_every_op_is_labelled_with_what_its_answer_supports(monkeypatch):
+    """Phase 3's "distinguish discovery from proof", in the place the distinction is ACTED on.
+
+    An agent picks an op before any envelope exists, so a label that lives only on the result
+    arrives after the decision it was meant to inform. Both channels carry it, and this is the
+    guard that keeps them one fact rather than two: the bracket after each op in the description is
+    compared against `provider._OP_CEILING`, which is what the envelope is stamped from.
+
+    The ceiling is what the description can promise. `callers` may come back `advisory` when its
+    rows were matched by name, so its entry says so in words rather than claiming evidence flatly —
+    the one op whose label is conditional, and the reason this compares a ceiling and not a value.
+    """
+    from typing import get_args
+
+    from codeintel.provider import _OP_CEILING
+    from codeintel.server import _QueryOp
+
+    description = _query_input_schema(monkeypatch)["properties"]["op"]["description"]
+
+    for op in get_args(_QueryOp):
+        assert op in _OP_CEILING, (
+            f"`{op}` is offered to the model and has no evidence class. Classify it in "
+            f"provider._OP_CEILING — the default for an unclassified op is `advisory`, which is "
+            f"safe but silently so, and the model is told nothing.")
+        marker = f"{op}(" if op not in ("overview", "changed", "hotspots") else f"{op}()"
+        assert marker in description, f"`{op}` is not described at all: {description}"
+        assert f"[{_OP_CEILING[op]}" in description, (
+            f"`{op}` is stamped `{_OP_CEILING[op]}` on the envelope and the description does not "
+            f"say so; the model would choose on one rule and be answered by another")
+
+    # The three words mean nothing without the instruction that uses them, and the destructive case
+    # is the one the whole phase is about.
+    assert "require `evidence_class: \"evidence\"`" in description, description
+    assert "Before deleting or renaming" in description, description

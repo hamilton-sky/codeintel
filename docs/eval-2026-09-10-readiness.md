@@ -13,7 +13,7 @@ are silently deleted cannot be audited and gets re-litigated instead.
 |---|---|
 | **P0** Indexing reports success when no files are readable | **Closed** — `d1dfc15` fails closed on unreadable repositories. Re-verified: `bright-sky` now indexes 29,903 chunks in 12m44s where it previously reported `0 files, 0 chunks` and exited 0. |
 | **P0** False-positive graph edges for qualified methods | **Partly closed** — `#34` makes the failure legible: a caller heading now reads `2 resolved · 43 name-matched · 5 unstated` above the rows, and `StrategyChain.resolve`'s two true callers rank first among unbadged rows. The *disclosure* is fixed; the *resolution* is still heuristic, so Phase 2 below stands. |
-| **P1** Confidence visible but not actionable | **Open**, and narrowed — per-row badges and bucket counts exist; a `min_confidence` / `include_heuristic` filter does not. See Phase 3. |
+| **P1** Confidence visible but not actionable | **Closed** — `#44`. Not by adding the `min_confidence` filter this row asked for: an engine-side filter would drop rows, and the one thing measured across four repositories is that this engine is never wrongly silent. The rows ride the envelope instead (`rows[]`, `evidence`, `evidence_class`), so the caller filters and the tool keeps reporting everything it found. See Phase 3. |
 | **P1** Background indexing state unclear | **Unverified** — not re-tested on 2026-09-17. |
 | **P1** Full-suite performance or hang risk | **Closed** — `#39`. It never hung: it completed in 672s, twice measured. Three tests queried the gateway with a real root, each firing a full background reindex of this checkout (146s, 154s) on daemon threads nothing joined, which starved `test_hard_exit`'s nested pytest at the 47.8% mark. Suite now 219s. |
 | **P2** SQLite resource warnings | **Closed** — `#39`, and misnamed: not one came from sqlite. Sixteen HTTP listeners kept open by `shutdown()` without `server_close()`, one template file, eight bare `open(...).read()`, two MCP children killed without being waited on. `ResourceWarning` is an error in the suite now. |
@@ -44,11 +44,38 @@ the target lists are stratified onto deliberately.
 
 ---
 
-## Phase 3: Improve trust and result ergonomics
+## Phase 3: Improve trust and result ergonomics — **delivered** (`#44`)
 
 Priority: **P1**
 
-### 1. Make the first screen trustworthy
+> All three acceptance criteria hold. Two items are delivered differently from how they are
+> written below, and one part of item 4 is refused outright; each is stated at its own item rather
+> than quietly adjusted.
+>
+> Writing it surfaced two defects in its own first draft, both the shape this repository keeps
+> finding — a summary true of a proxy and read as a claim about something else:
+>
+> * `impact` renders callers and callees into one body and recorded only the second half, so
+>   `evidence.returned` was 3 over a body printing 6. The rows are now recorded from the list that
+>   was handed to `_display`, after it was displayed, so `rows` and the `- ` lines are the same
+>   rows by construction rather than by two derivations agreeing.
+> * `safe_for_destructive` was computed while the answer was still being rendered, and three of the
+>   gaps an edge answer can raise are recorded after its rows are printed. Measured: an answer over
+>   two same-named symbols came back `confidence: partial`, `gaps: [target-ambiguous]` and
+>   `safe_for_destructive: true` — the envelope contradicting itself in the one direction that ends
+>   in a deletion. It is settled in `build_result` now, where the answer is whole.
+>
+> Both are pinned: `test_the_evidence_summary_agrees_with_the_rows_it_summarises` and
+> `test_the_envelope_never_calls_an_answer_safe_while_calling_it_partial`, with the `evidence`
+> summary registered in `tests/test_summary_integrity.py`'s census so the next one fails on the
+> commit that adds it.
+
+### 1. Make the first screen trustworthy — delivered
+
+> A `>`-quoted block above the heading, on `callers` / `callees` / `impact`, carrying exactly the
+> lines below. **Silent on a clean answer**: a banner over every result is furniture, and furniture
+> is not read — the same argument `_evidence_headline` makes for its own silence on a single
+> bucket. One banner over an `impact` answer, not one per half.
 
 Start every structural result with a compact confidence summary:
 
@@ -62,7 +89,27 @@ Safe for destructive decisions: no
 
 Detailed explanations can follow afterward.
 
-### 2. Distinguish discovery from proof
+### 2. Distinguish discovery from proof — delivered, on both channels
+
+> In **two** places, because the choice and the answer happen at different moments. `code.query`'s
+> `op` description labels each op, which is what an agent reads *before* it picks one; the envelope
+> carries `evidence_class` on every answered result, which is what it reads after.
+>
+> The envelope's label is **not** the op's. An op-keyed constant would say `evidence` on every
+> `callers` result including the 48-row one in which two rows were callers — true of the op and
+> false of the answer, which is the substitution this document's own findings are made of. So the
+> op supplies a ceiling (`provider._OP_CEILING`, pinned against the tool description by
+> `test_every_op_is_labelled_with_what_its_answer_supports`) and the answer supplies the verdict:
+> `callers` comes back `evidence` when every row followed a real binding and `advisory` when it did
+> not. Nothing partial is ever `evidence`.
+>
+> `impact`, `context` and `chain` stay `advisory` whatever their rows say, as written below. Their
+> rows still carry per-row `verified`, so the evidence-grade subset is reachable — a narrower and
+> more honest claim than the whole answer being proof.
+>
+> "Explicitly recommend verification" is the first screen's `Safe for destructive decisions: no`,
+> the `Settle it:` command `#42` added, and the MCP instructions telling an agent to require
+> `evidence_class: "evidence"` before deleting or renaming.
 
 Label operations by intended use:
 
@@ -72,7 +119,18 @@ Label operations by intended use:
 
 For destructive questions, explicitly recommend verification when evidence is incomplete.
 
-### 3. Return structured confidence metadata
+### 3. Return structured confidence metadata — delivered, less one field
+
+> `rows[]` on the envelope, one entry per printed row, carrying `relation`, `name`,
+> `qualified_name`, `file`, `module_scope`, `edge`, `verified`, `evidence`, `strategy`,
+> `confidence` and `why`. `relation` is not on the list below and is needed by it: `impact` answers
+> callers and callees into one body and therefore one `rows` array, and without it the two
+> questions that op exists to keep apart are one undifferentiated list.
+>
+> **The receiver/type field is refused.** The backend reports no receiver type, so the key would be
+> `null` on every row of every answer. "When available" is the honest qualifier and it evaluates to
+> never; a field that promises a capability nobody has is worse than its absence, because the
+> absence is at least legible.
 
 Do not require agents to parse explanatory prose. Each row should include:
 
@@ -83,7 +141,17 @@ Do not require agents to parse explanatory prose. Each row should include:
 - Reason for inclusion.
 - Receiver/type evidence when available.
 
-### 4. Improve truncation behavior
+### 4. Improve truncation behavior — delivered, less the cursor
+
+> **No continuation cursor.** "Where supported" is the load-bearing phrase: `codebase-memory-mcp`
+> offers none, and the only way to produce one here is to invent paging over a `LIMIT 50` query —
+> a second query returning a second arbitrary fifty with no guarantee it excludes the first. That
+> is a cursor in name, and a caller would page it believing otherwise.
+>
+> The rest holds. `evidence.total` is `null` **exactly** when the backend's own cap was hit, which
+> is the case where the size is genuinely unknown; our candidate cap is the other case and those
+> rows *are* in hand, so `total` states them and `total > returned`. Rows are sorted resolved
+> first, within direct calls first, so a reader who stops early stops on the evidence.
 
 When results are capped:
 
@@ -94,9 +162,16 @@ When results are capped:
 
 Acceptance criteria:
 
-- An agent can safely filter results using structured fields only.
-- Qualified caller queries show verified results before possible matches.
-- Truncation cannot be mistaken for completeness.
+- ~~An agent can safely filter results using structured fields only.~~ **Met** —
+  `test_an_agent_can_filter_on_structured_fields_alone`, which checks the filter against the prose
+  rather than against itself: filtering `rows[]` on `verified` returns the same set as reading the
+  badges out of the body.
+- ~~Qualified caller queries show verified results before possible matches.~~ **Met** —
+  `test_qualified_caller_queries_show_verified_results_before_possible_ones`, over rows interleaved
+  on the way in so passing cannot be an accident of input order.
+- ~~Truncation cannot be mistaken for completeness.~~ **Met** —
+  `test_truncation_cannot_be_mistaken_for_completeness`, checked in all four channels that could
+  claim otherwise: `evidence`, `confidence`, `gaps` and the rendered first screen.
 
 ## Phase 4: Stabilize test and resource behavior — **delivered** (`#39`)
 
@@ -358,9 +433,12 @@ indexed standalone. `doctor` catches all three, and as of `#41` `--deep` no long
 process for a working one — it puts a real query to each engine and requires content. Phase 5 is
 delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
 
-What remains before a broad recommendation is **Phase 3** (confidence filtering, structured per-row
-evidence, truncation cursors) and **Phase 6**'s external validation — several people installing and
-verifying without the maintainer. That last one cannot be done by writing anything.
+What remains before a broad recommendation is **Phase 6**'s external validation — several people
+installing and verifying without the maintainer. That cannot be done by writing anything.
+
+Phase 3 closed in `#44`. One thing it asked for does not exist and one cannot be built honestly:
+the receiver/type evidence field has no backend behind it, and a continuation cursor over a
+`LIMIT 50` query would page nothing. Both are recorded at their items rather than dropped.
 
 ## Recommended message to an early-adopter friend
 

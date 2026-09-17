@@ -94,6 +94,7 @@ _CLAIM_KEYS = frozenset({
     "source_readable",  # presence, sampled
     "chunks",           # presence, as a count
     "verified",         # capability, after a real check
+    "evidence_class",   # classification: what this answer can be USED for
 })
 
 # A markdown heading is a summary when it carries a COUNT: a parenthesised number or
@@ -347,7 +348,28 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     # ── completeness: `confidence: complete` ⟹ no gap-worthy condition is detectable ──────────
     ("claim", "provider.attach_confidence"):
         "a body that discloses a limitation carries a gap — "
-        "test_a_body_that_discloses_a_limitation_is_never_stamped_complete",
+        "test_a_body_that_discloses_a_limitation_is_never_stamped_complete; and the answer's "
+        "`evidence_class` is decided by the rows it has rather than by the op it came from — "
+        "test_the_evidence_class_never_calls_a_partial_answer_proof, with the end-to-end half in "
+        "test_the_evidence_class_follows_the_rows_and_not_only_the_op",
+
+    # ── structured: the answer as FIELDS ⟹ the rows the body printed ──────────────────────────
+    # `rows` and `evidence` are the prose in a shape an agent branches on, so every way the two
+    # could disagree is a summary reporting one thing and being read as another. The referent is
+    # never the rows RETRIEVED — it is the rows the body PRINTED, which is where this one went
+    # wrong first: `impact` renders callers and callees and recorded only the second half.
+    ("claim", "AnswerRendering._settle_evidence"):
+        "the three buckets partition the rows the body printed, `returned` is the `- ` lines in "
+        "it, and `total` is None exactly when the backend's cap was hit — "
+        "test_the_evidence_summary_agrees_with_the_rows_it_summarises, with the two caps kept "
+        "apart by test_a_capped_answer_counts_the_rows_it_withheld_rather_than_forgetting_them "
+        "and the safe/partial cross-check by "
+        "test_the_envelope_never_calls_an_answer_safe_while_calling_it_partial",
+    ("claim", "AnswerRendering._structured_row"):
+        "each row's `verified` and `confidence` are the badge on the line it was rendered from — "
+        "test_a_structured_row_never_disagrees_with_the_line_it_was_rendered_from, and the filter "
+        "they exist for is checked against the prose by "
+        "test_an_agent_can_filter_on_structured_fields_alone",
 
     # ── relay: a per-row confidence this tool did not establish ───────────────────────────────
     ("claim", "_trace_path.hops"):
@@ -1986,3 +2008,46 @@ def test_bench_provenance_names_the_engine_it_ran():
     assert "declares" in source and "on PATH" in source, (
         "the version-skew warning is gone; it is what tells a reader the run measured a different "
         "tree from the checkout they are reading")
+
+
+def test_the_evidence_class_never_calls_a_partial_answer_proof():
+    """`evidence_class` is a claim about what an answer can be USED for, and its referent is the
+    answer — not the op, which is the cheap proxy sitting right beside it.
+
+    An op-keyed constant is locally true and reads as a verdict: every `callers` result would come
+    back `evidence`, including the 48-row one in which two rows were callers. So the op supplies a
+    CEILING and the answer supplies the verdict, and this is the half of that which can be checked
+    without a backend — no path through the stamp may reach `evidence` while the same envelope is
+    saying a named part of it is missing.
+    """
+    from codeintel.provider import _OP_CEILING, attach_confidence
+
+    gap = [{"section": "callers", "kind": "row-cap-reached", "detail": "capped"}]
+    clean = {"verified": 4, "possible": 0, "unstated": 0, "returned": 4, "total": 4,
+             "truncated": False, "safe_for_destructive": True}
+    dirty = {**clean, "possible": 2, "returned": 6, "total": 6, "safe_for_destructive": False}
+
+    for op in _OP_CEILING:
+        for gaps in ([], gap):
+            for evidence in (None, clean, dirty):
+                env = {"ok": True, "op": op, "target": "t", "result": "## x", "engine": "graph"}
+                if evidence is not None:
+                    env["evidence"] = evidence
+                out = attach_confidence(env, gaps)               # type: ignore[arg-type]
+                where = (op, bool(gaps), evidence and evidence["safe_for_destructive"])
+
+                assert out["evidence_class"] in ("evidence", "discovery", "advisory"), where
+                if out["evidence_class"] == "evidence":
+                    assert not gaps, f"{where}: proof, and partial in the same envelope"
+                    if evidence is not None:
+                        assert evidence["safe_for_destructive"], (
+                            f"{where}: proof, over rows that did not all follow a binding")
+                # The ceiling is a ceiling: nothing is promoted above what its op can support.
+                if _OP_CEILING[op] == "advisory":
+                    assert out["evidence_class"] == "advisory", where
+                if _OP_CEILING[op] == "discovery":
+                    assert out["evidence_class"] == "discovery", where
+
+    # A null result carries no body to classify, and stamping one would imply it has an answer.
+    assert "evidence_class" not in attach_confidence(
+        {"ok": True, "op": "callers", "target": "t", "result": None, "engine": "graph"})  # type: ignore[arg-type]

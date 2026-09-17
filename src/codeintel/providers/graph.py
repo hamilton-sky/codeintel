@@ -480,6 +480,18 @@ class GraphProvider(GraphOps):
     # Parts of this answer known to be short of an answer. Graph has two real cases: a symbol-scoped
     # answer served from a CONTAINING project, and callee rows dropped as name collisions.
     _pending_gaps: tuple[dict[str, Any], ...] = ()
+    # The structured form of the rows an edge op rendered, and the three facts needed to summarise
+    # them honestly once the answer is whole. Same mechanism as `_pending_gaps` above and the same
+    # caveat: `refactor-graph-provider.md`'s open phase 4 would have the renderer return these
+    # instead of the provider carrying them. Class-level defaults because five test modules build a
+    # provider with `__new__` and never run `__init__`.
+    _pending_rows: tuple[dict[str, Any], ...] = ()
+    # The backend's own row cap was hit, so the total is unknown rather than large.
+    _pending_row_cap: bool = False
+    # Rows retrieved and deliberately not printed (the candidate cap). Known, so counted, not None.
+    _pending_withheld: int = 0
+    # The body carries `- ` lines that are not result rows, so no row summary of it can be true.
+    _pending_nonrow_lines: bool = False
 
     def _clear_failure(self) -> None:
         self._backend._clear_failure()
@@ -727,6 +739,10 @@ class GraphProvider(GraphOps):
             # attribute it to the caller's repo.
             self._answered_root = resolution.matched_root
             self._pending_gaps = ()
+            self._pending_rows = ()
+            self._pending_row_cap = False
+            self._pending_withheld = 0
+            self._pending_nonrow_lines = False
             self._clear_failure()
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
             if result_text is not None and self._last_failure is not None:
@@ -819,14 +835,32 @@ class GraphProvider(GraphOps):
                     f"`codeintel index {root_str}` for an answer scoped to it."
                 )
 
-            return attach_confidence({
+            # Settled HERE, and not in the renderer that produced the rows, because this is the
+            # first point at which the answer is whole: `impact` has rendered both its halves, and
+            # every gap the body discloses — including the `ancestor-scope` one added immediately
+            # above — is in `_pending_gaps`. A `safe_for_destructive` computed any earlier answers
+            # "is the list clean?" against a gap list that is not yet the answer's.
+            #
+            # Emitted only by the ops that produce rows, and only when they produced some — an
+            # empty `rows` on a `search` answer would be a claim that the op has rows and found
+            # none, which is a different sentence from "this op does not work that way".
+            evidence = self._settle_evidence()
+            if evidence is not None:
+                # Above the heading, because "first screen" is the requirement: a reader who acts
+                # on the heading never reaches a caveat printed below fifty rows.
+                result_text = self._first_screen(evidence) + result_text
+            envelope: Result = {
                 "ok": True,
                 "op": op_str,
                 "target": target_str,
                 "result": result_text,
                 "engine": "graph",
                 "cached": False,
-            }, self._pending_gaps)
+            }
+            if evidence is not None:
+                envelope["rows"] = list(self._pending_rows)
+                envelope["evidence"] = evidence
+            return attach_confidence(envelope, self._pending_gaps)
         except Exception as exc:
             log_swallowed("GraphProvider.build_result", exc)
             return safe_null_result(op, target, engine="graph", reason="error")

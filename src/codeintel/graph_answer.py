@@ -19,7 +19,7 @@ answer emptied by our own filter never reads as an answer about the code.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from codeintel.graph_confidence import (
     _EDGE_CONFIDENCE_FLOOR,
@@ -62,6 +62,11 @@ class AnswerRendering:
         # checker verifies it at the join, so a future host that does not record gaps fails here
         # instead of silently dropping every caveat these methods raise.
         _answered_root: str | None
+        _pending_gaps: tuple[dict[str, Any], ...]
+        _pending_rows: tuple[dict[str, Any], ...]
+        _pending_row_cap: bool
+        _pending_withheld: int
+        _pending_nonrow_lines: bool
 
         def _add_gap(self, section: str, kind: str, detail: str) -> None: ...
 
@@ -321,6 +326,10 @@ class AnswerRendering:
             f"no symbol matching {wanted.describe()} has {op} here; {len(candidates)} other "
             f"symbol(s) named `{wanted.name}` do, so this is not evidence that `{target}` has none",
         )
+        # These bullets are candidate SYMBOLS, not result rows, and `impact` can compose this half
+        # with a half that did have rows. Flagged so the envelope withholds its row summary rather
+        # than publishing a `returned` that undercounts the `- ` lines in the body it describes.
+        self._pending_nonrow_lines = True
         listing = "\n".join(f"- {g.describe()}" for g in candidates[:_CANDIDATE_CAP])
         more = (f"\n… (+{len(candidates) - _CANDIDATE_CAP} more)"
                 if len(candidates) > _CANDIDATE_CAP else "")
@@ -677,6 +686,168 @@ class AnswerRendering:
             + listing
         )
 
+    @staticmethod
+    def _structured_row(row: dict, name_key: str, qn_key: str, file_key: str,
+                        unit: str) -> dict[str, Any]:
+        """One rendered row, as fields an agent can branch on without reading the line.
+
+        The badges, the notes and the headline all say the same things in prose, and an integration
+        that wants to act on them has to parse markdown that this project reserves the right to
+        reword. Everything here is already known at render time; none of it is re-derived, so the
+        structured row and the printed row cannot disagree about a fact.
+
+        `verified` is the field to filter on and the only one that is a VERDICT: true exactly when
+        the edge was followed through an import or a language-server binding. An unstamped row is
+        not verified — silence from the backend is not evidence — and it is not `possible` either,
+        which is why `evidence` keeps all three states rather than collapsing to a boolean pair.
+
+        `relation` says which side of the edge this row is, because `impact` renders callers and
+        callees into ONE answer and therefore into one `rows` list. Without it a reader filtering
+        structurally cannot tell "what calls this" from "what this calls" — the two questions an
+        impact answer exists to keep apart — and the list would be filterable but not safely so.
+
+        There is no receiver/type evidence field. The readiness doc asks for one "when available"
+        and it is never available: the backend reports no receiver type, so a key here would be
+        `null` on every row of every answer — a field that promises a capability nobody has.
+        """
+        bucket = str(row.get("_bucket") or _UNSTATED)
+        strategy = str(row.get("strategy") or "").strip()
+        confidence = row.get("_low_confidence")
+        scope = row.get("_module_scope")
+        edge = str(row.get("type(c)") or "").strip()
+        return {
+            "relation": unit,
+            "name": str(row.get(name_key) or ""),
+            "qualified_name": _strip_project_prefix(
+                str(row.get(qn_key) or ""), may_be_filename=False),
+            "file": str(scope) if scope is not None else str(row.get(file_key) or ""),
+            "module_scope": scope is not None,
+            "edge": edge or None,
+            "verified": bucket == _RESOLVED,
+            "evidence": bucket,
+            "strategy": strategy or None,
+            "confidence": float(confidence) if confidence is not None else None,
+            "why": {
+                _RESOLVED: "followed an import or a language-server binding",
+                _NAME_MATCHED: (f"matched by name ({strategy})" if strategy
+                                else "matched by bare symbol name, not by following a binding"),
+                _UNSTATED: "the backend reported no provenance for this edge",
+            }.get(bucket, "unclassified"),
+        }
+
+    def _record_rows(self, rendered: list[dict], row_keys: tuple[str, str, str], unit: str,
+                     *, row_cap_hit: bool, withheld: int) -> None:
+        """Publish the structured form of the rows this renderer just PRINTED.
+
+        Held on the provider and read by `build_result`, the same way `_pending_gaps` is. That is
+        not the shape this should end in — `docs/refactor-graph-provider.md`'s open phase 4 would
+        have a renderer RETURN its rows and gaps instead of mutating the provider — but inventing a
+        second mechanism beside the existing one would make that eventual change harder rather than
+        easier.
+
+        `rendered` is the list that was handed to `_display`, not the list that was retrieved, and
+        the difference is the whole correspondence this method exists to keep: `rows` and the `- `
+        lines in the body are then the same rows by construction rather than by two derivations
+        agreeing. Rows held back by the candidate cap are counted in `withheld`, not published.
+
+        ACCUMULATES rather than assigns, because one answer is not always one render. `impact`
+        calls `callers` and `callees` and prints both, so a method that overwrote would leave the
+        envelope summarising the second half of a body containing both — a count true of the last
+        render and false of the answer, which is this repository's recurring defect with the rows
+        in hand.
+        """
+        self._pending_rows += tuple(
+            self._structured_row(r, *row_keys, unit) for r in rendered)
+        self._pending_row_cap = self._pending_row_cap or bool(row_cap_hit)
+        self._pending_withheld += withheld
+
+    def _settle_evidence(self) -> dict[str, Any] | None:
+        """The counts that summarise `_pending_rows` — computed once the answer is whole.
+
+        Deliberately NOT computed in `_record_rows`. Three of the gaps an edge answer can raise are
+        recorded after its rows are rendered (`target-ambiguous` and `non-call-relationships` inside
+        the renderer, `ancestor-scope` and a backend failure in `build_result`), so a
+        `safe_for_destructive` derived at render time reads a gap list that is not yet the answer's.
+        Measured on the working tree before this split: an answer over three same-named symbols came
+        back `confidence: partial`, `gaps: [target-ambiguous]` and `safe_for_destructive: true` —
+        the envelope contradicting itself in the one direction that ends in a deletion.
+
+        `total` is `None` exactly when the BACKEND row cap was hit: we know it had at least
+        `returned` and we do not know how many, and reporting `returned` as the total is how a
+        capped list comes to read as a complete one. The candidate cap is the other case and is not
+        the same case — those rows are in hand and counted, so `total` states them and `truncated`
+        still says the printed list is not all of it.
+        """
+        # One branch prints `- ` lines that are not result rows: `_no_symbol_matched_the_hint`
+        # lists the symbols that DO carry the name. A row summary over a body containing those
+        # would miscount the moment `impact` composes that half with a half that did have rows, so
+        # the summary is withheld rather than stated wrongly.
+        if self._pending_nonrow_lines or not self._pending_rows:
+            return None
+        rows = self._pending_rows
+        counts = {bucket: sum(1 for r in rows if r["evidence"] == bucket)
+                  for bucket in (_RESOLVED, _NAME_MATCHED, _UNSTATED)}
+        withheld = self._pending_withheld
+        return {
+            "verified": counts[_RESOLVED],
+            "possible": counts[_NAME_MATCHED],
+            "unstated": counts[_UNSTATED],
+            "returned": len(rows),
+            "total": None if self._pending_row_cap else len(rows) + withheld,
+            "truncated": bool(self._pending_row_cap or withheld),
+            # Deliberately conservative, and deliberately a DERIVED field rather than a judgement:
+            # every row followed a real binding, the list is whole, and nothing about the answer is
+            # disclosed as missing. Anything less and the honest answer to "can I delete this?" is
+            # no. A reader who wants a looser rule has the three counts to write it themselves.
+            "safe_for_destructive": bool(
+                counts[_NAME_MATCHED] == 0 and counts[_UNSTATED] == 0
+                and not self._pending_row_cap and not withheld and not self._pending_gaps),
+        }
+
+    def _row_noun(self) -> str:
+        """What the rows in hand are, for the first screen — `caller`, `callee` or neither.
+
+        `impact` answers two questions in one body, so its rows are not all callers and calling
+        them callers would be a summary that is true of most of the list and false of the rest."""
+        relations = {str(r.get("relation") or "") for r in self._pending_rows}
+        return relations.pop() if len(relations) == 1 and all(relations) else "row"
+
+    def _first_screen(self, ev: dict[str, Any] | None) -> str:
+        """The verdict, above everything, in four lines — or `""` when there is nothing to warn of.
+
+        The readiness doc's first Phase 3 item, and the reason it is first: every disclosure this
+        engine makes is already correct and most of them are BELOW fifty rows. A reader who acts on
+        the heading never reaches them.
+
+        Prepended by `build_result` rather than written into the renderer's own heading, for the
+        same reason `_settle_evidence` computes there: this states the whole answer's confidence,
+        and inside the renderer neither the gap list nor — for `impact` — the row list is whole yet.
+        It also means one banner over an impact answer instead of two, each describing half of it.
+
+        Silent on a clean answer. A banner printed over every result is furniture, and furniture is
+        not read — the same argument `_evidence_headline` makes for its own silence on a single
+        bucket, and the reason `bench/run.py daycap` had to stay byte-identical when the
+        `unresolvable` disclosure landed.
+
+        No line here may begin with `- `: `bench/score.py::graph_answer` reads every such line in
+        the body as a result row, so prose in that shape is scored as a fabricated caller. Pinned
+        by `test_the_first_screen_can_never_be_read_as_result_rows`.
+        """
+        if not ev or ev["safe_for_destructive"]:
+            return ""
+        noun = self._row_noun()
+        lines = [f"> **Confidence: {'partial' if self._pending_gaps else 'complete'}**"]
+        if ev["verified"] or ev["possible"]:
+            lines.append(f"> Verified {noun}s: {ev['verified']} · "
+                         f"possible: {ev['possible']} · unstated: {ev['unstated']}")
+        if ev["truncated"]:
+            total = ev["total"]
+            shown = (f"{ev['returned']} shown, {total} in total" if total is not None
+                     else f"{ev['returned']} shown, total unknown")
+            lines.append(f"> Truncated: yes — {shown}")
+        lines.append("> Safe for destructive decisions: **no**")
+        return "\n".join(lines) + "\n\n"
+
     def _render_edge_answer(
         self, op: str, unit: str, target: str, wanted: _SymbolTarget,
         groups: list[_EdgeGroup], row_keys: tuple[str, str, str], truncated: bool,
@@ -692,10 +863,14 @@ class AnswerRendering:
         name_key, qn_key, file_key = row_keys
         answered = [g for g in groups if g.rows]
         kept = sum(len(g.rows) for g in answered)
-        # Rows are ordered so the direct calls come first: they are the answer to the question that
-        # was asked, and the rest is context beneath it.
+        # Rows are ordered so the direct calls come first — they are the answer to the question
+        # that was asked — and, within those, the rows that followed a real binding come before the
+        # ones matched by name. A reader who stops after the first few should be stopping on the
+        # evidence, not on whichever guess the backend happened to return first.
+        _ORDER = {_RESOLVED: 0, _UNSTATED: 1, _NAME_MATCHED: 2}
         for g in answered:
-            g.rows.sort(key=lambda r: str(r.get("type(c)") or "") != _DIRECT_KIND)
+            g.rows.sort(key=lambda r: (str(r.get("type(c)") or "") != _DIRECT_KIND,
+                                       _ORDER.get(str(r.get("_bucket") or ""), 1)))
         counts = self._kind_counts(answered)
         direct = counts.get(_DIRECT_KIND, 0)
         others = kept - direct
@@ -709,8 +884,10 @@ class AnswerRendering:
         head += self._settle_name_matches(answered, wanted, unit, file_key)
 
         if len(answered) == 1:
+            rendered = list(answered[0].rows)
+            withheld = 0
             body = head + "\n".join(self._display(r, name_key, qn_key, file_key)
-                                    for r in answered[0].rows)
+                                    for r in rendered)
         else:
             # Several distinct symbols share the name. Keep every one of them, each under its own
             # heading — a merged list presented as one symbol's answer is the reading these ops most
@@ -721,10 +898,16 @@ class AnswerRendering:
                 f"{unit}s are grouped separately rather than merged into one list. Narrow the target "
                 f"with a qualified name or `{wanted.name}@<file>` to answer about one of them",
             )
+            shown = answered[:_CANDIDATE_CAP]
+            rendered = [r for g in shown for r in g.rows]
+            # Rows past the candidate cap are printed by nobody, so they are published by nobody
+            # either — but they are counted, because "12 of 17 shown" and "12 shown, total
+            # unknown" are different facts and only one of them is true here.
+            withheld = sum(len(g.rows) for g in answered[_CANDIDATE_CAP:])
             sections = [
                 f"### {g.describe()} — {len(g.rows)} {unit}(s)\n"
                 + "\n".join(self._display(r, name_key, qn_key, file_key) for r in g.rows)
-                for g in answered[:_CANDIDATE_CAP]
+                for g in shown
             ]
             if len(answered) > _CANDIDATE_CAP:
                 sections.append(f"… (+{len(answered) - _CANDIDATE_CAP} more symbol(s) with this "
@@ -735,6 +918,9 @@ class AnswerRendering:
                       f"`{answered[0].label or wanted.name}` or "
                       f"`{wanted.name}@{answered[0].file or '<file>'}` for a single symbol.\n"
                     + "\n" + "\n\n".join(sections))
+        # Recorded from the list that was displayed, after it was displayed: `rows` and the `- `
+        # lines beneath this heading are then the same rows, not two derivations that agree today.
+        self._record_rows(rendered, row_keys, unit, row_cap_hit=truncated, withheld=withheld)
         return (body + self._kind_note(op, counts) + extra_notes
                 + self._name_resolution_note(wanted, answered, truncated))
 
