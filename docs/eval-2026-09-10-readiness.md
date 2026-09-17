@@ -1,0 +1,355 @@
+# Readiness evaluation — 2026-09-10, with a 2026-09-17 status pass
+
+An external assessment of codeintel against two repositories the author did not write
+(`daycap`, `bright-sky`), scoring it **7/10** and recommending it as an early-adopter beta.
+
+It lived untracked at the repository root for a week. This is the salvaged half: the findings
+that are still open, plus a ledger of the ones that closed, because a plan whose resolved items
+are silently deleted cannot be audited and gets re-litigated instead.
+
+## Status ledger — what closed, and where
+
+| finding | status as of 2026-09-17 |
+|---|---|
+| **P0** Indexing reports success when no files are readable | **Closed** — `d1dfc15` fails closed on unreadable repositories. Re-verified: `bright-sky` now indexes 29,903 chunks in 12m44s where it previously reported `0 files, 0 chunks` and exited 0. |
+| **P0** False-positive graph edges for qualified methods | **Partly closed** — `#34` makes the failure legible: a caller heading now reads `2 resolved · 43 name-matched · 5 unstated` above the rows, and `StrategyChain.resolve`'s two true callers rank first among unbadged rows. The *disclosure* is fixed; the *resolution* is still heuristic, so Phase 2 below stands. |
+| **P1** Confidence visible but not actionable | **Open**, and narrowed — per-row badges and bucket counts exist; a `min_confidence` / `include_heuristic` filter does not. See Phase 3. |
+| **P1** Background indexing state unclear | **Unverified** — not re-tested on 2026-09-17. |
+| **P1** Full-suite performance or hang risk | **Open and confirmed.** The full suite was again not run on 2026-09-17 for this reason; targeted subsets were used throughout. See Phase 4. |
+| **P2** SQLite resource warnings | **Open and confirmed** — `ResourceWarning` still observed in test output. |
+
+Two findings the original assessment could not have had, both fixed since:
+
+* An empty LSP reference list was rendered as `## References (0)` at `confidence: complete` — a
+  confident "nothing references this" about the question asked immediately before deleting code.
+  Closed by `#33`, which added the `unresolvable` outcome kind.
+* `bench/oracle_py.py` scored a function's own call sites as fabricated callers, understating the
+  measured engine by 10–60 points. Closed by `#35`. The corrected numbers are in
+  [`bench/README.md`](../bench/README.md).
+
+## Measured position, 2026-09-17
+
+Against `codebase-memory-mcp 0.10.8`, stratified targets, `graph` arm:
+
+| repository | direct precision / recall | wrongly silent |
+|---|---|---|
+| `daycap` (TypeScript, 23 source files) | 100% / 100% | 0 / 8 |
+| `snitch-simulator` (Python) | 100% / 100% | 0 / 6 |
+| `pathly-adapters` (Python, 3,284 files) | 90% / 100% | 0 / 10 |
+| `corpus-ts` (fixture, smoke test) | 50% / 80% | 0 / 3 |
+
+Across 27 scored symbols on four repositories, **zero wrongly silent** — the deletion trap did not
+open once. The remaining precision loss is concentrated in short, colliding names, which is what
+the target lists are stratified onto deliberately.
+
+---
+
+## Phase 3: Improve trust and result ergonomics
+
+Priority: **P1**
+
+### 1. Make the first screen trustworthy
+
+Start every structural result with a compact confidence summary:
+
+```text
+Confidence: partial
+Verified callers: 2
+Possible callers: 48
+Truncated: yes
+Safe for destructive decisions: no
+```
+
+Detailed explanations can follow afterward.
+
+### 2. Distinguish discovery from proof
+
+Label operations by intended use:
+
+- Discovery: semantic search, pattern search, overview, hotspots.
+- Evidence: LSP definition and references, high-confidence graph edges.
+- Advisory only: heuristic impact and call chains.
+
+For destructive questions, explicitly recommend verification when evidence is incomplete.
+
+### 3. Return structured confidence metadata
+
+Do not require agents to parse explanatory prose. Each row should include:
+
+- Resolver strategy.
+- Numeric confidence.
+- Verified boolean.
+- Edge type.
+- Reason for inclusion.
+- Receiver/type evidence when available.
+
+### 4. Improve truncation behavior
+
+When results are capped:
+
+- Return a continuation cursor where supported.
+- Keep exact total counts separate from returned-row counts.
+- Never describe a capped list as complete.
+- Prefer verified rows before heuristic rows.
+
+Acceptance criteria:
+
+- An agent can safely filter results using structured fields only.
+- Qualified caller queries show verified results before possible matches.
+- Truncation cannot be mistaken for completeness.
+
+## Phase 4: Stabilize test and resource behavior
+
+Priority: **P1**
+
+### 1. Isolate the full-suite stall
+
+Run the suite with duration and timeout reporting:
+
+```bash
+pytest -vv --durations=50 --timeout=60
+```
+
+Then bisect by test directory or file until the CPU-heavy test is identified.
+
+Investigate:
+
+- Reindexing loops.
+- Process pools or excessive parallel workers.
+- Semantic model initialization.
+- Graph-backend subprocess cleanup.
+- Recursive filesystem watching.
+- Tests waiting on MCP processes that never exit.
+
+### 2. Add per-test timeouts in CI
+
+Use a timeout plugin or explicit process timeout for integration tests. Mark slow and live-backend tests separately so unit tests remain quick and deterministic.
+
+Suggested groups:
+
+- Unit: no external process or downloaded model.
+- Integration: local backend processes.
+- Live: installed graph/LSP engines.
+- Release canary: built-wheel end-to-end verification.
+
+### 3. Close SQLite connections deterministically
+
+Audit semantic database construction and teardown:
+
+- Add context-manager support.
+- Make `close()` idempotent.
+- Ensure providers close owned connections during shutdown.
+- Ensure tests use fixtures that always finalize connections.
+- Turn `ResourceWarning` into an error in the relevant test group.
+
+Acceptance criteria:
+
+- Full suite completes within a documented time budget.
+- No test can run indefinitely.
+- No unclosed SQLite connection warnings remain.
+- MCP server shutdown leaves no child processes or database handles behind.
+
+## Phase 5: Strengthen onboarding and documentation
+
+Priority: **P2**
+
+### 1. Set precise expectations
+
+Keep the existing honest beta language and add a short trust model:
+
+- Semantic and pattern search locate candidates.
+- LSP results are preferred for definitions and references.
+- Graph results depend on resolver evidence.
+- Low-confidence impact results must be verified.
+
+### 2. Add a five-minute verification workflow
+
+Ask new users to select a symbol whose callers they already know and run:
+
+```bash
+codeintel doctor --deep /path/to/repo
+codeintel query --op context --target KnownSymbol /path/to/repo
+```
+
+The guide should explain how to read confidence, gaps, possible matches, and index freshness.
+
+### 3. Document supported and degraded repository states
+
+Cover:
+
+- Fully indexed and healthy.
+- Graph-only.
+- LSP-only.
+- Semantic-only.
+- Reindexing with a usable stale snapshot.
+- Permission failure.
+- Empty or unsupported repository.
+- Partial parser coverage.
+
+### 4. Provide friend-ready setup instructions
+
+Recommended flow:
+
+```bash
+pip install codecortex
+codeintel setup --all /path/to/project
+codeintel doctor --deep /path/to/project
+codeintel install --agent codex
+```
+
+Tell the user to restart the agent after registration and verify a known caller before trusting impact analysis.
+
+Acceptance criteria:
+
+- A new user can install, diagnose, and verify the tool without reading internal architecture documentation.
+- Every common failure includes one concrete next action.
+- Documentation never implies that heuristic graph edges are authoritative.
+
+## Phase 6: Release-readiness gates
+
+Priority: **P2**
+
+Create explicit promotion levels.
+
+### Current: beta / early adopter
+
+Requirements:
+
+- Safe envelopes.
+- Honest partial-confidence reporting.
+- Working local graph, LSP, and semantic engines.
+- Focused integration coverage.
+
+### Recommended beta
+
+Requirements:
+
+- Qualified-method false positives fixed or excluded by default.
+- Zero-readable-file indexing fails clearly.
+- Background index state is durable and inspectable.
+- Full suite completes reliably.
+- SQLite warnings eliminated.
+
+### General recommendation
+
+Requirements:
+
+- Precision benchmark across multiple real Python and TypeScript repositories.
+- Measured verified-caller precision above an agreed threshold, preferably 95% or higher.
+- Large-repository performance budgets documented and enforced.
+- Upgrade and uninstall paths tested.
+- At least several external users have completed setup without maintainer assistance.
+
+## Suggested execution order
+
+### Milestone 1: Safety patch — **delivered**
+
+- ~~Fix permission and zero-file indexing behavior.~~ `d1dfc15`
+- Prevent repeated background-index restarts. — **not re-verified**
+- ~~Separate verified from heuristic graph counts.~~ `#34`
+- Add the `StrategyChain.resolve` regression fixture. — **still open**: the case is hand-checked
+  and written up in `bench/README.md`, but it is scored by no arm. Establishing truth at that
+  scale is the blocker.
+
+Release criterion met: `bright-sky` now indexes 29,903 chunks where it previously reported zero
+files and exited successfully.
+
+### Milestone 2: Precision release
+
+Target: following release
+
+- Add confidence filtering.
+- Tighten class-qualified method resolution.
+- Prioritize high-confidence results.
+- Add structured per-edge evidence.
+- Measure precision on `daycap`, `bright-sky`, and the internal fixture corpus.
+
+Release criterion: qualified method queries no longer headline unrelated suffix matches as callers.
+
+### Milestone 3: Reliability release
+
+Target: following release
+
+- Resolve the full-suite performance stall.
+- Add test timeouts and test categories.
+- Eliminate database resource warnings.
+- Document performance budgets.
+
+Release criterion: clean lint, type check, unit suite, integration suite, and release canary on a clean machine.
+
+### Milestone 4: Friend-ready release
+
+Target: after external validation
+
+- Run onboarding tests with several developers.
+- Collect setup failure telemetry locally and privately, or provide an opt-in diagnostic bundle.
+- Refine documentation based on real installation attempts.
+- Publish a clear support matrix and known limitations.
+
+Release criterion: multiple external users install, index, query, and upgrade without maintainer intervention.
+
+## Validation matrix
+
+| Capability | Daycap | Bright Sky | Required target |
+|---|---:|---:|---:|
+| Health diagnostics | Pass | Pass with semantic failure correctly shown | Pass |
+| Architecture overview | Pass | Pass | Pass |
+| Exact definition | Pass | LSP path resolution failed for qualified method | Pass |
+| Exact references | Pass | Not retrieved — now DISCLOSED as `unresolvable` rather than reported as zero (`#33`) | Pass |
+| Direct callers | Strong (100%/100% measured) | Many false positives, now counted separately in the heading (`#34`) | High precision |
+| Direct callees | Strong with caveats | Core callee found; noise present | High precision |
+| Semantic search | Pass | **Resolved** — 29,903 chunks indexed 2026-09-17 | Clear success or failure |
+| Pattern search | Pass | Pass | Pass |
+| Hotspots | Useful | Useful | Pass |
+| Changed-file impact | Pass for observed state | Not fully assessed | High precision |
+| Indexing UX | Pass | **Resolved** (`d1dfc15`) | Fail safely |
+| Full automated suite | Did not complete during assessment | N/A | Reliable completion |
+
+## Metrics to track
+
+Track these per release:
+
+- Verified caller precision and recall.
+- Heuristic caller precision and recall.
+- Percentage of edges with resolver evidence.
+- Qualified-query false-positive rate.
+- Indexing success rate.
+- Zero-file scan count by reason.
+- Median and p95 indexing time by repository size.
+- Median and p95 query latency by operation.
+- Background-index retry count.
+- LSP boot success rate.
+- Unclosed resource warnings.
+- Full-suite duration and slowest tests.
+- Percentage of queries returning partial confidence.
+
+## Final recommendation
+
+*(Rewritten 2026-09-17. The original closed on "complete the two P0 items"; both have since been
+addressed, so the gate it named has moved.)*
+
+Offer codeintel to technically confident early adopters now, with one instruction: **read
+`confidence` and `gaps`, and treat a caller count as a lead rather than an authority.** Measured
+accuracy is bimodal and the discriminator is knowable before asking — a symbol whose leaf name is
+unique in the index resolves essentially exactly; a colliding method name in a large tree does not,
+and now says so on its first line.
+
+The next release gate is what this document's Phase 4 already named, and nothing since has moved it:
+
+1. Resolve the full-suite stall. It has now prevented a full local verification run twice.
+2. Eliminate the SQLite resource warnings.
+
+Beyond that, the barrier to recommending it broadly is **not accuracy** — it is setup. Three
+configuration mistakes still produce a plausible *wrong answer* rather than an error: a language
+missing from `.serena/project.yml`, a TypeScript tree with no `tsconfig.json`, and a repository not
+indexed standalone. `doctor` catches the first two as of 2026-09-17. Phase 5 is the remaining work,
+and it is what stands between "useful to its author" and "installable by a stranger".
+
+## Recommended message to an early-adopter friend
+
+> I am testing a local code-intelligence tool for coding agents. It combines architecture maps,
+> language-server definitions and references, semantic search, caller/callee graphs, and
+> change-impact analysis. It is genuinely useful for exploring an unfamiliar repository. It is
+> still beta: caller answers head with a breakdown of how each row was resolved, and only the
+> `resolved` rows followed a real import or language-server binding — treat the rest as leads to
+> verify, not as facts, especially before deleting or refactoring anything.
