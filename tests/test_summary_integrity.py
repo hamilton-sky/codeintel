@@ -406,6 +406,9 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("tally", "AnswerRendering._confidence_note"):
         "the note's N-of-M counts the rows it describes — "
         "test_the_confidence_note_counts_the_rows_it_describes",
+    ("tally", "AnswerRendering._settle_name_matches"):
+        "the two counts in the settle note are the rows in doubt and their distinct files — "
+        "test_the_settle_note_counts_the_rows_it_sends_you_to_check",
     ("tally", "AnswerRendering._no_symbol_matched_the_hint"):
         "a no-match note states only what was asked — "
         "test_a_no_match_note_claims_nothing_about_the_symbol_itself",
@@ -581,14 +584,18 @@ def test_every_registry_entry_names_a_verifier_that_exists():
     subject of the file. So the names are resolved, not trusted: a verifier that is renamed or
     deleted takes its registry entry red with it.
     """
-    # Verifiers may live in a sibling module — the deep-probe ones belong with the doctor tests,
-    # beside the shallow probes they strengthen. Resolve against both rather than forcing a test
-    # into the wrong file to satisfy a guard.
+    # Verifiers live wherever they belong, not wherever this guard can see them: the deep-probe
+    # ones sit with the doctor tests beside the shallow probes they strengthen, the settle-command
+    # one with the confidence tests. Resolving across every test module keeps the guard's question
+    # the right one — does the named verifier EXIST — instead of quietly also requiring it to live
+    # in a file someone has to remember to list here.
     import ast
 
     defined = {name for name in globals() if name.startswith("test_")}
-    for sibling in ("test_doctor.py",):
-        tree = ast.parse((pathlib.Path(__file__).parent / sibling).read_text())
+    for sibling in sorted(pathlib.Path(__file__).parent.glob("test_*.py")):
+        if sibling.name == pathlib.Path(__file__).name:
+            continue
+        tree = ast.parse(sibling.read_text())
         defined |= {n.name for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")}
     for source, entries in (("_VERIFIED_BY", _VERIFIED_BY), ("_UNCENSUSED", _UNCENSUSED)):

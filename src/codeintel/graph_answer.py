@@ -61,6 +61,8 @@ class AnswerRendering:
         # The whole contract this mixin has with its host, declared rather than assumed. A type
         # checker verifies it at the join, so a future host that does not record gaps fails here
         # instead of silently dropping every caveat these methods raise.
+        _answered_root: str | None
+
         def _add_gap(self, section: str, kind: str, detail: str) -> None: ...
 
     @staticmethod
@@ -591,6 +593,90 @@ class AnswerRendering:
             f"rows followed an import or a language-server binding. Per-row detail below.\n"
         )
 
+    # How many name-matched rows make a command worth printing. Below this the reader can eyeball
+    # the badges; at or above it, "go and check" is advice without a method.
+    _SETTLE_FLOOR = 3
+
+    @staticmethod
+    def _discriminator(wanted: _SymbolTarget, groups: list[_EdgeGroup]) -> tuple[str, str] | None:
+        """The token whose presence a real caller cannot avoid, and what to call it. ``None`` when
+        the target offers nothing sharper than its own leaf name.
+
+        A name-matched row was bound by the LEAF name, so grepping the leaf name reproduces exactly
+        the population that is in doubt — it would return the same 48 files and settle nothing. The
+        token that discriminates is the part of the target the match did NOT use:
+
+        * a qualified target carries its own — `StrategyChain` from `StrategyChain.resolve`, and a
+          file that never writes `StrategyChain` is not calling that method;
+        * a bare target falls back to the stem of the file it is DEFINED in, which any caller must
+          name in an import to reach it.
+
+        Returns ``None`` rather than guessing when neither is available, because a command that
+        cannot settle anything is worse than no command: it looks like diligence.
+        """
+        qualified = wanted.qualified or (groups[0].qn_raw if groups else "")
+        parts = [p for p in str(qualified).replace("/", ".").split(".") if p]
+        # The segment before the leaf, when it is not the leaf itself.
+        if len(parts) >= 2 and parts[-1] == wanted.name and parts[-2] != wanted.name:
+            return parts[-2], "the name it is qualified by"
+        defining = wanted.file_hint or (groups[0].file if groups else "")
+        stem = str(defining).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if stem and stem != wanted.name:
+            return stem, "the module it is defined in"
+        return None
+
+    def _settle_name_matches(
+        self, groups: list[_EdgeGroup], wanted: _SymbolTarget, unit: str, file_key: str,
+    ) -> str:
+        """The exact command that would settle the name-matched rows, or `""`.
+
+        DISCLOSING doubt and DISCHARGING it are different services, and this project had only been
+        doing the first. An agent reading `43 name-matched` is told the answer may be wrong and
+        left to design its own check — and it has `rg`, so the check is cheap, but only if it knows
+        which string to grep. That string is derivable here and nowhere else: this is the only
+        place that holds the target's qualifier, the defining file and the set of rows in doubt at
+        the same time.
+
+        On the case that motivated it — `callers StrategyChain.resolve` on a 1,483-file monorepo,
+        48 rows of which 43 were name-matched — the command prints the five files that mention
+        `StrategyChain` at all, against which 43 of the 48 rows cannot be real. That is the check
+        a person ran by hand to establish the finding in `bench/README.md`; printing it is the
+        difference between a warning and a next step.
+
+        Deliberately one command, and deliberately not a claim. It narrows; it does not decide. A
+        file that appears in the output may still not call the symbol, and the wording says so —
+        overstating what a grep proves would be the same defect this file is full of fixes for.
+        """
+        matched = [r for g in groups for r in g.rows if r.get("_bucket") == _NAME_MATCHED]
+        if len(matched) < self._SETTLE_FLOOR:
+            return ""
+        total = sum(len(g.rows) for g in groups)
+        # "Dominate": at least half the answer, or all of it. Below half, the resolved rows carry
+        # the answer and a command here would be noise on a result that is mostly evidence.
+        if len(matched) * 2 < total:
+            return ""
+        found = self._discriminator(wanted, groups)
+        if found is None:
+            return ""
+        token, why = found
+
+        root = getattr(self, "_answered_root", None) or "."
+        files = sorted({str(r.get(file_key) or "") for r in matched if r.get(file_key)})
+        listing = ""
+        if files:
+            shown = ", ".join(f"`{f}`" for f in files[:10])
+            more = f", … (+{len(files) - 10} more)" if len(files) > 10 else ""
+            listing = f"_The {len(files)} file(s) to check against: {shown}{more}._\n"
+        return (
+            f"\n\n_Settle it: `rg -n --fixed-strings '{token}' {root}`_\n"
+            f"_`{token}` is {why}, and it is the part of the target the name match did not use. "
+            f"A file that never names it cannot be reaching this symbol, so any of the "
+            f"{len(matched)} name-matched {unit}s below whose file is absent from that output is "
+            f"spurious. Appearing in it is not proof of a call — it narrows the list, it does not "
+            f"decide it._\n"
+            + listing
+        )
+
     def _render_edge_answer(
         self, op: str, unit: str, target: str, wanted: _SymbolTarget,
         groups: list[_EdgeGroup], row_keys: tuple[str, str, str], truncated: bool,
@@ -618,6 +704,9 @@ class AnswerRendering:
                 else f"## {op.capitalize()} of {target} "
                      f"({direct} direct, {others} other reference(s))\n")
         head += self._evidence_headline(answered, unit)
+        # Disclosure says the answer may be wrong; this says how to find out. Placed with
+        # the headline because that is the number it is about.
+        head += self._settle_name_matches(answered, wanted, unit, file_key)
 
         if len(answered) == 1:
             body = head + "\n".join(self._display(r, name_key, qn_key, file_key)

@@ -351,6 +351,21 @@ that reads "48 callers" and starts editing does not. That gap between *what the 
 **a qualified method target whose leaf name collides across a large tree.** Adding it needs a
 repository whose truth is establishable, which is why it is an observation here and not a table.
 
+**The answer now prints the command that closes it.** Establishing the paragraph above took a person
+noticing that the discriminator is `StrategyChain` rather than `resolve` and grepping for it. That
+derivation is mechanical — the qualifier is the part of the target the name match did not use — so
+the answer emits it:
+
+```text
+_Settle it: `rg -n --fixed-strings 'StrategyChain' ~/…/bright-sky`_
+```
+
+Re-measured on the same repository: the 43 name-matched rows sit in **26 distinct files**, exactly
+**5** files in the tree mention `StrategyChain` at all, and the intersection is **empty** — one shell
+command eliminates all 26, leaving the two true callers among the `resolved` rows. The headline is
+still 48 and the count is still the finding; what changed is that discharging the doubt is now one
+command a reader is handed rather than one they have to design.
+
 ### What `corpus-ts` reports today
 
 Re-measured 2026-09-17, after `codeintel index bench/fixtures/corpus_ts`:

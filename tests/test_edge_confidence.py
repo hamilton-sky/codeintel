@@ -203,3 +203,142 @@ def test_the_breakdown_counts_every_row_it_was_given(monkeypatch):
     counted = sum(int(part.strip().split()[0])
                   for part in head.split("**")[1].rstrip(".").split("·"))
     assert counted == 5, head
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# Discharging the doubt, not only disclosing it
+#
+# Everything above makes an unverified answer SAY it is unverified. That leaves the reader to
+# design their own check — and an agent reading this has `rg`, so the check is cheap, but only if
+# it knows which string to grep. That string is derivable at the point of rendering and nowhere
+# else, because only there are the target's qualifier, the defining file and the rows in doubt all
+# in hand at once.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _guessed(*, n: int, resolved: int = 0, qualified: str = "chain.StrategyChain.resolve",
+             leaf: str = "resolve") -> tuple:
+    """(provider, groups, target) for `n` name-matched rows and `resolved` resolved ones."""
+    from codeintel.graph_backend import BackendClient
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
+
+    gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)          # type: ignore[attr-defined]
+    gp._pending_gaps = []                                       # type: ignore[attr-defined]
+    gp._answered_root = "/repo"                                 # type: ignore[attr-defined]
+
+    def rows(count, bucket, start):
+        return [{"a.name": f"c{i}", "a.qualified_name": f"pkg.agents.c{i}",
+                 "a.file_path": f"src/agents/f{i}.ts", "type(c)": "CALLS", "_bucket": bucket}
+                for i in range(start, start + count)]
+
+    groups = [_EdgeGroup(leaf, qualified, "src/chain.ts",
+                         rows(resolved, "resolved", 0) + rows(n, "name-matched", resolved))]
+    return gp, groups, _SymbolTarget(leaf, qualified=qualified)
+
+
+def _render(gp, groups, wanted, leaf="resolve"):
+    return gp._render_edge_answer(
+        "callers", "caller", leaf, wanted, groups,
+        ("a.name", "a.qualified_name", "a.file_path"), False)
+
+
+def test_a_dominated_answer_prints_the_command_that_would_settle_it():
+    """The `StrategyChain.resolve` shape: 48 rows, 43 name-matched, five files in the whole
+    repository mentioning `StrategyChain`. The command printed here is the one a person ran by
+    hand to establish that finding."""
+    body = _render(*_guessed(n=43, resolved=5))
+
+    assert "rg -n --fixed-strings 'StrategyChain' /repo" in body, body
+    assert "43 name-matched caller" in body, body
+
+
+def test_the_command_never_greps_the_name_that_was_matched():
+    """Grepping the LEAF reproduces exactly the population in doubt — it would return the same 48
+    files and settle nothing. The token has to be the part of the target the match did not use."""
+    body = _render(*_guessed(n=43, resolved=5))
+
+    command = next(ln for ln in body.splitlines() if "rg -n" in ln)
+    assert "'resolve'" not in command, command
+    assert "'StrategyChain'" in command, command
+
+
+def test_a_bare_target_falls_back_to_the_module_it_is_defined_in():
+    """No qualifier to lean on, so the discriminator is the file the symbol is DEFINED in: any
+    caller has to name it in an import to reach it. This is the `describe` shape — 32 rows, none
+    resolved."""
+    gp, groups, wanted = _guessed(
+        n=32, resolved=0, qualified="pkg.domain.budget.describe", leaf="describe")
+    body = _render(gp, groups, wanted, leaf="describe")
+
+    assert "rg -n --fixed-strings 'budget' /repo" in body, body
+
+
+def test_the_command_appears_where_the_breakdown_cannot():
+    """When EVERY row is name-matched the evidence headline is deliberately silent — one bucket is
+    the single-bucket case it refuses to restate. That is also the answer in most doubt, so the
+    command has to fire there or it is missing from the case that needs it most."""
+    body = _render(*_guessed(n=12, resolved=0))
+
+    assert "name-matched." not in body, "the headline should stay silent on a single bucket"
+    assert "Settle it" in body, body
+
+
+def test_no_command_when_the_resolved_rows_carry_the_answer():
+    """A command on a mostly-evidence answer is noise, and noise is how a disclosure stops being
+    read — the same argument the evidence headline makes for its own silence."""
+    assert "Settle it" not in _render(*_guessed(n=2, resolved=9))
+
+
+def test_no_command_when_there_is_nothing_sharper_to_grep():
+    """A target with no qualifier and no defining file offers nothing the leaf name does not. An
+    unhelpful command would read as diligence while settling nothing, which is worse than silence."""
+    from codeintel.graph_edges import _EdgeGroup
+
+    gp, _groups, _wanted = _guessed(n=8)
+    from codeintel.graph_targets import _SymbolTarget
+    bare = [_EdgeGroup("run", "run", "", [
+        {"a.name": f"c{i}", "a.qualified_name": f"pkg.c{i}", "a.file_path": f"src/f{i}.py",
+         "type(c)": "CALLS", "_bucket": "name-matched"} for i in range(8)])]
+
+    assert "Settle it" not in _render(gp, bare, _SymbolTarget("run"), leaf="run")
+
+
+def test_the_command_does_not_claim_more_than_a_grep_proves():
+    """It narrows; it does not decide. Overstating what a text search establishes would be this
+    repository's own recurring defect, committed by the fix for it."""
+    body = _render(*_guessed(n=43, resolved=5))
+
+    assert "not proof of a call" in body, body
+    assert "narrows the list" in body, body
+
+
+def test_the_settle_lines_can_never_be_read_as_result_rows():
+    """A cross-component contract worth pinning: `bench/score.py::graph_answer` parses this body
+    back into caller keys and takes every line starting with `- ` as a row. Prose that began that
+    way would be scored as a fabricated caller — the benchmark measuring the disclosure instead of
+    the engine, in the direction that makes the tool look worse."""
+    body = _render(*_guessed(n=43, resolved=5))
+
+    added = [ln for ln in body.splitlines() if "Settle it" in ln or "file(s) to check" in ln]
+    assert added, body
+    for line in added:
+        assert not line.startswith("- "), line
+
+
+def test_the_settle_note_counts_the_rows_it_sends_you_to_check():
+    """Both numbers in the note are claims about the answer beneath it: how many rows are in doubt,
+    and how many distinct files they sit in. The second is not the first — several rows routinely
+    share a file — and stating one while counting the other would send a reader looking for files
+    that are not there."""
+    gp, groups, wanted = _guessed(n=7, resolved=2)
+    # Two of the seven name-matched rows share a file, so the two counts must differ.
+    groups[0].rows[-1]["a.file_path"] = groups[0].rows[-2]["a.file_path"]
+    body = _render(gp, groups, wanted)
+
+    matched = [r for r in groups[0].rows if r["_bucket"] == "name-matched"]
+    files = {r["a.file_path"] for r in matched}
+    assert len(files) < len(matched), "the fixture must exercise the difference"
+
+    assert f"{len(matched)} name-matched caller" in body, body
+    assert f"The {len(files)} file(s) to check against" in body, body
