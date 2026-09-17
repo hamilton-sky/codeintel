@@ -23,7 +23,7 @@ CODEINTEL_BENCH_TS=~/src/some-app python bench/run.py typescript
 
 # Against the checked-in corpora — needs nothing, runs in CI, pins both oracles.
 pytest tests/test_bench_oracle.py tests/test_bench_oracle_ts.py
-python bench/run.py corpus-ts        # the TypeScript arm end to end, on 20 known files
+python bench/run.py corpus-ts        # the TypeScript arm end to end, on 24 known files
 ```
 
 The repository paths used to be hardcoded to one laptop, which meant the artifact that turns this
@@ -170,31 +170,41 @@ which is a different quantity that had been standing in for it.
 Measured 2026-09-17 with `codeintel 0.23.4` (the checkout, via `CODEINTEL_BENCH_EXE`), same trees
 and same backend as the rows above:
 
-| repository | `graph` direct | `graph_verified` direct | `graph` impact | `graph_verified` impact |
-|---|---|---|---|---|
-| `daycap` | 100% / 100% | 100% / 100% | 100% / 95% | 100% / 95% |
-| `snitch-simulator` | 100% / 100% | 100% / 100% | 100% / 82% | 100% / 73% |
-| `pathly-adapters` | 90% / 100% | **97% / 78%** | 93% / 100% | 97% / 74% |
-| `corpus-ts` | 50% / 80% | **75% / 60%** | 50% / 50% | 75% / 38% |
+| repository | `graph` direct | `graph_verified` direct | `graph` impact | `graph_verified` impact | `graph_verified` wrongly silent |
+|---|---|---|---|---|---|
+| `daycap` | 100% / 100% | 100% / 100% | 100% / 95% | 100% / 95% | 0 / 8 |
+| `snitch-simulator` | 100% / 100% | 100% / 100% | 100% / 82% | 100% / 73% | 0 / 6 |
+| `pathly-adapters` | 90% / 100% | **97% / 78%** | 93% / 100% | 97% / 74% | 0 / 10 |
+| `corpus-ts` | 60% / 86% | **75% / 43%** | 60% / 60% | 75% / 30% | **1 / 4** |
 
 Two readings, and the second is the one that matters.
 
 **Filtering buys precision and costs recall, as expected.** On the two repositories where the graph
 arm is already perfect, the filter changes nothing about direct callers — every row there had
-followed a binding. Where it is not perfect it helps: +7 points on `pathly-adapters`, +25 on
-`corpus-ts`. The recall cost is larger than the precision gain in both cases (−22 and −20).
+followed a binding. Where it is not perfect it helps: +7 points on `pathly-adapters`, +15 on
+`corpus-ts`. The recall cost is larger than the precision gain in both cases, and by a lot: −22 and
+−43.
 
-**It did not open the deletion trap on this corpus.** `wrongly silent` is **0 on every arm of every
-repository, `graph_verified` included** — across all 27 scored symbols, not one had its entire
-caller list removed by the filter. That is a real result and it is narrower than it looks: it says
-the filter never *silenced* a symbol here, not that filtering is safe. The rows it removes are
-overwhelmingly *additional* callers of symbols that also had verified ones (`read_flow_nodes`: 5
-rows → 2; `_decompose_flow_dict`: 14 → 12), so the arm keeps answering and answers less. A symbol
-whose only callers are name-matched is the case that would score `wrongly silent` here, and the
-stratified target lists do not currently contain one.
+**It opens the deletion trap, once per four symbols on the fixture.** That last column is the whole
+argument, and it is worth saying plainly that it read `0 / 3` here until the run before this one —
+not because filtering was safe, but because **no target in the lists could have made it say
+anything else.** Every scored symbol either had verified callers or had no callers at all, so the
+filtered arm had nothing it could silence. A zero that cannot move is not a measurement, and the
+first version of this section read it as reassurance: *"it did not open the deletion trap on this
+corpus."* True, and true of the population rather than of the filter.
 
-So this does not settle the standing argument for keeping heuristic rows in the default answer — it
-prices it. What it removes is the assumption that the price was unmeasurable.
+`settleQueue` was added to the `corpus-ts` list to fix that (see **What `corpus-ts` reports today**).
+It is reached only through a re-export facade, so both its edges bind by bare name; truth is two
+real calls; `graph` returns both and `graph_verified` returns nothing. The column moved the moment
+a case existed for it to move on.
+
+The rest of the filter's cost is milder and was always visible: the rows it drops elsewhere are
+*additional* callers of symbols that also had verified ones (`read_flow_nodes` 5 → 2,
+`_decompose_flow_dict` 14 → 12), so those arms keep answering and answer less.
+
+So this still does not settle the standing argument for keeping heuristic rows in the default
+answer — it prices it, and the price now has a unit. What it removes is the assumption that the
+price was unmeasurable, and the weaker claim that it had been measured at zero.
 
 ### Why these numbers went UP, and what that says about the instrument
 
@@ -320,7 +330,7 @@ Stated re-exports are followed transitively (`export { x } from`, including `exp
 imports are tracked under their new spelling — scanning only for the target's own name finds the
 import and none of its callers — and a property access on a value stays an abstention, as in Python.
 
-`bench/fixtures/corpus_ts` is 20 files covering all of it, and `python bench/run.py corpus-ts` drives
+`bench/fixtures/corpus_ts` is 24 files covering all of it, and `python bench/run.py corpus-ts` drives
 the whole path — oracle, scorer and both engines through codeintel's own envelope. It is a **smoke
 test, not a measurement**: files written to have a known answer cannot say anything about real code.
 The real measurement it could not supply is below.
@@ -409,11 +419,12 @@ Re-measured 2026-09-17, after `codeintel index bench/fixtures/corpus_ts`:
 
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
-| `graph` | 50% | 80% | 50% | 50% | 0 / 3 |
-| `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **3 unanswered** |
-| `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **3 unanswered** |
+| `graph` | 60% | 86% | 60% | 60% | 0 / 4 |
+| `graph_verified` | 75% | 43% | 75% | 30% | **1 / 4** |
+| `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **4 unanswered** |
+| `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **4 unanswered** |
 
-Oracle coverage 79% mean. The `graph` row is a smoke test and nothing more — 20 files written to
+Oracle coverage 84% mean. The `graph` row is a smoke test and nothing more — 24 files written to
 have a known answer cannot measure an engine — with one exception worth naming: **`describe` now
 claims 1 caller where the failure that motivated this entire arm claimed 32.** One spurious against
 one proven non-caller is still a spurious, but that class is no longer what it was.
@@ -421,12 +432,24 @@ one proven non-caller is still a spurious, but that class is no longer what it w
 The two LSP rows say `unanswered` rather than a number, and getting them to say that is the whole
 story below. They read `1 / 3 wrongly silent` until the run before this one.
 
+**`settleQueue` is the fourth target, and the one `graph_verified` exists to be judged by.** It is
+reached only through `settleFacade.ts`, so no call site's own imports name the file it is defined
+in, and the backend binds both its edges by bare name (`unique_name`) rather than by following one.
+Truth is two real calls, `graph` returns exactly those two, and **`graph_verified` returns nothing —
+the first `1 / N` in that column anywhere in this file.**
+
+What the target does NOT say: that filtering is unsafe in general, or that this shape is common. It
+is one constructed symbol in a fixture, written to isolate a single mechanism — a re-export chain,
+with the collision variable deliberately held out, since `describe` already covers that one. Its
+value is that the price of excluding heuristic rows by default is now expressible in the same column
+as every other failure mode here, rather than argued about in prose.
+
 ### The corpus has no `tsconfig.json`, and that is load-bearing in both directions
 
 That absence is deliberate — it is what the oracle's unresolvable-specifier guard exists to bite on.
 Its second effect was not designed. Without a project file, `tsserver` treats every file as its own
 inferred project and cannot see across files, so it returns each definition and an **empty reference
-list**. `forwardReleasedItem` is imported and called in four of the 20 files, and
+list**. `forwardReleasedItem` is imported and called in four of the 24 files, and
 `--engine lsp --op symbol` used to answer:
 
 ```text
@@ -457,7 +480,7 @@ was not, the same query now answers
 
 ```text
 ## References — not retrieved
-> the language server returned no references, but no tsconfig.json covers the 20 TypeScript files
+> the language server returned no references, but no tsconfig.json covers the 24 TypeScript files
 > in this repository — … so this is UNKNOWN rather than none. …
 ```
 

@@ -342,19 +342,30 @@ Create explicit promotion levels.
 > | `daycap` | 100% / 100% | **100% / 100%** | 0 / 8 |
 > | `snitch-simulator` | 100% / 100% | **100% / 100%** | 0 / 6 |
 > | `pathly-adapters` | 90% / 100% | **97% / 78%** | 0 / 10 |
-> | `corpus-ts` (fixture) | 50% / 80% | **75% / 60%** | 0 / 3 |
+> | `corpus-ts` (fixture) | 60% / 86% | **75% / 43%** | **1 / 4** |
 >
 > The three real repositories clear 95%; the deliberately adversarial three-symbol fixture does not.
 > **No pooled cross-repository figure is printed and none is invented here** — the arms have
 > different symbol counts and averaging them would be its own summary defect. What is still missing
 > from this gate is a *decision*, not a measurement: "an agreed threshold" has never been agreed.
 >
-> The result worth reading twice is the last column. `wrongly silent` is **0 on every arm including
-> `graph_verified`** — across 27 symbols, filtering to verified rows never emptied a caller list.
-> That prices the argument against exclusion-by-default rather than settling it: the rows the filter
-> drops are overwhelmingly *additional* callers of symbols that also had verified ones, and a symbol
-> whose only callers are name-matched — the case that would score `wrongly silent` — is not in the
-> stratified target lists today. Adding one is the next thing this arm needs.
+> The result worth reading twice is the last column, and it has since been corrected by its own
+> instrument. On the first run of this arm it read **0 everywhere**, and this document said so:
+> filtering to verified rows had never emptied a caller list across 27 symbols. That was true, and
+> it was true of the POPULATION rather than of the filter — every scored symbol either had verified
+> callers or had no callers at all, so the filtered arm had nothing it could silence and a column
+> that cannot move was being read as reassurance.
+>
+> `settleQueue` was added to the `corpus-ts` fixture to remove that: a symbol reached only through a
+> re-export facade, so both its caller edges bind by bare name, with two real calls as truth.
+> `graph` returns both; `graph_verified` returns nothing. The column reads **1 / 4** on the fixture
+> and still 0 on the three real repositories.
+>
+> So exclusion-by-default costs a wrongly-silent answer on a shape that is constructed but not
+> exotic — a re-export chain is ordinary in both languages here. That prices the standing argument
+> for keeping heuristic rows in the default answer; it does not settle it, and one fixture symbol is
+> not a rate. The rows the filter drops elsewhere remain *additional* callers of symbols that also
+> had verified ones.
 >
 > **What "inspectable, not durable" means.** `Reindexer.reindex_pending` answers whether a root is
 > being rebuilt, and an answer served in that window carries `reindexing: true` plus a hint saying
@@ -524,9 +535,10 @@ and test the upgrade path — there being no `uninstall` to test. The beta / ear
 met on all four of its gates, which is the level this document recommends the tool at.
 
 The verified-caller precision gate is measured now (`graph_verified`, `bench/README.md`) and reads
-100% / 100% / 97% on the three real repositories. What it still wants is an agreed threshold, and a
-target symbol whose callers are *all* name-matched — the one case that would make its `wrongly
-silent` column say something, and the case the stratified lists do not yet contain.
+100% / 100% / 97% on the three real repositories. What it still wants is an agreed threshold — a
+decision, not a measurement. The target whose callers are *all* name-matched has since been added
+(`settleQueue`, in the checked-in fixture), and it turned that arm's `wrongly silent` column from a
+zero that could not move into a `1 / 4`.
 
 Phase 3 closed in `#44`. One thing it asked for does not exist and one cannot be built honestly:
 the receiver/type evidence field has no backend behind it, and a continuation cursor over a

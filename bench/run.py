@@ -123,7 +123,7 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
     ], "typescript"),
 
     # The checked-in TypeScript corpus. Small, and it is a SMOKE TEST of the arm end to end rather
-    # than a measurement — 20 files written to have a known answer cannot say anything about a real
+    # than a measurement — 24 files written to have a known answer cannot say anything about a real
     # codebase. Its value is that the whole path runs without a private clone: oracle, scorer, and
     # both engines through codeintel's own envelope.
     "corpus-ts": (CORPUS_TS, [
@@ -133,6 +133,16 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
         ("src/proxy.ts", "describe"),
         # A name the tree installs on `globalThis`, where the module argument stops holding.
         ("src/proxy.ts", "legacyHelper"),
+        # EVERY caller is a guess. `settleQueue` is reached only through `settleFacade.ts`, so no
+        # call site's own imports name the file it is defined in, and the backend binds both edges
+        # by bare name (`unique_name`) rather than by following one. Truth is two real calls.
+        #
+        # This is the case `graph_verified` was missing and could not be read without: every other
+        # target either has verified callers or has none at all, so the filtered arm never had a
+        # symbol it could silence, and its `wrongly silent` column read 0 for want of a case rather
+        # than for want of a failure. Here filtering removes the whole answer — which is the price
+        # of excluding heuristic rows by default, stated in the column that exists to hold it.
+        ("src/settle.ts", "settleQueue"),
     ], "typescript"),
 
     # A real TypeScript repository, named by the environment. Fill in the disputed symbols.
