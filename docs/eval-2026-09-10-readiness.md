@@ -303,8 +303,8 @@ Create explicit promotion levels.
 > that was supposed to deliver it merged" is the same substitution this document's own findings are
 > made of.
 >
-> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **five are
-> met, one is refused as written, one is partly met, and three are open** — of which exactly one
+> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **six are
+> met, one is refused as written, one is partly met, and two are open** — of which exactly one
 > cannot be closed by writing anything.
 >
 > | level | gate | status |
@@ -320,7 +320,7 @@ Create explicit promotion levels.
 > | rec. beta | SQLite warnings eliminated | **met** — `#39`, and `ResourceWarning` is an error in the suite |
 > | general | precision benchmark, multiple real Python and TS repos | **met** — four arms, two of each language, 27 scored symbols |
 > | general | verified-caller precision ≥ 95% | **measured** — 100% / 100% / 97% on the three real repositories, 75% on the fixture; no threshold agreed |
-> | general | large-repo performance budgets documented and enforced | **open** — documented, self-marked stale, enforced nowhere |
+> | general | large-repo performance budgets documented and enforced | **met** — re-measured at 0.23.4, and the per-query work budget runs in CI |
 > | general | upgrade and uninstall paths tested | **open** — and there is no uninstall path to test |
 > | general | several external users set up unassisted | **open** — the one gate no commit can close |
 >
@@ -374,11 +374,28 @@ Create explicit promotion levels.
 > reindex in progress whether or not one was interrupted. The ledger's "not re-tested on
 > 2026-09-17" also still stands for the originally reported symptom.
 >
-> **Performance budgets.** `docs/benchmarks.md` carries indexing and latency numbers, and its own
-> query-latency section is marked **Stale**: the path it measured no longer exists, and the doc says
-> to re-measure before quoting a figure. No CI job asserts any performance number. So this gate is
-> open on both halves of its wording — the documented figures need re-measuring, and nothing
-> enforces them.
+> **Performance budgets, closed on both halves.** *Documented*: `docs/benchmarks.md` is re-measured
+> at 0.23.4 on the same machine and corpus family — 29,903 chunks indexed in 607 s at 49.3
+> chunks/sec, 1.72 GB peak RSS, a 68.1 MB index, and warm queries at **p50 233 ms / p95 242 ms**
+> pooled over four passes.
+>
+> The re-measurement settled the prediction that document had been carrying. It said `_verify`'s
+> per-candidate disk reads should have made queries slower, direction knowable and magnitude not.
+> **The regression is not observable**: 233 ms against 235 ms at 0.10.0, because the CPU query embed
+> (~230 ms) dominates reading sixty short spans by two orders of magnitude. Sound about direction,
+> wrong about whether it would show — which is why "re-measure" was the right instruction and
+> "adjust" would not have been.
+>
+> *Enforced*: not as a wall-clock number. A latency assertion on a shared CI runner is a summary
+> whose referent is the RUNNER — true of that machine on that morning, read as a claim about the
+> code, and flaky as well. `tests/test_query_budget.py` counts the work instead, and the counted
+> quantities are the ones that actually regress: one file read per candidate, a read set flat in
+> corpus size, one embed per search, one vector query per search, and `rerank=off` reading only `k`.
+> Those are identical on a laptop and on a cold runner, so they run in the ordinary suite across
+> four Python versions rather than in a special job nobody trusts.
+>
+> That also converts the latency result above from luck into an invariant. It holds *because* the
+> read set is bounded by the candidate limit; the test is what keeps that true.
 >
 > **Upgrade and uninstall.** `reset` is covered (cache removal, 29 tests) and `install` is covered
 > (registration, 44 tests), but neither is the gate. There is no `uninstall` subcommand at all, and
@@ -406,7 +423,7 @@ Requirements:
 - ~~Full suite completes reliably.~~ `#39`
 - ~~SQLite warnings eliminated.~~ `#39`
 
-### General recommendation — 2 of 5 met
+### General recommendation — 3 of 5 met
 
 Requirements:
 
@@ -416,7 +433,9 @@ Requirements:
   **measured** by the `graph_verified` arm: 100% / 100% / 97% on the three real repositories, 75%
   on the fixture. The threshold itself has still never been agreed, which is a decision rather than
   a measurement.
-- Large-repository performance budgets documented and enforced. — **open** on both halves.
+- ~~Large-repository performance budgets documented and enforced.~~ — **met on both halves**:
+  re-measured at 0.23.4 in `docs/benchmarks.md`, and enforced as a counted per-query work budget in
+  `tests/test_query_budget.py` rather than as a wall-clock number a shared runner cannot hold.
 - Upgrade and uninstall paths tested. — **open**; no `uninstall` exists.
 - At least several external users have completed setup without maintainer assistance. — **open**,
   and the only gate in this document that no commit can close.
@@ -529,10 +548,9 @@ delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
 
 What remains is **Phase 6**, and it is four gates rather than the one this paragraph used to name.
 External validation — several people installing and verifying without the maintainer — is the gate
-no commit can close, and it is not the only thing outstanding. The other two are ordinary work:
-re-measure the performance figures `docs/benchmarks.md` already marks stale and put a number in CI,
-and test the upgrade path — there being no `uninstall` to test. The beta / early-adopter level is
-met on all four of its gates, which is the level this document recommends the tool at.
+no commit can close, and it is now nearly the only thing outstanding. The one other piece of
+ordinary work is the upgrade path, there being no `uninstall` to test. The beta / early-adopter
+level is met on all four of its gates, which is the level this document recommends the tool at.
 
 The verified-caller precision gate is measured now (`graph_verified`, `bench/README.md`) and reads
 100% / 100% / 97% on the three real repositories. What it still wants is an agreed threshold — a

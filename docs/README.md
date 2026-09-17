@@ -37,7 +37,7 @@ not the same claim as `not-in-graph`.
 | Doc | What it measures |
 |---|---|
 | [../bench/README.md](../bench/README.md) | **Call-edge accuracy** — precision/recall of `callers`/`impact` against labelled ground truth, per question, across graph vs LSP vs LSP-plus-syntax. Includes what the oracle proves is NOT a caller — without which a fabricated caller costs an engine nothing — and what it refuses to judge. Reported numbers are **Python only**; a TypeScript arm exists but has not been run against a real repository. |
-| [benchmarks.md](benchmarks.md) | **Semantic engine** throughput and index size at scale. A different measurement with a different method. **Taken at 0.10.0 and not re-measured** — the query path has changed since, so the latency rows are stale. |
+| [benchmarks.md](benchmarks.md) | **Semantic engine** throughput and index size at scale. A different measurement with a different method. **Re-measured 2026-09-17 at 0.23.4**, and the work a single query is allowed to do is now enforced by `tests/test_query_budget.py` rather than argued about. |
 
 ## Outputs other than `code.query`
 

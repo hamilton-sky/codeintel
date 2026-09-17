@@ -2,7 +2,12 @@
 
 > **Scope: the semantic engine only.** For **call-edge accuracy** — precision and recall of `callers`/`impact` against labelled ground truth, per question, across engines — see [../bench/README.md](../bench/README.md), which is a different measurement with a different method.
 >
-> **These numbers were taken at 0.10.0 and have NOT been re-measured. The semantic engine has changed since, so the query-latency row in particular is stale.** This doc used to say "semantic engine unchanged since; re-measure if that changes"; that is no longer true, and by its own rule the re-measurement is now owed. See [What has changed since these numbers](#what-has-changed-since-these-numbers).
+> **Re-measured 2026-09-17 at 0.23.4.** The previous figures were taken at 0.10.0 and this document
+> had marked its own latency row stale, with a prediction attached: `_verify` reads each candidate
+> from disk inside the measured window, so the query path should have got slower. It did not — see
+> [What changed against the 0.10.0 numbers](#what-changed-against-the-0100-numbers). The read count
+> that prediction was about is now **enforced by a test** rather than re-argued: see
+> [The enforced budget](#the-enforced-budget).
 
 Real, reproducible numbers for the **semantic** engine at scale — the one engine that does heavy
 local work (chunk → embed → index → search). The graph and LSP engines delegate to external
@@ -18,27 +23,37 @@ backends and are not measured here.
 |---|---|
 | CPU | Apple M5 Pro — 15 cores (5 performance) |
 | RAM | 24 GB |
-| OS | macOS 26.5 (arm64) |
+| OS | macOS 26.6.2 (arm64) |
 | Embedding model | `BAAI/bge-small-en-v1.5` (384-dim), via `fastembed` on CPU |
-| codeintel | 0.10.0 — **the measurement version, not the current release** (see the [CHANGELOG](../CHANGELOG.md); this row is deliberately not maintained against it). See below for what changed after. |
+| codeintel | 0.23.4, run from the checkout (`PYTHONPATH=src python -m codeintel`), not the installed snapshot |
 
 ## Corpus
 
-A full production TypeScript/React monorepo (`bright-sky`): **1,449 code files** (`.ts/.tsx/.js/.py/.go`,
-excluding `node_modules`), syntax-aware chunked (tree-sitter) into **25,313 chunks** (~17.5 chunks/file).
+A full production TypeScript/React monorepo (`bright-sky`): **1,334 files chunked**, syntax-aware
+(tree-sitter), into **29,903 chunks** (~22.4 chunks/file).
+
+The tree is not a git checkout at the measured root; its code lives in a `brightsky-ai` subdirectory
+which is clean at `3109977`. That is the most this corpus can be pinned to, and it is stated rather
+than dressed up as a revision of the thing actually measured. At 0.10.0 the same repository chunked
+to 25,313 chunks from 1,449 counted files, so **the corpus has grown ~18% and is not identical** —
+which matters for the wall-clock rows and not for the per-chunk ones.
 
 ## Cold index (one-time)
 
-The embedding model is downloaded once (~50 MB) and excluded from the timing below.
+The embedding model is downloaded once (~50 MB) and excluded from the timing below; it was already
+cached, and loading it takes 0.5 s.
 
-| Metric | Value |
-|---|---|
-| Chunks indexed | **25,313** |
-| Wall time | **499.7 s** (~8.3 min) |
-| Throughput | **~51 chunks/sec** |
-| CPU parallelism | **6.7×** (3,339 s user / 500 s real — embedding fans out across cores) |
-| Peak memory (RSS) | **~1.7 GB** |
-| On-disk index (`semantic.db`) | **60 MB** (~2.4 KB/chunk: a 384-d float32 vector + metadata + chunk text) |
+| Metric | 0.23.4 (2026-09-17) | 0.10.0 (prior) |
+|---|---|---|
+| Chunks indexed | **29,903** | 25,313 |
+| Wall time | **607.1 s** (~10.1 min) | 499.7 s |
+| Throughput | **~49.3 chunks/sec** | ~51 chunks/sec |
+| CPU parallelism | **6.68×** (4,054 s user / 607 s real) | 6.7× |
+| Peak memory (RSS) | **1.72 GB** | ~1.7 GB |
+| On-disk index (`semantic.db`) | **68.1 MB** (~2.39 KB/chunk) | 60 MB (~2.4 KB/chunk) |
+
+Scan and chunk is 1 s of that; the other 9 m 49 s is embedding. Throughput and bytes-per-chunk are
+flat against 0.10.0 — the wall-clock difference is the larger corpus, not a slower engine.
 
 Cold indexing is a **one-time** cost. Steady state is **incremental**: the reindexer re-embeds only
 the files a `git` diff touched, so day-to-day it's seconds, not minutes — a background reindex
@@ -46,72 +61,119 @@ triggered by `code.query`, not something a user waits on.
 
 ## Warm query latency
 
-End-to-end `code.query op=search` (embed the query on CPU → `sqlite-vec` KNN over 25,313 vectors →
-hybrid rerank → render), measured warm over 11 realistic queries:
+End-to-end `code.query op=search` (embed the query on CPU → `sqlite-vec` KNN over 29,903 vectors →
+verify each candidate against current source → hybrid rerank → render), over 11 realistic queries,
+**four passes, pooled n = 40** after discarding each pass's first query:
 
-| Metric | Value |
-|---|---|
-| p50 | **235 ms** |
-| p95 | **251 ms** |
-| mean / min / max | 235 / 218 / 255 ms |
-| First query (incl. model warm) | 301 ms |
-| Relevant hit rate | 11 / 11 |
-
-> **Stale.** The query path measured above no longer exists. `Searcher.search` now verifies every
-> candidate against current source before ranking (`_verify`, added in 0.18.0), which reads each
-> candidate's file from disk inside the measured window — and `rerank_candidates` defaults to 60,
-> not the 30 the original design specified, so that read set is twice what it was. Direction of the
-> effect is knowable, magnitude is not: re-measure before quoting a latency figure.
-
-The latency is dominated by **embedding the query string** on CPU (~230 ms); the vec0 KNN over 25 k
-vectors is sub-millisecond. A GPU or a smaller model would cut the bulk of it. For an agent making a
-handful of `code.query` calls while reasoning, sub-¼-second is comfortably interactive.
-
-## What has changed since these numbers
-
-Four releases after the measurement touched the semantic engine, which is why the "unchanged since"
-claim this doc used to carry had to go:
-
-| Release | Change | Affects |
+| Metric | 0.23.4 (2026-09-17) | 0.10.0 (prior) |
 |---|---|---|
-| 0.17.0 | live progress for `codeintel index` | the cold-index rows (reporting work inside the timed pass) |
-| 0.18.0 | hits verified against current source; enclosing function named in mid-body previews | **query latency** — `_verify` reads each candidate from disk, in `Searcher.search` |
-| 0.19.0 | an index that cannot be verified is reported `unconfirmed` | query path |
-| 0.20.0 | per-edge confidence no longer discarded | envelope, not the semantic hot path |
+| p50 | **233 ms** | 235 ms |
+| p95 | **242 ms** | 251 ms |
+| min / max | 229 / 254 ms | 218 / 255 ms |
+| standard deviation | 4.7 ms | not recorded |
+| First query in a fresh process | **262–298 ms** | 301 ms |
+| Relevant hit rate | 11 / 11 (10 rows each) | 11 / 11 |
 
-The corpus, machine and model rows are still an accurate description of *what was measured*. What is
-no longer safe is treating the latency figures as current, or the "unchanged" claim as a reason not
-to re-run. The git history available in a shallow clone starts at 0.15.4, so changes between 0.10.0
-and 0.15.4 are not visible here and are not accounted for above — another reason the honest status is
-"re-measure", not "adjust".
+Two things are worth separating, because the first run of this measurement conflated them and
+reported `p50 = 272 ms`:
 
----
+* **First query in a fresh process is 262–298 ms**, and roughly 40 ms of that is page cache, not
+  model warm — the process has to fault in parts of a 68 MB database and the source spans of 60
+  candidates. That is a real user-visible cost on the first query after a boot, and it is reported
+  as its own row rather than averaged into the steady state.
+* **Steady state is 233 ms at p50 with a 4.7 ms standard deviation.** Once warm, this engine is
+  extremely consistent.
+
+The latency is dominated by **embedding the query string** on CPU (~230 ms); the vec0 KNN over 30 k
+vectors is sub-millisecond, and verifying 60 candidates against disk is a few milliseconds more. A
+GPU or a smaller model would cut the bulk of it. For an agent making a handful of `code.query` calls
+while reasoning, sub-¼-second is comfortably interactive.
+
+## What changed against the 0.10.0 numbers
+
+Four releases after the original measurement touched the semantic engine, and this document
+predicted a latency regression from one of them:
+
+| Release | Change | Predicted effect | Measured |
+|---|---|---|---|
+| 0.17.0 | live progress for `codeintel index` | reporting inside the timed pass | no visible cost; throughput flat |
+| 0.18.0 | hits verified against current source | **query latency** — `_verify` reads each candidate from disk | **none at p50** (233 vs 235 ms) |
+| 0.19.0 | an index that cannot be verified is reported `unconfirmed` | query path | none measurable |
+| 0.20.0 | per-edge confidence no longer discarded | envelope, not the semantic hot path | none |
+
+**The predicted regression did not materialise, and the reason is worth stating because it is the
+thing that keeps being true here: the query embed dominates everything else by two orders of
+magnitude.** Reading 60 short spans off a warm page cache costs single-digit milliseconds against a
+~230 ms CPU embed. The prediction was sound about direction and wrong about whether it would be
+observable — which is exactly why this document said "re-measure" rather than "adjust".
+
+That result is contingent, not structural. It holds while the read set stays bounded by the
+candidate limit. If a change made the search read every row, or read each candidate twice, the same
+argument would stop protecting it — so that bound is now a test rather than a paragraph.
+
+## The enforced budget
+
+`tests/test_query_budget.py` asserts the work a single `search` is allowed to do. It counts rather
+than times, because **a wall-clock assertion on a shared CI runner is a summary whose referent is
+the runner** — true of that machine on that morning, and read as a claim about the code. The
+quantities below are properties of the algorithm, identical on a laptop and on a cold shared
+runner, so they can be asserted instead of eyeballed:
+
+| Budget | Why it is the one to hold |
+|---|---|
+| **≤ 1 file read per candidate** | verification, rerank and the snippet share one read. A change that re-reads for the snippet doubles the disk cost of every query and changes no result. |
+| **reads flat in corpus size** | the extrapolation below is only valid while the read set is bounded by the candidate limit rather than by the number of chunks indexed. |
+| **exactly 1 embed per search** | the embed IS the latency. One per candidate would be a 60× regression that no functional test would notice. |
+| **exactly 1 vector query per search** | an N+1 over candidates changes nothing a user can see, and only makes every query slower. |
+| **rerank=off reads only `k`** | otherwise switching the widening off still pays for it. |
+
+Measured values today, at `k=5`: 10 reads for 10 candidates, 20 for 20, 20 for 20 on a corpus 3×
+larger, 5 with rerank off, and 1 embed / 1 KNN throughout. The budget is a ceiling, so a smaller
+number is an improvement and only a larger one fails.
 
 ## Extrapolation to the configured ceiling
 
 codeintel caps a single index at **100,000 chunks** (`max_total_chunks`, tunable). Linear from the
 measured constants, the ceiling is roughly:
 
-| At 100 k chunks (≈4× this corpus) | Estimate |
+| At 100 k chunks (≈3.3× this corpus) | Estimate |
 |---|---|
-| Cold index (this machine) | ~33 min |
-| `semantic.db` size | ~240 MB |
-| Query latency | unchanged (~235 ms — KNN over 100 k vectors is still sub-ms; latency is the query embedding, not the search) |
+| Cold index (this machine) | ~34 min |
+| `semantic.db` size | ~234 MB |
+| Query latency | unchanged (~233 ms — KNN over 100 k vectors is still sub-ms; latency is the query embedding, not the search) |
 
 Query latency is flat in corpus size (the cost is embedding the *query*, not scanning the index), so
 the engine stays interactive as the repo grows; index time and disk scale linearly with chunk count.
+The flatness is not merely asserted here — it is the second row of
+[the enforced budget](#the-enforced-budget).
 
 ## Reproduce it
 
-Into a throwaway `HOME` so your real cache is untouched:
+Into a throwaway `CODEINTEL_HOME` so your real cache is untouched:
 
 ```bash
-export CODEINTEL_HOME=/tmp/ci-bench && mkdir -p "$CODEINTEL_HOME/.codeintel"
-codeintel index /path/to/small-repo >/dev/null   # warm-up: downloads the model, not timed
-/usr/bin/time -l codeintel index /path/to/large-repo   # wall time + max RSS; prints "Indexed N chunks"
-ls -la "$CODEINTEL_HOME/.codeintel/"*.db                # on-disk index size
+export CODEINTEL_HOME=/tmp/ci-bench && rm -rf "$CODEINTEL_HOME" && mkdir -p "$CODEINTEL_HOME"
+export PYTHONPATH="$PWD/src"          # measure the checkout, not the installed snapshot
+/usr/bin/time -l .venv/bin/python -m codeintel index /path/to/large-repo > /tmp/index.log 2>&1
+grep -Ei "Indexed|real|maximum resident" /tmp/index.log
+ls -l "$CODEINTEL_HOME"/semantic.db   # on-disk index size
 ```
 
-Query latency: load the provider once and time warm searches (see `codeintel query --op search
---target "..."`, or drive `SemanticProvider.build_result("search", q, [], 0, root)` in a loop and
-take the median of runs after the first).
+Do **not** pipe `/usr/bin/time` into `head`. The first attempt at this re-measurement did, which
+closed the pipe and SIGPIPE-killed the indexer at 1% — and the latency step then happily reported
+figures for a 600-chunk index while the header said 29,903. The run looked entirely normal.
+
+Query latency: load the provider once and time warm searches, discarding the first (model load and
+page cache), and run several passes rather than one — a single pass on a cold cache reads ~8% high.
+
+```bash
+CODEINTEL_HOME=/tmp/ci-bench PYTHONPATH=src .venv/bin/python -c '
+import os, statistics, time
+from codeintel.providers.semantic import SemanticProvider
+p, root = SemanticProvider(), os.path.expanduser("/path/to/large-repo")
+ts = []
+for i in range(11):
+    t = time.monotonic(); p.build_result("search", f"query {i}", [], 0, root)
+    if i: ts.append((time.monotonic() - t) * 1000)
+print(f"p50 {statistics.median(ts):.0f} ms")'
+```
