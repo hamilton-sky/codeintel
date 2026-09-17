@@ -303,8 +303,8 @@ Create explicit promotion levels.
 > that was supposed to deliver it merged" is the same substitution this document's own findings are
 > made of.
 >
-> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **four are
-> met, one is refused as written, one is partly met, and four are open** — of which exactly one
+> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **five are
+> met, one is refused as written, one is partly met, and three are open** — of which exactly one
 > cannot be closed by writing anything.
 >
 > | level | gate | status |
@@ -319,7 +319,7 @@ Create explicit promotion levels.
 > | rec. beta | full suite completes reliably | **met** — `#39`; 1,593 tests in 226s locally, four Pythons green in CI |
 > | rec. beta | SQLite warnings eliminated | **met** — `#39`, and `ResourceWarning` is an error in the suite |
 > | general | precision benchmark, multiple real Python and TS repos | **met** — four arms, two of each language, 27 scored symbols |
-> | general | verified-caller precision ≥ 95% | **open, and newly measurable** — see below |
+> | general | verified-caller precision ≥ 95% | **measured** — 100% / 100% / 97% on the three real repositories, 75% on the fixture; no threshold agreed |
 > | general | large-repo performance budgets documented and enforced | **open** — documented, self-marked stale, enforced nowhere |
 > | general | upgrade and uninstall paths tested | **open** — and there is no uninstall path to test |
 > | general | several external users set up unassisted | **open** — the one gate no commit can close |
@@ -332,12 +332,29 @@ Create explicit promotion levels.
 > rows are still all returned, and the *caller* can now exclude them with `rows[].verified` or
 > `evidence_class`. The underlying resolution is still heuristic, which is Phase 2 and stands.
 >
-> **Why the precision gate is "newly measurable".** The gate asks for *verified-caller* precision.
-> Every number in this document and in `bench/README.md` is precision over **all** rows — the arms
-> read 100% / 100% / 90% / 50%, and those are a different quantity from the one the gate names.
-> Until `#44` the distinction was not in the output to score. It is now (`rows[].verified`), so the
-> next step here is concrete and small: have `bench/score.py` report the verified subset as its own
-> arm. Nobody has run that number, and it is not claimed here.
+> **The precision gate, now measured.** The gate asks for *verified-caller* precision, and every
+> other number in this document is precision over **all** rows — a different quantity that had been
+> standing in for it. `bench/score.py` now carries a fourth arm, `graph_verified`, which applies
+> `rows[].verified` and scores what is left. Measured 2026-09-17 on the same trees and backend:
+>
+> | repository | `graph` direct | `graph_verified` direct | wrongly silent |
+> |---|---|---|---|
+> | `daycap` | 100% / 100% | **100% / 100%** | 0 / 8 |
+> | `snitch-simulator` | 100% / 100% | **100% / 100%** | 0 / 6 |
+> | `pathly-adapters` | 90% / 100% | **97% / 78%** | 0 / 10 |
+> | `corpus-ts` (fixture) | 50% / 80% | **75% / 60%** | 0 / 3 |
+>
+> The three real repositories clear 95%; the deliberately adversarial three-symbol fixture does not.
+> **No pooled cross-repository figure is printed and none is invented here** — the arms have
+> different symbol counts and averaging them would be its own summary defect. What is still missing
+> from this gate is a *decision*, not a measurement: "an agreed threshold" has never been agreed.
+>
+> The result worth reading twice is the last column. `wrongly silent` is **0 on every arm including
+> `graph_verified`** — across 27 symbols, filtering to verified rows never emptied a caller list.
+> That prices the argument against exclusion-by-default rather than settling it: the rows the filter
+> drops are overwhelmingly *additional* callers of symbols that also had verified ones, and a symbol
+> whose only callers are name-matched — the case that would score `wrongly silent` — is not in the
+> stratified target lists today. Adding one is the next thing this arm needs.
 >
 > **What "inspectable, not durable" means.** `Reindexer.reindex_pending` answers whether a root is
 > being rebuilt, and an answer served in that window carries `reindexing: true` plus a hint saying
@@ -378,15 +395,16 @@ Requirements:
 - ~~Full suite completes reliably.~~ `#39`
 - ~~SQLite warnings eliminated.~~ `#39`
 
-### General recommendation — 1 of 5 met
+### General recommendation — 2 of 5 met
 
 Requirements:
 
 - ~~Precision benchmark across multiple real Python and TypeScript repositories.~~ four arms,
   `bench/README.md`.
-- Measured verified-caller precision above an agreed threshold, preferably 95% or higher. —
-  **open**, and measurable for the first time since `#44`. The published arms are precision over all
-  rows, which is not this number.
+- ~~Measured verified-caller precision above an agreed threshold, preferably 95% or higher.~~ —
+  **measured** by the `graph_verified` arm: 100% / 100% / 97% on the three real repositories, 75%
+  on the fixture. The threshold itself has still never been agreed, which is a decision rather than
+  a measurement.
 - Large-repository performance budgets documented and enforced. — **open** on both halves.
 - Upgrade and uninstall paths tested. — **open**; no `uninstall` exists.
 - At least several external users have completed setup without maintainer assistance. — **open**,
@@ -500,12 +518,15 @@ delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
 
 What remains is **Phase 6**, and it is four gates rather than the one this paragraph used to name.
 External validation — several people installing and verifying without the maintainer — is the gate
-no commit can close, and it is not the only thing outstanding. The other three are ordinary work:
-score the **verified** subset as its own benchmark arm (the gate asks for verified-caller precision
-and every published arm measures precision over all rows), re-measure the performance figures
-`docs/benchmarks.md` already marks stale and put a number in CI, and test the upgrade path — there
-being no `uninstall` to test. The beta / early-adopter level is met on all four of its gates, which
-is the level this document recommends the tool at.
+no commit can close, and it is not the only thing outstanding. The other two are ordinary work:
+re-measure the performance figures `docs/benchmarks.md` already marks stale and put a number in CI,
+and test the upgrade path — there being no `uninstall` to test. The beta / early-adopter level is
+met on all four of its gates, which is the level this document recommends the tool at.
+
+The verified-caller precision gate is measured now (`graph_verified`, `bench/README.md`) and reads
+100% / 100% / 97% on the three real repositories. What it still wants is an agreed threshold, and a
+target symbol whose callers are *all* name-matched — the one case that would make its `wrongly
+silent` column say something, and the case the stratified lists do not yet contain.
 
 Phase 3 closed in `#44`. One thing it asked for does not exist and one cannot be built honestly:
 the receiver/type evidence field has no backend behind it, and a continuation cursor over a

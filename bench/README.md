@@ -149,6 +149,7 @@ reproduces the table:
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
 | `graph` | 90% | 100% | 93% | 100% | 0 / 10 |
+| `graph_verified` | 97% | 78% | 97% | 74% | 0 / 10 |
 | `lsp_raw` | 73% | 100% | 78% | 100% | 0 / 10 |
 | `lsp_classified` | **100%** | 100% | **100%** | 100% | 0 / 10 |
 
@@ -158,6 +159,42 @@ Measured with `codeintel 0.23.3` — the checkout minus `2905ea2` — against
 `simulator-with-schema-builder`, clean). That the engine was one commit behind the checkout is worth
 recording rather than fixing silently: `2905ea2` is a caller-resolution fix, so the table is a
 floor for the current source, not a reading of it.
+
+### `graph_verified`, and the price of filtering
+
+`graph_verified` is the `graph` answer with `rows[].verified` applied — only the edges that followed
+a real import or language-server binding. It exists because the readiness doc's general-release gate
+names **verified-caller** precision, and every other number on this page is precision over ALL rows,
+which is a different quantity that had been standing in for it.
+
+Measured 2026-09-17 with `codeintel 0.23.4` (the checkout, via `CODEINTEL_BENCH_EXE`), same trees
+and same backend as the rows above:
+
+| repository | `graph` direct | `graph_verified` direct | `graph` impact | `graph_verified` impact |
+|---|---|---|---|---|
+| `daycap` | 100% / 100% | 100% / 100% | 100% / 95% | 100% / 95% |
+| `snitch-simulator` | 100% / 100% | 100% / 100% | 100% / 82% | 100% / 73% |
+| `pathly-adapters` | 90% / 100% | **97% / 78%** | 93% / 100% | 97% / 74% |
+| `corpus-ts` | 50% / 80% | **75% / 60%** | 50% / 50% | 75% / 38% |
+
+Two readings, and the second is the one that matters.
+
+**Filtering buys precision and costs recall, as expected.** On the two repositories where the graph
+arm is already perfect, the filter changes nothing about direct callers — every row there had
+followed a binding. Where it is not perfect it helps: +7 points on `pathly-adapters`, +25 on
+`corpus-ts`. The recall cost is larger than the precision gain in both cases (−22 and −20).
+
+**It did not open the deletion trap on this corpus.** `wrongly silent` is **0 on every arm of every
+repository, `graph_verified` included** — across all 27 scored symbols, not one had its entire
+caller list removed by the filter. That is a real result and it is narrower than it looks: it says
+the filter never *silenced* a symbol here, not that filtering is safe. The rows it removes are
+overwhelmingly *additional* callers of symbols that also had verified ones (`read_flow_nodes`: 5
+rows → 2; `_decompose_flow_dict`: 14 → 12), so the arm keeps answering and answers less. A symbol
+whose only callers are name-matched is the case that would score `wrongly silent` here, and the
+stratified target lists do not currently contain one.
+
+So this does not settle the standing argument for keeping heuristic rows in the default answer — it
+prices it. What it removes is the assumption that the price was unmeasurable.
 
 ### Why these numbers went UP, and what that says about the instrument
 
