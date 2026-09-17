@@ -177,7 +177,16 @@ def test_graph_probe_not_installed(monkeypatch):
 # semantic probe — REAL temporary SemanticDb (model-free, read-only)
 # --------------------------------------------------------------------------- #
 
-def _make_db(path, project_root_real):
+def _make_db(path, project_root_real, *, embedded=True):
+    """A semantic index for `project_root_real`: one chunk, and by default a vector behind it.
+
+    `embedded` exists because the two halves come apart in the wild — an index pass can chunk and
+    then fail to embed — and `probe(deep=True)` now reports that state as unusable. Every test
+    whose subject is something ELSE wants a complete index, or its verdict is dominated by an
+    incompleteness it never meant to create.
+    """
+    import sqlite_vec
+
     from codeintel.semantic_db import SemanticDb
     db = SemanticDb(str(path))
     db.init()
@@ -187,6 +196,13 @@ def _make_db(path, project_root_real):
         " VALUES (?,?,?,?,?)",
         ("id1", project_root_real, "f.py", 0, "hash"),
     )
+    if embedded:
+        c.enable_load_extension(True)
+        sqlite_vec.load(c)
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS code_embeddings USING "
+                  "vec0(chunk_id TEXT PRIMARY KEY, embedding float[4])")
+        c.execute("INSERT INTO code_embeddings(chunk_id, embedding) VALUES (?, ?)",
+                  ("id1", sqlite_vec.serialize_float32([0.1, 0.2, 0.3, 0.4])))
     c.commit()
     db.close()
 
@@ -435,3 +451,222 @@ def test_setup_names_the_reason_indexing_failed(tmp_path, monkeypatch):
     step = onboarding._bounded_index(str(repo), timeout_s=30.0, out=io.StringIO())
     assert step["status"] == "fail"
     assert "403 Forbidden" in step["detail"], step["detail"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# `--deep` asks a question
+#
+# Everything above verifies that engines BOOT. That is the shape of every instance of this
+# project's recurring defect: `READY` is true of the process and false of answerability,
+# `list_projects` answers in a dialect a dead index also answers in, and a chunk count is true of
+# what was chunked and false of what a search can reach. Each of these drives one real query and
+# requires content — and each asserts the SHALLOW probe disagrees, because a check that cannot
+# separate the two states is not a check.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _graph_with_rows(rows, *, failure=None):
+    """A GraphProvider that resolves cleanly and whose real queries return `rows`."""
+    from codeintel.graph_backend import BackendClient
+    from codeintel.graph_resolution import ProjectResolution
+
+    gp = GraphProvider.__new__(GraphProvider)
+    gp._backend = BackendClient.__new__(BackendClient)           # type: ignore[attr-defined]
+    gp.available = True                                          # type: ignore[attr-defined]
+    gp._last_failure = failure                                   # type: ignore[attr-defined]
+    gp._probe_wire_format = lambda name: True                    # type: ignore[method-assign]
+    gp._match_project = lambda raw, root: ProjectResolution(      # type: ignore[method-assign]
+        name="p", matched_root=root, scope="exact")
+
+    def _run(method, payload, timeout_ms):
+        if method == "list_projects":
+            return {"projects": [{"name": "p", "root_path": "/repo"}]}
+        return {"columns": ["a.name"], "rows": rows}
+
+    gp._run = _run                                               # type: ignore[method-assign]
+    return gp
+
+
+def test_a_graph_project_that_resolves_but_holds_nothing_is_not_deep_runnable():
+    """A registration whose index is empty answers `list_projects` and the wire-format probe
+    perfectly, and then answers every real question with nothing.
+
+    `_probe_wire_format` cannot catch it and is not supposed to: it asks whether the REPLY is
+    readable, and an empty result set is a readable reply. The shallow verdict is kept as-is so
+    the difference between the two is visible rather than asserted."""
+    gp = _graph_with_rows([])
+
+    assert gp.probe("/repo")["runnable"] is True, "the shallow probe is not the thing under test"
+
+    deep = gp.probe("/repo", deep=True)
+    assert deep["runnable"] is False, deep
+    assert deep["repo_indexed"] is True, "the registration does exist — that part was true"
+    assert "no rows" in deep["detail"], deep
+    assert "codeintel index" in (deep["remediation"] or ""), deep
+
+
+def test_a_graph_project_with_rows_stays_runnable_under_deep():
+    """The positive half. A check that fires on healthy repositories is one nobody runs twice."""
+    deep = _graph_with_rows([["something"]]).probe("/repo", deep=True)
+    assert deep["runnable"] is True, deep
+    assert "answered a real query" in deep["detail"], deep
+
+
+def test_a_graph_verification_query_that_fails_is_unknown_not_empty():
+    """`outcome.py`'s rule at the health check: could-not-ask and answered-nothing are different
+    facts, and only one of them means the engine is broken."""
+    from codeintel.outcome import Missing
+
+    gp = _graph_with_rows([], failure=Missing("timeout", "the backend did not answer"))
+    deep = gp.probe("/repo", deep=True)
+    assert deep["runnable"] is None, deep
+    assert "unknown" in deep["detail"], deep
+
+
+def _ready_lsp(repo, *, overview):
+    """An LspProvider with a READY session whose `get_symbols_overview` returns `overview`."""
+    from codeintel.outcome import Ok
+
+    lsp = LspProvider.__new__(LspProvider)
+    lsp.available = True                                         # type: ignore[attr-defined]
+    lsp._cmd = "uvx"                                             # type: ignore[attr-defined]
+
+    class _Ready:
+        state = _State.READY
+
+        class _Lock:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        _lock = _Lock()
+
+    session = _Ready()
+    lsp._sessions = {str(repo): session}                         # type: ignore[attr-defined]
+    lsp._get_or_create_session = lambda root: session            # type: ignore[method-assign]
+    class _Block:
+        def __init__(self, text): self.text = text
+
+    class _Result:
+        content = [_Block(overview)] if overview is not None else []
+
+    lsp._call_tool = lambda s, tool, args, t: Ok(_Result())      # type: ignore[method-assign]
+    return lsp
+
+
+def _python_repo(tmp_path, n=6):
+    repo = tmp_path / "py"
+    repo.mkdir()
+    for i in range(n):
+        (repo / f"m{i}.py").write_text("def f():\n    return 1\n")
+    (repo / ".serena").mkdir()
+    (repo / ".serena" / "project.yml").write_text(
+        "language_servers:\n  - python\n", encoding="utf-8")
+    return repo
+
+
+def test_a_ready_language_server_that_answers_nothing_is_not_deep_runnable(tmp_path):
+    """The exact state that reported `3 / 3 engines ready` over a tree whose every reference
+    lookup came back empty. The config is correct here — the language IS served — so neither
+    configuration check fires and only asking catches it."""
+    repo = _python_repo(tmp_path)
+    lsp = _ready_lsp(repo, overview="{}")
+
+    shallow = lsp.probe(str(repo), deep=False)
+    assert shallow["runnable"] is True, "the shallow probe reads READY and stops — as before"
+
+    deep = lsp.probe(str(repo), deep=True, timeout_s=2.0)
+    assert deep["runnable"] is False, deep
+    assert "no symbols" in deep["detail"] or "returned nothing" in deep["detail"], deep
+    assert deep["remediation"], "an engine that answers nothing must name a next action"
+
+
+def test_a_ready_language_server_that_answers_stays_runnable(tmp_path):
+    repo = _python_repo(tmp_path)
+    lsp = _ready_lsp(repo, overview='{"functions": ["f"]}')
+
+    deep = lsp.probe(str(repo), deep=True, timeout_s=2.0)
+    assert deep["runnable"] is True, deep
+    assert "answered a real query" in deep["detail"], deep
+
+
+def test_the_lsp_verification_picks_a_file_the_config_actually_serves(tmp_path):
+    """The subject has to be knowable from the tree. Guessing a SYMBOL name would make an empty
+    answer ambiguous — absent symbol, or absent engine — which is the ambiguity being removed."""
+    repo = tmp_path / "poly"
+    repo.mkdir()
+    for i in range(6):
+        (repo / f"m{i}.py").write_text("x = 1\n")
+    for i in range(3):
+        (repo / f"t{i}.ts").write_text("export const x = 1\n")
+    (repo / ".serena").mkdir()
+    (repo / ".serena" / "project.yml").write_text(
+        "language_servers:\n  - python\n", encoding="utf-8")
+
+    chosen = LspProvider.__new__(LspProvider)._a_served_source_file(str(repo))
+    assert chosen and chosen.endswith(".py"), chosen
+
+    # Nothing served ⇒ no question to ask, which is "could not ask", never "answered no".
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert LspProvider.__new__(LspProvider)._a_served_source_file(str(bare)) is None
+
+
+def _semantic_db(tmp_path, *, with_vectors):
+    """A real SemanticDb file holding one chunk for `/repo`, with or without a vector behind it."""
+    import sqlite3
+
+    import sqlite_vec
+
+    path = str(tmp_path / f"s-{'with' if with_vectors else 'without'}.db")
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.execute("CREATE TABLE chunk_hashes (chunk_id TEXT, project_root TEXT, file_path TEXT)")
+    conn.execute("INSERT INTO chunk_hashes VALUES ('c1','/repo','a.py')")
+    conn.execute("CREATE VIRTUAL TABLE code_embeddings USING "
+                 "vec0(chunk_id TEXT PRIMARY KEY, embedding float[4])")
+    if with_vectors:
+        conn.execute("INSERT INTO code_embeddings(chunk_id, embedding) VALUES (?, ?)",
+                     ("c1", sqlite_vec.serialize_float32([0.1, 0.2, 0.3, 0.4])))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_semantic_chunks_without_vectors_are_not_a_working_index(tmp_path):
+    """`N indexed chunks` counts `chunk_hashes`. A search reads `code_embeddings`. An index pass
+    that chunked and then failed to embed leaves the first full and the second empty, and the
+    count reports that as healthy."""
+    pytest.importorskip("sqlite_vec")
+    from codeintel.providers.semantic import _deep_answer
+
+    answered, why = _deep_answer(_semantic_db(tmp_path, with_vectors=False), "/repo", "m", True)
+    assert answered is False, why
+    assert "code_embeddings" in why, why
+
+    answered, why = _deep_answer(_semantic_db(tmp_path, with_vectors=True), "/repo", "m", True)
+    assert answered is True, why
+
+
+def test_semantic_without_cached_weights_reports_unknown_rather_than_broken(tmp_path):
+    """The weights being absent says nothing about the index. Reporting it as a failure would send
+    a user to `reset && index`, which cannot fix it."""
+    pytest.importorskip("sqlite_vec")
+    from codeintel.providers.semantic import _deep_answer
+
+    answered, why = _deep_answer(
+        _semantic_db(tmp_path, with_vectors=True), "/repo", "bge-small", model_cached=None)
+    assert answered is None, why
+    assert "not cached" in why, why
+
+
+def test_doctor_deep_reaches_every_engine():
+    """`--deep` used to reach two of the three: `run_doctor` called the graph probe with no `deep`
+    at all, so the engine whose index can be empty was the one never asked."""
+    import inspect
+
+    source = inspect.getsource(doctor.run_doctor)
+    for engine in ("graph", "lsp", "semantic"):
+        call = next(line for line in source.splitlines()
+                    if f'"{engine}", {engine}' in line or ("p.probe(root" in line and engine in line))
+        assert call, engine
+    assert source.count("deep=deep") >= 2 and "p.probe(root, deep=deep)" in source, source

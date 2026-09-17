@@ -213,6 +213,69 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
     return True
 
 
+def _deep_answer(db_path: str, project_root_real: str, model: str,
+                 model_cached: bool | None) -> tuple[bool | None, str]:
+    """Would a real search return anything? ``(answered, detail)``; ``None`` when it could not ask.
+
+    A chunk count is not an answer. `chunk_hashes` records what was CHUNKED; a search reads
+    `code_embeddings`, and the two come apart in ways that leave the count looking healthy — an
+    index pass that chunked and then failed to embed, a reset that cleared one table, a
+    `sqlite-vec` that will not load in this interpreter. In every one of those the probe reported
+    `runnable: true, repo_indexed: true, N indexed chunks` about an engine whose every search
+    returns nothing.
+
+    Deliberately NOT a full `Searcher.search`. That embeds the query, which needs the ~50 MB model
+    resident, and a diagnostic that downloads a model on a slow link is one people stop running.
+    What it checks instead is the exact precondition a search has and a chunk count does not: that
+    this repository's chunks have vectors behind them, reached through the same extension the
+    search path loads. When the model is absent that is reported as a separate, non-fatal fact
+    rather than folded into the verdict — "could not ask" is not "answered no".
+    """
+    import sqlite3
+
+    conn = None
+    try:
+        import sqlite_vec
+
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        # `code_embeddings` is created LAZILY at the first embed, so its absence is not a broken
+        # database — it is the definite statement that nothing has ever been embedded here, which
+        # is an answer and not a failure to ask. Distinguished explicitly, because letting the
+        # missing table fall into the exception path below would report the most common form of
+        # this defect as "could not tell".
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') "
+            "AND name = 'code_embeddings'"
+        ).fetchone()
+        if not exists:
+            return False, ("nothing has been embedded — the vector table a search reads has never "
+                           "been created, so every query returns nothing")
+        row = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM code_embeddings WHERE chunk_id IN "
+            "(SELECT chunk_id FROM chunk_hashes WHERE project_root = ?) LIMIT 1)",
+            (project_root_real,),
+        ).fetchone()
+    except Exception as exc:
+        log_swallowed("SemanticProvider._deep_answer", exc)
+        return None, f"the verification query could not run ({type(exc).__name__})"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if not (row and row[0]):
+        return False, ("none of them has a vector behind it — a search reads `code_embeddings` "
+                       "and this repository has no rows there, so every query returns nothing")
+    if model_cached is not True:
+        return None, (f"vectors are present, but the `{model}` weights are not cached, so whether "
+                      f"a query can be embedded here was not verified")
+    return True, "and this repository's chunks have vectors a search can reach"
+
+
 def _not_indexed_probe(project_root: str, detail: str) -> dict:
     """The `probe()` shape for 'this repo has no usable index yet' — with a distinct message when
     that gap is because a background cold-index is already filling it in (see
@@ -455,6 +518,17 @@ class SemanticProvider:
                     report["detail"] = (
                         f"{count} indexed chunks; {sampled}/{sampled} sampled source files readable"
                     )
+                # Last, and it can only ever LOWER the verdict. Source readability is about the
+                # tree; this is about the index, and a repository can pass the first and fail the
+                # second — which is the case a chunk count has always reported as healthy.
+                answered, why = _deep_answer(db_path, real, named_model, cached)
+                report["answers"] = answered
+                report["detail"] = f"{report['detail']}; {why}"
+                if answered is not True:
+                    report["runnable"] = answered
+                if answered is False:
+                    report["remediation"] = (
+                        f"codeintel reset {project_root} && codeintel index {project_root}")
             return _with_model_cache(report, cached, named_model)
         return _with_model_cache(
             _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo"),

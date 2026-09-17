@@ -280,7 +280,7 @@ def run_doctor(
     try:
         from codeintel.providers.graph import GraphProvider
         engines["graph"] = _probe_engine(
-            "graph", graph, GraphProvider, lambda p: p.probe(root), on_provider
+            "graph", graph, GraphProvider, lambda p: p.probe(root, deep=deep), on_provider
         )
     except Exception:
         engines["graph"] = {"engine": "graph", "status": "fail", "installed": False,
@@ -414,7 +414,10 @@ def render_doctor_text(report: dict) -> str:
     ready, total, healthy = summ.get("ready", "?"), summ.get("total", "?"), summ.get("healthy")
     count = c.bold(f"{ready} / {total}")
     count = c.red(count) if healthy is False else (c.green(count) if healthy else count)
-    tail = "" if report.get("deep") else c.dim("  (run with --deep to boot-check serena)")
+    # Names what --deep actually does. "boot-check serena" described one third of it and the
+    # least useful third: booting is the question this tool keeps learning not to stop at.
+    tail = "" if report.get("deep") else c.dim(
+        "  (run with --deep to ask each engine a real query)")
     out.append("")
     out.append(f"  {count} engines ready for this repo.{tail}")
     opt_down = [n for n in _ENGINES

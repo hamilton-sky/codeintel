@@ -615,6 +615,75 @@ class LspProvider:
             f"none. Add a tsconfig.json covering the sources, or use `--engine graph` for callers",
         )
 
+    def _a_served_source_file(self, project_root: str) -> str | None:
+        """One repo-relative source file in a language this config actually serves, or ``None``.
+
+        The deep answer check needs a question with a known-good subject, and a symbol NAME is the
+        wrong kind of subject: picking one means guessing what this repository contains, and a
+        wrong guess produces an empty answer that says nothing about the engine. A FILE the config
+        serves is knowable from the tree, so an empty answer about it is a fact about the server.
+
+        Prefers the most-populous served language, so the file is representative rather than the
+        first one `os.walk` happens upon.
+        """
+        try:
+            configured, census = self._language_coverage(project_root)
+            served = [lang for lang in configured if census.get(lang)]
+            if not served:
+                return None
+            best = max(served, key=lambda lang: census.get(lang, 0))
+            wanted = self._LANG_EXTS.get(best, ())
+            if not wanted:
+                return None
+            for dirpath, dirnames, filenames in os.walk(project_root):
+                dirnames[:] = [d for d in dirnames
+                               if d not in self._SKIP_DIRS and not d.startswith(".")]
+                for fn in sorted(filenames):
+                    if fn.endswith(wanted):
+                        full = os.path.join(dirpath, fn)
+                        return os.path.relpath(full, project_root)
+            return None
+        except Exception as exc:
+            log_swallowed("LspProvider._a_served_source_file", exc)
+            return None
+
+    def _deep_answer(self, project_root: str, timeout_s: float) -> tuple[bool | None, str]:
+        """Does the language server actually ANSWER about this repository's code?
+
+        `READY` is a fact about the PROCESS, and this file already says so where the state is read.
+        `_unserved_note` and `_no_tsproject_note` close two specific ways a READY server answers
+        nothing — a language missing from the config, and TypeScript with no `tsconfig.json`. Both
+        are checks on the CONFIGURATION, which is one inference away from the thing a reader wants:
+        neither of them asks the server a question.
+
+        So this asks one. `get_symbols_overview` on a served source file needs no symbol name, no
+        index and no prior query, and its answer is content or it is not. An empty answer here
+        means the server booted and cannot read this repository's code — which is exactly the state
+        that reported `3 / 3 engines ready` over `bench/fixtures/corpus_ts` while every reference
+        lookup came back empty.
+
+        Returns ``(answered, detail)``; ``answered`` is ``None`` when the question could not be put.
+        """
+        rel = self._a_served_source_file(project_root)
+        if rel is None:
+            return None, "no file in a served language to verify against"
+        try:
+            session = self._get_or_create_session(project_root)
+            out = self._call_tool(
+                session, "get_symbols_overview", {"relative_path": rel}, timeout_s)
+        except Exception as exc:
+            log_swallowed("LspProvider._deep_answer", exc)
+            return None, "the verification query raised"
+        if isinstance(out, Missing):
+            return None, f"the verification query did not complete ({out.kind})"
+        text = self._extract_text(out.value)
+        if not text or not str(text).strip():
+            return False, f"it returned nothing for `{rel}`"
+        parsed = self._loads(str(text))
+        if isinstance(parsed, dict) and not any(parsed.values()):
+            return False, f"it reported no symbols at all in `{rel}`"
+        return True, f"and it answered a real query about `{rel}`"
+
     def probe(self, project_root: str, deep: bool = False, timeout_s: float = 20.0) -> dict:
         """Never-raise health check for the doctor. Shallow (default) is FREE — PATH presence
         plus any existing session's live state. Deep boots serena and polls until READY/FAILED,
@@ -668,10 +737,19 @@ class LspProvider:
                 # a separate question, and the one the caller is actually asking.
                 unserved = (self._unserved_note(project_root)
                             or self._no_tsproject_note(project_root))
-                return {"installed": True, "runnable": unserved is None, "repo_indexed": None,
-                        "detail": f"serena booted via `{cmd}` and reached READY" + (
-                            unserved[0] if unserved else ""),
-                        "remediation": unserved[1] if unserved else None}
+                if unserved is not None:
+                    return {"installed": True, "runnable": False, "repo_indexed": None,
+                            "detail": f"serena booted via `{cmd}` and reached READY"
+                                      + unserved[0],
+                            "remediation": unserved[1]}
+                # Both notes above read the CONFIGURATION. This asks the server.
+                answered, why = self._deep_answer(project_root, timeout_s)
+                return {"installed": True, "runnable": answered, "repo_indexed": None,
+                        "detail": f"serena booted via `{cmd}` and reached READY " + why,
+                        "remediation": None if answered else (
+                            "the language server is running but returns nothing for this "
+                            "repository's code — check `.serena/project.yml` names the right "
+                            "language(s), and that the project builds")}
             if st == _State.FAILED:
                 return {"installed": True, "runnable": False, "repo_indexed": None,
                         "detail": "serena failed to boot",

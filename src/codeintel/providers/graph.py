@@ -357,11 +357,32 @@ class GraphProvider(GraphOps):
         `_lookup_project`) would silently bypass that stub."""
         return self._lookup_project(project_root).resolution
 
-    def probe(self, project_root: str, timeout_ms: int = _RESOLVE_TIMEOUT_MS) -> dict:
-        """Cheap, never-raise, single-subprocess health check for the doctor.
+    def _deep_answer(self, project: str, timeout_ms: int) -> bool | None:
+        """Does a real query against THIS project come back with a row? ``None`` if it could not ask.
 
-        Returns ``{installed, runnable, repo_indexed, project, detail, remediation}`` — one
-        ``list_projects`` call, bounded by ``timeout_ms`` (``_run`` returns None on timeout)."""
+        `_probe_wire_format` already sends a genuine `query_graph`, and it is not this check: it
+        asks whether the backend's REPLY is in a dialect this release can read, and an empty result
+        set answers that perfectly well. So a project registered with zero nodes — an index that
+        failed, was reset, or was registered against an unreadable tree — passes it, and the probe
+        then reports `runnable: true, repo_indexed: true` about an engine that will answer every
+        question with nothing.
+
+        True about the wire, false about the repository. This is the second half of the question,
+        and the only one a reader means by "ready".
+        """
+        rows = self._query_rows("MATCH (a) RETURN a.name LIMIT 1", project, timeout_ms)
+        if self._last_failure is not None:
+            return None                     # could not ask — never reported as an empty answer
+        return bool(rows)
+
+    def probe(self, project_root: str, timeout_ms: int = _RESOLVE_TIMEOUT_MS,
+              *, deep: bool = False) -> dict:
+        """Never-raise health check for the doctor.
+
+        Returns ``{installed, runnable, repo_indexed, project, detail, remediation}``. Shallow is
+        one ``list_projects`` call, bounded by ``timeout_ms``. ``deep`` adds one real query against
+        the resolved project and requires it to return a row — see `_deep_answer`, and
+        `docs/doctor.md` for why booting is not answering."""
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False, "project": None,
@@ -414,8 +435,10 @@ class GraphProvider(GraphOps):
             # for something that refuses for an unrelated reason.
             runnable_scoped = ", ".join(sorted(_ROOT_SCOPED_OPS - set(_WITHDRAWN_OPS)))
             scoped = f"the repo-wide ops ({runnable_scoped}) will refuse"
+            answered = self._deep_answer(resolution.name, timeout_ms) if deep else True
             return {
-                "installed": True, "runnable": True, "repo_indexed": True,
+                "installed": True, "runnable": True if answered else answered,
+                "repo_indexed": True,
                 "project": resolution.name,
                 "detail": (f"this repo is NOT indexed on its own — answers would come from "
                            f"'{resolution.name}' ({resolution.matched_root}), which contains it; "
@@ -424,9 +447,30 @@ class GraphProvider(GraphOps):
                               "rather than a subdirectory of that project)" if own_repo else "")),
                 "remediation": f"codeintel index {project_root}",
             }
+        if deep:
+            answered = self._deep_answer(resolution.name, timeout_ms)
+            if answered is False:
+                return {
+                    "installed": True, "runnable": False, "repo_indexed": True,
+                    "project": resolution.name,
+                    "detail": (f"project '{resolution.name}' resolves, and a real query against it "
+                               f"returns no rows at all — the registration exists but the index "
+                               f"behind it is empty, so every question will answer nothing"),
+                    "remediation": f"codeintel index {project_root}",
+                }
+            if answered is None:
+                return {
+                    "installed": True, "runnable": None, "repo_indexed": True,
+                    "project": resolution.name,
+                    "detail": (f"project '{resolution.name}' resolves, but the verification query "
+                               f"did not complete, so whether it will answer is unknown"),
+                    "remediation": "re-run `codeintel doctor --deep`; if it persists, check "
+                                   "`codebase-memory-mcp cli query_graph`",
+                }
         return {
             "installed": True, "runnable": True, "repo_indexed": True, "project": resolution.name,
-            "detail": f"resolved project '{resolution.name}' in codebase-memory-mcp",
+            "detail": (f"resolved project '{resolution.name}' in codebase-memory-mcp"
+                       + (" and it answered a real query" if deep else "")),
             "remediation": None,
         }
 
