@@ -13,7 +13,8 @@ as current.
 
 | Doc | What it covers |
 |---|---|
-| [architecture.md](architecture.md) | The layered design, the `CodeProvider` protocol, the safe-null contract, caching, freshness, transports. **Read this first.** |
+| [trust.md](trust.md) | **What an answer is worth, and how to check it in five minutes.** Written for someone who has read none of the others: the per-engine trust model, the verification workflow to run on a symbol you already know, the eight repository states with one command each, and what to hand a colleague. **Start here if you did not write this tool.** |
+| [architecture.md](architecture.md) | The layered design, the `CodeProvider` protocol, the safe-null contract, caching, freshness, transports. **Read this first** if you are changing the code. |
 | [query-flow.md](query-flow.md) | The request lifecycle — engine selection, fan-out & merge, caching, and why the gateway never throws. |
 | [install.md](install.md) | `codeintel install` — what each agent host actually reads, why the registered command is an absolute path, and the three levels of proof that it works. |
 

@@ -15,8 +15,8 @@ are silently deleted cannot be audited and gets re-litigated instead.
 | **P0** False-positive graph edges for qualified methods | **Partly closed** — `#34` makes the failure legible: a caller heading now reads `2 resolved · 43 name-matched · 5 unstated` above the rows, and `StrategyChain.resolve`'s two true callers rank first among unbadged rows. The *disclosure* is fixed; the *resolution* is still heuristic, so Phase 2 below stands. |
 | **P1** Confidence visible but not actionable | **Open**, and narrowed — per-row badges and bucket counts exist; a `min_confidence` / `include_heuristic` filter does not. See Phase 3. |
 | **P1** Background indexing state unclear | **Unverified** — not re-tested on 2026-09-17. |
-| **P1** Full-suite performance or hang risk | **Open and confirmed.** The full suite was again not run on 2026-09-17 for this reason; targeted subsets were used throughout. See Phase 4. |
-| **P2** SQLite resource warnings | **Open and confirmed** — `ResourceWarning` still observed in test output. |
+| **P1** Full-suite performance or hang risk | **Closed** — `#39`. It never hung: it completed in 672s, twice measured. Three tests queried the gateway with a real root, each firing a full background reindex of this checkout (146s, 154s) on daemon threads nothing joined, which starved `test_hard_exit`'s nested pytest at the 47.8% mark. Suite now 219s. |
+| **P2** SQLite resource warnings | **Closed** — `#39`, and misnamed: not one came from sqlite. Sixteen HTTP listeners kept open by `shutdown()` without `server_close()`, one template file, eight bare `open(...).read()`, two MCP children killed without being waited on. `ResourceWarning` is an error in the suite now. |
 
 Two findings the original assessment could not have had, both fixed since:
 
@@ -98,9 +98,15 @@ Acceptance criteria:
 - Qualified caller queries show verified results before possible matches.
 - Truncation cannot be mistaken for completeness.
 
-## Phase 4: Stabilize test and resource behavior
+## Phase 4: Stabilize test and resource behavior — **delivered** (`#39`)
 
 Priority: **P1**
+
+> Every acceptance criterion below is met. The isolation step it proposes — bisect by directory —
+> was not the route: the suite was instrumented instead, because the reported symptom contained
+> one wrong inference (it never hung) and a bisect would have inherited it. Per-test timeouts are
+> `pytest-timeout` at 180s with `timeout_method = signal`, so one overrun fails one test rather
+> than the session.
 
 ### 1. Isolate the full-suite stall
 
@@ -149,9 +155,15 @@ Acceptance criteria:
 - No unclosed SQLite connection warnings remain.
 - MCP server shutdown leaves no child processes or database handles behind.
 
-## Phase 5: Strengthen onboarding and documentation
+## Phase 5: Strengthen onboarding and documentation — **delivered**
 
 Priority: **P2**
+
+> All four items ship as [`docs/trust.md`](trust.md), linked from the README's status banner and
+> listed first in the docs index. Its claims are checked by `tests/test_docs_trust_claims.py`:
+> every `reason` and gap kind it names is one the product emits, every command it shows is parsed
+> against the real CLI, all eight states are present, and each degraded one carries a command —
+> which is this phase's own acceptance criterion, enforced rather than asserted.
 
 ### 1. Set precise expectations
 
@@ -334,16 +346,21 @@ accuracy is bimodal and the discriminator is knowable before asking — a symbol
 unique in the index resolves essentially exactly; a colliding method name in a large tree does not,
 and now says so on its first line.
 
-The next release gate is what this document's Phase 4 already named, and nothing since has moved it:
+*(Gate updated again. Both items this section named on 2026-09-17 have since closed.)*
 
-1. Resolve the full-suite stall. It has now prevented a full local verification run twice.
-2. Eliminate the SQLite resource warnings.
+The gate Phase 4 named — resolve the stall, eliminate the resource warnings — is met: `#39`. The
+suite completes in 219s, `ResourceWarning` is an error, and no test can run longer than 180s.
 
-Beyond that, the barrier to recommending it broadly is **not accuracy** — it is setup. Three
-configuration mistakes still produce a plausible *wrong answer* rather than an error: a language
+The barrier to recommending it broadly was **not accuracy** — it was setup, and specifically three
+configuration mistakes that produce a plausible *wrong answer* rather than an error: a language
 missing from `.serena/project.yml`, a TypeScript tree with no `tsconfig.json`, and a repository not
-indexed standalone. `doctor` catches the first two as of 2026-09-17. Phase 5 is the remaining work,
-and it is what stands between "useful to its author" and "installable by a stranger".
+indexed standalone. `doctor` catches all three, and as of `#41` `--deep` no longer takes a booted
+process for a working one — it puts a real query to each engine and requires content. Phase 5 is
+delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
+
+What remains before a broad recommendation is **Phase 3** (confidence filtering, structured per-row
+evidence, truncation cursors) and **Phase 6**'s external validation — several people installing and
+verifying without the maintainer. That last one cannot be done by writing anything.
 
 ## Recommended message to an early-adopter friend
 
