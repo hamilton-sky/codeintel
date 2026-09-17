@@ -292,40 +292,105 @@ Acceptance criteria:
 - Every common failure includes one concrete next action.
 - Documentation never implies that heuristic graph edges are authoritative.
 
-## Phase 6: Release-readiness gates
+## Phase 6: Release-readiness gates — **open**, and the only phase left
 
 Priority: **P2**
 
 Create explicit promotion levels.
 
-### Current: beta / early adopter
+> Status pass 2026-09-17, after `#44` closed Phase 3. Every gate below is marked from something
+> checked rather than from the phase ledger above it — a promotion level inferred from "the phase
+> that was supposed to deliver it merged" is the same substitution this document's own findings are
+> made of.
+>
+> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **four are
+> met, one is refused as written, one is partly met, and four are open** — of which exactly one
+> cannot be closed by writing anything.
+>
+> | level | gate | status |
+> |---|---|---|
+> | beta | safe envelopes | **met** — never-raise + safe-null, and a null result carries `reason`/`hint` |
+> | beta | honest partial-confidence reporting | **met** — `confidence`/`gaps`, and since `#44` `rows[]`/`evidence`/`evidence_class` |
+> | beta | graph, LSP and semantic all work locally | **met** — `doctor --deep` (`#41`) puts a real question to each and requires content |
+> | beta | focused integration coverage | **met** — live contract jobs for both backend dialects and for LSP run on every PR |
+> | rec. beta | qualified-method false positives fixed or excluded by default | **refused as written** — see below |
+> | rec. beta | zero-readable-file indexing fails clearly | **met** — `d1dfc15` |
+> | rec. beta | background index state durable and inspectable | **partly** — inspectable, not durable |
+> | rec. beta | full suite completes reliably | **met** — `#39`; 1,593 tests in 226s locally, four Pythons green in CI |
+> | rec. beta | SQLite warnings eliminated | **met** — `#39`, and `ResourceWarning` is an error in the suite |
+> | general | precision benchmark, multiple real Python and TS repos | **met** — four arms, two of each language, 27 scored symbols |
+> | general | verified-caller precision ≥ 95% | **open, and newly measurable** — see below |
+> | general | large-repo performance budgets documented and enforced | **open** — documented, self-marked stale, enforced nowhere |
+> | general | upgrade and uninstall paths tested | **open** — and there is no uninstall path to test |
+> | general | several external users set up unassisted | **open** — the one gate no commit can close |
+>
+> **Why the false-positive gate is refused rather than failed.** "Excluded by default" is a
+> behaviour this project has deliberately chosen against: dropping a name-matched row trades a false
+> positive for a false negative, and before a delete "no callers" is the more dangerous of the two.
+> The measured position is **zero wrongly silent across 27 symbols on four repositories** — that is
+> what exclusion-by-default would spend. `#44` resolves the tension instead of picking a side: the
+> rows are still all returned, and the *caller* can now exclude them with `rows[].verified` or
+> `evidence_class`. The underlying resolution is still heuristic, which is Phase 2 and stands.
+>
+> **Why the precision gate is "newly measurable".** The gate asks for *verified-caller* precision.
+> Every number in this document and in `bench/README.md` is precision over **all** rows — the arms
+> read 100% / 100% / 90% / 50%, and those are a different quantity from the one the gate names.
+> Until `#44` the distinction was not in the output to score. It is now (`rows[].verified`), so the
+> next step here is concrete and small: have `bench/score.py` report the verified subset as its own
+> arm. Nobody has run that number, and it is not claimed here.
+>
+> **What "inspectable, not durable" means.** `Reindexer.reindex_pending` answers whether a root is
+> being rebuilt, and an answer served in that window carries `reindexing: true` plus a hint saying
+> the index is as of the last completed pass. That is the inspectable half and it is real. The
+> durable half is not: the in-flight set is an in-process dict, so a restarted server reports no
+> reindex in progress whether or not one was interrupted. The ledger's "not re-tested on
+> 2026-09-17" also still stands for the originally reported symptom.
+>
+> **Performance budgets.** `docs/benchmarks.md` carries indexing and latency numbers, and its own
+> query-latency section is marked **Stale**: the path it measured no longer exists, and the doc says
+> to re-measure before quoting a figure. No CI job asserts any performance number. So this gate is
+> open on both halves of its wording — the documented figures need re-measuring, and nothing
+> enforces them.
+>
+> **Upgrade and uninstall.** `reset` is covered (cache removal, 29 tests) and `install` is covered
+> (registration, 44 tests), but neither is the gate. There is no `uninstall` subcommand at all, and
+> the upgrade failure mode `docs/install.md` describes — an upgrade moves the binary and leaves a
+> stale launch command, which `doctor` reports — has no test standing behind it.
+
+### Current: beta / early adopter — **met**
 
 Requirements:
 
-- Safe envelopes.
-- Honest partial-confidence reporting.
-- Working local graph, LSP, and semantic engines.
-- Focused integration coverage.
+- ~~Safe envelopes.~~
+- ~~Honest partial-confidence reporting.~~
+- ~~Working local graph, LSP, and semantic engines.~~
+- ~~Focused integration coverage.~~
 
-### Recommended beta
-
-Requirements:
-
-- Qualified-method false positives fixed or excluded by default.
-- Zero-readable-file indexing fails clearly.
-- Background index state is durable and inspectable.
-- Full suite completes reliably.
-- SQLite warnings eliminated.
-
-### General recommendation
+### Recommended beta — 3 of 5 met, 1 refused, 1 partly
 
 Requirements:
 
-- Precision benchmark across multiple real Python and TypeScript repositories.
-- Measured verified-caller precision above an agreed threshold, preferably 95% or higher.
-- Large-repository performance budgets documented and enforced.
-- Upgrade and uninstall paths tested.
-- At least several external users have completed setup without maintainer assistance.
+- Qualified-method false positives fixed or excluded by default. — **refused as written**; the
+  exclusion is now the caller's to make, and the resolution is Phase 2.
+- ~~Zero-readable-file indexing fails clearly.~~ `d1dfc15`
+- Background index state is durable and inspectable. — **partly**: inspectable per answer,
+  process-local rather than durable.
+- ~~Full suite completes reliably.~~ `#39`
+- ~~SQLite warnings eliminated.~~ `#39`
+
+### General recommendation — 1 of 5 met
+
+Requirements:
+
+- ~~Precision benchmark across multiple real Python and TypeScript repositories.~~ four arms,
+  `bench/README.md`.
+- Measured verified-caller precision above an agreed threshold, preferably 95% or higher. —
+  **open**, and measurable for the first time since `#44`. The published arms are precision over all
+  rows, which is not this number.
+- Large-repository performance budgets documented and enforced. — **open** on both halves.
+- Upgrade and uninstall paths tested. — **open**; no `uninstall` exists.
+- At least several external users have completed setup without maintainer assistance. — **open**,
+  and the only gate in this document that no commit can close.
 
 ## Suggested execution order
 
@@ -433,8 +498,14 @@ indexed standalone. `doctor` catches all three, and as of `#41` `--deep` no long
 process for a working one — it puts a real query to each engine and requires content. Phase 5 is
 delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
 
-What remains before a broad recommendation is **Phase 6**'s external validation — several people
-installing and verifying without the maintainer. That cannot be done by writing anything.
+What remains is **Phase 6**, and it is four gates rather than the one this paragraph used to name.
+External validation — several people installing and verifying without the maintainer — is the gate
+no commit can close, and it is not the only thing outstanding. The other three are ordinary work:
+score the **verified** subset as its own benchmark arm (the gate asks for verified-caller precision
+and every published arm measures precision over all rows), re-measure the performance figures
+`docs/benchmarks.md` already marks stale and put a number in CI, and test the upgrade path — there
+being no `uninstall` to test. The beta / early-adopter level is met on all four of its gates, which
+is the level this document recommends the tool at.
 
 Phase 3 closed in `#44`. One thing it asked for does not exist and one cannot be built honestly:
 the receiver/type evidence field has no backend behind it, and a continuation cursor over a
