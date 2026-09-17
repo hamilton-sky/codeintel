@@ -16,10 +16,10 @@ from typing import Any, ClassVar
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
+from codeintel.graph_render import _FILE_EXTENSIONS
 from codeintel.loc import loc, span
 from codeintel.outcome import Missing, Ok, Outcome
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
-from codeintel.providers.graph import _FILE_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 

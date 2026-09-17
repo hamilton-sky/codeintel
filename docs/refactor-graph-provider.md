@@ -1,6 +1,6 @@
 # Scoping: splitting `GraphProvider` (SOLID)
 
-> **Status: done.** The split described here shipped — `graph_backend.py`, `graph_resolution.py` and `graph_render.py` exist, and `wire_text.py` was added later at the transport seam this refactor created. Kept for the reasoning behind the seams.
+> **Status: done, including phase 4 — by a different route than this document proposed.** Phases 1-3 shipped as described (`graph_backend.py`, `graph_resolution.py`, `graph_render.py`; `wire_text.py` came later at the transport seam this created). Phase 4 shipped as two MIXINS rather than as an `EdgeAnswerRenderer` returning `(text, gaps)` — see [Phase 4, as shipped](#phase-4-as-shipped) at the bottom. Kept for the reasoning behind the seams.
 
 `providers/graph.py` is 1,976 lines and `GraphProvider` is **41 methods / ~1,362 lines** — the
 largest class in the codebase by a factor of two (next: `Indexer`, 22/608). It violates SRP by owning
@@ -75,3 +75,49 @@ Secondary targets, same pattern, lower priority: `Indexer` (22/608), then `LspPr
 - The extensive inline comments in `graph.py` are load-bearing institutional memory — move them
   **with** their code, never drop them.
 - No `__version__` bump per phase; this refactor ships in a later release as one reviewed unit.
+
+---
+
+## Phase 4, as shipped
+
+`providers/graph.py` reached **2,521 lines** — `GraphProvider` alone was 1,851 of them — and was
+split again. The file is now **810 lines** and the class **603**, across:
+
+| module | lines | concern |
+|---|---:|---|
+| `graph_render.py` | 295 | naming, path classification, rendered notes (phase 1, completed here) |
+| `graph_targets.py` | 138 | what the caller's `target` denotes |
+| `graph_confidence.py` | 155 | how much an edge is vouched for |
+| `graph_edges.py` | 89 | relationship kinds, grouping, caps |
+| `graph_answer.py` | 688 | `AnswerRendering` — rows, headings, ambiguity, the notes that qualify a count |
+| `graph_ops.py` | 712 | `GraphOps` — one method per question a caller can ask |
+| `providers/graph.py` | 810 | `GraphProvider(GraphOps)` — transport, resolution, the op gate, the envelope |
+
+**Why mixins instead of the `EdgeAnswerRenderer` this document proposed.** That design returns
+`(text, gaps)` instead of mutating `_pending_gaps`, and it is still the better shape. It is also a
+change to what a renderer PROMISES, and the brief this split was done under required behaviour to
+be provably unchanged and proved two ways. Inheritance moves method bodies verbatim and leaves
+every call site — `GraphProvider._is_noise` from `mapper.py`, `gp._display(...)` from six test
+modules, the ~18 `_run`/`_query_rows` stubs that intercept by assignment — resolving to the same
+function object through the MRO. The proof is then a reading rather than a hope that a set of
+delegators is complete. **The `(text, gaps)` redesign remains open**; separating the code did not
+have to wait for it.
+
+Each mixin declares, under `TYPE_CHECKING`, exactly what it needs from the class it joins —
+`AnswerRendering` needs only `_add_gap`; `GraphOps` needs transport and per-query state — so the
+contract is checked at the join instead of assumed. `GraphOps` inherits `AnswerRendering` because
+an op's shape genuinely is query, filter, render.
+
+**Guardrail that earned its place.** Three reflection tests in
+`tests/test_graph_failure_population.py` defined their domain as "the AST of
+`providers/graph.py`". After the split they covered nothing and said so
+(`op domain looks broken, only found: []`). They now derive their domain from `GraphProvider.__mro__`,
+so a third mixin is covered the day it lands. `tests/test_summary_integrity.py` named all nine
+summary sites whose qualname moved, and the rename was 1:1 — nine out, nine in — which is itself
+evidence the move was pure.
+
+**Proved two ways.** The full suite: 1,545 passed / 29 skipped / 1 xfailed, identical counts before
+and after, coverage 89.11% -> 89.14%. And every benchmark arm byte-identical below the provenance
+header — not just the summary table but every per-symbol truth line and every per-arm
+claimed/missed/spurious count, on `daycap`, `snitch-simulator`, `pathly-adapters` and `corpus-ts`.
+

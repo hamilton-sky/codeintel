@@ -12,11 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.providers.graph import (
-    _EDGE_CONFIDENCE_FLOOR,
-    _EDGE_CONFIDENCE_WEAK,
-    GraphProvider,
-)
+from codeintel.graph_confidence import _EDGE_CONFIDENCE_FLOOR, _EDGE_CONFIDENCE_WEAK
+from codeintel.providers.graph import GraphProvider
 
 ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}

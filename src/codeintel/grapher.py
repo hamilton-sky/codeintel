@@ -32,11 +32,8 @@ def build_graph_payload(project_root: Any, *, limit: int = 220, timeout_ms: int 
             timeout_ms = int(timeout_ms)
         except Exception:
             timeout_ms = 8000
-        from codeintel.providers.graph import (
-            GraphProvider,
-            _repo_display_name,
-            _strip_project_prefix,
-        )
+        from codeintel.graph_render import _repo_display_name, _strip_project_prefix
+        from codeintel.providers.graph import GraphProvider
         p = GraphProvider()
         if not getattr(p, "available", False):
             return {**_EMPTY, "reason": "engine-unavailable"}

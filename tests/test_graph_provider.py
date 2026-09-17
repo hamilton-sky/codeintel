@@ -550,7 +550,7 @@ def test_is_noise_does_not_filter_a_real_symbol_named_get():
 def test_only_named_archive_directories_are_hidden(path, archived):
     """Excluding EVERY dot-directory swept up live automation — `.claude/hooks`, `.storybook`,
     `.husky`, `.server`, `src/.internal`. An unknown dot-directory is source until proven retired."""
-    from codeintel.providers.graph import _is_archived_path
+    from codeintel.graph_render import _is_archived_path
 
     assert _is_archived_path(path) is archived
 
@@ -563,7 +563,7 @@ def test_only_named_archive_directories_are_hidden(path, archived):
 def test_collapsing_repeats_never_rewrites_a_number(label, expected):
     """Splitting on "." also splits version numbers and dotted quads, where consecutive equal
     parts are meaningful: `CHANGELOG.1.1.0` became `CHANGELOG.1.0` — a different real release."""
-    from codeintel.providers.graph import _collapse_repeats
+    from codeintel.graph_render import _collapse_repeats
 
     assert _collapse_repeats(label) == expected
 
@@ -580,7 +580,7 @@ def test_generated_output_is_not_a_refactor_target(path, excluded):
     """A checked-in minified bundle took the top TWO hotspot slots on a real repo (cx:586,
     cog:1145) — a webpack chunk is by far the most "complex" function in any tree containing one.
     The first version excluded only dot-directories, so a plain `out/` or `dist/` sailed through."""
-    from codeintel.providers.graph import _is_archived_path
+    from codeintel.graph_render import _is_archived_path
 
     assert _is_archived_path(path) is excluded
 

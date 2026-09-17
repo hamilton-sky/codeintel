@@ -507,7 +507,7 @@ def test_hotspots_ranks_across_languages():
 def test_a_single_language_ranking_says_so():
     """When a ranking really is one file type, that must be stated rather than left to look like a
     considered result — the failure mode that hid the bug above for two whole repositories."""
-    from codeintel.providers.graph import _language_coverage_note
+    from codeintel.graph_render import _language_coverage_note
 
     only_tsx = [{"file_path": f"src/C{i}.tsx"} for i in range(10)]
     assert "tsx" in _language_coverage_note(only_tsx)
