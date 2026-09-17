@@ -57,6 +57,20 @@ All notable changes to codeintel are documented here. The format is based on
   a confident falsehood becoming a disclosed non-answer.
 
 ### Added
+- **The call-edge benchmark's oracle scored a function's own call sites as fabricated callers.**
+  `not-target` marks a bare name a proven non-caller when the file's syntax accounts for it — a
+  parameter, an assignment, a `def` in scope. In the target's OWN defining module that `def` is the
+  target, and `_accounted_by` reported only *where* the name was bound while the caller read it as
+  *what* it was bound to. Every call a function made to itself from its own file therefore became a
+  proven negative, and the engine that found those sites was charged a false positive for each one.
+  `snitch-simulator` went from **38% to 100%** direct precision and `pathly-adapters` from **80% to
+  90%**, with `lsp_classified`'s impact precision from 84% to 100%; no engine code changed. The
+  corpus never contained a file that called a symbol it defined, which is why the rule was never
+  exercised where it is wrong — `bench/fixtures/corpus/src/corpuspkg/self_call.py` now covers the
+  home-module call and the same-named parameter that must stay a negative, since trading one wrong
+  label for its mirror would be the same defect facing the other way. Tables in `bench/README.md`
+  are corrected, with the reason recorded beside them.
+
 - **A `callers`/`callees` heading breaks its count down by how the rows were resolved.** The count
   was one number over rows that are not one kind of fact. Asking a 1,483-file monorepo for callers
   of `StrategyChain.resolve` answered `(48 direct, 2 other reference(s))` where five files in the

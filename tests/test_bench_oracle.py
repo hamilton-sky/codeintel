@@ -209,3 +209,27 @@ def test_coverage_reflects_the_sites_the_oracle_can_now_decide() -> None:
     _, t = _truth(f"{PKG}/sse.py", "_broadcast")
     assert t.decided == len(EXPECTED) - len(t.undecidable)
     assert 0.0 < t.coverage < 1.0                                    # three abstentions remain
+
+
+# --- the file that defines the target is not a stranger to it ------------------------------------
+
+def test_a_call_in_the_defining_file_is_a_call_not_a_proven_negative() -> None:
+    """The negative rule reads "the file's own syntax accounts for this name, so it is some other
+    binding" — which is true everywhere except the one file where that binding IS the target.
+
+    Nothing in this corpus called a symbol from the file that defines it, so the rule was never
+    exercised where it is wrong, and `snitch-simulator` paid for it: `_strip_hop_by_hop` is called
+    three times inside its own module, every one was labelled a proven non-caller, and the graph
+    arm was charged three false positives for finding them. 38% direct precision was the oracle."""
+    _, t = _truth(f"{PKG}/self_call.py", "relay_self")
+    assert (f"{PKG}/self_call.py", "fan") in t.calls
+    assert (f"{PKG}/self_call.py", "fan") not in t.negatives
+
+
+def test_the_fix_stays_scope_aware() -> None:
+    """The counterweight, and the reason this is not simply "the defining file always means the
+    target". A parameter of the same name is a nearer binding and provably is not it — trading a
+    false negative for a false positive would be the same defect facing the other way."""
+    _, t = _truth(f"{PKG}/self_call.py", "relay_self")
+    assert (f"{PKG}/self_call.py", "shadowed") in t.negatives
+    assert (f"{PKG}/self_call.py", "shadowed") not in t.calls
