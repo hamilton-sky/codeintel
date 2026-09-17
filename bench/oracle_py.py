@@ -404,6 +404,18 @@ def label_file(path: str, root: str, target: str,
 
     binder = _Binder(target, _module_of(path, root), aliases)
     binder.visit(tree)
+    # Is this the target's OWN defining module? There the name needs no import: the `def` that
+    # defines the target binds it at module scope, and every bare call in the file is a call to it.
+    # Read as "some other `x` this module happens to bind", that fact turned a function's own call
+    # sites into PROVEN NON-CALLERS — the oracle asserting the opposite of the truth, in the one
+    # label that exists to charge an engine for being wrong. `_strip_hop_by_hop` in
+    # `snitch-simulator` is called three times in the file that defines it; all three were scored
+    # against the engine that found them, and the arm read 38% direct precision because of it.
+    #
+    # Gated on the module not REBINDING the name after defining it (`def f` then `f = other`),
+    # which is real doubt and stays on the conservative path below.
+    home_module = (binder.module == binder.tmod
+                   and binder.tname not in binder.reassigned)
     rel = os.path.relpath(path, root)
     enclosing = _enclosing_map(tree)
     scopes = _scope_binds(tree)
@@ -425,6 +437,12 @@ def label_file(path: str, root: str, target: str,
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             hit, why = _callee_name(node.func, binder)
+            if (not hit and home_module and isinstance(node.func, ast.Name)
+                    and node.func.id == tname
+                    and _accounted_by(tname, where(node.lineno), scopes) == _MODULE_SCOPE_KEY):
+                # Scope-checked, not assumed: a local variable of the same name inside some function
+                # accounts for itself and stays a negative, exactly as in any other file.
+                hit, why = True, f"call to `{tname}`, defined at module scope in this same file"
             if hit and not opaque:
                 verdict.sites.append(
                     Site(rel, node.lineno, where(node.lineno), CALL, why))
@@ -450,7 +468,12 @@ def label_file(path: str, root: str, target: str,
                 # imports no `describe` and declares none is an injected global, and Python permits
                 # another module to have installed the target itself under that name.
                 bound_at = _accounted_by(tname, where(ln), scopes)
-                if bound_at is not None:
+                if home_module and bound_at == _MODULE_SCOPE_KEY:
+                    verdict.sites.append(
+                        Site(rel, ln, where(ln), REFERENCE,
+                             f"`{tname}` itself, used without calling it, in the file that "
+                             f"defines it"))
+                elif bound_at is not None:
                     verdict.sites.append(
                         Site(rel, ln, where(ln), NOT_TARGET,
                              f"a different `{tname}` — bound by "

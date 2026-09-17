@@ -148,9 +148,9 @@ reproduces the table:
 
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
-| `graph` | 80% | 100% | 78% | 100% | 0 / 10 |
-| `lsp_raw` | 65% | 100% | 65% | 100% | 0 / 10 |
-| `lsp_classified` | **100%** | 100% | 84% | 100% | 0 / 10 |
+| `graph` | 90% | 100% | 93% | 100% | 0 / 10 |
+| `lsp_raw` | 73% | 100% | 78% | 100% | 0 / 10 |
+| `lsp_classified` | **100%** | 100% | **100%** | 100% | 0 / 10 |
 
 Measured with `codeintel 0.23.3` — the checkout minus `2905ea2` — against
 `codebase-memory-mcp 0.10.8`, on `pathly-adapters` at `c1def41b` (branch
@@ -159,13 +159,40 @@ Measured with `codeintel 0.23.3` — the checkout minus `2905ea2` — against
 recording rather than fixing silently: `2905ea2` is a caller-resolution fix, so the table is a
 floor for the current source, not a reading of it.
 
-**Nothing in the table moved between 2026-09-03 and 2026-09-17**, and neither did the per-symbol
-counts underneath it: `_broadcast` 4 claimed against 6 proven non-callers, `_claude_tokens` 1 against
-2, `snitch-simulator` 38% / 33% / 60% with 6 of 6 LSP symbols unanswered. Two weeks and a backend
-untouched is the boring outcome, and the reason it is stated at all is the section below.
+### Why these numbers went UP, and what that says about the instrument
+
+The 2026-09-03 table read `graph` at 80% / 78% and `snitch-simulator` at 38% / 33% / 60%. The engine
+has not changed. **The oracle was wrong, in the one label that exists to charge an engine for being
+wrong.**
+
+`not-target` marks a bare name a proven non-caller when the file's own syntax accounts for it — a
+parameter, an assignment, *a `def` in scope*. In the target's own defining module that `def` is the
+target, and the oracle read it as "some other `x` this module binds". So **every call a function
+made to itself from its own file was scored as a fabricated caller**, and the engine that found
+those call sites was charged a false positive for each one.
+
+`snitch-simulator` is where it bit hardest, because its targets are methods in the file that uses
+them: `_strip_hop_by_hop` is called three times inside `proxy.py`, all three were counted against
+the graph arm, and 38% direct precision was the result. Corrected, it is **100%**. On
+`pathly-adapters` four targets each lost one mislabelled site and `_claude_tokens` two, taking the
+graph arm from 80% to 90% and `lsp_classified`'s impact precision from 84% to 100%.
+
+Three things worth being uncomfortable about:
+
+* **The instrument was the least-tested code in the argument.** `tests/test_bench_oracle.py` pins a
+  corpus in which no file ever called a symbol it defined, so the rule was never exercised where it
+  is wrong. `bench/fixtures/corpus/src/corpuspkg/self_call.py` now covers both halves — the
+  home-module call, and a same-named parameter that must stay a proven negative, because trading
+  one wrong label for its mirror would be the same defect facing the other way.
+* **It failed in the flattering direction for the argument this file makes.** A benchmark that
+  exists to stop a tool overstating itself was understating it, which is the bias least likely to
+  prompt anyone to look.
+* **It is the same defect class the tool keeps shipping**, one level up: `_accounted_by` returns
+  *where* a name is bound, and the caller read it as *what* it is bound to. True about the location,
+  false about the identity — the shape `outcome.py` and the `doctor` checks were each written for.
 
 `snitch-simulator` is reported separately rather than averaged in, because its arms did not answer
-the same question: `graph` scores **38% direct precision, 33% impact precision and 60% impact
+the same question: `graph` scores **100% direct precision, 100% impact precision and 82% impact
 recall** over six symbols, and **both LSP arms are `n/a` — 6 of 6 unanswered**, the language server
 having resolved none of those symbols. An arm that answered nothing cannot be pooled with one that
 answered ten times.
@@ -177,12 +204,11 @@ Three things worth stating plainly:
    them and costs no recall. "Promote the LSP to authority for callers" would have shipped a
    regression; "LSP locates, syntax classifies" is what the numbers support.
 2. **The graph engine is not exact, and the earlier claim that it was is what proven negatives
-   corrected.** Its 20 points of lost direct precision are almost entirely `_broadcast` (4 claimed
-   callers against 6 proven non-callers) and `_claude_tokens` (1 against 2) — the two short common
-   names on the target list, put there because that is where the fabrication class lives. Under
-   positives-only truth those sites left the population and every arm scored 100%. This is also a
-   result *about 0.10.8*, which fixed the Python attribution defect; 0.9.x would look materially
-   worse.
+   corrected.** Its remaining 10 points of lost direct precision are almost entirely `_broadcast`,
+   which has one real caller and five proven non-callers — a short common name, on the list because
+   that is where the fabrication class lives. Under positives-only truth those sites left the
+   population and every arm scored 100%. This is also a result *about 0.10.8*, which fixed the
+   Python attribution defect; 0.9.x would look materially worse.
 3. **This table is Python.** The worst failure ever observed here (`describe`, 32 fabricated
    callers) is TypeScript. A real TypeScript repository is now measured too — see
    [daycap](#a-real-typescript-repository-daycap) below — but it is a *different* repository with a
@@ -199,14 +225,18 @@ dominates this score — grew in between:
 
 | tree | `_broadcast` proven non-callers | true calls, all ten targets |
 |---|---|---|
-| `c1def41b`, 2026-08-24 — the table above | 6 | 32 |
-| `1371485`, 2026-09-03 — the fresh clone | 11 | 30 |
+| `c1def41b`, 2026-08-24 — the table above | 5 | 36 |
+| `1371485`, 2026-09-03 — the fresh clone | 10 | 34 |
 
 Those two populations are re-derived here by running the oracle alone, which needs no backend, over
-both trees. The claim counts and the 71% are from that run's own output rather than re-measured, and
-they reconcile exactly: 32 true against 8 false is 80%; 30 true against 12 false is 71%. **The engine
-did not move. The denominator did**, and precision is a ratio over a population that the repository
-owns.
+both trees. **The engine did not move. The denominator did**, and precision is a ratio over a
+population that the repository owns: the newer tree doubled `_broadcast`'s proven non-callers, and
+`_broadcast` is the symbol that dominates this score.
+
+(The counts in this table were themselves re-derived after the oracle defect described below; the
+run that first reported the discrepancy saw 6 and 11 against a truth that was wrong in both trees
+by the same defect. The conclusion it supported — that a percentage here belongs to a commit —
+survived the correction unchanged, which is the only reason it is still stated.)
 
 Two things follow, and the second is the uncomfortable one.
 
