@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import tempfile
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -261,7 +262,7 @@ def test_write_creates_file():
         expected = os.path.join(d, "CODE_INTEL.md")
         assert path == expected and wrote is True
         assert os.path.exists(expected)
-        assert open(expected).read() == "# content"
+        assert pathlib.Path(expected).read_text() == "# content"
 
 
 def test_write_preserves_populated_map_when_new_is_a_stub():
@@ -270,12 +271,12 @@ def test_write_preserves_populated_map_when_new_is_a_stub():
     gen = MapGenerator(None)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "CODE_INTEL.md")
-        open(path, "w").write(_POPULATED)
+        pathlib.Path(path).write_text(_POPULATED)
         stub = _minimal_map(d, note="project not yet indexed")
         assert not _is_populated_map(stub) and _is_populated_map(_POPULATED)  # sanity
         p, wrote = gen.write(d, stub)
         assert p == path and wrote is False          # preserved → reported as not written
-        assert open(path).read() == _POPULATED        # preserved, not stubbed
+        assert pathlib.Path(path).read_text() == _POPULATED        # preserved, not stubbed
 
 
 def test_write_stub_ok_when_no_existing_map():
@@ -284,7 +285,7 @@ def test_write_stub_ok_when_no_existing_map():
     with tempfile.TemporaryDirectory() as d:
         _, wrote = gen.write(d, _minimal_map(d, note="x"))
         assert wrote is True
-        assert "Auto-generated" in open(os.path.join(d, "CODE_INTEL.md")).read()
+        assert "Auto-generated" in pathlib.Path(os.path.join(d, "CODE_INTEL.md")).read_text()
 
 
 def test_write_populated_replaces_a_stub():
@@ -292,10 +293,10 @@ def test_write_populated_replaces_a_stub():
     gen = MapGenerator(None)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "CODE_INTEL.md")
-        open(path, "w").write(_minimal_map(d, note="stale"))
+        pathlib.Path(path).write_text(_minimal_map(d, note="stale"))
         _, wrote = gen.write(d, _POPULATED)
         assert wrote is True
-        assert _is_populated_map(open(path).read())
+        assert _is_populated_map(pathlib.Path(path).read_text())
 
 
 def test_entry_points_only_map_counts_as_populated():
@@ -307,9 +308,9 @@ def test_entry_points_only_map_counts_as_populated():
     gen = MapGenerator(None)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "CODE_INTEL.md")
-        open(path, "w").write(_POPULATED)
+        pathlib.Path(path).write_text(_POPULATED)
         _, wrote = gen.write(d, entry_only)   # real content replaces the old map, not skipped
-        assert wrote is True and "Entry Points" in open(path).read()
+        assert wrote is True and "Entry Points" in pathlib.Path(path).read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -320,11 +321,11 @@ def test_inject_appends_block():
     inj = Injector()
     with tempfile.TemporaryDirectory() as d:
         claude = os.path.join(d, "CLAUDE.md")
-        open(claude, "w").write("# Project\n")
+        pathlib.Path(claude).write_text("# Project\n")
         path, action = inj.inject(d)
         assert action == "appended"
         assert path == claude
-        content = open(claude).read()
+        content = pathlib.Path(claude).read_text()
         assert "<!-- codeintel-map-start -->" in content
         assert "<!-- codeintel-map-end -->" in content
 
@@ -333,10 +334,10 @@ def test_inject_is_idempotent():
     inj = Injector()
     with tempfile.TemporaryDirectory() as d:
         claude = os.path.join(d, "CLAUDE.md")
-        open(claude, "w").write("# Project\n")
+        pathlib.Path(claude).write_text("# Project\n")
         inj.inject(d)
         inj.inject(d)
-        content = open(claude).read()
+        content = pathlib.Path(claude).read_text()
         assert content.count("<!-- codeintel-map-start -->") == 1
         assert content.count("<!-- codeintel-map-end -->") == 1
 
@@ -356,11 +357,11 @@ def test_inject_updates_existing_block():
             "# Project\n\n"
             "<!-- codeintel-map-start -->\nold content\n<!-- codeintel-map-end -->\n"
         )
-        open(claude, "w").write(initial)
+        pathlib.Path(claude).write_text(initial)
         path, action = inj.inject(d)
         assert action == "updated"
         assert path == claude
-        content = open(claude).read()
+        content = pathlib.Path(claude).read_text()
         assert content.count("<!-- codeintel-map-start -->") == 1
         assert content.count("<!-- codeintel-map-end -->") == 1
         assert "old content" not in content

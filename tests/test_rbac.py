@@ -80,6 +80,7 @@ def rbac_server(tmp_path, monkeypatch):
     threading.Thread(target=s.serve_forever, daemon=True).start()
     yield s.server_address[1]
     s.shutdown()
+    s.server_close()
     srv._reset_gateway()  # cleanup: the next test rebuilds without this policy
 
 
@@ -712,6 +713,7 @@ def root_scoped_server(tmp_path, monkeypatch):
     threading.Thread(target=s.serve_forever, daemon=True).start()
     yield s.server_address[1], str(allowed), str(tmp_path / "forbidden")
     s.shutdown()
+    s.server_close()
     srv._reset_gateway()
 
 

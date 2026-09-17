@@ -44,6 +44,7 @@ def test_no_token_allows_request():
         assert status == 200 and body["ok"] is True
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_missing_token_is_rejected():
@@ -52,6 +53,7 @@ def test_missing_token_is_rejected():
         assert _post(port)[0] == 401
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_wrong_token_is_rejected():
@@ -60,6 +62,7 @@ def test_wrong_token_is_rejected():
         assert _post(port, headers={"Authorization": "Bearer nope"})[0] == 401
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_correct_token_is_accepted():
@@ -69,6 +72,7 @@ def test_correct_token_is_accepted():
         assert status == 200 and body["ok"] is True
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_non_ascii_token_is_rejected_not_crashed():
@@ -80,6 +84,7 @@ def test_non_ascii_token_is_rejected_not_crashed():
         assert status == 401
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_auth_also_guards_status_get():
@@ -93,6 +98,7 @@ def test_auth_also_guards_status_get():
             assert e.code == 401
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_status_get_accepts_project_root_query():
@@ -104,6 +110,7 @@ def test_status_get_accepts_project_root_query():
         assert body["ok"] is True and "indexed" in body
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_handler_has_a_request_timeout():
@@ -127,3 +134,4 @@ def test_server_refuses_with_503_when_at_capacity():
         for _ in range(_MAX_CONCURRENT_REQUESTS):
             server._slots.release()
         server.shutdown()
+        server.server_close()

@@ -101,6 +101,61 @@ def _fresh_gateway():
     server._reset_gateway()
 
 
+@pytest.fixture
+def background_reindex():
+    """Opt back in to the real `Reindexer.maybe_reindex` for a test that exercises it.
+
+    Requesting this fixture suppresses the autouse guard below. Ask for it only when the
+    background pass IS the subject — `test_reindexer.py` drives it directly — and never merely to
+    make a query look realistic: what it buys you is a minutes-long embedding job on a daemon
+    thread that your test will not wait for and cannot see.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _no_background_reindex(request, monkeypatch):
+    """A unit test must not be able to start a full reindex of a real repository.
+
+    THE FULL-SUITE STALL WAS THIS. `Gateway.query` calls `maybe_reindex(project_root)`, which
+    submits `_do_reindex` — a complete semantic AND graph reindex — to a daemon thread pool and
+    returns immediately. Three tests passed a real root: `test_could_not_ask_semantic` and two in
+    `test_engine_adoption` each queried with `os.getcwd()`, i.e. **this checkout**. Each pass
+    embedded the whole repository, measured at 146s and 154s, on threads that outlived the test
+    that started them and that nothing ever joined.
+
+    Measured consequence, by sampling the suite at the point it appears to hang: at
+    `tests/test_hard_exit.py` — test 751 of 1572, 47.8% through, which is the "roughly half" in
+    every report of this — three `_do_reindex` threads were still live inside
+    `onnxruntime::InferenceSession::Run`, down in `MlasGemmBatch` and `SpinPause`, saturating all
+    15 cores. `test_hard_exit` runs pytest in a SUBPROCESS, so it was starved: 11.5s in isolation,
+    119s / 140s / 268s in the suite across three runs, and on one run it blew its own 300s
+    `subprocess.run` timeout and failed. That is the whole symptom — silent for minutes at 100%
+    CPU, at the half-way mark, occasionally fatal.
+
+    The suite never hung. Twice measured end to end at 672s, exit 0. What it did was go quiet for
+    four minutes in a way no observer could distinguish from a hang, which is why it kept being
+    killed rather than waited out.
+
+    Off by default rather than made faster, because speed is not the defect: a daemon thread doing
+    unbounded work that no test waits for, asserts on, or cleans up is not a test fixture. The
+    gateway's own call is still covered — `test_gateway.py` substitutes a recording Reindexer and
+    asserts the call happens with the right root, which is the contract that matters and costs
+    nothing.
+
+    Note the executor multiplication this also removes: `_fresh_gateway` above builds a new Gateway
+    per test, so each one gets a new `Reindexer` with a new `_BoundedExecutor` and a fresh
+    `_in_flight` set. The debounce and the in-flight guard cannot see the previous gateway's
+    threads, so the same root reindexed concurrently three times over. `_reset_gateway` has no
+    production caller, so this is a property of the suite and not a bug in the server.
+    """
+    if "background_reindex" in request.fixturenames:
+        return
+    from codeintel.reindexer import Reindexer
+
+    monkeypatch.setattr(Reindexer, "maybe_reindex", lambda self, project_root: None)
+
+
 def _interpreter_scripts_dir() -> str:
     """Where console scripts for the interpreter running these tests are installed."""
     return sysconfig.get_path("scripts") or os.path.dirname(sys.executable)

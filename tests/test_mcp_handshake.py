@@ -49,11 +49,12 @@ class _Client:
         return self
 
     def __exit__(self, *exc) -> None:
-        try:
-            self._proc.terminate()
-            self._proc.wait(timeout=10)
-        except Exception:
-            self._proc.kill()
+        # `verify._reap` is the production teardown — terminate, then kill, then CLOSE THE PIPES.
+        # This used to terminate and wait without closing stdin/stdout, so every handshake test
+        # leaked two pipe fds and, on the kill path, an unwaited child.
+        from codeintel.verify import _reap
+
+        _reap(self._proc)
 
     def _notify(self, method: str) -> None:
         self._proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
