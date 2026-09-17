@@ -125,9 +125,16 @@ _TALLY = re.compile(
 def _site_key(qualname: str, module_stem: str) -> str:
     """The registry key for a site, chosen to survive the one refactor that is already scheduled.
 
-    A DOTTED qualname (`GraphProvider.probe`) names a class member, and a behaviour-preserving
-    module split carries class members across intact — so it is used bare, and splitting
-    `providers/graph.py` will not churn a single registry entry.
+    A DOTTED qualname (`GraphProvider.probe`) names a class member, and a module split that moves a
+    whole class carries its members across intact, so the key survives it.
+
+    It does NOT survive a class being split, and splitting `providers/graph.py` was exactly that:
+    the ops moved to a `GraphOps` mixin and the renderers to `AnswerRendering`, so nine keys were
+    rekeyed from `GraphProvider.*` in one commit. An earlier version of this docstring promised
+    that split would "not churn a single registry entry", which was wrong. What the keys did buy
+    is the thing worth having: the rename was a clean 1:1 — nine out, nine in, none lost and none
+    invented — and `test_the_registry_has_no_entries_for_summaries_that_no_longer_exist` named
+    every one of them rather than letting a moved summary quietly go unchecked.
 
     A BARE qualname is a top-level function, and those are not unique: `run` is a top-level
     function in four different modules here (`commands/c4.py`, `commands/graph.py`,
@@ -360,25 +367,25 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "test_the_progress_counter_reports_what_it_counted",
 
     # ── aggregate: a headline ⟹ the rows beneath it ───────────────────────────────────────────
-    ("count", "GraphProvider._render_edge_answer"):
+    ("count", "AnswerRendering._render_edge_answer"):
         "the headline counts the rows rendered — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
-    ("count", "GraphProvider._render_scan"):
+    ("count", "AnswerRendering._render_scan"):
         "the headline counts the rows rendered — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
-    ("count", "GraphProvider._op_pattern"):
+    ("count", "GraphOps._op_pattern"):
         "the headline counts the rows rendered — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
-    ("count", "GraphProvider._op_changed"):
+    ("count", "GraphOps._op_changed"):
         "each section heading counts its own section — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
-    ("tally", "GraphProvider._op_changed"):
+    ("tally", "GraphOps._op_changed"):
         "the impact headline sums its own sections — "
         "test_the_changed_headline_sums_the_sections_beneath_it",
-    ("count", "GraphProvider._op_impact"):
+    ("count", "GraphOps._op_impact"):
         "a zero is rendered only when the lookup answered — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",
-    ("count", "GraphProvider._empty_edge_answer"):
+    ("count", "AnswerRendering._empty_edge_answer"):
         "a zero is rendered only when rows were retrieved — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",
     ("count", "LspProvider._op_symbol"):
@@ -390,10 +397,10 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("tally", "Gateway._cross_check_name_resolved"):
         "the cross-check count counts its own rows — "
         "test_the_cross_check_headline_counts_the_rows_it_rendered",
-    ("tally", "GraphProvider._confidence_note"):
+    ("tally", "AnswerRendering._confidence_note"):
         "the note's N-of-M counts the rows it describes — "
         "test_the_confidence_note_counts_the_rows_it_describes",
-    ("tally", "GraphProvider._no_symbol_matched_the_hint"):
+    ("tally", "AnswerRendering._no_symbol_matched_the_hint"):
         "a no-match note states only what was asked — "
         "test_a_no_match_note_claims_nothing_about_the_symbol_itself",
     ("claim", "c4_check.check_layers"):
@@ -437,7 +444,7 @@ _UNCENSUSED: dict[str, str] = {
     "mapper._render / '## Ranked Symbols (by caller count)'":
         "a heading whose parenthesis names a SORT KEY rather than a count — "
         "test_the_ranked_heading_is_actually_ranked_by_caller_count",
-    "GraphProvider._evidence_headline / 'N resolved · N name-matched · N unstated'":
+    "AnswerRendering._evidence_headline / 'N resolved · N name-matched · N unstated'":
         "a bold tally whose units are bucket names, so no unit noun to match — "
         "test_the_evidence_headline_sums_to_the_rows_it_describes",
     "bench/oracle_py.py / per-site label":
@@ -708,7 +715,8 @@ def test_every_rendered_headline_counts_the_rows_beneath_it(case):
     checked here against the thing it claims to count — the rows actually rendered, plus the rows
     the body explicitly says it did not render, which is a disclosure rather than a discrepancy.
     """
-    from codeintel.providers.graph import _EdgeGroup, _SymbolTarget
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
 
     gp = _graph_provider()
     keys = ("b.name", "b.qualified_name", "b.file_path")
@@ -765,7 +773,7 @@ def test_the_evidence_headline_sums_to_the_rows_it_describes():
     `_UNCENSUSED` and checked here. Its own failure mode is the one it was built to fix, one level
     down: a tally that does not add up to the list beneath it.
     """
-    from codeintel.providers.graph import _EdgeGroup
+    from codeintel.graph_edges import _EdgeGroup
 
     gp = _graph_provider()
     rows = (_edge_rows(2, bucket="resolved")
@@ -785,7 +793,7 @@ def test_the_evidence_headline_sums_to_the_rows_it_describes():
 
 def test_the_confidence_note_counts_the_rows_it_describes():
     """"43 of 50 row(s) were resolved by name matching" is only useful if 50 is the rows."""
-    from codeintel.providers.graph import _EdgeGroup
+    from codeintel.graph_edges import _EdgeGroup
 
     gp = _graph_provider()
     rows = _edge_rows(2) + _edge_rows(43, start=2)
@@ -866,7 +874,8 @@ def test_a_no_match_note_claims_nothing_about_the_symbol_itself():
     index not matching a target says nothing about the code.
     """
     gp = _graph_provider()
-    from codeintel.providers.graph import _EdgeGroup, _SymbolTarget
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
 
     others = [_EdgeGroup("handle", "pkg.b.handle", "src/b.py", _edge_rows(2))]
     note = gp._no_symbol_matched_the_hint(
@@ -1150,8 +1159,9 @@ def test_a_body_that_discloses_a_limitation_is_never_stamped_complete(scenario, 
     exact grammar: the honest sentence is present, and the field an agent branches on says the
     answer is whole.
     """
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
     from codeintel.provider import attach_confidence
-    from codeintel.providers.graph import _EdgeGroup, _SymbolTarget
 
     gp = _graph_provider()
     keys = ("b.name", "b.qualified_name", "b.file_path")
@@ -1218,8 +1228,9 @@ def test_a_clean_answer_is_still_allowed_to_be_complete():
     `partial` that appears on correct answers is one nobody reads, which costs the disclosure its
     only value. `bench/run.py daycap` being byte-identical across the `unresolvable` fix is the
     measured form of this same guard."""
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
     from codeintel.provider import attach_confidence
-    from codeintel.providers.graph import _EdgeGroup, _SymbolTarget
 
     gp = _graph_provider()
     rows = _edge_rows(3)

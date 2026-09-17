@@ -475,8 +475,7 @@ def test_callers_render_module_scope_as_a_location_not_a_pseudo_symbol(corpus_re
     filename. Every such node must be caught by the module-scope filter, so a new container label the
     backend introduces fails here instead of rendering as a fiction again.
     """
-    from codeintel.graph_render import _is_module_scope_node
-    from codeintel.providers.graph import _FILE_EXTENSIONS, _strip_project_prefix
+    from codeintel.graph_render import _FILE_EXTENSIONS, _is_module_scope_node, _strip_project_prefix
 
     p = _indexed_graph(corpus_repo)
     proj = _project_name(p, corpus_repo)
@@ -622,7 +621,7 @@ def _python_definitions(repo: str) -> list[_Definition]:
     The candidate population for the measurement. Files the product itself considers out of scope
     (generated, archived) are skipped using the product's own predicates rather than a second
     hand-typed copy of them."""
-    from codeintel.providers.graph import _ARCHIVE_DIRS, _VERIFY_SKIP_DIRS
+    from codeintel.graph_render import _ARCHIVE_DIRS, _VERIFY_SKIP_DIRS
     from codeintel.source_kind import looks_generated_path, looks_generated_text
 
     found: list[_Definition] = []

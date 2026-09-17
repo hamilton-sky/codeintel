@@ -14,6 +14,7 @@ op added next year is covered without anyone remembering to add a case.
 """
 from __future__ import annotations
 
+import pathlib
 import threading
 
 from codeintel.graph_backend import BackendClient
@@ -27,6 +28,28 @@ from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResol
 _NOT_A_USER_OP = {
     "deadcode": "withdrawn pending a precision measurement (graph.py _WITHDRAWN_OPS)",
 }
+
+
+def _provider_sources() -> list[pathlib.Path]:
+    """Every source file whose code is part of `GraphProvider`, derived from the MRO.
+
+    `providers/graph.py` was split: the ops live in `graph_ops.py` and the renderers in
+    `graph_answer.py`, both mixed in. An AST walk pinned to one path would keep passing while
+    covering none of the methods that moved — a domain that silently shrinks, which is the defect
+    class every test in this file exists to catch one level down. Reading the MRO means a third
+    mixin is covered the day it lands.
+    """
+    import inspect
+
+    out = []
+    for cls in GraphProvider.__mro__:
+        if cls is object:
+            continue
+        origin = inspect.getsourcefile(cls)
+        if origin:
+            out.append(pathlib.Path(origin))
+    assert out, "GraphProvider has no locatable source — the reflection has broken, not the code"
+    return out
 
 
 def _gp(*, run=None, query_rows=None) -> GraphProvider:
@@ -68,7 +91,8 @@ def _fail_backend(gp: GraphProvider, missing: Missing):
 # --------------------------------------------------------------------------------------------- #
 
 def test_no_graph_op_reports_a_backend_failure_as_an_absence():
-    ops = sorted(n[len("_op_"):] for n in vars(GraphProvider) if n.startswith("_op_"))
+    ops = sorted({n[len("_op_"):] for cls in GraphProvider.__mro__
+                  for n in vars(cls) if n.startswith("_op_")})
     assert len(ops) >= 8, f"op domain looks broken, only found: {ops}"
 
     for missing in (
@@ -403,7 +427,7 @@ def test_a_hint_that_matches_nothing_is_not_reported_as_having_no_callees():
 def test_a_truncated_callee_list_says_it_was_truncated():
     """The query caps rows. A list cut off at the cap reads exactly like a complete one, which is
     the same defect as a filtered list reading as complete."""
-    from codeintel.providers.graph import _EDGE_ROW_LIMIT
+    from codeintel.graph_edges import _EDGE_ROW_LIMIT
 
     rows = [{
         "b.name": f"callee_{i}", "b.qualified_name": f"pkg.callee_{i}",
@@ -461,12 +485,11 @@ def test_every_gap_callees_can_report_states_its_numbers_in_the_body_too():
     the defect class this project keeps re-learning (CHANGELOG 0.15.4/0.15.5).
     """
     import ast
-    import pathlib
     import re
 
-    source = pathlib.Path("src/codeintel/providers/graph.py").read_text(encoding="utf-8")
     declared: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    trees = [ast.parse(f.read_text(encoding="utf-8")) for f in _provider_sources()]
+    for node in (n for tree in trees for n in ast.walk(tree)):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "_add_gap" and len(node.args) >= 2):
             continue
@@ -533,7 +556,8 @@ def test_a_filename_is_never_read_as_a_qualified_target():
     for `ts` — a symbol nobody asked about, on a repository where 985 names took exactly this shape
     (CHANGELOG 0.15.x, `_strip_project_prefix`). The extension population is derived from the
     source's own set, so a language added there is covered here without anyone remembering."""
-    from codeintel.providers.graph import _FILE_EXTENSIONS, _parse_symbol_target
+    from codeintel.graph_render import _FILE_EXTENSIONS
+    from codeintel.graph_targets import _parse_symbol_target
 
     for ext in sorted(_FILE_EXTENSIONS):
         name = f"use-toast.{ext}"
@@ -543,7 +567,7 @@ def test_a_filename_is_never_read_as_a_qualified_target():
 
 
 def test_target_parsing_keeps_its_hands_off_what_is_not_a_hint():
-    from codeintel.providers.graph import _parse_symbol_target
+    from codeintel.graph_targets import _parse_symbol_target
 
     plain = _parse_symbol_target("handle")
     assert (plain.name, plain.qualified, plain.file_hint) == ("handle", "", "")
@@ -562,7 +586,7 @@ def test_target_parsing_keeps_its_hands_off_what_is_not_a_hint():
 def test_a_qualified_hint_must_match_whole_segments():
     """`routes.handle` naming `api.myroutes.handle` would silently answer about the wrong symbol,
     which is the failure this whole mechanism exists to prevent."""
-    from codeintel.providers.graph import _qualified_name_matches
+    from codeintel.graph_targets import _qualified_name_matches
 
     assert _qualified_name_matches("proj.api.routes.handle", "routes.handle")
     assert _qualified_name_matches("proj.api.routes.handle", "api.routes.handle")
@@ -574,7 +598,7 @@ def test_a_qualified_hint_must_match_whole_segments():
 
 
 def test_a_file_hint_must_match_whole_path_segments():
-    from codeintel.providers.graph import _file_path_matches
+    from codeintel.graph_targets import _file_path_matches
 
     assert _file_path_matches("src/api/routes.py", "routes.py")
     assert _file_path_matches("src/api/routes.py", "api/routes.py")
@@ -673,11 +697,10 @@ def test_both_edge_ops_render_through_one_renderer():
     ambiguity disclosure, the truncation note. Enumerated from the source rather than trusted: this
     is the same reasoning that made the repo-scan ops share `_render_scan`."""
     import ast
-    import pathlib
 
-    source = pathlib.Path("src/codeintel/providers/graph.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    functions = {node.name: node for node in ast.walk(tree)
+    functions = {node.name: node
+                 for f in _provider_sources()
+                 for node in ast.walk(ast.parse(f.read_text(encoding="utf-8")))
                  if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
     for op in ("_op_callers", "_op_callees"):
         assert op in functions, op

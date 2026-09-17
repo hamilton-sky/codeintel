@@ -495,7 +495,8 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
     payload at an auto-fit (or requested) directory depth. Never raises -- returns a flat `reason`
     string and empty lists on any failure."""
     try:
-        from codeintel.providers.graph import GraphProvider, _repo_display_name
+        from codeintel.graph_render import _repo_display_name
+        from codeintel.providers.graph import GraphProvider
 
         p = GraphProvider()
         if not getattr(p, "available", False):
