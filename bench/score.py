@@ -156,7 +156,11 @@ class _TypeScript:
 
     def kinds_at(self, root: str, rel_file: str, line: int, qn: str) -> set[str]:
         def_file, _, name = qn.partition("::")
-        aliases = oracle_ts.alias_set(os.path.join(root, def_file), name, self.repo)
+        # A class-qualified target re-exports as its class, never as the bare method — the same
+        # split `oracle_ts.truth_for` makes, and the two have to agree or a site is labelled one
+        # way when truth is built and another way when the scorer re-asks about it.
+        qualifier, leaf = oracle_ts._split_qualified(name)
+        aliases = oracle_ts.alias_set(os.path.join(root, def_file), qualifier or leaf, self.repo)
         verdict = oracle_ts.label_file(os.path.join(root, rel_file), root,
                                        os.path.join(root, def_file), name, aliases, self.repo)
         return {s.kind for s in verdict.sites if s.line == line}

@@ -336,6 +336,38 @@ def test_the_settle_lines_can_never_be_read_as_result_rows():
         assert not line.startswith("- "), line
 
 
+def test_the_candidate_listing_can_never_be_read_as_result_rows():
+    """The THIRD site of the same contract, and the one that was still open.
+
+    When a qualified target matches nothing, the answer lists the symbols that DO carry the bare
+    name — the opposite of a caller of the target. Those bullets were rendered flat, so
+    `bench/score.py` read them as caller rows. Two consequences, both measured on
+    `bench/fixtures/corpus_ts` before this was fixed:
+
+    * the `graph` arm scored the listing as a fabricated caller whenever the named file happened to
+      hold a decidable site — it did not here, which made a real defect look like a clean run;
+    * `graph_verified` refused the target outright. That arm rejects any answer whose body shows
+      rows the envelope does not publish, and says so as "this build publishes no structured
+      `rows`" — pointing a reader at their `codeintel` install for a defect in the renderer.
+
+    The envelope half was already handled: `_pending_nonrow_lines` withholds the row summary. This
+    is the body half.
+    """
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
+
+    gp, _, _ = _guessed(n=1)
+    others = [_EdgeGroup("resolve", f"pkg.b{i}.Other.resolve", f"src/b{i}.ts", []) for i in range(3)]
+    note = gp._no_symbol_matched_the_hint(
+        "callers", "StrategyChain.resolve",
+        _SymbolTarget("resolve", qualified="chain.StrategyChain.resolve"), others)
+
+    for line in note.splitlines():
+        assert not line.startswith("- "), f"a candidate bullet in result-row shape: {line!r}"
+    # Still a list to a person — the fix is the prefix, not the removal.
+    assert sum(1 for ln in note.splitlines() if ln.startswith("> - ")) == 3, note
+
+
 def test_the_settle_note_counts_the_rows_it_sends_you_to_check():
     """Both numbers in the note are claims about the answer beneath it: how many rows are in doubt,
     and how many distinct files they sit in. The second is not the first — several rows routinely

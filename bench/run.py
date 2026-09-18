@@ -39,9 +39,15 @@ DAYCAP = os.path.expanduser(
     os.environ.get("CODEINTEL_BENCH_DAYCAP",
                    "/Users/shammaihamilton/Documents/project/daycap"))
 
-# (file where it is DEFINED, symbol) — never a dotted string, because `src.pkg.mod.f` and
+# (file where it is DEFINED, symbol) — never a MODULE-dotted string, because `src.pkg.mod.f` and
 # `pkg.mod.f` name the same function and only one of them appears in any import statement. The
 # oracle derives the importable name from the definition site.
+#
+# A CLASS qualifier is admitted, and `StrategyChain.resolve` below is one. It is the opposite kind
+# of string from a module path: it names a declaration that appears in the source text and in import
+# statements, there is exactly one spelling of it, and in a large tree it is the only thing that
+# separates the target from every other method sharing its leaf name. The rule is therefore the
+# qualifier must be a class, not a package — and the oracle splits on the last dot to read it.
 # A TypeScript repository to measure. There is no default, because inventing target symbols for a
 # codebase nobody here has read is exactly the kind of unfounded claim this benchmark exists to
 # replace. Point it at a real one and list its disputed symbols below.
@@ -153,6 +159,31 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str, bool]] = {
         # than for want of a failure. Here filtering removes the whole answer — which is the price
         # of excluding heuristic rows by default, stated in the column that exists to hold it.
         ("src/settle.ts", "settleQueue"),
+        # THE QUALIFIED CASE — a class-qualified method whose leaf name collides across the tree.
+        # `bench/README.md` called this "the one shape this file has never scored", and the readiness
+        # doc has carried it as an open item on the strength of a hand-check against `bright-sky`,
+        # where the answer is 48 reported callers against a truth of two.
+        #
+        # It was open because it was thought to need a repository whose truth is establishable at
+        # that scale. That was the wrong diagnosis: the blocker was that the oracle abstains on every
+        # `obj.method(...)` site — "the receiver's type is not a syntactic fact" — and every real call
+        # site of a method is one of those, so the true callers were invisible in a 3-file tree just
+        # as much as in a 1,483-file one. Scale had nothing to do with it.
+        #
+        # The oracle now decides the receiver in the two cases where the source STATES it, which is
+        # how `bright-sky` writes it and how the fixture writes it. Truth here is fully decidable:
+        # one real call, and four proven non-callers — three Promise executors and one agent holding
+        # a different class behind the identical `this.chain.resolve` spelling.
+        ("src/strategyChain.ts", "StrategyChain.resolve"),
+        # The SAME case from the other side, and the two are not redundant — measured, they fail in
+        # opposite directions, which is why one target could not have shown this.
+        #
+        # The backend recorded neither agent's `this.chain.resolve(...)` edge and bound all three
+        # Promise executors to this symbol, because it is the only `resolve` in the index carrying
+        # edges. So `StrategyChain.resolve` answers NOTHING for a symbol that has a caller — the
+        # deletion trap — while this one answers three callers that are all fabrications and misses
+        # the one real caller it does have. Precision and silence, on one pair of classes.
+        ("src/fallbackChain.ts", "FallbackChain.resolve"),
     ], "typescript", False),   # smoke fixture — see the note on REPOS
 
     # A real TypeScript repository, named by the environment. Fill in the disputed symbols.
