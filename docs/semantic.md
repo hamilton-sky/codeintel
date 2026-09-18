@@ -264,6 +264,29 @@ function the indexer wrote it with — one definition, so the two sides cannot d
 - **`chunk_end IS NULL`** (a cache predating the column) → unverifiable, kept as before. An index
   pass backfills the span in place without re-embedding.
 
+### An interrupted index pass — the gap verification cannot see
+
+Staleness verification only ever examines hits that came **back**. A chunk that was never embedded
+is invisible to it, because there is nothing to re-read: ranking, scoring and verification are all
+perfectly correct over a corpus missing an unknown fraction of the repository.
+
+`project_index_meta` is written only when a pass **completes** (including a pass that found nothing
+new), so rows-present-with-no-timestamp is not ambiguous — it is a pass that started and died. That
+state raises a `coverage` / `index-incomplete` gap and marks the answer `confidence: partial`, and
+when such an index yields no match the `below-floor` hint says **unknown** rather than letting the
+silence read as absence.
+
+Measured 2026-09-18 by `SIGKILL`ing a pass at 256 of 600 chunks:
+
+| | |
+|---|---|
+| Database | **not torn** — 256 hashes, 256 vectors, `integrity_check ok`. Embeddings commit per 32-chunk batch, each vector beside its hash |
+| Next pass | **resumes exactly** — embedded the missing 344, reached 600, recorded completion |
+| Before this gap existed | `confidence: complete`, `gaps: None`, and a symbol that exists in the tree and was never embedded simply absent from the answer |
+
+So an interrupted index is safe to keep and safe to finish; what it was not is safe to *trust
+silently*. One `codeintel index <root>` clears both the gap and the state behind it.
+
 Verification is per-chunk, not per-file: editing one function does not blind the rest of its
 module. It never raises — a fault in verification returns the candidates unverified rather than
 returning nothing.

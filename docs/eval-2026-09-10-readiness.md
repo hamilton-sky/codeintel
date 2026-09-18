@@ -14,7 +14,7 @@ are silently deleted cannot be audited and gets re-litigated instead.
 | **P0** Indexing reports success when no files are readable | **Closed** — `d1dfc15` fails closed on unreadable repositories. Re-verified: `bright-sky` now indexes 29,903 chunks in 12m44s where it previously reported `0 files, 0 chunks` and exited 0. |
 | **P0** False-positive graph edges for qualified methods | **Partly closed** — `#34` makes the failure legible: a caller heading now reads `2 resolved · 43 name-matched · 5 unstated` above the rows, and `StrategyChain.resolve`'s two true callers rank first among unbadged rows. The *disclosure* is fixed; the *resolution* is still heuristic, so Phase 2 below stands. |
 | **P1** Confidence visible but not actionable | **Closed** — `#44`. Not by adding the `min_confidence` filter this row asked for: an engine-side filter would drop rows, and the one thing measured across four repositories is that this engine is never wrongly silent. The rows ride the envelope instead (`rows[]`, `evidence`, `evidence_class`), so the caller filters and the tool keeps reporting everything it found. See Phase 3. |
-| **P1** Background indexing state unclear | **Unverified** — not re-tested on 2026-09-17. |
+| **P1** Background indexing state unclear | **Closed** — `#52`, and the premise was wrong in a useful way. Measured 2026-09-18 by `SIGKILL`ing an index pass at 256 of 600 chunks: the database is not torn (per-batch commits), a durable completion record already existed (`project_index_meta`, written only on success), and the next pass resumes exactly — it embedded the missing 344 and finished. Nothing needed to be made durable. What was missing is that the QUERY path never read that record, so a half-built index answered `confidence: complete` with a symbol that exists silently absent. It now raises a `coverage` / `index-incomplete` gap. |
 | **P1** Full-suite performance or hang risk | **Closed** — `#39`. It never hung: it completed in 672s, twice measured. Three tests queried the gateway with a real root, each firing a full background reindex of this checkout (146s, 154s) on daemon threads nothing joined, which starved `test_hard_exit`'s nested pytest at the 47.8% mark. Suite now 219s. |
 | **P2** SQLite resource warnings | **Closed** — `#39`, and misnamed: not one came from sqlite. Sixteen HTTP listeners kept open by `shutdown()` without `server_close()`, one template file, eight bare `open(...).read()`, two MCP children killed without being waited on. `ResourceWarning` is an error in the suite now. |
 
@@ -303,9 +303,9 @@ Create explicit promotion levels.
 > that was supposed to deliver it merged" is the same substitution this document's own findings are
 > made of.
 >
-> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **seven are
-> met, one is refused as written, one is partly met, and one is open** — and the one that is open
-> is the one no commit can close.
+> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **eight are
+> met, one is refused as written, and one is open** — and the one that is open is the one no commit
+> can close. Nothing here is now waiting on coverage or on code.
 >
 > | level | gate | status |
 > |---|---|---|
@@ -315,7 +315,7 @@ Create explicit promotion levels.
 > | beta | focused integration coverage | **met** — live contract jobs for both backend dialects and for LSP run on every PR |
 > | rec. beta | qualified-method false positives fixed or excluded by default | **refused as written** — see below |
 > | rec. beta | zero-readable-file indexing fails clearly | **met** — `d1dfc15` |
-> | rec. beta | background index state durable and inspectable | **partly** — inspectable, not durable |
+> | rec. beta | background index state durable and inspectable | **met** — the durable record already existed; the query path now reads it (`index-incomplete`) |
 > | rec. beta | full suite completes reliably | **met** — `#39`; 1,593 tests in 226s locally, four Pythons green in CI |
 > | rec. beta | SQLite warnings eliminated | **met** — `#39`, and `ResourceWarning` is an error in the suite |
 > | general | precision benchmark, multiple real Python and TS repos | **met** — four arms, two of each language, 27 scored symbols |
@@ -387,12 +387,33 @@ Create explicit promotion levels.
 > not a rate. The rows the filter drops elsewhere remain *additional* callers of symbols that also
 > had verified ones.
 >
-> **What "inspectable, not durable" means.** `Reindexer.reindex_pending` answers whether a root is
-> being rebuilt, and an answer served in that window carries `reindexing: true` plus a hint saying
-> the index is as of the last completed pass. That is the inspectable half and it is real. The
-> durable half is not: the in-flight set is an in-process dict, so a restarted server reports no
-> reindex in progress whether or not one was interrupted. The ledger's "not re-tested on
-> 2026-09-17" also still stands for the originally reported symptom.
+> **Background index state — measured, and the premise was wrong.** This gate read "partly:
+> inspectable, not durable" on the strength of one true observation — `Reindexer._in_flight` is an
+> in-process set, so a restarted server reports no reindex in progress. The conclusion drawn from
+> it, that the state needed making durable, did not survive measurement.
+>
+> `SIGKILL` on an index pass at 256 of 600 chunks, 2026-09-18:
+>
+> | | |
+> |---|---|
+> | Database | **not torn** — 256 hashes, 256 vectors, `integrity_check ok`. Embeddings commit per 32-chunk batch, each vector beside its hash, so a kill lands between batches |
+> | Durable record | **already existed** — `project_index_meta` is written only when a pass completes, so rows-present-and-no-timestamp is unambiguous |
+> | Next pass | **resumes exactly** — embedded the missing 344, reached 600, recorded completion |
+> | Disclosure | **none** — `confidence: complete`, `gaps: None`, and a symbol that exists in the tree and was never embedded simply absent from the answer |
+>
+> So there was nothing to make durable. The durable record was on disk the whole time and only
+> `codeintel status` was reading it; the query path — the one an agent reads — never did. That is
+> the same sentence as two findings already closed in this ledger (`## References (0)` at
+> `confidence: complete`, and `Ok([])` meaning the call succeeded rather than the world being
+> empty), and it is fixed the same way: a `coverage` / `index-incomplete` gap, plus a `below-floor`
+> hint that says **unknown** rather than letting silence read as absence.
+>
+> Worth recording what was NOT built. A "reindexing" flag file — the obvious way to make the
+> in-flight set durable — would be **worse than the in-memory version**: a crashed process leaves it
+> set forever, so the tool reports a reindex in progress that is not. A signal true of a file and
+> false of the world is this document's own recurring defect, and buying it to close a gate would
+> have been a poor trade. Cross-process duplicate reindexing remains real and is about waste rather
+> than honesty; it is not this gate.
 >
 > **Performance budgets, closed on both halves.** *Documented*: `docs/benchmarks.md` is re-measured
 > at 0.23.4 on the same machine and corpus family — 29,903 chunks indexed in 607 s at 49.3
@@ -466,15 +487,16 @@ Requirements:
 - ~~Working local graph, LSP, and semantic engines.~~
 - ~~Focused integration coverage.~~
 
-### Recommended beta — 3 of 5 met, 1 refused, 1 partly
+### Recommended beta — 4 of 5 met, 1 refused as written
 
 Requirements:
 
 - Qualified-method false positives fixed or excluded by default. — **refused as written**; the
   exclusion is now the caller's to make, and the resolution is Phase 2.
 - ~~Zero-readable-file indexing fails clearly.~~ `d1dfc15`
-- Background index state is durable and inspectable. — **partly**: inspectable per answer,
-  process-local rather than durable.
+- ~~Background index state is durable and inspectable.~~ — **met**, and not the way this line
+  expected: the durable record already existed (`project_index_meta`) and the query path was not
+  reading it. A half-built index now discloses itself rather than answering `complete`.
 - ~~Full suite completes reliably.~~ `#39`
 - ~~SQLite warnings eliminated.~~ `#39`
 
@@ -602,11 +624,17 @@ indexed standalone. `doctor` catches all three, and as of `#41` `--deep` no long
 process for a working one — it puts a real query to each engine and requires content. Phase 5 is
 delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
 
-What remains is **Phase 6**, and the ordinary work in it is done. External validation — several
+What remains is **Phase 6**, and nothing in it is waiting on code. External validation — several
 people installing and verifying without the maintainer — is the only gate still open, and it is the
-one no commit can close. One gate sits at "partly" and it is not waiting on coverage: background
-index state is inspectable per answer but process-local, so a restarted server reports no reindex in
-progress whether or not one was interrupted. Making it durable is a design change, not a test.
+one no commit can close.
+
+The last one to close did so by being measured rather than built. "Background index state durable
+and inspectable" had been read as a request to persist the reindexer's in-flight set; killing a
+pass at 256 of 600 chunks showed the durable record already existed, the database was intact, and
+the next pass resumed exactly. The defect was that the query path never read any of it — a
+half-built index answered `confidence: complete`. Worth keeping as a caution: the obvious fix, a
+"reindexing" flag file, would have been *worse* than the in-memory state it replaced, because a
+crashed process leaves it set forever.
 
 One gate is refused rather than failed, and that is worth re-reading before anyone counts it as
 outstanding: excluding heuristic rows by default is a behaviour this project has declined, and

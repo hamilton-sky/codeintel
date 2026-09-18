@@ -535,6 +535,42 @@ class SemanticProvider:
             cached, named_model,
         )
 
+    @staticmethod
+    def _incomplete_index(db: Any, searcher: Any, project_root: str) -> int | None:
+        """Chunks indexed by a pass that never finished — or None when the index is whole.
+
+        `project_index_meta` is written only when an index pass COMPLETES (including a pass that
+        found nothing new). So rows present + no timestamp is not an ambiguous state: it is a pass
+        that started, wrote some batches, and died — a crash, a `kill`, a laptop closing, a killed
+        MCP server. Measured on 2026-09-18 by SIGKILLing a pass at 256 of 600 chunks.
+
+        What that leaves is intact and incomplete, which is the combination worth a gap. The
+        database is not torn (embeddings commit per 32-chunk batch, each vector beside its hash)
+        and the next pass resumes exactly — it embedded the missing 344 and recorded completion.
+        But until that pass runs, this index covers an unknown fraction of the repository while
+        answering like a whole one: the same query returned `confidence: complete` with no gap for
+        a symbol that exists in the tree and had never been embedded.
+
+        That is the defect this project has closed twice already in other engines — `## References
+        (0)` at `confidence: complete`, and an `Ok([])` that meant the call succeeded rather than
+        that the world was empty. Nothing needed to be made durable to fix it: the durable record
+        was already on disk and only `codeintel status` was reading it.
+
+        Never raises: a provider that cannot answer "is this index whole?" must still answer the
+        query. Returning None on error means "no gap", which is the pre-existing behaviour.
+        """
+        try:
+            if not searcher.has_index(project_root):
+                return None
+            if db.indexed_at(os.path.realpath(project_root)) is not None:
+                return None
+            # The searcher's own counter, so the number in the gap is the number the query
+            # actually searched rather than a second count that could disagree with it.
+            return int(searcher._row_count(os.path.realpath(project_root)))
+        except Exception as exc:
+            log_swallowed("SemanticProvider._incomplete_index", exc)
+            return None
+
     def build_result(
         self,
         op: str,
@@ -735,6 +771,21 @@ class SemanticProvider:
                              f"could not be verified against the current source; "
                              f"run: codeintel index {project_root}",
                     ))
+                # "Nothing matched" from a half-built index is the most dangerous sentence this
+                # provider can produce: the reader takes it as a fact about the repository, and it
+                # is a fact about how far the indexer got. A null result carries no `gaps` — by
+                # design, `reason` is the whole story there — so the caveat goes in the hint, which
+                # is the field that is read.
+                _partial = self._incomplete_index(db, searcher, project_root)
+                if _partial is not None:
+                    return _finish(safe_null_result(
+                        op, target, engine="semantic", reason="below-floor",
+                        hint=f"nothing matched above the similarity floor — but the last index "
+                             f"pass for this repository did not finish "
+                             f"({_plural(_partial, 'chunk')} indexed, the rest never embedded), so "
+                             f"this is UNKNOWN rather than absent. Finish the pass and re-ask: "
+                             f"codeintel index {project_root}",
+                    ))
                 return _finish(safe_null_result(
                     op, target, engine="semantic", reason="below-floor"))
 
@@ -788,6 +839,21 @@ class SemanticProvider:
             # asked "where is X done" and received only prose needs to know that no code matched —
             # otherwise an empty code corpus reads as "the implementation does not exist".
             gaps = []
+            # An index that was never finished being built covers an unknown fraction of the repo,
+            # and every other gap here is about hits it DID return. This one is about the ones it
+            # could never have returned, so it goes first.
+            _partial = self._incomplete_index(db, searcher, project_root)
+            if _partial is not None:
+                gaps.append({
+                    "section": "coverage",
+                    "kind": "index-incomplete",
+                    "detail": f"the last index pass for this repository did not finish: "
+                              f"{_plural(_partial, 'chunk')} are indexed and the remainder of the "
+                              f"tree was never embedded, so code that exists here can be missing "
+                              f"from these results entirely. This is not a stale hit — it is an "
+                              f"absent one, and it cannot be detected by looking at what came "
+                              f"back. Finish the pass: codeintel index {project_root}",
+                })
             # A thinned list must never be passed off as a whole one. These hits were dropped
             # because the file no longer holds the code they were indexed from, so the answer is
             # "some of this repo is not currently searchable", not "this is everything".
