@@ -12,7 +12,7 @@ are silently deleted cannot be audited and gets re-litigated instead.
 | finding | status as of 2026-09-17 |
 |---|---|
 | **P0** Indexing reports success when no files are readable | **Closed** — `d1dfc15` fails closed on unreadable repositories. Re-verified: `bright-sky` now indexes 29,903 chunks in 12m44s where it previously reported `0 files, 0 chunks` and exited 0. |
-| **P0** False-positive graph edges for qualified methods | **Partly closed** — `#34` makes the failure legible: a caller heading now reads `2 resolved · 43 name-matched · 5 unstated` above the rows, and `StrategyChain.resolve`'s two true callers rank first among unbadged rows. The *disclosure* is fixed; the *resolution* is still heuristic, so Phase 2 below stands. |
+| **P0** False-positive graph edges for qualified methods | **Partly closed, and now MEASURED** — `#34` made the failure legible: a caller heading reads `2 resolved · 43 name-matched · 5 unstated` above the rows, and `StrategyChain.resolve`'s two true callers rank first among unbadged rows. The *disclosure* is fixed; the *resolution* is still heuristic, so Phase 2 below stands. What changed on 2026-09-18 is that it is no longer argued from one hand-check: the shape is a scored arm (see Milestone 1's fixture line), and the number it produces is `graph` direct precision falling from 60% to 46% on `corpus-ts`, plus that arm's first-ever `wrongly silent`. Reproduce against `bright-sky`, not `pathly-adapters` — `StrategyChain` does not exist in the latter. |
 | **P1** Confidence visible but not actionable | **Closed** — `#44`. Not by adding the `min_confidence` filter this row asked for: an engine-side filter would drop rows, and the one thing measured across four repositories is that this engine is never wrongly silent. The rows ride the envelope instead (`rows[]`, `evidence`, `evidence_class`), so the caller filters and the tool keeps reporting everything it found. See Phase 3. |
 | **P1** Background indexing state unclear | **Closed** — `#52`, and the premise was wrong in a useful way. Measured 2026-09-18 by `SIGKILL`ing an index pass at 256 of 600 chunks: the database is not torn (per-batch commits), a durable completion record already existed (`project_index_meta`, written only on success), and the next pass resumes exactly — it embedded the missing 344 and finished. Nothing needed to be made durable. What was missing is that the QUERY path never read that record, so a half-built index answered `confidence: complete` with a symbol that exists silently absent. It now raises a `coverage` / `index-incomplete` gap. |
 | **P1** Full-suite performance or hang risk | **Closed** — `#39`. It never hung: it completed in 672s, twice measured. Three tests queried the gateway with a real root, each firing a full background reindex of this checkout (146s, 154s) on daemon threads nothing joined, which starved `test_hard_exit`'s nested pytest at the 47.8% mark. Suite now 219s. |
@@ -534,9 +534,25 @@ Requirements:
 - ~~Fix permission and zero-file indexing behavior.~~ `d1dfc15`
 - Prevent repeated background-index restarts. — **not re-verified**
 - ~~Separate verified from heuristic graph counts.~~ `#34`
-- Add the `StrategyChain.resolve` regression fixture. — **still open**: the case is hand-checked
-  and written up in `bench/README.md`, but it is scored by no arm. Establishing truth at that
-  scale is the blocker.
+- ~~Add the `StrategyChain.resolve` regression fixture.~~ — **met on 2026-09-18, and the stated
+  blocker was the wrong one.** This line said the obstacle was "establishing truth at that scale",
+  meaning `bright-sky`'s 1,483 files. Scale had nothing to do with it. `bench/oracle_ts.py` abstains
+  on every `obj.method(...)` site — *"the receiver's type is not a syntactic fact"* — and every real
+  call site of a method is one of those, so the true callers were equally invisible in a three-file
+  tree. Measured before anything was built: a 3-file probe reproduced the blindness exactly.
+
+  The oracle now decides a receiver where the source states it (`private readonly chain:
+  StrategyChain`, `= new StrategyChain()`, or the constructor-parameter-property form) and keeps
+  abstaining everywhere else. Verified additive: across all twelve pre-existing TypeScript targets,
+  including every one in the gated `daycap` arm, not one site changed label.
+
+  Two targets, not one, because the same mechanism fails in opposite directions either side of a
+  name collision — `StrategyChain.resolve` answers nothing for a symbol that has a caller, while
+  `FallbackChain.resolve` answers three Promise executors and misses its one real caller.
+
+  Note what this does and does not close. It closes the *measurement*. It does not close the
+  resolution: Milestone 2's "tighten class-qualified method resolution" is still open, and is now
+  the only item left whose fix would move a number this repository actually records.
 
 Release criterion met: `bright-sky` now indexes 29,903 chunks where it previously reported zero
 files and exited successfully.

@@ -330,8 +330,15 @@ class AnswerRendering:
         # with a half that did have rows. Flagged so the envelope withholds its row summary rather
         # than publishing a `returned` that undercounts the `- ` lines in the body it describes.
         self._pending_nonrow_lines = True
-        listing = "\n".join(f"- {g.describe()}" for g in candidates[:_CANDIDATE_CAP])
-        more = (f"\n… (+{len(candidates) - _CANDIDATE_CAP} more)"
+        # And they are quoted, for the same reason the settle note and the first screen are: an
+        # answer's body is parsed back into caller keys by `bench/score.py::graph_answer`, which
+        # takes every line starting with `- ` as a row. Rendered flat, this listing scored as a
+        # fabricated caller — the benchmark measuring the disclosure instead of the engine, in the
+        # direction that makes the tool look worse — and it silenced the `graph_verified` arm
+        # outright, which refuses an answer whose body shows rows the envelope does not publish.
+        # Withholding the row summary was half the fix; the line shape is the other half.
+        listing = "\n".join(f"> - {g.describe()}" for g in candidates[:_CANDIDATE_CAP])
+        more = (f"\n> … (+{len(candidates) - _CANDIDATE_CAP} more)"
                 if len(candidates) > _CANDIDATE_CAP else "")
         return (f"## {op.capitalize()} of {target}\n"
                 f"**No symbol matching {wanted.describe()} has {op} in this index** — which says "

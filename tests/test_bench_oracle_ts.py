@@ -240,3 +240,104 @@ def test_the_readme_states_this_corpus_size_correctly():
         f"bench/README.md claims {sorted(corpus_claims)} file(s) for corpus_ts; "
         f"there are {on_disk} on disk"
     )
+
+
+# --- class-qualified targets ------------------------------------------------------------------
+#
+# `bench/README.md` carried the qualified case as an observation for weeks, on the stated grounds
+# that scoring it needed "a repository whose truth is establishable" — meaning something smaller
+# than the 1,483-file monorepo it was hand-checked on. That diagnosis was wrong, and these tests
+# pin what it was actually blocked on: the oracle abstains on every `obj.method(...)` site, and
+# every real call site of a method is one of those. Twenty-four files were never the problem.
+
+def test_a_qualified_target_decides_the_receiver_its_class_body_declares(repo) -> None:
+    """`this.chain.resolve(...)` where the class states `private readonly chain: StrategyChain`.
+
+    The declaration is a fact in the text, not an inference, which is the whole basis for deciding
+    it. `StrategyAgent` reaches the target through a barrel re-export, so the class's alias chain
+    has to be followed before the annotation can be matched — the qualifier's equivalent of the
+    indirection `settleFacade.ts` puts in front of `settleQueue`.
+    """
+    t = _truth(repo, "StrategyChain.resolve", f"{SRC}/strategyChain.ts")
+
+    assert (f"{SRC}/chainAgents.ts", "StrategyAgent.route") in t.calls, _labels(t)
+    assert t.coverage == 1.0, f"the qualified case must be fully decidable: {_labels(t)}"
+    assert not t.undecidable, _labels(t)
+
+
+def test_a_field_holding_a_different_class_is_a_proven_non_caller(repo) -> None:
+    """`FallbackAgent.route` spells its call `this.chain.resolve(q)` — identical to the true caller,
+    character for character. What separates them is the declared class, and nothing else.
+
+    Without this half the arm could only reward finding callers, and an engine answering
+    "everything" would score as well as one answering correctly.
+    """
+    t = _truth(repo, "StrategyChain.resolve", f"{SRC}/strategyChain.ts")
+
+    assert (f"{SRC}/chainAgents.ts", "FallbackAgent.route") in t.negatives, _labels(t)
+
+
+def test_a_promise_executor_is_a_proven_non_caller_of_a_method(repo) -> None:
+    """The population that supplied 43 of 48 reported callers on the repository this is modelled
+    from. `new Promise((resolve, reject) => ... resolve(x))` binds the name right there, and a
+    method is never reached as a bare name — so these are decidable negatives, not abstentions.
+    """
+    t = _truth(repo, "StrategyChain.resolve", f"{SRC}/strategyChain.ts")
+
+    for fn in ("fetchLater", "settleSoon", "firstOf"):
+        assert (f"{SRC}/promiseExecutors.ts", fn) in t.negatives, (fn, _labels(t))
+
+
+def test_a_structural_receiver_type_is_still_an_abstention(repo) -> None:
+    """The limit, and it is the point of the design rather than a gap in it.
+
+    `memberCall.ts` annotates its field with an object type, not a class. That states the shape of
+    the receiver and not its identity, so the site stays undecidable — the same answer the oracle
+    gave before qualified targets existed. A rule that guessed here would manufacture exactly the
+    kind of unfounded truth this harness is built to measure other tools against.
+    """
+    t = _truth(repo, "forwardReleasedItem")
+
+    assert (f"{SRC}/memberCall.ts", "Relay.go") in t.undecidable, _labels(t)
+
+
+def test_an_unqualified_target_still_abstains_on_every_property_access(repo) -> None:
+    """The backward-compatibility pin. Asking for the bare leaf name must behave exactly as it did
+    before qualified targets existed: a property access is undecidable without a qualifier to
+    decide it against, because there is then nothing to compare the declared class to.
+    """
+    t = _truth(repo, "resolve", f"{SRC}/strategyChain.ts")
+
+    for scope in ("StrategyAgent.route", "FallbackAgent.route"):
+        assert (f"{SRC}/chainAgents.ts", scope) in t.undecidable, (scope, _labels(t))
+    assert not t.calls, _labels(t)
+
+
+def test_a_receiver_typed_by_an_unresolvable_import_abstains(tmp_path) -> None:
+    """The boundary of the negative branch, and the reason it is drawn conservatively.
+
+    A field annotated with a class imported from a specifier that resolves to nothing is NOT a
+    proven different class — the specifier could be a path alias for the target's own file, which is
+    exactly what `aliasImport.ts` pins for an unqualified target. Claiming a negative here would
+    manufacture a wrong truth, and a wrong truth in this file silently rescores an engine.
+
+    Built as its own tree rather than added to the corpus: the corpus is pinned file-by-file by the
+    tests above and by a derived count in `bench/README.md`, and this boundary needs a `tsconfig`-
+    less path alias that would change what several of those files mean.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "chain.ts").write_text(
+        "export class StrategyChain {\n  resolve(x: string): string { return x; }\n}\n")
+    (src / "agent.ts").write_text(
+        "import { StrategyChain } from '@aliased/chain';\n"
+        "export class Agent {\n"
+        "  private readonly chain: StrategyChain;\n"
+        "  constructor() { this.chain = null as never; }\n"
+        "  go(q: string) { return this.chain.resolve(q); }\n"
+        "}\n")
+
+    t = oracle_ts.truth_for(str(tmp_path), "src/chain.ts::StrategyChain.resolve")
+
+    assert ("src/agent.ts", "Agent.go") in t.undecidable, _labels(t)
+    assert ("src/agent.ts", "Agent.go") not in t.negatives, _labels(t)

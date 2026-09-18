@@ -23,7 +23,7 @@ CODEINTEL_BENCH_TS=~/src/some-app python bench/run.py typescript
 
 # Against the checked-in corpora — needs nothing, runs in CI, pins both oracles.
 pytest tests/test_bench_oracle.py tests/test_bench_oracle_ts.py
-python bench/run.py corpus-ts        # the TypeScript arm end to end, on 24 known files
+python bench/run.py corpus-ts        # the TypeScript arm end to end, on 29 known files
 ```
 
 The repository paths used to be hardcoded to one laptop, which meant the artifact that turns this
@@ -372,7 +372,7 @@ Stated re-exports are followed transitively (`export { x } from`, including `exp
 imports are tracked under their new spelling — scanning only for the target's own name finds the
 import and none of its callers — and a property access on a value stays an abstention, as in Python.
 
-`bench/fixtures/corpus_ts` is 24 files covering all of it, and `python bench/run.py corpus-ts` drives
+`bench/fixtures/corpus_ts` is 29 files covering all of it, and `python bench/run.py corpus-ts` drives
 the whole path — oracle, scorer and both engines through codeintel's own envelope. It is a **smoke
 test, not a measurement**: files written to have a known answer cannot say anything about real code.
 The real measurement it could not supply is below.
@@ -414,7 +414,27 @@ common names and each turned out to be unique in the index. A repository that ha
 unambiguous name gets an unambiguous answer, and 100% is what that looks like. It is a real result
 and it is not a general one.
 
-### The shape this table does not contain
+### The shape this table did not contain — now scored
+
+**This section's own premise was wrong, and it is left standing because finding that out is the
+result.** It said the qualified case needed "a repository whose truth is establishable", and that
+its absence was a question of scale. It was not. The blocker was in `bench/oracle_ts.py`, which
+abstains on every `obj.method(...)` site — *"property access on a value — the receiver's type is not
+a syntactic fact"* — and every real call site of a method is one of those. The true callers were
+invisible in a three-file tree exactly as much as in a 1,483-file one; 1,483 files were never the
+problem, so no amount of looking for a tractable repository would have found it.
+
+What the oracle now does is narrow and states no more than the source does: where a class body
+DECLARES what a field holds — `private readonly chain: StrategyChain`, or `= new StrategyChain()`,
+or the constructor-parameter-property spelling — `this.chain.resolve(...)` is decidable, and it is
+decidable as a proven NON-caller when the declared class is a different one. Everything else keeps
+abstaining, including the structural type in `memberCall.ts`, which is still there and still
+undecidable. Confirmed on all twelve pre-existing TypeScript targets: not one site changed label.
+
+The observation below is the `bright-sky` hand-check that motivated all of this. It is still an
+observation — that repository is a private clone and not an arm — but the shape it describes is now
+a scored row in the table under it, built from `strategyChain.ts`, `fallbackChain.ts`,
+`chainAgents.ts`, `chainBarrel.ts` and `promiseExecutors.ts` in the checked-in corpus.
 
 Hand-checked on a third repository in the same tree — 1,483 TypeScript files, a monorepo — and not
 scored by this harness, so it is reported as an observation rather than a row:
@@ -436,9 +456,17 @@ What matters is what the answer looks like underneath the headline:
 So the ranking and the disclosure both work, and the headline count is still wrong by more than an
 order of magnitude. An agent that reads `gaps` and prefers unbadged rows gets the right answer; one
 that reads "48 callers" and starts editing does not. That gap between *what the envelope says* and
-*what the first line says* is the finding, and it is the one shape this file has never scored:
-**a qualified method target whose leaf name collides across a large tree.** Adding it needs a
-repository whose truth is establishable, which is why it is an observation here and not a table.
+*what the first line says* is the finding, and it was for a long time the one shape this file had
+never scored: **a qualified method target whose leaf name collides across a large tree.**
+
+The fixture reproduces it, and reproduces something the single `bright-sky` hand-check could not
+have shown — the same mechanism fails in two opposite directions depending on which side of a name
+collision you ask about. `StrategyChain.resolve` gets **nothing**: the backend recorded neither
+agent's `this.chain.resolve(...)` edge, so a symbol with a real caller answers empty, which is the
+deletion trap and the first `wrongly silent` the `graph` arm has ever recorded. `FallbackChain.
+resolve` gets **three callers, all of them Promise executors, and misses its one real caller** —
+because it is the only `resolve` in the index carrying edges, so every unresolved bare `resolve(...)`
+in the tree binds to it. One target could not have measured both.
 
 **The answer now prints the command that closes it.** Establishing the paragraph above took a person
 noticing that the discriminator is `StrategyChain` rather than `resolve` and grepping for it. That
@@ -457,16 +485,35 @@ command a reader is handed rather than one they have to design.
 
 ### What `corpus-ts` reports today
 
-Re-measured 2026-09-17, after `codeintel index bench/fixtures/corpus_ts`:
+Re-measured 2026-09-18, after `codeintel index bench/fixtures/corpus_ts`, with the two
+class-qualified targets added:
 
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
-| `graph` | 60% | 86% | 60% | 60% | 0 / 4 |
-| `graph_verified` | 75% | 43% | 75% | 30% | **1 / 4** |
-| `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **4 unanswered** |
-| `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **4 unanswered** |
+| `graph` | 46% | 67% | 46% | 50% | **1 / 6** |
+| `graph_verified` | 75% | 33% | 75% | 25% | **3 / 6** |
+| `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **6 unanswered** |
+| `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **6 unanswered** |
 
-Oracle coverage 84% mean. The `graph` row is a smoke test and nothing more — 24 files written to
+The four-target table this replaces read `graph` 60% / 86% / 60% / 60% at `0 / 4`, and
+`graph_verified` 75% / 43% / 75% / 30% at `1 / 4`. No engine behaviour changed between the two runs
+— both answer the four original targets identically — and what moved is the population: it now
+contains the shape the section above this one used to say was missing. The movement is the qualified
+case and nothing else. The 14 points of direct precision are three fabricated callers on one target,
+and the new `1 / 6` is the other target answering nothing at all for a symbol that has a caller.
+
+One renderer change was needed to get the second arm to answer at all, and it is worth stating
+because it is a defect this file's own parser caused. When a qualified target matches nothing, the
+answer lists the symbols that DO carry the bare name. Those bullets were rendered `- `, and
+`graph_answer` here takes every line starting with `- ` as a caller row — so `graph_verified`, which
+refuses any answer whose body shows rows the envelope does not publish, reported the target as
+`UNANSWERED — this build publishes no structured rows`. That message sends a reader to check their
+`codeintel` install for a defect in a renderer. The bullets are now quoted (`> - `), which is the
+same remedy already applied to the settle note and the first screen, and the third test pinning that
+contract is in `tests/test_edge_confidence.py`. The `graph` arm was unaffected here only by luck:
+the file those bullets named happened to hold no decidable site.
+
+Oracle coverage 89% mean. The `graph` row is a smoke test and nothing more — 29 files written to
 have a known answer cannot measure an engine — with one exception worth naming: **`describe` now
 claims 1 caller where the failure that motivated this entire arm claimed 32.** One spurious against
 one proven non-caller is still a spurious, but that class is no longer what it was.
@@ -491,7 +538,7 @@ as every other failure mode here, rather than argued about in prose.
 That absence is deliberate — it is what the oracle's unresolvable-specifier guard exists to bite on.
 Its second effect was not designed. Without a project file, `tsserver` treats every file as its own
 inferred project and cannot see across files, so it returns each definition and an **empty reference
-list**. `forwardReleasedItem` is imported and called in four of the 24 files, and
+list**. `forwardReleasedItem` is imported and called in four of the 29 files, and
 `--engine lsp --op symbol` used to answer:
 
 ```text
