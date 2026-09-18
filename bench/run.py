@@ -57,7 +57,17 @@ CORPUS_TS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
 #     CODEINTEL_BENCH_EXE=./scripts/codeintel-src python bench/run.py corpus-ts
 EXE = os.environ.get("CODEINTEL_BENCH_EXE", "codeintel")
 
-REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
+# (root, targets, language, GATED). `gated` says whether this arm's verified-caller precision is
+# held to `score.VERIFIED_PRECISION_FLOOR` — i.e. whether its number is a MEASUREMENT of an engine
+# or a smoke test of this harness.
+#
+# `corpus-ts` is the only one that is not, and the exclusion is stated here rather than buried in a
+# threshold nobody can see: it is four hand-written symbols chosen to be maximally adversarial, in
+# a 24-file tree written to have a known answer. Holding a deliberately hostile fixture to a
+# production floor would either force the fixture to be made easier — destroying the thing it is
+# for — or park the gate permanently red. Excluding the arm that fails is a suspicious move in
+# general, so: its verdict line still prints on every run, saying it was not applied and why.
+REPOS: dict[str, tuple[str, list[tuple[str, str]], str, bool]] = {
     "pathly-adapters": (PATHLY, [
         # Plainly resolvable: direct import, direct call. The control group — an engine that gets
         # these wrong is broken, and one that only gets these right has not been tested.
@@ -79,7 +89,7 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
         # Short/common names, the population where `unique_name` binding does its damage.
         ("src/pathly_orchestrator/http_server/sse.py", "_broadcast"),
         ("src/pathly_orchestrator/runner/output.py", "_claude_tokens"),
-    ], "python"),
+    ], "python", True),
     "snitch-simulator": (SNITCH, [
         # Only ever PASSED, never invoked — `set_forward_fn(app.forward_released_item)`. Truth is
         # zero calls and two references, so this is the case that separates an engine which reports
@@ -92,7 +102,7 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
         # Module-level functions reached across packages.
         ("services/simulator/src/snitch_simulator/state.py", "FaultStore"),
         ("services/simulator/src/snitch_simulator/config.py", "load_config"),
-    ], "python"),
+    ], "python", True),
 
     # A REAL TypeScript repository, which bench/README.md called the largest thing still open: the
     # table was Python-only, and the worst failure this project has ever seen is TypeScript. daycap
@@ -120,7 +130,7 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
 
         # The CLI entry point's argument parser.
         ("src/bin/daycap.ts", "parseArgs"),
-    ], "typescript"),
+    ], "typescript", True),
 
     # The checked-in TypeScript corpus. Small, and it is a SMOKE TEST of the arm end to end rather
     # than a measurement — 24 files written to have a known answer cannot say anything about a real
@@ -143,10 +153,10 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str]] = {
         # than for want of a failure. Here filtering removes the whole answer — which is the price
         # of excluding heuristic rows by default, stated in the column that exists to hold it.
         ("src/settle.ts", "settleQueue"),
-    ], "typescript"),
+    ], "typescript", False),   # smoke fixture — see the note on REPOS
 
     # A real TypeScript repository, named by the environment. Fill in the disputed symbols.
-    "typescript": (TS_REPO, [], "typescript"),
+    "typescript": (TS_REPO, [], "typescript", True),
 }
 
 
@@ -155,7 +165,7 @@ def main() -> int:
     if key not in REPOS:
         print(f"unknown repo '{key}'; known: {', '.join(REPOS)}")
         return 2
-    root, targets, language = REPOS[key]
+    root, targets, language, gated = REPOS[key]
     if key == "typescript" and not targets:
         print("The `typescript` slot has no targets yet.\n"
               "Set CODEINTEL_BENCH_TS to a real TypeScript repository and list its disputed\n"
@@ -172,8 +182,10 @@ def main() -> int:
               f"Point {env} at your clone, or run the checked-in corpus instead:\n"
               f"    pytest tests/test_bench_oracle.py")
         return 2
-    run(root, targets, exe=EXE, language=language)
-    return 0
+    # The exit code IS the gate. Exit 1 means the verified-caller precision floor was not met (or
+    # could not be measured); 2 stays what it always was — the harness could not run at all, which
+    # is a different fact from an engine scoring badly and must not be confused with one.
+    return run(root, targets, exe=EXE, language=language, gated=gated, repo=key)
 
 
 if __name__ == "__main__":

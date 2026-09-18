@@ -31,6 +31,48 @@ project's accuracy arguments into arithmetic could be reproduced by nobody and r
 a backend release. They come from the environment now, and a missing clone says so instead of scoring
 every arm against an empty tree.
 
+## The gate: verified-caller precision ≥ 95%
+
+Every run ends with a verdict, and **the exit code is the gate**:
+
+```text
+verified-caller precision gate: 97% vs 95% floor — PASS
+```
+
+| exit | meaning |
+|---|---|
+| 0 | the floor was met, or this arm is not gated |
+| 1 | `graph_verified` direct precision is below the floor, **or could not be measured at all** |
+| 2 | the harness could not run — a missing clone, an unlisted repo. Not an engine result |
+
+The floor is `score.VERIFIED_PRECISION_FLOOR`, **95%, agreed 2026-09-18**. The readiness doc's Phase
+6 had asked for "an agreed threshold" and carried that phrase unagreed, which is a gate that cannot
+be failed and so cannot be passed either.
+
+Three things about what it reads, because each one is a way this number could be made to look better
+than the engine is:
+
+* **Direct callers only.** Not impact, which is a recall-first question with the opposite failure
+  cost, and not the unfiltered `graph` arm, whose precision over all rows is the quantity that had
+  been standing in for this one.
+* **Per repository, never pooled.** The arms have different symbol counts, so an average would let
+  one bad tree hide behind three good ones — and a pooled figure is exactly the kind of summary this
+  benchmark exists to distrust.
+* **An unmeasurable arm FAILS.** If `graph_verified` claimed nothing on any symbol there is no
+  precision to compare, and reporting PASS there would convert "we could not ask" into "we asked and
+  it was fine" — the substitution this whole benchmark exists to catch in the tools it measures.
+
+`corpus-ts` is **not gated**, and its verdict line says so on every run rather than staying silent.
+It is four hand-written symbols chosen to be maximally adversarial in a 24-file tree written to have
+a known answer; holding it to a production floor would either force the fixture to be made easier —
+destroying the thing it is for — or park the gate permanently red. Excluding the arm that fails is a
+suspicious move in general, so `tests/test_bench_gate.py` pins the exemption list at exactly one
+entry and fails if a second appears.
+
+The gate reads precision and nothing else. **`wrongly silent` is not gated**, and a FAIL prints that
+beside itself: raising precision by dropping rows is always available, and that column is what it
+costs.
+
 ## Before you trust a run of this
 
 **The two LSP arms need the clone's own `.serena/project.yml` to name the language being scored.**

@@ -319,7 +319,7 @@ Create explicit promotion levels.
 > | rec. beta | full suite completes reliably | **met** — `#39`; 1,593 tests in 226s locally, four Pythons green in CI |
 > | rec. beta | SQLite warnings eliminated | **met** — `#39`, and `ResourceWarning` is an error in the suite |
 > | general | precision benchmark, multiple real Python and TS repos | **met** — four arms, two of each language, 27 scored symbols |
-> | general | verified-caller precision ≥ 95% | **measured** — 100% / 100% / 97% on the three real repositories, 75% on the fixture; no threshold agreed |
+> | general | verified-caller precision ≥ 95% | **met** — threshold agreed at 95% (2026-09-18) and enforced by the benchmark's exit code; 100% / 100% / 97% |
 > | general | large-repo performance budgets documented and enforced | **met** — re-measured at 0.23.4, and the per-query work budget runs in CI |
 > | general | upgrade and uninstall paths tested | **met** — upgrade tested end to end on all four agents; `codeintel uninstall` now exists and is tested |
 > | general | several external users set up unassisted | **open** — the one gate no commit can close |
@@ -344,10 +344,30 @@ Create explicit promotion levels.
 > | `pathly-adapters` | 90% / 100% | **97% / 78%** | 0 / 10 |
 > | `corpus-ts` (fixture) | 60% / 86% | **75% / 43%** | **1 / 4** |
 >
-> The three real repositories clear 95%; the deliberately adversarial three-symbol fixture does not.
+> **The threshold is 95%, agreed 2026-09-18 by the repository owner.** The gate had read "an agreed
+> threshold" for eight days with nobody having agreed one, which is a gate that cannot be failed and
+> therefore cannot be passed. It is now `score.VERIFIED_PRECISION_FLOOR`, and it is enforced by the
+> benchmark's **exit code** — `python bench/run.py <repo>` returns 1 when the floor is not met, so
+> it can be a release step rather than a number someone reads. Exit 2 stays what it always was: the
+> harness could not run, which is a different fact from an engine scoring badly.
+>
+> It applies to `graph_verified`'s DIRECT-caller precision and nothing else: not impact (a
+> recall-first question with the opposite failure cost), not the unfiltered `graph` arm, and not
+> `wrongly silent`, which is a separate count precisely because averaging it into a precision figure
+> would bury it. A FAIL prints that caveat beside itself, because raising precision by dropping rows
+> is always available and this gate does not read the column that prices it.
+>
+> Three of the four arms are held to it and all three pass: **100% / 100% / 97%**. `corpus-ts` is
+> exempt, and the exemption is the part worth scrutinising — excluding the arm that fails is a
+> suspicious move in general. It is four hand-written symbols chosen to be maximally adversarial in
+> a 24-file tree written to have a known answer; holding it to a production floor would either force
+> the fixture to be made easier, destroying what it is for, or park the gate permanently red. So its
+> verdict line still prints on every run, saying it was not applied and why, and a test pins the
+> exemption list at exactly one entry.
+>
 > **No pooled cross-repository figure is printed and none is invented here** — the arms have
-> different symbol counts and averaging them would be its own summary defect. What is still missing
-> from this gate is a *decision*, not a measurement: "an agreed threshold" has never been agreed.
+> different symbol counts and averaging them would be its own summary defect. The floor is applied
+> per repository, which is also the only way a single bad tree cannot be averaged out of view.
 >
 > The result worth reading twice is the last column, and it has since been corrected by its own
 > instrument. On the first run of this arm it read **0 everywhere**, and this document said so:
@@ -465,9 +485,8 @@ Requirements:
 - ~~Precision benchmark across multiple real Python and TypeScript repositories.~~ four arms,
   `bench/README.md`.
 - ~~Measured verified-caller precision above an agreed threshold, preferably 95% or higher.~~ —
-  **measured** by the `graph_verified` arm: 100% / 100% / 97% on the three real repositories, 75%
-  on the fixture. The threshold itself has still never been agreed, which is a decision rather than
-  a measurement.
+  **met**: threshold agreed at **95%** on 2026-09-18, enforced by `bench/run.py`'s exit code, and
+  cleared by all three gated arms (100% / 100% / 97%).
 - ~~Large-repository performance budgets documented and enforced.~~ — **met on both halves**:
   re-measured at 0.23.4 in `docs/benchmarks.md`, and enforced as a counted per-query work budget in
   `tests/test_query_budget.py` rather than as a wall-clock number a shared runner cannot hold.
@@ -594,11 +613,11 @@ outstanding: excluding heuristic rows by default is a behaviour this project has
 `bench/README.md` now prices what declining it costs. The beta / early-adopter level is met on all
 four of its gates, which is the level this document recommends the tool at.
 
-The verified-caller precision gate is measured now (`graph_verified`, `bench/README.md`) and reads
-100% / 100% / 97% on the three real repositories. What it still wants is an agreed threshold — a
-decision, not a measurement. The target whose callers are *all* name-matched has since been added
-(`settleQueue`, in the checked-in fixture), and it turned that arm's `wrongly silent` column from a
-zero that could not move into a `1 / 4`.
+The verified-caller precision gate is closed: measured by `graph_verified`, held to a **95% floor
+agreed on 2026-09-18**, and enforced by `bench/run.py`'s exit code rather than by someone reading a
+table. All three gated arms clear it — 100% / 100% / 97%. The target whose callers are *all*
+name-matched was added on the way (`settleQueue`, in the checked-in fixture), turning that arm's
+`wrongly silent` column from a zero that could not move into a `1 / 4`.
 
 Phase 3 closed in `#44`. One thing it asked for does not exist and one cannot be built honestly:
 the receiver/type evidence field has no backend behind it, and a continuation cursor over a
