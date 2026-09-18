@@ -63,15 +63,24 @@ class Reindexer:
             return self._generation.get(project_root, 0)
 
     def reindex_pending(self, project_root: str) -> bool:
-        """Whether this root has a reindex running right now.
+        """Whether this root has a reindex running right now — in ANY process.
 
         Lets a caller distinguish "this is the current structure" from "this is the structure as
         of the last completed index, and a newer one is being built". An agent's loop is edit →
-        ask what I broke, which lands exactly in that window."""
+        ask what I broke, which lands exactly in that window.
+
+        Our own set is checked first and answers most calls without touching the filesystem. The
+        cross-process probe matters for the case that set cannot see: an MCP server rebuilding a
+        repo while the user runs `codeintel query` in a terminal, or a restarted server whose
+        predecessor's pass is still running under another pid. Before this, each process reported
+        only on itself, so the terminal said nothing was happening while a full reindex was."""
         if not project_root:
             return False
         with self._lock:
-            return project_root in self._in_flight
+            if project_root in self._in_flight:
+                return True
+        from codeintel.filelock import held_by_another_process, lock_path
+        return held_by_another_process(lock_path(os.path.realpath(project_root)))
 
     def maybe_reindex(self, project_root: str) -> None:
         if not self._enabled:
@@ -124,15 +133,31 @@ class Reindexer:
         Silent, confident staleness is the worst failure this codebase can produce, so the
         generation now advances in a `finally`: one engine's outage degrades that engine's
         freshness, never the cache's correctness."""
+        from codeintel.filelock import exclusive, lock_path
+
         try:
-            try:
-                self._semantic_reindex(project_root)
-            except Exception as exc:
-                logger.warning("semantic reindex failed for %s: %s", project_root, exc)
-            try:
-                self._graph_reindex(project_root)
-            except Exception as exc:
-                logger.warning("graph reindex failed for %s: %s", project_root, exc)
+            # One pass per repository across the whole machine. Measured 2026-09-18: two passes
+            # started together each embedded all 600 chunks of a 600-file repo and each reported
+            # success — they read the same "what is new" answer before either had written, so the
+            # entire embedding cost is paid twice while both contend for the same cores.
+            #
+            # Non-blocking, and losing is not an error: whoever holds the lock is already doing
+            # precisely this work, so there is nothing to wait for and nothing to report. The
+            # generation still advances in the `finally` below, because the index does move — just
+            # under someone else's pass.
+            with exclusive(lock_path(os.path.realpath(project_root))) as acquired:
+                if not acquired:
+                    logger.debug("reindex of %s skipped: another process holds the lock",
+                                 project_root)
+                    return
+                try:
+                    self._semantic_reindex(project_root)
+                except Exception as exc:
+                    logger.warning("semantic reindex failed for %s: %s", project_root, exc)
+                try:
+                    self._graph_reindex(project_root)
+                except Exception as exc:
+                    logger.warning("graph reindex failed for %s: %s", project_root, exc)
         finally:
             with self._lock:
                 self._generation[project_root] = self._generation.get(project_root, 0) + 1
