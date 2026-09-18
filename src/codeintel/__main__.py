@@ -44,6 +44,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("setup", "Prepare backends + index this repo (--all does it all)"),
         ("index", "Build the index every other command reads (semantic + graph)"),
         ("install", "Register codeintel with the AI agents on this machine"),
+        ("uninstall", "Remove those registrations — the index is left alone"),
         ("prompt", "Print a paste-to-your-agent setup prompt for this machine"),
     ]),
     ("Check health", [
@@ -79,6 +80,7 @@ _MODULES = {
     "setup": "setup",
     "index": "index",
     "install": "install",
+    "uninstall": "uninstall",
     "prompt": "prompt",
     "doctor": "doctor",
     "status": "status",
@@ -333,6 +335,13 @@ The one-shot path on a new machine.""",
 Writes the MCP server config so an agent can call codeintel. Then restart the
 agent (or start a new session) — a running host does not reload its MCP
 config. `codeintel doctor` lists what got registered where.""",
+    "uninstall": """examples:
+  codeintel uninstall
+  codeintel uninstall --dry-run         show what would go, change nothing
+
+Removes only codeintel's own entry from each agent config — neighbouring
+servers and your settings are left alone. The index is NOT deleted; use
+`codeintel reset --all` for that.""",
     "prompt": """examples:
   codeintel prompt
 
@@ -502,6 +511,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show what would be registered, and where — write nothing",
+    )
+
+    # uninstall subcommand
+    uninstall_parser = subparsers.add_parser(
+        "uninstall", help=_DESCRIPTIONS["uninstall"], description=_DESCRIPTIONS["uninstall"])
+    uninstall_parser.add_argument(
+        "--agent",
+        choices=["auto", "claude", "codex", "gemini", "zed", "all"],
+        default="auto",
+        help="Agent to remove from (default: auto — every agent codeintel is REGISTERED with, "
+             "which is a different set from the agents installed here)",
+    )
+    uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed, and from where — change nothing",
     )
 
     # map subcommand

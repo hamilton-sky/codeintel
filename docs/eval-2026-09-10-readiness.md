@@ -303,8 +303,8 @@ Create explicit promotion levels.
 > that was supposed to deliver it merged" is the same substitution this document's own findings are
 > made of.
 >
-> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **six are
-> met, one is refused as written, two are partly met, and one is open** — and the one that is open
+> **Beta / early adopter is met on all four gates.** Of the ten gates above that level, **seven are
+> met, one is refused as written, one is partly met, and one is open** — and the one that is open
 > is the one no commit can close.
 >
 > | level | gate | status |
@@ -321,7 +321,7 @@ Create explicit promotion levels.
 > | general | precision benchmark, multiple real Python and TS repos | **met** — four arms, two of each language, 27 scored symbols |
 > | general | verified-caller precision ≥ 95% | **measured** — 100% / 100% / 97% on the three real repositories, 75% on the fixture; no threshold agreed |
 > | general | large-repo performance budgets documented and enforced | **met** — re-measured at 0.23.4, and the per-query work budget runs in CI |
-> | general | upgrade and uninstall paths tested | **partly** — upgrade tested end to end on all four agents; there is still no `uninstall` to test |
+> | general | upgrade and uninstall paths tested | **met** — upgrade tested end to end on all four agents; `codeintel uninstall` now exists and is tested |
 > | general | several external users set up unassisted | **open** — the one gate no commit can close |
 >
 > **Why the false-positive gate is refused rather than failed.** "Excluded by default" is a
@@ -411,11 +411,31 @@ Create explicit promotion levels.
 > something standing behind it. A negative control (move the binary, skip the reinstall) proves the
 > loop can fail.
 >
-> **Uninstall: still nothing to test**, and this is the one place the gate asks for a feature rather
-> than a test. `reset` removes caches (29 tests) and `install` writes registrations (44), but no
-> command removes a registration — so "uninstall tested" cannot be closed by testing. Whether
-> codeintel should own an `uninstall` is a product decision, and it is left as one rather than
-> smuggled in under a gate about coverage.
+> **Uninstall: built, then tested.** This was the one place the gate asked for a feature rather
+> than a test — `reset` removed caches and `install` wrote registrations, but nothing was the
+> inverse of `install`, so "uninstall tested" could not be closed by testing anything. `codeintel
+> uninstall` now is that inverse, and its whole risk is one sentence: it edits a user-owned config
+> file holding other people's servers and settings. So the tests are mostly about what it must not
+> do, and three of those are refusals rather than features:
+>
+> * it never deletes the config file, **including when codeintel was its only entry** — removing
+>   somebody's `~/.claude.json` because we happened to be its last server is a far larger action
+>   than the one asked for;
+> * it never rewrites a file it could not fully parse. Zed's JSONC (rewriting it through
+>   `json.dumps` would silently delete the user's comments, which in Zed's default config is most
+>   of the file) and two same-named TOML tables are both refused, with the block to remove by hand
+>   — the same refusals `install` makes, for the same reasons;
+> * it does **not** delete the index. That is `reset`'s, it costs ten minutes to rebuild on a large
+>   repo, and a command called "uninstall" destroying it silently is the surprise this project
+>   spends its comments avoiding. The location and the `reset --all` command are printed instead.
+>
+> `--agent auto` resolves to *where codeintel is registered*, not to *what is installed here* —
+> which is the question `install` asks and the wrong one twice over: an agent removed from the
+> machine still holds the entry, and an agent present but never registered has nothing to remove.
+>
+> No confirmation prompt, unlike `reset --all`, and that asymmetry is deliberate: this edits one
+> entry and `codeintel install` puts it back, which is asserted rather than assumed. `--dry-run` is
+> there for looking first.
 
 ### Current: beta / early adopter — **met**
 
@@ -438,7 +458,7 @@ Requirements:
 - ~~Full suite completes reliably.~~ `#39`
 - ~~SQLite warnings eliminated.~~ `#39`
 
-### General recommendation — 3 of 5 met
+### General recommendation — 4 of 5 met
 
 Requirements:
 
@@ -451,9 +471,9 @@ Requirements:
 - ~~Large-repository performance budgets documented and enforced.~~ — **met on both halves**:
   re-measured at 0.23.4 in `docs/benchmarks.md`, and enforced as a counted per-query work budget in
   `tests/test_query_budget.py` rather than as a wall-clock number a shared runner cannot hold.
-- Upgrade and uninstall paths tested. — **partly**: the upgrade loop is tested end to end on all
-  four agents (`tests/test_upgrade_path.py`); no `uninstall` command exists, so its half asks for a
-  feature rather than a test.
+- ~~Upgrade and uninstall paths tested.~~ — **met**: the upgrade loop end to end on all four agents
+  (`tests/test_upgrade_path.py`), and `codeintel uninstall` — which had to be built before it could
+  be tested — in `tests/test_uninstall.py`.
 - At least several external users have completed setup without maintainer assistance. — **open**,
   and the only gate in this document that no commit can close.
 
@@ -563,12 +583,16 @@ indexed standalone. `doctor` catches all three, and as of `#41` `--deep` no long
 process for a working one — it puts a real query to each engine and requires content. Phase 5 is
 delivered: [`docs/trust.md`](trust.md) is what a stranger reads first.
 
-What remains is **Phase 6**, and the ordinary work in it is now done. External validation — several
+What remains is **Phase 6**, and the ordinary work in it is done. External validation — several
 people installing and verifying without the maintainer — is the only gate still open, and it is the
-one no commit can close. Two gates sit at "partly" and neither is waiting on coverage: background
-index state is inspectable but process-local, and `uninstall` asks for a command that does not
-exist, which is a product decision rather than a missing test. The beta / early-adopter level is met
-on all four of its gates, which is the level this document recommends the tool at.
+one no commit can close. One gate sits at "partly" and it is not waiting on coverage: background
+index state is inspectable per answer but process-local, so a restarted server reports no reindex in
+progress whether or not one was interrupted. Making it durable is a design change, not a test.
+
+One gate is refused rather than failed, and that is worth re-reading before anyone counts it as
+outstanding: excluding heuristic rows by default is a behaviour this project has declined, and
+`bench/README.md` now prices what declining it costs. The beta / early-adopter level is met on all
+four of its gates, which is the level this document recommends the tool at.
 
 The verified-caller precision gate is measured now (`graph_verified`, `bench/README.md`) and reads
 100% / 100% / 97% on the three real repositories. What it still wants is an agreed threshold — a
