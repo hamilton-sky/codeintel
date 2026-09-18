@@ -63,6 +63,17 @@ _LSP_REF = re.compile(r"^- (?P<file>[^\s:]+):(?P<line>\d+)")
 # PATH is a DIFFERENT build from the source tree the reader is editing.
 _CHECKOUT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The release gate `docs/eval-2026-09-10-readiness.md` Phase 6 asks for: "measured verified-caller
+# precision above an agreed threshold, preferably 95% or higher". Agreed at **95% on 2026-09-18**,
+# by the repository owner — the doc had carried "an agreed threshold" for eight days with nobody
+# having agreed one, which makes a gate that cannot be failed and therefore cannot be passed.
+#
+# It applies to `graph_verified`'s DIRECT-caller precision and to nothing else. Not impact (a
+# recall-first question with the opposite failure cost), not the unfiltered `graph` arm (precision
+# over all rows is the quantity that was standing in for this one), and not `wrongly silent`, which
+# is a separate count precisely because averaging it into a precision figure would bury it.
+VERIFIED_PRECISION_FLOOR = 0.95
+
 
 @dataclass
 class Answer:
@@ -495,8 +506,28 @@ def _provenance(root: str, exe: str) -> None:
               f"     This run measures the INSTALLED build, not your working tree.")
     print()
 
+def _gate(direct_verified: Scores, *, gated: bool, repo: str) -> tuple[str, int]:
+    """`(verdict line, exit code)` for the verified-caller precision gate.
+
+    Three outcomes, and the third is the one worth building deliberately. A gate that reports PASS
+    when nothing was measured is worse than no gate: it converts "we could not ask" into "we asked
+    and it was fine", which is the substitution this whole benchmark exists to catch in the tools it
+    measures. So an unmeasurable arm FAILS, loudly, rather than passing on an empty population.
+    """
+    if not gated:
+        return (f"verified-caller precision gate: not applied — {repo} is a smoke fixture, "
+                f"deliberately adversarial and too small to sample anything"), 0
+    p = direct_verified.precision
+    if p is None:
+        return ("verified-caller precision gate: NOT MEASURED — the verified arm claimed nothing "
+                "on any symbol, so there is no precision to compare. Refusing to call that a pass"), 1
+    verdict = "PASS" if p >= VERIFIED_PRECISION_FLOOR else "FAIL"
+    return (f"verified-caller precision gate: {p:.0%} vs {VERIFIED_PRECISION_FLOOR:.0%} floor "
+            f"— {verdict}"), (0 if verdict == "PASS" else 1)
+
+
 def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
-        language: str = "python") -> None:
+        language: str = "python", *, gated: bool = True, repo: str = "") -> int:
     _provenance(root, exe)
     _verify_target_sources(root, targets)
     lang = LANGUAGES[language]()
@@ -559,3 +590,13 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
         print(f"\noracle coverage: {sum(covered) / len(covered):.0%} mean "
               f"(sites it judged, of sites mentioning the symbol)")
     print("`wrongly silent` = returned nothing for a symbol that has callers — the deletion trap.")
+
+    line, code = _gate(direct["graph_verified"], gated=gated, repo=repo or os.path.basename(root))
+    print("\n" + line)
+    if code:
+        # The counterweight, named at the moment someone is deciding what to do about a FAIL.
+        # Raising precision by dropping rows is always available and is not free: `wrongly silent`
+        # is the column that prices it, and this gate does not read that column.
+        print("  Note: this gate reads precision only. `wrongly silent` above is what filtering "
+              "more aggressively would cost, and it is not gated here.")
+    return code
