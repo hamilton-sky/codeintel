@@ -408,12 +408,21 @@ Create explicit promotion levels.
 > empty), and it is fixed the same way: a `coverage` / `index-incomplete` gap, plus a `below-floor`
 > hint that says **unknown** rather than letting silence read as absence.
 >
-> Worth recording what was NOT built. A "reindexing" flag file — the obvious way to make the
-> in-flight set durable — would be **worse than the in-memory version**: a crashed process leaves it
-> set forever, so the tool reports a reindex in progress that is not. A signal true of a file and
-> false of the world is this document's own recurring defect, and buying it to close a gate would
-> have been a poor trade. Cross-process duplicate reindexing remains real and is about waste rather
-> than honesty; it is not this gate.
+> Worth recording what was NOT built, because the obvious thing was a trap. A "reindexing" flag
+> file — the direct way to make the in-flight set durable — would be **worse than the in-memory
+> version**: a crashed process leaves it set forever, so the tool reports a reindex in progress that
+> is not. A signal true of a file and false of the world is this document's own recurring defect.
+>
+> **Cross-process duplication, since closed** (`#53`) and with the same trap avoided. Measured
+> first: two passes started together on a 600-file repository each embedded all 600 chunks and each
+> reported success, because both read the same "what is new" answer before either had written — the
+> whole embedding cost paid twice, on contended cores. A pass now takes an advisory **`flock`** and
+> skips when another process holds it (measured after: 4.1 s and 0.0 s). `flock` rather than a flag
+> file for exactly the reason above — the kernel releases it when the process dies, so there is no
+> cleanup to skip and no staleness to age out, and `tests/test_reindex_lock.py` proves that against
+> a real `SIGKILL`ed holder. The same lock makes `reindexing: true` visible across processes, which
+> also closes the "a restarted server reports no reindex in progress" symptom this gate started
+> from. That was waste rather than honesty, so it was never what the gate turned on.
 >
 > **Performance budgets, closed on both halves.** *Documented*: `docs/benchmarks.md` is re-measured
 > at 0.23.4 on the same machine and corpus family — 29,903 chunks indexed in 607 s at 49.3
