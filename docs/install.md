@@ -122,6 +122,35 @@ Start a **new** agent session — hosts read MCP config at startup. Then confirm
 
 For Claude Code specifically, `claude mcp list` should now show `codeintel`.
 
+## Removing it again
+
+```bash
+codeintel uninstall              # every agent it is registered with
+codeintel uninstall --dry-run    # show what would go, change nothing
+codeintel uninstall --agent zed  # just the one
+```
+
+`--agent auto` (the default) means **wherever codeintel is registered**, which is a different set
+from the one `install` uses — that one asks what is installed on this machine. An agent you removed
+from the machine still holds the entry, and an agent you never registered has nothing to remove.
+
+What it removes is codeintel's own entry and nothing else. Neighbouring servers, unrelated settings
+and the file itself survive, including when codeintel was the only server in it: deleting your
+`~/.claude.json` because we happened to be its last entry is a much larger action than the one you
+asked for. Where the file cannot be fully parsed — Zed's JSONC, or two `[mcp_servers.codeintel]`
+tables — it refuses and hands you the block to delete by hand, exactly as `install` does.
+
+There is **no confirmation prompt**, unlike `reset --all`. This edits one entry and
+`codeintel install` puts it straight back; `reset` destroys an index that costs ten minutes to
+rebuild. `--dry-run` is there for looking first.
+
+**The index is not deleted.** `uninstall` unregisters; the embeddings and graph cache stay where
+they are, and the command prints their location. If you are done with codeintel entirely:
+
+```bash
+codeintel reset --all            # then remove the package itself
+```
+
 ## Offline / air-gapped install
 
 The one non-local step in `codeintel setup` is `fastembed` downloading the

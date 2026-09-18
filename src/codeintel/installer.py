@@ -229,6 +229,41 @@ def _replace_toml_table(text: str, header: str, block: str) -> str | None:
         return None
 
 
+def _remove_toml_table(text: str, header: str) -> str | None:
+    """Delete ONLY the ``header`` table, leaving every other byte of the file alone.
+
+    The mirror of `_replace_toml_table` and it refuses in the same places for the same reason: this
+    file is hand-maintained and holds unrelated Codex settings, so an ambiguous match (two tables
+    with the same header) returns None rather than guessing which one to delete. A stale entry the
+    user can see and remove beats a config we rewrote without fully parsing.
+
+    The blank line that separated the table from its neighbour goes with it, so removing and
+    re-adding a registration does not accumulate whitespace.
+    """
+    try:
+        lines = text.splitlines(keepends=True)
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == header:
+                if start is not None:
+                    return None  # duplicate tables — ambiguous, don't guess
+                start = i
+        if start is None:
+            return None
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if lines[j].startswith("["):  # next table header at column 0
+                end = j
+                break
+        # Take the blank line(s) immediately before the table with it — they were written as the
+        # separator when it was added. Stop at the start of file or at another table's content.
+        while start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        return "".join(lines[:start]) + "".join(lines[end:])
+    except Exception:
+        return None
+
+
 def _get_nested(data: dict, keys: list[str]):
     node = data
     for k in keys:
@@ -236,6 +271,43 @@ def _get_nested(data: dict, keys: list[str]):
             return None
         node = node[k]
     return node
+
+
+def _del_nested(data: dict, keys: list[str]) -> bool:
+    """Remove `keys` from `data`. True when something was removed.
+
+    The now-empty CONTAINER is left in place — `"mcpServers": {}` rather than no `mcpServers` at
+    all. It is inert either way, and the key belongs to the host's schema rather than to codeintel:
+    removing a structure we did not create is a larger claim on someone's config than removing the
+    one entry we wrote, and this command's whole contract is that it touches only its own entry."""
+    node = data
+    for k in keys[:-1]:
+        if not isinstance(node, dict) or k not in node:
+            return False
+        node = node[k]
+    if not isinstance(node, dict) or keys[-1] not in node:
+        return False
+    del node[keys[-1]]
+    return True
+
+
+def registered_agents() -> list[str]:
+    """Agents whose config currently holds a codeintel entry.
+
+    Not the same question as `detect_agents`, which asks what is INSTALLED on this machine. For
+    uninstall the population that matters is where codeintel actually wrote something: an agent the
+    user removed after registering still has our entry in its config, and an agent that is present
+    but never registered has nothing to remove. Using the install-side detector here would have
+    both wrong, in the two directions that matter — leaving an orphan entry behind, and reporting
+    work on files it never touched."""
+    found: list[str] = []
+    for agent in _AGENTS:
+        try:
+            if registered_command(_CONFIG[agent])[1] is not None:
+                found.append(agent)
+        except Exception:
+            continue
+    return found
 
 
 def _set_nested(data: dict, keys: list[str], value) -> None:
@@ -391,6 +463,90 @@ class Installer:
             new_text = prefix + "\n" + block  # blank line before the new table
         _atomic_write_text(config_path, new_text)
         return self._result(agent, str(config_path), True, "registered")
+
+    # ---------------------------------------------------------------- uninstall
+
+    def unregister(self, agent: str) -> dict:
+        """Remove codeintel's entry from *agent*'s config, and nothing else.
+
+        The inverse of `register`, and it inherits that method's one real guarantee: only
+        codeintel's own entry changes. Neighbouring servers, unrelated settings and the file itself
+        survive — including when codeintel was the only server registered, because deleting
+        somebody's `~/.claude.json` because we happened to be its last entry is a far larger action
+        than the one that was asked for.
+
+        `action` is `removed` | `absent` | `failed`. `absent` is not a failure: uninstalling twice,
+        or uninstalling an agent that was never registered, is a no-op that should read as one.
+        """
+        spec = _CONFIG.get(agent)
+        if spec is None:
+            return self._result(agent, "", False, "failed", f"unknown agent '{agent}'")
+        config_path = resolve_config_path(spec)
+        try:
+            if spec.get("format") == "toml-mcp":
+                res = self._unregister_toml(agent, config_path, spec)
+            else:
+                res = self._unregister_json(agent, config_path, spec)
+        except Exception as exc:
+            return self._result(agent, str(config_path), False, "failed", str(exc))
+        # Reported, never deleted — the same rule `register` follows for it. It lives in a file this
+        # tool does not write, so removing it would be reaching further than install ever did.
+        res["legacy"] = self._legacy_note(spec)
+        return res
+
+    def _unregister_json(self, agent: str, config_path: pathlib.Path, spec: dict) -> dict:
+        if not config_path.exists():
+            return self._result(agent, str(config_path), True, "absent")
+        raw = config_path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Same refusal as `_register_json`, for the same reason: rewriting Zed's JSONC through
+            # `json.dumps` would silently delete the user's comments. Removing an entry does not
+            # make that acceptable, so hand back the block to delete by hand.
+            if self._looks_like_jsonc(raw):
+                raise ValueError(
+                    f"{config_path} is JSONC (it has comments or trailing commas), which codeintel "
+                    f"will not rewrite because doing so would discard your comments. Delete the "
+                    f"\"{spec['key'][-1]}\" entry under \"{'.'.join(spec['key'][:-1]) or 'the root'}\" "
+                    f"by hand."
+                ) from None
+            raise
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{config_path} does not contain a JSON object (found {type(data).__name__}) — "
+                f"refusing to rewrite it; there is nothing of ours to remove from it")
+        if not _del_nested(data, spec["key"]):
+            return self._result(agent, str(config_path), True, "absent")
+        _atomic_write_text(config_path, json.dumps(data, indent=2))
+        return self._result(agent, str(config_path), True, "removed")
+
+    def _unregister_toml(self, agent: str, config_path: pathlib.Path, spec: dict) -> dict:
+        """Codex: delete the ``[mcp_servers.codeintel]`` table, textually, preserving the rest."""
+        if not config_path.exists():
+            return self._result(agent, str(config_path), True, "absent")
+        existing = config_path.read_text(encoding="utf-8")
+        if spec["table"] not in existing:
+            return self._result(agent, str(config_path), True, "absent")
+        removed = _remove_toml_table(existing, spec["table"])
+        if removed is None:
+            return self._result(
+                agent, str(config_path), False, "failed",
+                f"could not locate exactly one {spec['table']} table in {config_path} — remove it "
+                f"by hand rather than have this rewrite a config it did not fully parse")
+        _atomic_write_text(config_path, removed)
+        return self._result(agent, str(config_path), True, "removed")
+
+    def unregister_many(self, agents: list[str]) -> list[dict]:
+        return [self.unregister(agent) for agent in agents]
+
+    def unregister_all(self) -> list[dict]:
+        return self.unregister_many(list(_AGENTS))
+
+    def unregister_registered(self) -> tuple[list[dict], list[str]]:
+        """`(results, untouched)` for every agent that currently holds a codeintel entry."""
+        targets = registered_agents()
+        return self.unregister_many(targets), [a for a in _AGENTS if a not in targets]
 
     @staticmethod
     def _result(agent: str, path: str, ok: bool, action: str, reason: str = "") -> dict:
