@@ -561,13 +561,55 @@ files and exited successfully.
 
 Target: following release
 
-- Add confidence filtering.
-- Tighten class-qualified method resolution.
-- Prioritize high-confidence results.
-- Add structured per-edge evidence.
-- Measure precision on `daycap`, `bright-sky`, and the internal fixture corpus.
+- ~~Add confidence filtering.~~ — **delivered as a caller-side filter, not an engine-side one**
+  (`#44`). The engine publishes `rows[].verified`, `rows[].qualifier_seen` and `evidence_class`;
+  it drops nothing. See Phase 3.
+- **Tighten class-qualified method resolution.** — **partly closed on 2026-09-19, and the naive
+  reading of it is impossible.** Measured first, and the measurement moved the work:
+
+  * *codeintel cannot resolve what the backend never recorded.* On `corpus-ts`,
+    `callees(StrategyAgent.route)` is empty — the backend recorded **no edge at all** for either
+    agent's `this.chain.resolve(q)`, and bound the bare `resolve(...)` calls inside Promise
+    executors to `FallbackChain.resolve` instead. No change inside this repository produces a
+    caller that is not in the index.
+  * *The LSP escalation is not the route.* `Gateway._cross_check_name_resolved` already fires on
+    three signatures, and none of them matches the real case: two of the fifty rows ARE resolved,
+    the target did match, and the third trigger needs an `@file` hint. Widening it would buy
+    nothing anyway — `bright-sky` has no root `tsconfig.json`, so the language server returns no
+    definition for the symbol even when handed its file.
+  * *Filtering is the forbidden trade, now with a number.* Removing the refuted rows from
+    `FallbackChain.resolve` empties an answer for a symbol that has a caller: `corpus-ts`
+    `wrongly silent` goes 1/6 → 2/6. That is why the rows stay.
+
+  What was delivered is the check the answer had been telling readers to run: the engine performs
+  it, states the result (`Checked: 43 of 43 …` in place of `Settle it: rg …`), publishes it per row
+  as `qualifier_seen`, counts it in `evidence.qualifier_absent`, and ranks refuted rows last —
+  without removing any. A fifth bench arm, `graph_qualified`, prices the middle of the trade the
+  other two bracket: **+14 points of direct precision over `graph` at unchanged recall**, against
+  `graph_verified`'s +29 for −34.
+
+  It runs only when the CALLER wrote the qualifier, and that limit took two measurements to find.
+  Scanning on any discriminator refuted a true caller — `callerFacade.ts` reaches
+  `forwardReleasedItem` through `./facade` and contains no `proxy`. Gating on which branch of
+  `_discriminator` fired did not fix it, and the re-run said so by not moving: the discriminator also
+  falls back to the backend's dotted name, so `src.proxy.forwardReleasedItem` yields `proxy` through
+  the qualifier branch — a module path wearing a class qualifier's clothes. Both wrong turns are
+  recorded in `bench/README.md` rather than tidied away, because the second one produced an
+  identical-looking table and only a diff against the previous run caught it.
+- ~~Prioritize high-confidence results.~~ — `#34` ordered resolved rows first; refuted rows now sort
+  last within their bucket, and can never rise above a binding.
+- ~~Add structured per-edge evidence.~~ — `#44`, plus `qualifier_seen` here.
+- ~~Measure precision on `daycap`, `bright-sky`, and the internal fixture corpus.~~ — done for
+  `daycap` and the fixture, which are arms. `bright-sky` is a private clone with no root
+  `tsconfig.json`; it is hand-checked in `bench/README.md` and the shape it demonstrates is now
+  scored on the fixture instead.
 
 Release criterion: qualified method queries no longer headline unrelated suffix matches as callers.
+**Met on the headline, open on the resolution.** The first screen has led with
+`Verified callers: 2 · possible: 43 · unstated: 5` since `#44`, the two true callers rank first, and
+the answer now states that 43 of 43 name-matched rows sit in files that never write `StrategyChain`.
+The count in the heading is still 48, because the rows are still there — which is the decision this
+document records as refused-as-written, not a gap in it.
 
 ### Milestone 3: Reliability release
 
