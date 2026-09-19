@@ -430,7 +430,11 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "test_the_confidence_note_counts_the_rows_it_describes",
     ("tally", "AnswerRendering._settle_name_matches"):
         "the two counts in the settle note are the rows in doubt and their distinct files — "
-        "test_the_settle_note_counts_the_rows_it_sends_you_to_check",
+        "test_the_settle_note_counts_the_rows_it_sends_you_to_check. The note has a second shape "
+        "once the engine runs the check itself, and its `N of M` is the refuted rows over the rows "
+        "in doubt — test_the_note_states_what_the_scan_found_rather_than_how_to_find_it, with the "
+        "unreadable-file arithmetic in "
+        "test_an_unreadable_file_is_unknown_and_not_counted_as_absent",
     ("tally", "AnswerRendering._no_symbol_matched_the_hint"):
         "a no-match note states only what was asked — "
         "test_a_no_match_note_claims_nothing_about_the_symbol_itself",

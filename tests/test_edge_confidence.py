@@ -685,3 +685,154 @@ def test_the_evidence_class_follows_the_rows_and_not_only_the_op(monkeypatch):
     impact, _ = _shape(monkeypatch, "impact")
     assert impact["evidence_class"] == "advisory", impact["evidence_class"]
     assert any(r["verified"] for r in impact["rows"]), "the per-row verdict is still there"
+
+
+# --- the qualifier scan ---------------------------------------------------------------------------
+#
+# `#34` derived the discriminating token and printed the `rg` for it. These pin the step after: the
+# answer runs that check itself and publishes the result per row. Everything here is about what the
+# result may and may not be used to claim — the scan narrows an answer, it never empties one.
+
+def _scanned(tmp_path, *, naming: set[int], n: int = 4, resolved: int = 1, missing: set[int] = ()):
+    """Render `_guessed` against a REAL tree, so the scan actually runs.
+
+    `naming` is the indices of the name-matched rows whose file mentions `StrategyChain`; `missing`
+    the ones whose file is not written at all, which is how an unreadable path reaches the scan.
+    """
+    gp, groups, wanted = _guessed(n=n, resolved=resolved)
+    src = tmp_path / "src" / "agents"
+    src.mkdir(parents=True)
+    for i in range(resolved + n):
+        if i in missing:
+            continue
+        body = "export const x = 1;\n"
+        if i in naming:
+            body += "import { StrategyChain } from './chain';\n"
+        (src / f"f{i}.ts").write_text(body)
+    (tmp_path / "src" / "chain.ts").write_text("export class StrategyChain {}\n")
+    gp._answered_root = str(tmp_path)
+    return gp, _render(gp, groups, wanted)
+
+
+def test_the_note_states_what_the_scan_found_rather_than_how_to_find_it(tmp_path):
+    """The whole point of the change. `#34` told a reader to run `rg`; the token, the root and the
+    rows in doubt are all in hand at render time, so the answer states the result.
+
+    The command stays in the body underneath. A claim a reader cannot re-run is a claim they have to
+    take on trust, which is the thing this note exists to avoid.
+    """
+    _, body = _scanned(tmp_path, naming=set(), n=4)
+
+    assert "_Checked: **4 of 4**" in body, body
+    assert "never write `StrategyChain`" in body, body
+    assert "rg -n --fixed-strings 'StrategyChain'" in body, body
+
+
+def test_the_scan_never_removes_a_row(tmp_path):
+    """The decided constraint, pinned where it would be easiest to break.
+
+    Dropping a disproved row would trade a false positive for a false negative, and `corpus-ts`
+    prices that trade: filtering the three fabricated rows off `FallbackChain.resolve` also empties
+    an answer for a symbol that has a caller. The scan ranks and labels; the caller decides.
+    """
+    _, body = _scanned(tmp_path, naming=set(), n=4)
+
+    assert len(_row_lines(body)) == 5, body        # 4 name-matched + 1 resolved, all still printed
+
+
+def test_a_disproved_row_ranks_last_but_never_above_a_binding(tmp_path):
+    """Ordering is the lever the scan is allowed to pull, and only within a bucket.
+
+    A row whose file names the qualifier sorts above one whose file does not — but neither can rise
+    above a `resolved` row, because the scan is weaker evidence than a followed binding and ordering
+    it as though it were equal would be the same over-claim in a new place.
+    """
+    gp, _ = _scanned(tmp_path, naming={1, 2}, n=4, resolved=1)
+
+    seen = [r.get("qualifier_seen") for r in gp._pending_rows]
+    assert seen[0] is None, seen                   # the resolved row, never scanned
+    assert seen[1:3] == [True, True], seen
+    assert seen[3:] == [False, False], seen
+
+
+def test_a_resolved_row_is_never_marked_by_the_scan(tmp_path):
+    """`null`, not `true`. A row that followed a real binding is not in the scanned population, so
+    reporting either verdict for it would be a claim about a file nobody opened — and `false` would
+    invite the reading that a proven caller is suspect for not writing the class's name."""
+    gp, _ = _scanned(tmp_path, naming=set(), n=2, resolved=2)
+
+    resolved = [r for r in gp._pending_rows if r["verified"]]
+    assert resolved, gp._pending_rows
+    assert all(r["qualifier_seen"] is None for r in resolved), resolved
+
+
+def test_an_unreadable_file_is_unknown_and_not_counted_as_absent(tmp_path):
+    """The distinction every summary in this project exists to keep. "This file does not name
+    `StrategyChain`" and "we could not open this file" are different facts, and collapsing them
+    would let a missing path argue that a row is spurious."""
+    gp, body = _scanned(tmp_path, naming=set(), n=4, missing={3, 4})
+
+    seen = [r.get("qualifier_seen") for r in gp._pending_rows if not r["verified"]]
+    assert seen.count(None) == 2, seen
+    assert seen.count(False) == 2, seen
+    assert "_Checked: **2 of 4**" in body, body
+    assert "2 could not be read and are left unjudged" in body, body
+
+
+def test_the_evidence_block_counts_what_the_scan_decided(tmp_path):
+    """The envelope's counts are the rows' own values, not a second derivation that could drift."""
+    gp, _ = _scanned(tmp_path, naming={1}, n=4, resolved=1)
+    ev = gp._settle_evidence()
+
+    assert ev["qualifier_present"] == 1, ev
+    assert ev["qualifier_absent"] == 3, ev
+    assert ev["qualifier_present"] + ev["qualifier_absent"] == ev["possible"], ev
+
+
+def test_without_a_readable_root_the_answer_falls_back_to_printing_the_command(tmp_path):
+    """No scan, no claim. A provider answering about a root that is not on disk must not report
+    "0 of 43 name it" — it must hand the reader the check, which is `#34`'s behaviour unchanged."""
+    gp, groups, wanted = _guessed(n=43, resolved=2)
+    gp._answered_root = str(tmp_path / "does-not-exist")
+    body = _render(gp, groups, wanted)
+
+    assert "_Settle it:" in body, body
+    assert "Checked:" not in body, body
+    assert all(r["qualifier_seen"] is None for r in gp._pending_rows), gp._pending_rows
+
+
+def test_a_bare_target_is_never_scanned_because_a_re_export_defeats_the_stem(tmp_path):
+    """The limit that a measurement imposed, not a cautious guess.
+
+    For a bare target `_discriminator` falls back to the stem of the defining file, and a caller
+    reaching the symbol through a re-export never writes that stem. Measured on `corpus-ts`:
+    `callerFacade.ts` imports `forwardReleasedItem` from `./facade`, contains no `proxy`, and the
+    scan disproved a TRUE caller. `settleQueue` survived the identical shape only because `settle`
+    is a substring of `settleFacade` — luck about a filename, not a fact about the code.
+
+    A class qualifier names an entity a caller must get hold of; a file stem names a path it may
+    never spell. So the scan runs for the first and not the second, and a bare target keeps the
+    printed command it has had since `#34`.
+    """
+    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.graph_targets import _SymbolTarget
+
+    gp, _groups, _wanted = _guessed(n=4)
+    src = tmp_path / "src"
+    src.mkdir(parents=True)
+    for i in range(4):
+        (src / f"f{i}.ts").write_text("export const x = 1;\n")
+    gp._answered_root = str(tmp_path)
+
+    # A bare target whose BACKEND qualified name is dotted — the subtle half of the bug. The
+    # discriminator falls back to `qn_raw` and yields `proxy` through its qualifier branch, so a
+    # gate on "which branch fired" passes and a module path gets scanned as though it were a class.
+    # None of these callers writes `proxy`; `callerFacade.ts` reaches the symbol via `./facade`.
+    bare = [_EdgeGroup("forwardReleasedItem", "src.proxy.forwardReleasedItem", "src/proxy.ts", [
+        {"a.name": f"c{i}", "a.qualified_name": f"pkg.c{i}", "a.file_path": f"src/f{i}.ts",
+         "type(c)": "CALLS", "_bucket": "name-matched"} for i in range(4)])]
+    body = _render(gp, bare, _SymbolTarget("forwardReleasedItem"), leaf="forwardReleasedItem")
+
+    assert all(r["qualifier_seen"] is None for r in gp._pending_rows), gp._pending_rows
+    assert "Checked:" not in body, body
+    assert "_Settle it:" in body, body

@@ -122,6 +122,7 @@ Three arms, per **question**, because the questions have opposite failure costs:
 | `graph` | what codeintel reports today, through its own envelope — what an agent actually receives |
 | `lsp_raw` | the language server's references taken as callers |
 | `lsp_classified` | the same references, with the syntax at each site deciding whether it is a call |
+| `graph_qualified` | the `graph` answer minus only the rows a qualifier scan DISPROVED — see below |
 
 * **direct callers** — precision-first. A fabricated caller sends an agent to edit unrelated code.
 * **change impact** — recall-first. A missed dependant is how live code gets broken.
@@ -247,6 +248,42 @@ The rest of the filter's cost is milder and was always visible: the rows it drop
 So this still does not settle the standing argument for keeping heuristic rows in the default
 answer — it prices it, and the price now has a unit. What it removes is the assumption that the
 price was unmeasurable, and the weaker claim that it had been measured at zero.
+
+### `graph_qualified`, the middle of that trade
+
+The two arms above are the endpoints of a choice — keep every guess, or keep only proven bindings —
+and for a long time nothing measured what sits between them. The argument for keeping heuristic rows
+is an argument about rows **nobody checked**. A row a mechanical check has refuted is a different
+object, and this arm is what prices the difference.
+
+`graph_qualified` is the `graph` answer with exactly one class of row removed: a name-matched row
+whose file never writes the qualifier the target was narrowed by (`rows[].qualifier_seen is false`).
+It is strictly weaker than `verified` — it discards what a check refuted rather than everything a
+binding did not confirm — so it cannot silence a symbol that `graph_verified` answers.
+
+Two things the first run of it established, both worth more than the headline:
+
+**The scan only runs when the CALLER supplied the qualifier, because the alternative was measured
+and was wrong — twice.** `_discriminator` serves the settle command, where a weak token still helps
+a reader; a claim published per row needs a stronger one. On the first run it refuted
+`callerFacade.ts`, which imports `forwardReleasedItem` from `./facade` and contains no `proxy` — so
+the arm disproved a **true** caller and its recall fell below `graph`'s, to 56%.
+
+The first fix was wrong too, and the re-run said so by not moving: gating on *which branch of the
+discriminator fired* does nothing, because it also falls back to the BACKEND's dotted name, and
+`src.proxy.forwardReleasedItem` yields `proxy` through the qualifier branch — a module path wearing
+a class qualifier's clothes, the same ambiguity `bench/run.py` refuses module-dotted targets over.
+The gate is now `the caller wrote a dotted target`, and with it `graph_qualified` matches `graph`
+exactly on `forwardReleasedItem` (7 claimed, 1 missed) and recall returns to 67%.
+
+`settleQueue` had passed the identical shape all along, but only because `settle` is a substring of
+`settleFacade` — luck about a filename rather than a fact about the code.
+
+**Removing refuted rows can still empty an answer, and the column says so.** On `FallbackChain.
+resolve` the three fabricated rows are all refuted, and the true caller was never in the answer to
+begin with — so the arm turns three wrong rows into silence, and takes a `wrongly silent` for it.
+That is the same trade `graph_verified` makes, paid less often. Anyone reading this arm as "strictly
+better" should read that column first.
 
 ### Why these numbers went UP, and what that says about the instrument
 
@@ -491,9 +528,15 @@ class-qualified targets added:
 | arm | direct precision | direct recall | impact precision | impact recall | wrongly silent |
 |---|---|---|---|---|---|
 | `graph` | 46% | 67% | 46% | 50% | **1 / 6** |
+| `graph_qualified` | 60% | 67% | 60% | 50% | **2 / 6** |
 | `graph_verified` | 75% | 33% | 75% | 25% | **3 / 6** |
 | `lsp_raw` | n/a | n/a | n/a | n/a | 0 / 0 — **6 unanswered** |
 | `lsp_classified` | n/a | n/a | n/a | n/a | 0 / 0 — **6 unanswered** |
+
+The three `graph` rows are the trade, in order. `graph_qualified` buys **+14 points of direct
+precision over `graph` at unchanged recall**, where `graph_verified` pays **−34 recall** for its
++29 — and it takes one `wrongly silent` rather than three. Read across the row, not down the
+column: the arm that looks best on precision is the one most likely to answer nothing.
 
 The four-target table this replaces read `graph` 60% / 86% / 60% / 60% at `0 / 4`, and
 `graph_verified` 75% / 43% / 75% / 30% at `1 / 4`. No engine behaviour changed between the two runs

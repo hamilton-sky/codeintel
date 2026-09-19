@@ -1,12 +1,17 @@
 """Score each engine's "who calls this" against the labelled truth, per question.
 
-Four arms, because the argument this benchmark exists to settle was about which of them to trust:
+Five arms, because the argument this benchmark exists to settle was about which of them to trust:
 
     graph            what codeintel reports today, whole stack, as an agent sees it
     graph_verified   the same answer with `rows[].verified` applied — only the edges that followed
                      a real import or language-server binding. The readiness doc's general-release
                      gate names *verified-caller* precision, and every other arm here measures
                      precision over ALL rows, which is a different quantity.
+    graph_qualified  the same answer with only the DISPROVED rows removed — a name-matched row
+                     whose file never writes the qualifier (`rows[].qualifier_seen is false`).
+                     Strictly weaker than `verified`: it discards what a check refuted rather than
+                     everything a binding did not confirm, so it cannot silence a symbol that
+                     `graph_verified` answers. It is the middle of a trade the other two bracket.
     lsp_raw          the language server's references, taken as callers — the design I proposed
                      and then measured at 56% precision on one hand-checked symbol
     lsp_classified   the same references, with the syntax at each location deciding whether it is
@@ -17,6 +22,13 @@ a change this project has repeatedly declined to make. Reading it as "the better
 point: its `wrongly silent` column is the price of that exclusion, and `wrongly silent` is the
 error this benchmark holds to be the most consequential one an engine of this kind can make. The
 two arms together are the trade, priced.
+
+`graph_qualified` was added because that trade had only its endpoints measured. "Keep every guess"
+and "keep only proven bindings" are not the only options, and the argument for keeping heuristic
+rows — that dropping them buys a false negative with a false positive — is an argument about rows
+nobody checked. A row a mechanical check has refuted is a different object, and this arm is what
+prices the difference. Its `wrongly silent` column is the one to read: if removing disproved rows
+ever empties an answer that `graph` filled, the check is too strong and this column says so.
 
 `graph` is measured through codeintel's own JSON envelope rather than by querying the backend
 directly. That is deliberate: the number that matters is what an agent receives, which includes every
@@ -199,12 +211,29 @@ def _enclosing(file: str, label: str) -> str:
     return label.rpartition(".")[2] or label
 
 
-def _keys_from_rows(rows: list, *, verified_only: bool) -> tuple[set, set]:
+def _verified_row(row: dict) -> bool:
+    """`rows[].verified` — the edge followed a real import or language-server binding."""
+    return bool(row.get("verified"))
+
+
+def _not_disproved_row(row: dict) -> bool:
+    """Every row EXCEPT the ones the qualifier scan put in a file that never writes the qualifier.
+
+    The third position between the two arms that existed. `graph` keeps every guess; `graph_verified`
+    keeps only proven bindings and pays for it in `wrongly silent`. This keeps a guess unless a
+    mechanical check disproved it, which is a weaker filter than `verified` and therefore drops
+    fewer true callers — and `qualifier_seen` is `null` for every row nobody checked, so an unknown
+    is kept rather than discarded.
+    """
+    return row.get("qualifier_seen") is not False
+
+
+def _keys_from_rows(rows: list, *, keep) -> tuple[set, set]:
     """`(callers, others)` from the envelope's structured rows — no prose parsed.
 
-    This is the arm reading the contract `#44` added, the way an agent would: filter on
-    `verified`, never on a badge in the rendered text. The call/non-call split replicates what the
-    body parser does rather than improving on it, including one wart — `_display` prints a
+    This is the arm reading the contract `#44` added, the way an agent would: filter on the
+    envelope's own fields, never on a badge in the rendered text. The call/non-call split replicates
+    what the body parser does rather than improving on it, including one wart — `_display` prints a
     module-scope row's kind badge only when the kind is neither CALLS nor USAGE, so the body reads
     a module-scope USAGE row as a call. Correcting that here would make the arms differ by a rule
     change in this file and be read as a difference between the engines.
@@ -214,7 +243,7 @@ def _keys_from_rows(rows: list, *, verified_only: bool) -> tuple[set, set]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if verified_only and not row.get("verified"):
+        if not keep(row):
             continue
         edge = str(row.get("edge") or "")
         file = str(row.get("file") or "")
@@ -229,8 +258,8 @@ def _keys_from_rows(rows: list, *, verified_only: bool) -> tuple[set, set]:
     return callers, others
 
 
-def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer]:
-    """`(graph, graph_verified)` — every claimed row, and only the rows that followed a binding.
+def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer, Answer]:
+    """`(graph, graph_verified, graph_qualified)` — every row, the proven ones, and the middle.
 
     The rendering is the product under test, so it is what gets parsed for the `graph` arm.
     `module scope of <file>` maps to `<module>` — the same name the oracle gives a top-level site —
@@ -245,14 +274,21 @@ def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer]
     against the body's before either is scored: a divergence means the engine's own claim that
     `rows` and the printed rows are the same rows is false, and this benchmark reports that as an
     unanswerable arm rather than as a precision difference between them.
+
+    `graph_qualified` is the third channel off the same `rows[]`, and it exists because the other
+    two are the endpoints of a trade with nothing measured in between. It drops only what the
+    engine's qualifier scan DISPROVED — a name-matched row in a file that never writes the
+    qualifier — and keeps every row the scan could not judge. That is strictly weaker than
+    `verified`, so it cannot silence a symbol that `graph_verified` answers.
     """
     env = _run_codeintel(root, "callers", target_name, "graph", exe)
-    ans, ver = Answer(reason=env.get("reason")), Answer(reason=env.get("reason"))
+    ans, ver, qual = (Answer(reason=env.get("reason")), Answer(reason=env.get("reason")),
+                      Answer(reason=env.get("reason")))
     if str(env.get("reason") or "") in (
             "engine-unavailable", "backend-incompatible", "project-not-indexed"
     ) or str(env.get("reason") or "").startswith("harness-error"):
-        ans.unavailable = ver.unavailable = True
-        return ans, ver
+        ans.unavailable = ver.unavailable = qual.unavailable = True
+        return ans, ver, qual
     # Read the structured gaps, for the mirror of the `not-asked` case handled in `lsp_answers`.
     # A repository that is not indexed ON ITS OWN is answered from the enclosing indexed project,
     # which spells every path relative to THAT root: `bench/fixtures/corpus_ts/src/proxy.ts` where
@@ -262,12 +298,12 @@ def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer]
     # the tools it measures, so it is refused here instead of scored.
     gaps = env.get("gaps") or []
     if any(isinstance(g, dict) and g.get("kind") == "ancestor-scope" for g in gaps):
-        ans.unavailable = ver.unavailable = True
-        ans.reason = ver.reason = (
+        ans.unavailable = ver.unavailable = qual.unavailable = True
+        ans.reason = ver.reason = qual.reason = (
             "ancestor-scope: this repo is not indexed on its own, so the backend answered "
             "from the project containing it and paths are relative to that root "
             f"(index it standalone: `codeintel index {root}`)")
-        return ans, ver
+        return ans, ver, qual
     body = env.get("result") or ""
     for raw in body.splitlines():
         if not raw.startswith("- "):
@@ -291,7 +327,7 @@ def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer]
         # No structured rows. Consistent only if the body claimed none either; an engine that
         # printed rows and published none has broken the contract this arm rests on.
         if ans.everything:
-            ver.unavailable = True
+            ver.unavailable = qual.unavailable = True
             # Overwhelmingly the cause is an engine BUILD predating `rows`, not a broken envelope —
             # the `codeintel` on PATH is a uv tool snapshot, not this checkout, and the provenance
             # header above already prints that skew when it exists. Say so, because "the envelope
@@ -300,16 +336,18 @@ def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer]
                           "rows — most likely an engine older than the rows contract; check the "
                           "`engine` line in the provenance header and set CODEINTEL_BENCH_EXE to "
                           "the build you meant to score")
-        return ans, ver
-    all_c, all_o = _keys_from_rows(rows, verified_only=False)
+            qual.reason = ver.reason
+        return ans, ver, qual
+    all_c, all_o = _keys_from_rows(rows, keep=lambda _r: True)
     if (all_c, all_o) != (ans.callers, ans.others):
-        ver.unavailable = True
-        ver.reason = ("`rows` and the rendered rows do not agree "
+        ver.unavailable = qual.unavailable = True
+        ver.reason = qual.reason = ("`rows` and the rendered rows do not agree "
                       f"(rows: {len(all_c | all_o)} keys, body: {len(ans.everything)} keys), "
                       "so the verified subset cannot be compared against the other arms")
-        return ans, ver
-    ver.callers, ver.others = _keys_from_rows(rows, verified_only=True)
-    return ans, ver
+        return ans, ver, qual
+    ver.callers, ver.others = _keys_from_rows(rows, keep=_verified_row)
+    qual.callers, qual.others = _keys_from_rows(rows, keep=_not_disproved_row)
+    return ans, ver, qual
 
 
 def lsp_answers(root: str, target_name: str, target_qn: str, exe: str,
@@ -539,7 +577,7 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
     # `graph_verified` sits beside `graph` deliberately: the pair is the measurement, and reading
     # either number without the other is how "filter the heuristic rows out" became an obvious
     # improvement that nobody had priced.
-    arms = ("graph", "graph_verified", "lsp_raw", "lsp_classified")
+    arms = ("graph", "graph_verified", "graph_qualified", "lsp_raw", "lsp_classified")
     direct = {a: Scores() for a in arms}
     impact = {a: Scores() for a in arms}
     covered: list[float] = []
@@ -557,9 +595,10 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
         true_calls = t.calls
         true_impact = t.calls | t.references        # an import alone does not break when a body moves
 
-        g, gv = graph_answer(root, symbol, exe)
+        g, gv, gq = graph_answer(root, symbol, exe)
         lr, lc = lsp_answers(root, symbol, qn, exe, lang)
-        got = {"graph": g, "graph_verified": gv, "lsp_raw": lr, "lsp_classified": lc}
+        got = {"graph": g, "graph_verified": gv, "graph_qualified": gq,
+               "lsp_raw": lr, "lsp_classified": lc}
         for a in arms:
             direct[a].add(got[a].callers, true_calls, decidable, got[a].unavailable)
             impact[a].add(got[a].everything, true_impact, decidable, got[a].unavailable)

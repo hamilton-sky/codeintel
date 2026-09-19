@@ -400,12 +400,15 @@ _MCP_INSTRUCTIONS = (
     "or matched candidates, a place to look; `advisory` — assembled from heuristics, verify before "
     "acting. Before a destructive edit (deleting, renaming, changing a signature) require "
     "`evidence`, and when you do not have it, verify first — re-ask with `engine=\"lsp\"`, or run "
-    "the `Settle it:` command the answer prints.\n\n"
+    "the `rg` command the answer prints.\n\n"
     "`callers`/`callees`/`impact` also return the answer as FIELDS, so you never parse the prose: "
-    "`rows[]` carries per-row `relation`, `verified`, `evidence`, `strategy`, `confidence` and "
-    "`why`, and `evidence[]` carries `verified`/`possible`/`unstated`/`returned`/`total`/"
-    "`truncated`/`safe_for_destructive`. Filter on `rows[].verified`; `evidence.total` is null when "
-    "the row cap was hit, which means the size is UNKNOWN, not that `returned` is all of them."
+    "`rows[]` carries per-row `relation`, `verified`, `evidence`, `strategy`, `confidence`, "
+    "`qualifier_seen` and `why`, and `evidence[]` carries `verified`/`possible`/`unstated`/"
+    "`qualifier_absent`/`returned`/`total`/`truncated`/`safe_for_destructive`. Filter on "
+    "`rows[].verified`; `evidence.total` is null when the row cap was hit, which means the size is "
+    "UNKNOWN, not that `returned` is all of them. `rows[].qualifier_seen` is false when the row's "
+    "file never writes the qualifier the target was narrowed by — the rows to doubt first, though "
+    "not proof, since a caller can reach a method without naming its class."
 )
 
 

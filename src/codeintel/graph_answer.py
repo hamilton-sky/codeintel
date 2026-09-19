@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from codeintel import qualifier_scan
 from codeintel.graph_confidence import (
     _EDGE_CONFIDENCE_FLOOR,
     _EDGE_CONFIDENCE_WEAK,
@@ -48,6 +49,13 @@ from codeintel.graph_render import (
 )
 from codeintel.graph_targets import _SymbolTarget
 
+# What the discriminating token IS, and the two are not interchangeable. The first names a program
+# entity a caller must get hold of to reach the symbol; the second names a path a caller may reach
+# through a re-export without ever spelling it. Only the first is strong enough to scan on — see
+# `_scan_for_qualifier`, where the measurement that settled this is recorded.
+_WHY_QUALIFIED = "the name it is qualified by"
+_WHY_MODULE = "the module it is defined in"
+
 
 class AnswerRendering:
     """Row rendering, ambiguity disclosure and the notes that qualify a count.
@@ -67,6 +75,8 @@ class AnswerRendering:
         _pending_row_cap: bool
         _pending_withheld: int
         _pending_nonrow_lines: bool
+        _qualifier_token: str | None
+        _qualifier_files: dict[str, bool] | None
 
         def _add_gap(self, section: str, kind: str, detail: str) -> None: ...
 
@@ -634,12 +644,83 @@ class AnswerRendering:
         parts = [p for p in str(qualified).replace("/", ".").split(".") if p]
         # The segment before the leaf, when it is not the leaf itself.
         if len(parts) >= 2 and parts[-1] == wanted.name and parts[-2] != wanted.name:
-            return parts[-2], "the name it is qualified by"
+            return parts[-2], _WHY_QUALIFIED
         defining = wanted.file_hint or (groups[0].file if groups else "")
         stem = str(defining).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
         if stem and stem != wanted.name:
-            return stem, "the module it is defined in"
+            return stem, _WHY_MODULE
         return None
+
+    def _scan_for_qualifier(
+        self, groups: list[_EdgeGroup], wanted: _SymbolTarget, file_key: str,
+    ) -> None:
+        """Run the check the settle note has been telling readers to run by hand.
+
+        `#34` derived the discriminating token and printed the `rg` command for it, which turned a
+        warning into a next step. It still left the step to the reader, and the step is mechanical:
+        the token, the root and the files in doubt are all in hand at this point, so the answer can
+        state what the grep would have found instead of describing how to find it.
+
+        Scoped to the `name-matched` rows, which is the population the note is about and the only
+        one the scan can say anything useful about. Two exclusions, both deliberate:
+
+        * a `resolved` row followed a real binding and needs no corroboration from a text search.
+          Scanning it would spend reads to re-derive something already known, and would invite the
+          reading that a resolved row whose file happens not to name the class is somehow suspect.
+          It is not — see `qualifier_scan` for the three ways a genuine caller avoids the name.
+        * an `unstated` row carries no provenance at all, so there is no claim about HOW it was
+          bound for the qualifier to corroborate or undercut. Those rows stay `null`, which leaves
+          them out of any filter built on this field rather than silently counted as clean.
+        """
+        self._qualifier_token = None
+        self._qualifier_files = None
+        found = self._discriminator(wanted, groups)
+        if found is None:
+            return
+        token, why = found
+        # ONLY when the CALLER supplied the qualifier, and this limit was measured rather than
+        # guessed at. `_discriminator` serves the settle command, where a weak token still helps a
+        # reader; a claim published per row needs a stronger one, and the two places diverge here.
+        #
+        # It will hand back a token for a bare target in two ways, and both were wrong on
+        # `corpus-ts`. The stem of the defining file is the obvious one. The subtle one is that it
+        # falls back to the BACKEND's dotted name, so `src.proxy.forwardReleasedItem` yields `proxy`
+        # through the qualifier branch — a module path wearing a class qualifier's clothes, which is
+        # exactly the ambiguity `bench/run.py` refuses module-dotted targets over. Either way
+        # `callerFacade.ts` imports the symbol from `./facade`, contains no `proxy`, and was refuted:
+        # the scan disproved a TRUE caller. `settleQueue` survived the identical shape only because
+        # `settle` is a substring of `settleFacade` — luck about a filename.
+        #
+        # A qualifier the caller WROTE is a different kind of token. They have asserted it identifies
+        # the symbol, the rows were already narrowed by it, and for a class it names an entity a
+        # caller must get hold of rather than a path it may never spell. Still not proof —
+        # `qualifier_scan` lists the three ways a genuine caller avoids the name — and a caller who
+        # writes a module-dotted target (`api.routes.handle`) gets a module segment scanned, which is
+        # the weak case surviving inside the strong gate. They asked for that narrowing explicitly.
+        if why != _WHY_QUALIFIED or not wanted.qualified:
+            return
+        in_doubt = [str(r.get(file_key) or "")
+                    for g in groups for r in g.rows
+                    if r.get("_bucket") == _NAME_MATCHED and r.get(file_key)]
+        if not in_doubt:
+            return
+        root = getattr(self, "_answered_root", None) or ""
+        scanned = qualifier_scan.files_naming(root, token, in_doubt)
+        if scanned is None:
+            return
+        self._qualifier_token = token
+        self._qualifier_files = scanned
+
+    def _qualifier_seen(self, row: dict, file_key: str) -> bool | None:
+        """Whether THIS row's file names the qualifier. ``None`` when nobody looked.
+
+        Unknown for every row the scan did not cover, and unknown for every row that did not need
+        it: a `resolved` row is not in the scanned population, so reporting `False` for it would be
+        a claim about a file that was never opened."""
+        files = getattr(self, "_qualifier_files", None)
+        if files is None or row.get("_bucket") != _NAME_MATCHED:
+            return None
+        return files.get(str(row.get(file_key) or ""))
 
     def _settle_name_matches(
         self, groups: list[_EdgeGroup], wanted: _SymbolTarget, unit: str, file_key: str,
@@ -683,19 +764,40 @@ class AnswerRendering:
             shown = ", ".join(f"`{f}`" for f in files[:10])
             more = f", … (+{len(files) - 10} more)" if len(files) > 10 else ""
             listing = f"_The {len(files)} file(s) to check against: {shown}{more}._\n"
+        scanned = getattr(self, "_qualifier_files", None)
+        if scanned is None:
+            # Nobody looked, so the reader is handed the check rather than its result — the
+            # behaviour from `#34`, which is what this falls back to whenever the scan is skipped.
+            return (
+                f"\n\n_Settle it: `rg -n --fixed-strings '{token}' {root}`_\n"
+                f"_`{token}` is {why}, and it is the part of the target the name match did not "
+                f"use. A {unit} whose file never names it is very unlikely to be reaching this "
+                f"symbol, so the {len(matched)} name-matched {unit}s below whose file is absent "
+                f"from that output are the ones to doubt first. Appearing in it is not proof of a "
+                f"call either — it narrows the list, it does not decide it._\n"
+                + listing
+            )
+
+        absent = sum(1 for r in matched if scanned.get(str(r.get(file_key) or "")) is False)
+        unknown = len(matched) - sum(
+            1 for r in matched if str(r.get(file_key) or "") in scanned)
+        unchecked = f" {unknown} could not be read and are left unjudged." if unknown else ""
+        # The result, not the instruction — but the command stays, because a claim a reader cannot
+        # re-run is a claim they have to take on trust, and this whole note exists to avoid that.
         return (
-            f"\n\n_Settle it: `rg -n --fixed-strings '{token}' {root}`_\n"
-            f"_`{token}` is {why}, and it is the part of the target the name match did not use. "
-            f"A file that never names it cannot be reaching this symbol, so any of the "
-            f"{len(matched)} name-matched {unit}s below whose file is absent from that output is "
-            f"spurious. Appearing in it is not proof of a call — it narrows the list, it does not "
-            f"decide it._\n"
+            f"\n\n_Checked: **{absent} of {len(matched)}** name-matched {unit}s are in files that "
+            f"never write `{token}`, {why}, and the part of the target the name match did not "
+            f"use.{unchecked} They are ranked last below and carry `qualifier_seen: false`._\n"
+            f"_This narrows; it does not decide. A file can reach the symbol without naming it — "
+            f"through an interface-typed field, a subclass, or a renaming re-export — so these are "
+            f"the {unit}s to doubt first, not {unit}s proven false. Re-run it yourself: "
+            f"`rg -n --fixed-strings '{token}' {root}`_\n"
             + listing
         )
 
     @staticmethod
     def _structured_row(row: dict, name_key: str, qn_key: str, file_key: str,
-                        unit: str) -> dict[str, Any]:
+                        unit: str, qualifier_seen: bool | None = None) -> dict[str, Any]:
         """One rendered row, as fields an agent can branch on without reading the line.
 
         The badges, the notes and the headline all say the same things in prose, and an integration
@@ -716,6 +818,13 @@ class AnswerRendering:
         There is no receiver/type evidence field. The readiness doc asks for one "when available"
         and it is never available: the backend reports no receiver type, so a key here would be
         `null` on every row of every answer — a field that promises a capability nobody has.
+
+        `qualifier_seen` is the field that IS available, and it is a different kind of claim: not
+        the receiver's type, which nothing here knows, but whether this row's file contains the text
+        of the qualifier the name match did not use. A fact about the file, checkable by the reader
+        with one `rg`, and `null` wherever nobody looked. It is deliberately not folded into
+        `verified` — a genuine caller can reach a method without ever writing its class's name, so
+        an absent qualifier lowers a row's standing without settling it.
         """
         bucket = str(row.get("_bucket") or _UNSTATED)
         strategy = str(row.get("strategy") or "").strip()
@@ -731,6 +840,7 @@ class AnswerRendering:
             "module_scope": scope is not None,
             "edge": edge or None,
             "verified": bucket == _RESOLVED,
+            "qualifier_seen": qualifier_seen,
             "evidence": bucket,
             "strategy": strategy or None,
             "confidence": float(confidence) if confidence is not None else None,
@@ -764,7 +874,8 @@ class AnswerRendering:
         in hand.
         """
         self._pending_rows += tuple(
-            self._structured_row(r, *row_keys, unit) for r in rendered)
+            self._structured_row(r, *row_keys, unit, self._qualifier_seen(r, row_keys[2]))
+            for r in rendered)
         self._pending_row_cap = self._pending_row_cap or bool(row_cap_hit)
         self._pending_withheld += withheld
 
@@ -795,10 +906,17 @@ class AnswerRendering:
         counts = {bucket: sum(1 for r in rows if r["evidence"] == bucket)
                   for bucket in (_RESOLVED, _NAME_MATCHED, _UNSTATED)}
         withheld = self._pending_withheld
+        # Three states, counted separately for the same reason the buckets above are: a row whose
+        # file was never opened is not a row whose file was opened and came back clean.
+        checked = [r.get("qualifier_seen") for r in rows]
         return {
             "verified": counts[_RESOLVED],
             "possible": counts[_NAME_MATCHED],
             "unstated": counts[_UNSTATED],
+            # Of the `possible` rows, how many sit in a file that never writes the qualifier. These
+            # are the ones a reader would have eliminated with the `rg` the note used to hand them.
+            "qualifier_absent": sum(1 for q in checked if q is False),
+            "qualifier_present": sum(1 for q in checked if q is True),
             "returned": len(rows),
             "total": None if self._pending_row_cap else len(rows) + withheld,
             "truncated": bool(self._pending_row_cap or withheld),
@@ -870,14 +988,22 @@ class AnswerRendering:
         name_key, qn_key, file_key = row_keys
         answered = [g for g in groups if g.rows]
         kept = sum(len(g.rows) for g in answered)
+        self._scan_for_qualifier(answered, wanted, file_key)
         # Rows are ordered so the direct calls come first — they are the answer to the question
         # that was asked — and, within those, the rows that followed a real binding come before the
         # ones matched by name. A reader who stops after the first few should be stopping on the
         # evidence, not on whichever guess the backend happened to return first.
+        #
+        # The qualifier is the last key, and it only ever reorders WITHIN a bucket: a row whose file
+        # names `StrategyChain` sorts above one whose file does not. It cannot promote a guess above
+        # a binding, because it is weaker evidence than either and ordering it as though it were
+        # would be the same over-claim in a different place.
         _ORDER = {_RESOLVED: 0, _UNSTATED: 1, _NAME_MATCHED: 2}
+        _QUALIFIER_ORDER = {True: 0, None: 1, False: 2}
         for g in answered:
             g.rows.sort(key=lambda r: (str(r.get("type(c)") or "") != _DIRECT_KIND,
-                                       _ORDER.get(str(r.get("_bucket") or ""), 1)))
+                                       _ORDER.get(str(r.get("_bucket") or ""), 1),
+                                       _QUALIFIER_ORDER[self._qualifier_seen(r, file_key)]))
         counts = self._kind_counts(answered)
         direct = counts.get(_DIRECT_KIND, 0)
         others = kept - direct
