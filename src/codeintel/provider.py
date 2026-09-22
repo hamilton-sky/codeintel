@@ -102,8 +102,8 @@ def safe_null_result(
     }
     unavailable_reasons = {
         "backend-unreachable", "engine-unavailable", "engines-unavailable", "indexing-in-progress",
-        "index-stale", "no-engine", "no-project-root", "op-not-allowed-for-role",
-        "op-not-supported", "op-withdrawn", "project-not-indexed",
+        "index-stale", "no-engine", "no-project-root", "no-target",
+        "op-not-allowed-for-role", "op-not-supported", "op-withdrawn", "project-not-indexed",
         "project-not-indexed-standalone", "root-not-allowed-for-role", "source-unreadable",
         "unknown-engine", "unsupported-op", "warming",
     }

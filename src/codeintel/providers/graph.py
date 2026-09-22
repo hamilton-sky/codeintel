@@ -812,10 +812,33 @@ class GraphProvider(GraphOps):
                                  f"change it; confirm with `--engine lsp` or `--op pattern`."
                                  + other,
                         )
+                # Name the symbol only when there IS one. `Gateway._query` now rejects a blank
+                # target before dispatch, so the query path cannot reach this line empty-handed,
+                # but a caller holding the provider directly still can — and the sentence this
+                # produced then, "`` is not in the graph index", is the one that sent an evaluator
+                # off to re-index an index that was never the problem. Cheap to make unreachable
+                # from both directions rather than only the one that was reported.
+                named = f"`{target_str}`" if target_str.strip() else "that symbol"
+                # Both remediations, because the reader is usually an agent with no shell.
+                # `codeintel index` is a CLI; an agent connected over MCP has the graph backend's
+                # own `index_repository` in its toolset already, and one call does the same job.
+                # Which of the two it can actually reach is not something this process can see —
+                # it knows its own transport, not the caller's tool list — so it names both rather
+                # than guessing and offering the one that isn't there.
+                #
+                # The MCP form deliberately does NOT repeat the path. `redact` rewrites this
+                # process's home directory to `~` on the way out, and its docstring gives the
+                # reason: hints carry runnable commands, and a shell expands `~` back. A JSON tool
+                # argument has no shell, so `repo_path="~/Documents/..."` is a remediation that
+                # does not run — worse than the CLI-only hint it was meant to improve. The caller
+                # passed `project_root` to get here, so it is holding the absolute path already;
+                # pointing at it beats printing a redacted copy that would not work.
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",
-                    hint=f"`{target_str}` is not in the graph index for this project — if "
-                         f"you just added or renamed it, refresh with: codeintel index {root_str}",
+                    hint=f"{named} is not in the graph index for this project — if you just "
+                         f"added or renamed it, refresh with: codeintel index {root_str} — or, "
+                         f"over MCP, call `index_repository` with `incremental=true` and the same "
+                         f"root you passed here, which needs no shell.",
                 )
 
             # A symbol-scoped answer served from a containing project is usually right (a real
