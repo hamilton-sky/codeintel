@@ -8,6 +8,7 @@ from codeintel.cache import ContentHashCache
 from codeintel.policy import TieringPolicy
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.providers.none import NoneProvider
+from codeintel.query_ops import OPS_REQUIRING_A_TARGET, TARGETLESS_OPS
 from codeintel.redact import redact
 from codeintel.reindexer import Reindexer
 
@@ -549,6 +550,45 @@ class Gateway:
                     return safe_null_result(op_str, target_str, reason="root-not-allowed-for-role",
                                             hint="this token's role is not scoped to that "
                                                  "project_root (see the [roots] table in auth.toml)")
+
+            # A blank `target` is a question that was never asked, and answering it as though it
+            # were one is how this tool told an evaluator their code was missing for a whole
+            # session. Routed on into the graph lookup it came back `reason: "not-in-graph"` with
+            # the hint "`` is not in the graph index for this project — if you just added or
+            # renamed it, refresh with: codeintel index <root>": empty backticks, and a
+            # remediation that cannot change the answer, because there was nothing to look up.
+            #
+            # How the target came to be blank is the part worth naming in the hint. The parameter
+            # is `target`; they passed the symbol as `q`, and MCP builds its argument model from
+            # the tool signature with pydantic's default `extra="ignore"`, so the unknown key was
+            # dropped without a word and `target` took its empty default. Every query for the rest
+            # of that session reported a symbol missing from a perfectly healthy index. They
+            # re-indexed, concluded the index was broken, and finished the job by going around
+            # this tool to the raw graph backend — which has none of the cross-language collision
+            # filtering `graph_answer._drop_edge_collisions` applies here, and duly handed them
+            # `.tsx` files "calling" a Python method. Losing `code.query` does not degrade to
+            # slower; it degrades to confidently wrong. So the hint names the parameter.
+            #
+            # `unavailable`, never `not_found` (see `provider.safe_null_result`): "you did not name
+            # a symbol" and "that symbol does not exist" license opposite next actions, and
+            # collapsing them is the precise ambiguity `outcome` was added to remove. It sits
+            # beside `no-project-root`, which is the same kind of miss on the other argument.
+            #
+            # Checked HERE rather than in `server.code_query_handler` because the CLI calls this
+            # method directly (`commands/query.py`), so a server-layer guard would leave that
+            # transport still answering "not in the graph index" for a missing argument. After the
+            # policy check, so a denied role learns nothing about which arguments would have been
+            # well-formed; before `maybe_reindex`, so a malformed call triggers no indexing work.
+            if op_str in OPS_REQUIRING_A_TARGET and not target_str.strip():
+                return safe_null_result(
+                    op_str, target_str, reason="no-target",
+                    hint=f"`{op_str}` needs a symbol to ask about and none was given — this is "
+                         f"not a statement about your code, and re-indexing will not change it. "
+                         f"Pass it as `target` (e.g. `target=\"my_function\"`). If you spelled "
+                         f"that argument something else — `q`, `name`, `symbol`, `query` — it was "
+                         f"silently dropped as unknown, which is why the answer came back empty. "
+                         f"The ops that need no target: {', '.join(sorted(TARGETLESS_OPS))}.",
+                )
 
             if not self._oneshot:
                 try:

@@ -855,8 +855,35 @@ class LspProvider:
                 # this branch at all.
                 state = session.wait_until_settled(min(_WARM_WAIT_S, timeout_s))
                 if state == _State.WARMING:
-                    return safe_null_result(
-                        op_str, target_str, engine="lsp", reason="warming")
+                    # A bare `warming` is a dead end. It says the engine did not answer and
+                    # nothing about whether asking again would help, how long that would take, or
+                    # what can answer meanwhile — so a reader treats the engine as unusable and
+                    # does not come back to it. One evaluation session did exactly that and never
+                    # touched the LSP engine again after the first call.
+                    #
+                    # This is an inconsistency, not an oversight in the design: `_WARM_WAIT_S`'s
+                    # own note above says degrading to `warming` is the right answer for a cold
+                    # `uvx` "with `retry_after_s` in the envelope", and the `boot-failed` branch
+                    # immediately below has carried `retry_after_s` since it was written. Only
+                    # this branch — the one on the common path, hit on the first call of every
+                    # session — was left bare.
+                    #
+                    # The number is the wait this call just spent rather than a guess at the
+                    # remaining boot. A session still WARMING after `_WARM_WAIT_S` is resolving
+                    # and downloading `serena-agent` on a cold `uvx`, which runs to tens of
+                    # seconds, so another `_WARM_WAIT_S` is an honest floor on when it is worth
+                    # re-asking — not a promise that it will be ready by then.
+                    warming = safe_null_result(
+                        op_str, target_str, engine="lsp", reason="warming",
+                        hint=f"the language server is still booting for this repository — this "
+                             f"is not a statement about your code. Ask again in "
+                             f"~{int(_WARM_WAIT_S)}s; the first boot of a session is the slow "
+                             f"one and later calls answer from the warm session. Meanwhile the "
+                             f"graph engine can answer callers/callees/impact now "
+                             f"(`engine=\"graph\"`).",
+                    )
+                    warming["retry_after_s"] = _WARM_WAIT_S
+                    return warming
 
             if state == _State.FAILED:
                 failed = safe_null_result(

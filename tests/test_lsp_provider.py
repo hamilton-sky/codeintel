@@ -84,6 +84,31 @@ def test_lsp_provider_warming(monkeypatch):
     assert r["reason"] == "warming"
 
 
+def test_warming_says_when_to_ask_again_and_what_can_answer_now(monkeypatch):
+    """A bare `warming` is a dead end, and it was read as one.
+
+    It says the engine did not answer and nothing about whether asking again would help, how long
+    that would take, or what can answer meanwhile — so an evaluator hit it on the first call of a
+    session, recorded "I moved on and never used the LSP engine", and did exactly that.
+
+    This was an inconsistency rather than a gap in the design: `_WARM_WAIT_S`'s own note says
+    degrading to `warming` is the right answer for a cold `uvx` *with* `retry_after_s` in the
+    envelope, and the `boot-failed` branch below has always carried one. Only this branch — the
+    one on the common path, reached on the first call of every session — was left bare."""
+    from codeintel.providers.lsp import _WARM_WAIT_S
+
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    p = LspProvider()
+    p._sessions["/my/repo"] = _make_fake_session(_State.WARMING)
+    r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
+
+    assert r["reason"] == "warming"
+    assert r["retry_after_s"] == _WARM_WAIT_S
+    hint = r["hint"]
+    assert "not a statement about your code" in hint, hint
+    assert "graph" in hint, "the engine that can answer right now must be named"
+
+
 # ---------------------------------------------------------------------------
 # Group 5 — FAILED / cooldown active
 # ---------------------------------------------------------------------------

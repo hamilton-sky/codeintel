@@ -15,3 +15,18 @@ QUERY_OPS: tuple[str, ...] = (
     "search", "symbol", "callers", "callees", "impact", "chain",
     "pattern", "overview", "context", "changed", "hotspots",
 )
+
+
+# The ops that answer for the WHOLE repository and therefore ignore `target`. Every OTHER op in
+# `QUERY_OPS` needs one, and asking without it is a caller mistake — not a fact about the code.
+#
+# Kept here, in the import-free module, because the check that uses it runs in `Gateway._query`:
+# `providers/graph.py` holds the renderer-side copy (`_ROOT_SCOPED_OPS`) and importing it would
+# make the gateway's argument check depend on the graph provider. That copy carries two names this
+# one does not — `changes` (an alias) and `deadcode` (withdrawn) — neither of which is a `code.query`
+# op, so the two sets agree exactly where they overlap. `tests/test_missing_target.py` guards the
+# pair against drift the same way `test_mcp_server.py` already guards `QUERY_OPS` against
+# `server._QueryOp`.
+TARGETLESS_OPS: tuple[str, ...] = ("overview", "changed", "hotspots")
+
+OPS_REQUIRING_A_TARGET: frozenset[str] = frozenset(QUERY_OPS) - frozenset(TARGETLESS_OPS)
