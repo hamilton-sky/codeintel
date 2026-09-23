@@ -23,8 +23,9 @@ more than it had are closed. **Before deleting or renaming, filter `rows[].verif
   sits above the heading, where a reader who acts on the heading will see it.
 - **`codeintel uninstall`** (#50) — the inverse of `install`, and only that. It removes codeintel's
   own server entry from each agent's config and nothing else: it never deletes a config file (even
-  when codeintel was its last entry), never touches a neighbouring server or setting, and leaves
-  caches to `reset`.
+  when codeintel was its last entry), never touches a neighbouring server or setting, and does
+  not delete the index — that stays `reset`'s job, and its location is printed. `--dry-run` shows
+  what would change.
 - **When name-matched rows dominate a caller answer, it prints the `rg` command that settles
   them** (#42) — grepping the part of the target the match did not use (a method's class, a
   symbol's file), since grepping the leaf name only reproduces the rows in doubt.
