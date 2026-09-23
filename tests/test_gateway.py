@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
-from codeintel.provider import Result
+from codeintel.provider import Result, attach_confidence
 
 # ---------------------------------------------------------------------------
 # Stub providers — no mocking library
@@ -723,3 +723,28 @@ def test_a_fanout_answer_claims_no_structured_rows():
     # The single-engine route is where the structured form lives, and it must still carry it.
     direct = Gateway(graph=graph, lsp=lsp).query("callers", "x", engine="graph")
     assert direct["rows"] and direct["evidence"], direct
+
+
+def test_a_fanout_callers_answer_is_never_stamped_proof():
+    """A fan-out carries no row summary by design, and "no summary" used to mean `evidence`.
+
+    So `callers --engine both` over a graph half whose rows were matched by bare name came back
+    `evidence_class: "evidence"` — the one value the tool description tells an agent to require
+    before deleting — while the same graph answer on its own said `advisory`."""
+    class _NameMatchedProvider(_StubProvider):
+        def build_result(self, op, target, files, budget, project_root) -> Result:
+            env = super().build_result(op, target, files, budget, project_root)
+            env["rows"] = [{"relation": "caller", "name": "c0", "verified": False}]
+            env["evidence"] = {"verified": 0, "possible": 1, "unstated": 0, "returned": 1,
+                               "total": 1, "truncated": False, "safe_for_destructive": False}
+            return attach_confidence(env)
+
+    graph = _NameMatchedProvider("graph", "## Callers of x (1)\n- pkg.c0 (src/c0.py)")
+    lsp = _StubProvider("lsp", "## References (1)\n- src/other.py:4")
+
+    direct = Gateway(graph=graph, lsp=lsp).query("callers", "x", engine="graph")
+    merged = Gateway(graph=graph, lsp=lsp).query("callers", "x", engine="both")
+
+    assert direct["evidence_class"] == "advisory", direct
+    assert merged["result"], merged
+    assert merged["evidence_class"] == "advisory", merged

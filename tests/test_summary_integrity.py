@@ -351,7 +351,9 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "test_a_body_that_discloses_a_limitation_is_never_stamped_complete; and the answer's "
         "`evidence_class` is decided by the rows it has rather than by the op it came from — "
         "test_the_evidence_class_never_calls_a_partial_answer_proof, with the end-to-end half in "
-        "test_the_evidence_class_follows_the_rows_and_not_only_the_op",
+        "test_the_evidence_class_follows_the_rows_and_not_only_the_op; and with no rows to read, "
+        "only an lsp `symbol` is proof — "
+        "test_an_answer_with_no_row_summary_is_proof_only_as_an_lsp_symbol_lookup",
 
     # ── structured: the answer as FIELDS ⟹ the rows the body printed ──────────────────────────
     # `rows` and `evidence` are the prose in a shape an agent branches on, so every way the two
@@ -453,6 +455,10 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("tally", "mapper._stamp_line"):
         "the stamp repeats the index it actually read — "
         "test_the_map_stamp_reports_the_index_it_read",
+    ("tally", "LspProvider._op_symbol"):
+        "`N of M` counts the references the server returned, not the rows printed — "
+        "test_a_capped_reference_list_is_disclosed_as_truncated, with the boundary in "
+        "test_a_reference_list_at_the_cap_exactly_is_still_complete",
     ("tally", "LspProvider._unserved_note"):
         "the note counts the files it found unserved — "
         "test_the_unserved_language_note_counts_the_files_it_found",
@@ -2051,3 +2057,22 @@ def test_the_evidence_class_never_calls_a_partial_answer_proof():
     # A null result carries no body to classify, and stamping one would imply it has an answer.
     assert "evidence_class" not in attach_confidence(
         {"ok": True, "op": "callers", "target": "t", "result": None, "engine": "graph"})  # type: ignore[arg-type]
+
+
+def test_an_answer_with_no_row_summary_is_proof_only_as_an_lsp_symbol_lookup():
+    """Absent a row summary, `evidence` is earned by what answered and not granted by default.
+
+    The default used to be proof: any engine answering an EVIDENCE-ceiling op in prose — a fan-out,
+    a graph answer whose summary was withheld, a future backend — was stamped `evidence`. Only a
+    language server's `symbol` resolves a real binding by construction, so only it keeps that."""
+    from codeintel.provider import attach_confidence
+
+    def stamp(op, engine):
+        return attach_confidence(
+            {"ok": True, "op": op, "target": "t", "result": "## x", "engine": engine})["evidence_class"]  # type: ignore[arg-type]
+
+    assert stamp("symbol", "lsp") == "evidence"
+    for op, engine in [("callers", "graph"), ("callees", "graph"), ("callers", "graph+lsp"),
+                       ("callers", "lsp"), ("symbol", "semantic"), ("symbol", "graph+lsp"),
+                       ("callers", "some-new-backend")]:
+        assert stamp(op, engine) == "advisory", (op, engine)
