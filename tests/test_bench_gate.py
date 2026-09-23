@@ -76,12 +76,28 @@ def test_an_ungated_arm_says_it_was_not_applied_rather_than_staying_silent():
 
 
 def test_every_gated_repo_in_the_bench_is_a_real_tree_not_the_fixture():
-    """The exclusion list is one entry long and should stay that way by accident of nobody adding
-    to it, not by accident of nobody checking. A second ungated arm is how a gate quietly stops
-    covering the thing it was written for."""
+    """An arm may be exempt from the precision floor only for being a checked-in fixture.
+
+    This read `ungated == ["corpus-ts"]` while that was the only one, and it fired the moment
+    `corpus-ts-typed` was added — which is what it was for. The list is not simply widened here,
+    because "the names I expected" is a weaker invariant than the one actually wanted and would have
+    to be edited again by the next person for the same reason.
+
+    What is wanted is the REASON the exemption is legitimate: a hand-written corpus chosen to be
+    maximally adversarial cannot be held to a production floor without either making the corpus
+    easier — destroying the thing it is for — or parking the gate permanently red. That reason is a
+    property of the tree, so test the property: an ungated arm must live under `bench/fixtures/`.
+    A real repository exempting itself from its own gate is the actual risk, and it still fails
+    here no matter what it is called."""
     import run as bench_run
 
-    ungated = [k for k, (_root, _t, _lang, gated) in bench_run.REPOS.items() if not gated]
-    assert ungated == ["corpus-ts"], (
-        f"{ungated} are excluded from the precision floor. Only the checked-in smoke fixture "
-        f"should be — anything else is an engine measurement being exempted from its own gate.")
+    fixtures = (BENCH / "fixtures").resolve()
+    ungated = {k: root for k, (root, _t, _lang, gated) in bench_run.REPOS.items() if not gated}
+
+    assert ungated, "the fixture arms are ungated by design; an empty set means the flag was lost"
+    for key, root in ungated.items():
+        assert fixtures in pathlib.Path(root).resolve().parents, (
+            f"'{key}' is excluded from the precision floor but its tree ({root}) is not a "
+            f"checked-in fixture under bench/fixtures/. Only an adversarial corpus written to have "
+            f"a known answer may be exempt — a real repository being exempted is an engine "
+            f"measurement dodging its own gate.")

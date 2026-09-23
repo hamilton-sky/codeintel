@@ -1,0 +1,32 @@
+{
+  "//": [
+    "This corpus is `corpus_ts` plus this file, and nothing else: all 29 sources are byte-identical",
+    "copies, which tests/test_bench_corpus_typed.py asserts on every run. It isolates one variable.",
+    "",
+    "WHY IT EXISTS. `corpus_ts` reports both LSP arms as unanswered, and bench/README.md explains that",
+    "by its missing tsconfig: without a project file `tsserver` treats every file as its own inferred",
+    "project, cannot see across files, and returns an empty reference list. This tree tests that.",
+    "",
+    "WHAT IT FOUND. Two blockers, in series. The tsconfig is one. The other was in this repository:",
+    "`providers/lsp.py`'s `_split_target_file_hint` returned early on any target without an `@file`",
+    "hint, so `StrategyChain.resolve` reached Serena verbatim while Serena name paths are",
+    "slash-separated, and references were never requested. With that fixed, this tree scores the",
+    "class-qualified pair at 100% on both LSP arms; `corpus_ts`, lacking only this file, still reports",
+    "them unanswered.",
+    "",
+    "Deliberately minimal: no `paths`, no `baseUrl`. Every import in the corpus is relative, and an",
+    "alias map would change how the ORACLE resolves specifiers, a second variable."
+  ],
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

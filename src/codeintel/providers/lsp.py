@@ -81,7 +81,7 @@ _BACKEND_ERROR_MARKERS = (
 
 
 def _split_target_file_hint(target: str) -> tuple[str, str, str]:
-    """Return Serena's symbol pattern and an optional repo-relative file hint.
+    """Return Serena's symbol pattern, an optional repo-relative file hint, and a qualified hint.
 
     Graph operations accept ``name@path`` to disambiguate duplicate symbols. The gateway may pass
     that exact target to the LSP for an independent reference cross-check, but Serena understands
@@ -89,12 +89,16 @@ def _split_target_file_hint(target: str) -> tuple[str, str, str]:
     graph.py's private target parser.
     """
     raw = str(target or "").strip()
-    if "@" not in raw:
-        return raw, "", ""
-    head, _, tail = raw.rpartition("@")
-    if not head.strip() or not tail.strip():
-        return raw, "", ""
-    symbol, file_hint = head.strip(), tail.strip()
+    symbol, file_hint = raw, ""
+    if "@" in raw:
+        head, _, tail = raw.rpartition("@")
+        if head.strip() and tail.strip():
+            symbol, file_hint = head.strip(), tail.strip()
+    # A class-qualified target needs the same dot-to-slash treatment with or without a file hint.
+    # This used to return early on a target with no `@`, so `StrategyChain.resolve` reached Serena
+    # verbatim — and Serena name paths are slash-separated, so it matched nothing and references
+    # were never requested (measured on bench/fixtures/corpus_ts_typed).
+    #
     # Query broadly by leaf and filter client-side. Serena splits module identity differently by
     # language, while the file hint and complete symbol-path suffix together are stable.
     suffix = symbol.rpartition(".")[2].lower()

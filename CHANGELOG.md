@@ -7,6 +7,13 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **A class-qualified target now reaches the LSP as a name path, with or without a file hint.**
+  `--op symbol --engine lsp --target StrategyChain.resolve` returned no definition and "references
+  were never requested", because `_split_target_file_hint` returned early on a target with no
+  `@file` and passed the dotted name to Serena verbatim; Serena name paths are slash-separated. The
+  dot→slash conversion was already there, gated behind the file hint. Measured on the new
+  `corpus-ts-typed` bench arm (the `corpus-ts` sources plus a `tsconfig.json`): both LSP arms go
+  from unanswered to 100% precision and recall on the class-qualified pair.
 - **An `engine-unavailable` answer now carries the hint that makes it actionable**, restoring the
   documented contract ("safe-nulls with a reason *and a hint*") on `--op callers` — the first
   command the Quickstart tells a new user to run. The fix is in `Gateway._dispatch_single`, not

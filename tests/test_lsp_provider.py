@@ -492,6 +492,27 @@ def test_filename_like_symbol_is_not_split_as_a_qualifier():
     )
 
 
+def test_class_qualified_target_without_file_hint_becomes_a_name_path():
+    # Serena name paths are slash-separated. Without a file hint this used to return the dotted
+    # target verbatim, which matched nothing and left references "not asked" — measured on
+    # bench/fixtures/corpus_ts_typed with `StrategyChain.resolve`.
+    assert _split_target_file_hint("StrategyChain.resolve") == (
+        "resolve", "", "StrategyChain/resolve"
+    )
+
+
+def test_qualified_split_is_the_same_with_and_without_a_file_hint():
+    bare = _split_target_file_hint("StrategyChain.resolve")
+    hinted = _split_target_file_hint("StrategyChain.resolve@src/strategyChain.ts")
+    assert (bare[0], bare[2]) == (hinted[0], hinted[2])
+    assert hinted[1] == "src/strategyChain.ts"
+
+
+def test_plain_and_filename_targets_without_hint_are_unchanged():
+    assert _split_target_file_hint("resolve") == ("resolve", "", "")
+    assert _split_target_file_hint("use-toast.ts") == ("use-toast.ts", "", "")
+
+
 def test_retryable_missing_state_is_thread_local():
     p = LspProvider.__new__(LspProvider)
     ready = threading.Barrier(2)
