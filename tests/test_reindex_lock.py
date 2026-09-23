@@ -25,10 +25,18 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 
 import pytest
 
-from codeintel.filelock import _HAVE_FLOCK, exclusive, held_by_another_process, lock_path
+from codeintel.filelock import (
+    _HAVE_FLOCK,
+    exclusive,
+    exclusive_waiting,
+    held_by_another_process,
+    lock_path,
+)
 from codeintel.reindexer import Reindexer
 
 pytestmark = pytest.mark.skipif(not _HAVE_FLOCK, reason="advisory locking needs POSIX fcntl")
@@ -207,3 +215,53 @@ def test_a_probe_that_fails_does_not_claim_a_reindex_is_running(home, monkeypatc
     monkeypatch.setattr(fl, "exclusive", lambda _p: (_ for _ in ()).throw(OSError("nope")))
 
     assert fl.held_by_another_process(path) is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# Waiting — for work a person asked for
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+def test_a_free_lock_is_taken_at_once_without_announcing_a_wait(home):
+    waits: list[int] = []
+    with exclusive_waiting(lock_path("/repo/one"), 5, on_wait=lambda: waits.append(1)) as got:
+        assert got is True
+    assert waits == []
+
+
+def test_a_held_lock_is_waited_for_and_then_taken(home):
+    """The foreground case: another pass is running, so wait for it rather than skip or duplicate."""
+    path = lock_path("/repo/one")
+    waits: list[int] = []
+    holding, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with exclusive(path) as got:
+            assert got
+            holding.set()
+            release.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    holding.wait(5)
+    threading.Timer(0.4, release.set).start()
+
+    started = time.monotonic()
+    with exclusive_waiting(path, 10, poll_s=0.05, on_wait=lambda: waits.append(1)) as got:
+        waited = time.monotonic() - started
+        assert got is True
+        assert held_by_another_process(path), "yielded True without actually holding the lock"
+    t.join(5)
+
+    assert waits == [1], "the wait must be announced exactly once"
+    assert waited >= 0.3, f"took the lock after {waited:.2f}s while it was still held"
+
+
+def test_a_lock_held_past_the_timeout_yields_false_so_the_work_still_happens(home):
+    """A hung holder must not block indexing forever: time out, say so, proceed."""
+    path = lock_path("/repo/one")
+    waits: list[int] = []
+    with exclusive(path) as first:
+        assert first
+        with exclusive_waiting(path, 0.2, poll_s=0.05, on_wait=lambda: waits.append(1)) as got:
+            assert got is False
+    assert waits == [1]

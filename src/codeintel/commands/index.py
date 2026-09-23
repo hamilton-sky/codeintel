@@ -6,6 +6,11 @@ from typing import Any
 
 from codeintel.commands._common import resolve_root
 
+# How long a foreground `codeintel index` waits for another process's pass over the same repository
+# before indexing anyway. Long enough to outlast a cold index of a large repo (measured at ~10 min
+# for 30k chunks, docs/benchmarks.md); short enough that a hung holder cannot block it forever.
+_LOCK_WAIT_S = 900.0
+
 
 class _ProgressLogBridge(logging.Handler):
     """Routes WARNING+ log records from the indexer to a live progress counter's ``notice()``, so a
@@ -51,6 +56,35 @@ def run(args: Any) -> int:
     )
     quiet = getattr(args, "quiet", False)
     counter = None if quiet else term.LiveCounter(console)
+
+    # Take the same per-repository lock the background reindexer takes, so a terminal `index` and
+    # a running server's background pass do not embed the whole repository twice. It covers the
+    # semantic AND graph passes, as the background pass does; the map refresh is not indexing.
+    import contextlib
+
+    from codeintel.filelock import exclusive_waiting, lock_path
+
+    def _say_waiting() -> None:
+        if not quiet:       # --quiet promises the result line only, contention or not
+            print("waiting for another codeintel process to finish indexing this repository…",
+                  flush=True)
+
+    lock = contextlib.ExitStack()
+    # Resolving the lock path reads the codeintel home, which raises where there is no resolvable
+    # home directory (a container UID with no passwd entry and no CODEINTEL_HOME). That must not
+    # turn into a traceback before the semantic pass's own error handling below — which reports
+    # exactly that failure as "index failed: …". A lock we cannot place is a lock we do without,
+    # by the rule in `filelock`: it may dedupe work, never stop it.
+    try:
+        path = lock_path(os.path.realpath(project_root))
+    except Exception:
+        path = None
+    if path is not None:
+        got_lock = lock.enter_context(
+            exclusive_waiting(path, _LOCK_WAIT_S, on_wait=_say_waiting))
+        if not got_lock and not quiet:
+            print(f"still locked after {int(_LOCK_WAIT_S)}s — indexing anyway; the other pass "
+                  "may repeat some of this work", flush=True)
 
     failed = False
     # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
@@ -145,6 +179,8 @@ def run(args: Any) -> int:
         except Exception:
             if beat:
                 beat.stop("warn", "skipped")
+
+    lock.close()
 
     # best-effort map refresh after index (fast, kept silent — not worth a checklist row)
     try:
