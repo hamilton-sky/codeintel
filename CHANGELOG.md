@@ -4,9 +4,84 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.24.0] — 2026-09-23
+
+The confidence signal becomes fields an agent can filter on, and five ways an answer could claim
+more than it had are closed. **Before deleting or renaming, filter `rows[].verified` and require
+`evidence_class: "evidence"`** — see [docs/trust.md](docs/trust.md).
+
+### Added
+- **`rows[]`, `evidence` and `evidence_class` on every answered envelope** (#44). `callers`,
+  `callees` and `impact` return each row as fields — `relation`, `verified`, `evidence`, `strategy`,
+  `confidence`, `why` — recorded from the same list the body prints, so the two cannot disagree.
+  `evidence` summarises them (`verified` / `possible` / `unstated`, `truncated`,
+  `safe_for_destructive`). `evidence_class` says what the answer can be used for: `evidence`,
+  `discovery` or `advisory`, bounded above by the op and decided by the rows. A verdict line now
+  sits above the heading, where a reader who acts on the heading will see it.
+- **`codeintel uninstall`** (#50) — the inverse of `install`, and only that. It removes codeintel's
+  own server entry from each agent's config and nothing else: it never deletes a config file (even
+  when codeintel was its last entry), never touches a neighbouring server or setting, and leaves
+  caches to `reset`.
+- **When name-matched rows dominate a caller answer, it prints the `rg` command that settles
+  them** (#42) — grepping the part of the target the match did not use (a method's class, a
+  symbol's file), since grepping the leaf name only reproduces the rows in doubt.
+- **The call-edge benchmark has a gate** (#51): verified-caller precision must be at least 95%, and
+  `python bench/run.py <repo>` exits 1 when it is not (exit 2 still means the harness could not
+  run). Fixture arms are exempt and say so. New arms: `graph_verified`, which scores only the
+  verified rows (#46); a target whose callers are all guesses, so that filter can fail (#47); and
+  `corpus-ts-typed`, the `corpus-ts` sources plus a `tsconfig.json` (#57).
+- **The call-edge benchmark's oracle scored a function's own call sites as fabricated callers.**
+  `not-target` marks a bare name a proven non-caller when the file's syntax accounts for it — a
+  parameter, an assignment, a `def` in scope. In the target's OWN defining module that `def` is the
+  target, and `_accounted_by` reported only *where* the name was bound while the caller read it as
+  *what* it was bound to. Every call a function made to itself from its own file therefore became a
+  proven negative, and the engine that found those sites was charged a false positive for each one.
+  `snitch-simulator` went from **38% to 100%** direct precision and `pathly-adapters` from **80% to
+  90%**, with `lsp_classified`'s impact precision from 84% to 100%; no engine code changed. The
+  corpus never contained a file that called a symbol it defined, which is why the rule was never
+  exercised where it is wrong — `bench/fixtures/corpus/src/corpuspkg/self_call.py` now covers the
+  home-module call and the same-named parameter that must stay a negative, since trading one wrong
+  label for its mirror would be the same defect facing the other way. Tables in `bench/README.md`
+  are corrected, with the reason recorded beside them.
+
+- **A `callers`/`callees` heading breaks its count down by how the rows were resolved.** The count
+  was one number over rows that are not one kind of fact. Asking a 1,483-file monorepo for callers
+  of `StrategyChain.resolve` answered `(48 direct, 2 other reference(s))` where five files in the
+  whole repository mention `StrategyChain` and the true answer is two — both of which were in the
+  list, correctly badged, under a note saying 43 of 50 rows were name-matched. The badges and the
+  note were already right; they sat beneath fifty rows, while the first line said 48. The heading
+  now reads `**2 resolved · 43 name-matched · 5 unstated.** The heading counts rows, not confirmed
+  callers …` directly above them. Buckets come from the same classifier that badges each row, so
+  the heading and the note cannot disagree, and they are coarser than `_evidence_class` on purpose:
+  a reader deciding whether to trust a count needs to know whether a binding was followed, not
+  which of nine LSP strategies followed it. Silent when every row falls in one bucket — including
+  on a backend generation that reports no confidence column, where the breakdown would restate a
+  fact about the backend once per query — because one number really is honest there, and a line
+  that fires on good answers is how a real warning stops being read.
+
+- **`CODEINTEL_BENCH_EXE` selects which `codeintel` the call-edge benchmark measures.** The harness
+  shells out to whatever is on `PATH`, and its new provenance header warns when that build is not
+  the checkout — but there was no way to act on the warning short of reinstalling the tool.
+
+### Changed
+- **`doctor --deep` asks each engine a real question and requires content** (#41), where it used to
+  check that processes boot. An empty graph index, a language server that is READY but serves
+  nothing, or a semantic index with no searchable vectors now reads as not runnable.
+- **One background reindex per repository, across processes** (#53). An MCP server and a terminal
+  `codeintel index` on the same repo used to embed everything twice; a pass now takes an advisory
+  lock and skips when another process holds it.
+- **Semantic engine re-measured at 0.23.4** and its per-query work budget enforced by counting in CI
+  (#48); see [docs/benchmarks.md](docs/benchmarks.md).
+- `providers/graph.py` split from 2,521 lines into seven modules (#40). No behaviour change.
 
 ### Fixed
+- **A half-built semantic index no longer answers `confidence: complete`** (#52). A pass that died
+  midway left a corpus missing an unknown share of the repository, and search answered over it
+  with no disclosure. The answered path now carries an `index-incomplete` coverage gap; the empty
+  path's hint says the result is unknown rather than letting silence read as absence.
+- **A missing `target` is `reason: "no-target"`, not a missing symbol** (#56). MCP drops an unknown
+  argument name (`q`, `symbol`, …) silently, so the target arrived empty and the graph answered
+  "not in the graph index", recommending a reindex that could not help.
 - **Concurrent graph queries no longer share one answer's state.** `serve-http` runs requests on
   threads over one `GraphProvider`, and the gaps, rows, row-cap and withheld counts it accumulates
   while rendering — plus `BackendClient._last_failure` — were plain instance attributes. Two
@@ -83,40 +158,6 @@ All notable changes to codeintel are documented here. The format is based on
   is byte-identical before and after (100% / 100% direct, 0 / 8 wrongly silent), and
   `bench/run.py corpus-ts` moves its two LSP arms from `1 / 3 wrongly silent` to `3 unanswered` —
   a confident falsehood becoming a disclosed non-answer.
-
-### Added
-- **The call-edge benchmark's oracle scored a function's own call sites as fabricated callers.**
-  `not-target` marks a bare name a proven non-caller when the file's syntax accounts for it — a
-  parameter, an assignment, a `def` in scope. In the target's OWN defining module that `def` is the
-  target, and `_accounted_by` reported only *where* the name was bound while the caller read it as
-  *what* it was bound to. Every call a function made to itself from its own file therefore became a
-  proven negative, and the engine that found those sites was charged a false positive for each one.
-  `snitch-simulator` went from **38% to 100%** direct precision and `pathly-adapters` from **80% to
-  90%**, with `lsp_classified`'s impact precision from 84% to 100%; no engine code changed. The
-  corpus never contained a file that called a symbol it defined, which is why the rule was never
-  exercised where it is wrong — `bench/fixtures/corpus/src/corpuspkg/self_call.py` now covers the
-  home-module call and the same-named parameter that must stay a negative, since trading one wrong
-  label for its mirror would be the same defect facing the other way. Tables in `bench/README.md`
-  are corrected, with the reason recorded beside them.
-
-- **A `callers`/`callees` heading breaks its count down by how the rows were resolved.** The count
-  was one number over rows that are not one kind of fact. Asking a 1,483-file monorepo for callers
-  of `StrategyChain.resolve` answered `(48 direct, 2 other reference(s))` where five files in the
-  whole repository mention `StrategyChain` and the true answer is two — both of which were in the
-  list, correctly badged, under a note saying 43 of 50 rows were name-matched. The badges and the
-  note were already right; they sat beneath fifty rows, while the first line said 48. The heading
-  now reads `**2 resolved · 43 name-matched · 5 unstated.** The heading counts rows, not confirmed
-  callers …` directly above them. Buckets come from the same classifier that badges each row, so
-  the heading and the note cannot disagree, and they are coarser than `_evidence_class` on purpose:
-  a reader deciding whether to trust a count needs to know whether a binding was followed, not
-  which of nine LSP strategies followed it. Silent when every row falls in one bucket — including
-  on a backend generation that reports no confidence column, where the breakdown would restate a
-  fact about the backend once per query — because one number really is honest there, and a line
-  that fires on good answers is how a real warning stops being read.
-
-- **`CODEINTEL_BENCH_EXE` selects which `codeintel` the call-edge benchmark measures.** The harness
-  shells out to whatever is on `PATH`, and its new provenance header warns when that build is not
-  the checkout — but there was no way to act on the warning short of reinstalling the tool.
 
 ## [0.23.4] — 2026-09-15
 
