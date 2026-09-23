@@ -12,6 +12,7 @@ commands, or a command dispatches to nothing.
 from __future__ import annotations
 
 import argparse
+import os
 import string
 import subprocess
 import sys
@@ -930,3 +931,60 @@ def test_query_json_stays_parseable_when_the_query_itself_fails(monkeypatch, cap
     payload = _json.loads(capsys.readouterr().out)      # must not raise
     assert payload["result"] is None
     assert "backend exploded" in payload["reason"]
+
+
+# --------------------------------------------------------------------------- index lock
+
+def test_index_holds_the_reindex_lock_for_its_whole_pass(monkeypatch, tmp_path):
+    """A server's background reindex skips while this is held, so the repository is embedded once.
+    Checked from inside the pass, because holding it "somewhere around" the pass is not enough."""
+    from codeintel.filelock import _HAVE_FLOCK, held_by_another_process, lock_path
+    if not _HAVE_FLOCK:
+        pytest.skip("advisory locking needs POSIX fcntl")
+    seen = _stub_index(monkeypatch, tmp_path, count=1, has_graph_backend=True)
+    path = lock_path(os.path.realpath(str(tmp_path)))
+    held: dict[str, bool] = {}
+
+    import codeintel.indexer as indexer_mod
+    base = indexer_mod.Indexer
+
+    class _Checking(base):  # type: ignore[misc, valid-type]
+        def index(self, root):
+            held["semantic"] = held_by_another_process(path)
+            return super().index(root)
+
+    monkeypatch.setattr("codeintel.indexer.Indexer", _Checking)
+    import codeintel.reindexer as reindexer_mod
+    graph_base = reindexer_mod.Reindexer
+
+    class _CheckingGraph(graph_base):  # type: ignore[misc, valid-type]
+        def _graph_reindex(self, root):
+            held["graph"] = held_by_another_process(path)
+            super()._graph_reindex(root)
+
+    monkeypatch.setattr("codeintel.reindexer.Reindexer", _CheckingGraph)
+
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert held == {"semantic": True, "graph": True}, held
+    assert seen["reindexed"]
+    assert not held_by_another_process(path), "the lock outlived the command"
+
+
+def test_index_waits_for_another_pass_then_indexes_anyway_on_timeout(monkeypatch, tmp_path, capsys):
+    """Held by someone else: say so, wait, and — past the limit — index anyway. Never skip: the
+    user asked for an index, and a hung holder must not be able to stop one."""
+    from codeintel.filelock import _HAVE_FLOCK, exclusive, lock_path
+    if not _HAVE_FLOCK:
+        pytest.skip("advisory locking needs POSIX fcntl")
+    _stub_index(monkeypatch, tmp_path, count=7)
+    mod = import_module("codeintel.commands.index")
+    monkeypatch.setattr(mod, "_LOCK_WAIT_S", 0.3)
+
+    with exclusive(lock_path(os.path.realpath(str(tmp_path)))) as other:
+        assert other
+        assert mod.run(_args(project_root=str(tmp_path))) == 0
+
+    out = capsys.readouterr().out
+    assert "waiting for another codeintel process" in out
+    assert "indexing anyway" in out
+    assert "Indexed 7 chunks" in out

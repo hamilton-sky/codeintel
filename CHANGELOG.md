@@ -4,6 +4,20 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A foreground `codeintel index` now takes the per-repository reindex lock**, so it no longer
+  embeds the whole repository a second time while a server's background pass is running. It waits
+  for the other pass, says that it is waiting, and — since the other pass has by then done the work
+  — usually finds little new. After 15 minutes it indexes anyway and says so: the lock may dedupe
+  work but never stop it. Background passes still skip rather than wait. POSIX only; on Windows
+  there is no `fcntl` and nothing is locked, as before.
+- The `corpus_ts` fixture's `.serena/project.yml` is on the same Serena template as
+  `corpus_ts_typed`, and a test keeps them identical apart from the name. A newer Serena upgrades
+  every registered project's config when it starts, which left an unexplained diff in this tracked
+  file at the start of most sessions.
+
 ## [0.24.0] — 2026-09-23
 
 The confidence signal becomes fields an agent can filter on, and five ways an answer could claim

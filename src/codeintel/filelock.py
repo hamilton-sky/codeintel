@@ -33,7 +33,8 @@ import logging
 import os
 import pathlib
 import re
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,45 @@ def exclusive(path: pathlib.Path) -> Iterator[bool]:
             if acquired:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)                # closing would release it anyway; explicit is clearer
+
+
+@contextlib.contextmanager
+def exclusive_waiting(
+    path: pathlib.Path,
+    timeout_s: float,
+    *,
+    poll_s: float = 0.25,
+    on_wait: Callable[[], None] | None = None,
+) -> Iterator[bool]:
+    """Like `exclusive`, but WAIT up to *timeout_s* for another holder to finish.
+
+    For work a person asked for. A background pass that loses the race skips, because nobody asked
+    for it and the holder is already doing it. A foreground `codeintel index` cannot skip: the user
+    asked for an index, and "somebody else is probably doing it" is not one. So it waits, and once
+    the holder finishes, its own pass is incremental and mostly finds nothing new.
+
+    Yields True once the lock is held, and False when *timeout_s* passed with it still held — in
+    which case the caller proceeds WITHOUT the lock, by the module's rule that a lock may dedupe work
+    but never stop it. A holder that is alive but hung must not block indexing forever.
+
+    *on_wait* runs once, the first time the lock is found held, so a caller can say why it has
+    stopped moving. Without `fcntl` there is nothing to wait on and this yields True at once.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    announced = False
+    while True:
+        with exclusive(path) as got:
+            if got:
+                yield True
+                return
+        if not announced and on_wait is not None:
+            announced = True
+            with contextlib.suppress(Exception):
+                on_wait()
+        if time.monotonic() >= deadline:
+            yield False
+            return
+        time.sleep(poll_s)
 
 
 def held_by_another_process(path: pathlib.Path) -> bool:
