@@ -70,9 +70,11 @@ more than it had are closed. **Before deleting or renaming, filter `rows[].verif
 - **`doctor --deep` asks each engine a real question and requires content** (#41), where it used to
   check that processes boot. An empty graph index, a language server that is READY but serves
   nothing, or a semantic index with no searchable vectors now reads as not runnable.
-- **One background reindex per repository, across processes** (#53). An MCP server and a terminal
-  `codeintel index` on the same repo used to embed everything twice; a pass now takes an advisory
-  lock and skips when another process holds it.
+- **One background reindex per repository, across processes** (#53). Two processes' background
+  reindexers on the same repo — two MCP servers, say — used to embed everything twice; a background
+  pass now takes an advisory lock and skips when another process holds it. Scope: background passes
+  only. A foreground `codeintel index` does not take the lock, so it can still overlap a server's
+  background pass, and on Windows (no `fcntl`) the lock degrades to no locking.
 - **Semantic engine re-measured at 0.23.4** and its per-query work budget enforced by counting in CI
   (#48); see [docs/benchmarks.md](docs/benchmarks.md).
 - `providers/graph.py` split from 2,521 lines into seven modules (#40). No behaviour change.
