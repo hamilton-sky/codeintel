@@ -7,6 +7,17 @@ All notable changes to codeintel are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **Concurrent graph queries no longer share one answer's state.** `serve-http` runs requests on
+  threads over one `GraphProvider`, and the gaps, rows, row-cap and withheld counts it accumulates
+  while rendering — plus `BackendClient._last_failure` — were plain instance attributes. Two
+  concurrent `callers` queries could return each other's gaps, or a `safe_for_destructive` computed
+  over the other request's rows. They are now per-thread through a small `PerThread` descriptor
+  (`codeintel/per_thread.py`), the pattern the LSP provider already used by hand. The stdio server
+  and CLI, which serve one request at a time, were not affected.
+- **The LSP cross-check re-stamps the envelope it adds a gap to.** It appended its gap with
+  `{**result, "gaps": [...]}`, copying the old `confidence`, `outcome` and `evidence_class` beside
+  the new gap list. Harmless while every trigger implies an already-partial answer; wrong the
+  moment one does not. Both branches now go through `attach_confidence`.
 - **A class-qualified target now reaches the LSP as a name path, with or without a file hint.**
   `--op symbol --engine lsp --target StrategyChain.resolve` returned no definition and "references
   were never requested", because `_split_target_file_hint` returned early on a target with no

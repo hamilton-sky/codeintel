@@ -31,6 +31,7 @@ from codeintel.graph_targets import (
     _same_path,
 )
 from codeintel.outcome import Missing
+from codeintel.per_thread import PerThread
 from codeintel.provider import Result, attach_confidence, log_swallowed, safe_null_result
 
 # Every op _dispatch recognizes. Kept beside it so "unsupported op" and "op found nothing" stay
@@ -474,24 +475,28 @@ class GraphProvider(GraphOps):
             "remediation": None,
         }
 
+    # Everything from here to `_pending_nonrow_lines` is a fact about ONE answer, and this provider
+    # is shared by concurrent `serve-http` requests — so each is `PerThread`, not a plain attribute.
+    # See `codeintel/per_thread.py` for what sharing them did.
+    #
     # The root the ANSWERING project is registered under, recorded per query so a renderer can
-    # check what it is about to attribute. Class-level default for the same __new__ reason.
-    _answered_root: str | None = None
+    # check what it is about to attribute.
+    _answered_root: PerThread[str | None] = PerThread(None)
     # Parts of this answer known to be short of an answer. Graph has two real cases: a symbol-scoped
     # answer served from a CONTAINING project, and callee rows dropped as name collisions.
-    _pending_gaps: tuple[dict[str, Any], ...] = ()
+    _pending_gaps: PerThread[tuple[dict[str, Any], ...]] = PerThread(())
     # The structured form of the rows an edge op rendered, and the three facts needed to summarise
     # them honestly once the answer is whole. Same mechanism as `_pending_gaps` above and the same
     # caveat: `refactor-graph-provider.md`'s open phase 4 would have the renderer return these
     # instead of the provider carrying them. Class-level defaults because five test modules build a
     # provider with `__new__` and never run `__init__`.
-    _pending_rows: tuple[dict[str, Any], ...] = ()
+    _pending_rows: PerThread[tuple[dict[str, Any], ...]] = PerThread(())
     # The backend's own row cap was hit, so the total is unknown rather than large.
-    _pending_row_cap: bool = False
+    _pending_row_cap: PerThread[bool] = PerThread(False)
     # Rows retrieved and deliberately not printed (the candidate cap). Known, so counted, not None.
-    _pending_withheld: int = 0
+    _pending_withheld: PerThread[int] = PerThread(0)
     # The body carries `- ` lines that are not result rows, so no row summary of it can be true.
-    _pending_nonrow_lines: bool = False
+    _pending_nonrow_lines: PerThread[bool] = PerThread(False)
 
     def _clear_failure(self) -> None:
         self._backend._clear_failure()

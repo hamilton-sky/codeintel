@@ -301,7 +301,7 @@ class Gateway:
                 nxt = (" Ask again once it is warm and this section will be filled in."
                        if retryable else
                        " Check it yourself with `--engine lsp --op symbol`.")
-                return {**result, "gaps": [*gaps, {
+                return self._restamp(result, [*gaps, {
                     "section": op, "kind": "cross-check-unavailable",
                     "engine": "lsp",
                     "reason": unavailable_reason,
@@ -309,10 +309,10 @@ class Gateway:
                               f"reference check ({why}), so the graph answer remains unverified"
                               + (" — retry" if retryable else ""),
                     **({"retry_after_s": retry_after_s or 2} if retryable else {}),
-                }], "result": str(result["result"]) + (
+                }], str(result["result"]) + (
                     f"\n\n> Cross-check unavailable: {graph_problem}, and "
                     f"{why}, so nothing here has been confirmed against a second engine.{nxt}"
-                )}
+                ))
             refs = self._reference_lines(str(body))
             listing = "\n".join(refs[: self._CROSS_CHECK_REF_CAP]) or "(no references reported)"
             more = (f"\n… (+{len(refs) - self._CROSS_CHECK_REF_CAP} more)"
@@ -325,16 +325,29 @@ class Gateway:
                 f"above but absent here is likely a name collision; a location here but missing "
                 f"above is a reference the graph could not bind._\n" + listing + more
             )
-            return {**result, "result": merged, "gaps": [*gaps, {
+            return self._restamp(result, [*gaps, {
                 "section": op, "kind": "cross-checked-with-lsp",
                 "engine": "lsp",
                 "detail": f"{graph_problem}, so the LSP was consulted "
                           f"independently and reported {len(refs)} reference location(s); the two "
                           f"lists answer related but different questions and are shown separately",
-            }]}
+            }], merged)
         except Exception as exc:
             log_swallowed("Gateway._cross_check_name_resolved", exc)
             return result
+
+    @staticmethod
+    def _restamp(envelope: Result, gaps: list[dict[str, Any]], body: str) -> Result:
+        """Rebuild an envelope whose gaps or body changed, through the one function that stamps it.
+
+        `confidence`, `outcome` and `evidence_class` are derived from `gaps` — by
+        `attach_confidence`, and nowhere else. The cross-check used to append its gap with
+        `{**result, "gaps": [...]}`, which copies the old stamp beside the new gap list: correct
+        only because every trigger today implies the graph answer was already `partial`. The first
+        trigger that fires on a `complete` answer would have produced `confidence: complete` with a
+        gap in the same envelope, and possibly `evidence_class: evidence` — the value an agent is
+        told to require before deleting. Re-deriving costs nothing and removes the precondition."""
+        return attach_confidence({**envelope, "result": body}, gaps)
 
     @staticmethod
     def _reference_lines(lsp_body: str) -> list[str]:

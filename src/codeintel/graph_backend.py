@@ -29,6 +29,7 @@ from typing import Any
 
 from codeintel import wire_text
 from codeintel.outcome import Missing
+from codeintel.per_thread import PerThread
 
 
 def _parse_query_rows(raw: Any) -> list[dict]:
@@ -91,7 +92,9 @@ class BackendClient:
     # "(none found)" — B1's exact bytes, reproduced in the graph engine after it had been fixed in
     # the LSP engine and declared closed. Fixing it per-op is what produced that miss; this is the
     # population-level equivalent.
-    _last_failure: Missing | None = None
+    # Per thread: the provider is shared by concurrent `serve-http` requests, and one request's
+    # failure is not another's — see `codeintel/per_thread.py`.
+    _last_failure: PerThread[Missing | None] = PerThread(None)
 
     def __init__(self) -> None:
         # Set once the backend answers something that is not JSON — i.e. it speaks a dialect this
@@ -103,7 +106,7 @@ class BackendClient:
         # level (see the attribute below) for callers that bypass __init__ via __new__; set here
         # too so every entry point that DOES run __init__ starts from a known state rather than
         # the class-level default it happens to share.
-        self._last_failure: Missing | None = None
+        self._last_failure = None
         self._detect_backend()
 
     def _detect_backend(self) -> None:

@@ -583,3 +583,29 @@ def test_changed_ripple_asks_for_the_registration_edge(monkeypatch):
                         lambda cypher, project, t: (seen.append(cypher), [])[1])
     p.build_result("changed", "", [], 30000, ROOT)
     assert seen and "CALL_REFERENCE" in seen[0], seen
+
+
+_STALE_STAMP = {"confidence": "complete", "outcome": "answered", "evidence_class": "evidence"}
+
+
+@pytest.mark.parametrize("lsp_env", [
+    {"ok": True, "engine": "lsp", "confidence": "complete",
+     "result": "## Symbol: describe\n**Function** — src/a.ts:1\n\n## References (1)\n- src/b.ts:2\n"},
+    {"ok": True, "engine": "lsp", "result": None, "reason": "warming", "retry_after_s": 5},
+], ids=["cross-checked", "cross-check-unavailable"])
+def test_the_cross_check_restamps_the_envelope_it_adds_a_gap_to(lsp_env):
+    """`confidence`, `outcome` and `evidence_class` follow from `gaps`, so adding one must
+    re-derive them. The cross-check copied the old stamp beside its new gap — right only while every
+    trigger implies an already-partial answer. Here the graph answer arrives stamped whole; the
+    trigger gap is what makes it partial, and the envelope must say so on both branches."""
+    graph = {**_graph_env([{"section": "callers", "kind": "all-rows-name-resolved",
+                            "detail": "d"}]), **_STALE_STAMP}
+    gw = Gateway(graph=_StubGraph(graph), lsp=_StubLsp(lsp_env))
+
+    env = gw.query("callers", "describe", engine="auto", project_root=ROOT, budget=30000)
+
+    kinds = [g["kind"] for g in env["gaps"]]
+    assert "cross-checked-with-lsp" in kinds or "cross-check-unavailable" in kinds, kinds
+    assert env["confidence"] == "partial", env
+    assert env["outcome"] == "partial", env
+    assert env["evidence_class"] == "advisory", env
