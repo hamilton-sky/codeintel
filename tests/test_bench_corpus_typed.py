@@ -38,43 +38,42 @@ sys.path.insert(0, _BENCH)
 _UNTYPED = os.path.join(_BENCH, "fixtures", "corpus_ts")
 _TYPED = os.path.join(_BENCH, "fixtures", "corpus_ts_typed")
 
-# The five sources that carry the class-qualified case. Named explicitly rather than globbed: the
-# typed corpus holds ONLY these, and a glob would quietly accept a sixth file appearing in it and
-# call the corpora equal on the five it still knew about.
-_SHARED_SOURCES = (
-    "chainAgents.ts",
-    "chainBarrel.ts",
-    "fallbackChain.ts",
-    "promiseExecutors.ts",
-    "strategyChain.ts",
-)
+def _sources(root: str) -> dict[str, bytes]:
+    src = os.path.join(root, "src")
+    out: dict[str, bytes] = {}
+    for dirpath, _dirs, files in os.walk(src):
+        for f in files:
+            full = os.path.join(dirpath, f)
+            with open(full, "rb") as fh:
+                out[os.path.relpath(full, src)] = fh.read()
+    return out
 
 
-@pytest.mark.parametrize("name", _SHARED_SOURCES)
-def test_each_shared_source_is_byte_identical(name):
+def test_both_corpora_hold_the_same_source_files():
+    """The whole tree, globbed on both sides — not a named subset.
+
+    This arm first held only the five files that carry the class-qualified case, and this test
+    compared exactly those five. That made the comparison two variables, not one: a tsconfig AND
+    24 fewer files, so fewer names for `tsserver` to see and collide on. A review caught it. Globbing
+    both trees is the only form of this check that a file added on either side cannot slip past."""
+    typed, untyped = _sources(_TYPED), _sources(_UNTYPED)
+    assert untyped, "corpus_ts/src is empty — the comparison has nothing to compare"
+    assert sorted(typed) == sorted(untyped), (
+        f"only in corpus_ts: {sorted(set(untyped) - set(typed))}; "
+        f"only in corpus_ts_typed: {sorted(set(typed) - set(untyped))}. "
+        "The typed arm is corpus_ts plus a tsconfig; copy the file across, or remove it from both.")
+
+
+def test_every_source_is_byte_identical():
     """Byte-for-byte, not "equivalent". A whitespace or comment difference is still a difference in
     what `tsserver` parses, and this comparison has no budget for judgement calls about which
     differences are harmless."""
-    with open(os.path.join(_UNTYPED, "src", name), "rb") as fh:
-        untyped = fh.read()
-    with open(os.path.join(_TYPED, "src", name), "rb") as fh:
-        typed = fh.read()
-
-    assert typed == untyped, (
-        f"bench/fixtures/corpus_ts_typed/src/{name} has drifted from its corpus_ts original. "
-        "The typed arm is a controlled comparison against the untyped one and the control is "
-        "that these files are copies. Re-copy it, or if the change is wanted, make it in BOTH."
-    )
-
-
-def test_the_typed_corpus_holds_only_the_shared_sources():
-    """The other direction. A new file in the typed tree is a second variable — it changes what
-    `tsserver` can see and what names collide — and would not be caught by comparing the five."""
-    found = sorted(f for f in os.listdir(os.path.join(_TYPED, "src")) if f.endswith(".ts"))
-    assert found == sorted(_SHARED_SOURCES), (
-        f"corpus_ts_typed/src holds {found}, expected exactly {sorted(_SHARED_SOURCES)}. "
-        "Adding a source here breaks the one-variable comparison with corpus_ts."
-    )
+    typed, untyped = _sources(_TYPED), _sources(_UNTYPED)
+    drifted = sorted(n for n in untyped if n in typed and typed[n] != untyped[n])
+    assert not drifted, (
+        f"corpus_ts_typed/src has drifted from corpus_ts in {drifted}. The typed arm is a "
+        "controlled comparison and the control is that these files are copies. Re-copy them, or "
+        "if the change is wanted, make it in BOTH.")
 
 
 def test_the_tsconfig_is_the_variable_and_is_present_on_exactly_one_side():
@@ -94,7 +93,7 @@ def test_the_tsconfig_is_the_variable_and_is_present_on_exactly_one_side():
 def test_the_tsconfig_declares_no_path_aliases():
     """A `paths` map would be a second variable: it changes how the ORACLE resolves specifiers
     (`oracle_ts._tsconfig_paths` reads exactly this file), not just how tsserver does. Every import
-    in these five sources is relative, so there is nothing for an alias map to do here except widen
+    in the corpus is relative, so there is nothing for an alias map to do here except widen
     what a difference between the arms could be attributed to."""
     pytest.importorskip("tree_sitter_language_pack")   # oracle_ts parses on import
     from oracle_ts import _tsconfig_paths

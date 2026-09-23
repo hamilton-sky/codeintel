@@ -1,40 +1,21 @@
 {
   "//": [
-    "This corpus was built to test a hypothesis, and the run disproved it. Both statements below",
-    "are measurements, not expectations, and the file is kept because the negative one is useful.",
+    "This corpus is `corpus_ts` plus this file, and nothing else: all 29 sources are byte-identical",
+    "copies, which tests/test_bench_corpus_typed.py asserts on every run. It isolates one variable.",
     "",
-    "THE HYPOTHESIS. `corpus_ts` reports both LSP arms as `n/a — 6 unanswered`, and bench/README.md",
-    "explains that by its missing tsconfig: without a project file `tsserver` treats every file as",
-    "its own inferred project, cannot see across files, and returns an empty reference list. If that",
-    "were the cause for the two class-qualified targets, a typed copy would unblock them, and the",
-    "readiness ledger's last technical item — tighten class-qualified method resolution — would",
-    "have a measurable candidate fix: ask the language server, which resolves a receiver by type.",
+    "WHY IT EXISTS. `corpus_ts` reports both LSP arms as unanswered, and bench/README.md explains that",
+    "by its missing tsconfig: without a project file `tsserver` treats every file as its own inferred",
+    "project, cannot see across files, and returns an empty reference list. This tree tests that.",
     "",
-    "WHAT WAS MEASURED. It is not the cause for that shape. With and without this file, byte-identical",
-    "sources, `--op symbol --engine lsp --target StrategyChain.resolve` returns the same thing:",
+    "WHAT IT FOUND. Two blockers, in series. The tsconfig is one. The other was in this repository:",
+    "`providers/lsp.py`'s `_split_target_file_hint` returned early on any target without an `@file`",
+    "hint, so `StrategyChain.resolve` reached Serena verbatim while Serena name paths are",
+    "slash-separated, and references were never requested. With that fixed, this tree scores the",
+    "class-qualified pair at 100% on both LSP arms; `corpus_ts`, lacking only this file, still reports",
+    "them unanswered.",
     "",
-    "    ## Symbol: StrategyChain.resolve",
-    "    []",
-    "    ## References — not retrieved",
-    "    > the symbol's file path was not resolved, so references were never requested.",
-    "",
-    "The failure is one step earlier than the tsconfig can reach. `providers/lsp.py`'s",
-    "`_split_target_file_hint` returns early on any target without an `@file` hint, so the dotted",
-    "name goes to Serena verbatim — and Serena name paths are SLASH-separated. Probed directly:",
-    "`find_symbol(\"StrategyChain.resolve\")` → `[]`; `find_symbol(\"StrategyChain/resolve\")` →",
-    "`{name_path: \"StrategyChain/resolve\", relative_path: \"src/strategyChain.ts\", lines 12-14}`.",
-    "The dot→slash conversion already exists in that same function, three lines below the early",
-    "return, reachable only when a file hint is present.",
-    "",
-    "WHY THIS TREE IS STILL HERE. The fix belongs in `lsp.py`, and when it lands it needs a tree to",
-    "be measured on. This is that tree: the class-qualified pair isolated, oracle coverage 100%, and",
-    "a project file present so that the inferred-project confound bench/README.md documents cannot",
-    "be the explanation for whatever the LSP arm reports next. It removes a candidate confound that",
-    "turned out not to be the operative one — which is worth keeping, and is not what this file was",
-    "originally claimed to do.",
-    "",
-    "Deliberately minimal: no `paths`, no `baseUrl`. Every import in these five files is relative,",
-    "and an alias map would add a variable to a tree whose value is having almost none."
+    "Deliberately minimal: no `paths`, no `baseUrl`. Every import in the corpus is relative, and an",
+    "alias map would change how the ORACLE resolves specifiers, a second variable."
   ],
   "compilerOptions": {
     "target": "ES2020",
@@ -45,5 +26,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

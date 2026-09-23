@@ -203,9 +203,9 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str, bool]] = {
         ("src/fallbackChain.ts", "FallbackChain.resolve"),
     ], "typescript", False),   # smoke fixture — see the note on REPOS
 
-    # The class-qualified pair again, in a tree that has a `tsconfig.json`. The five sources are
-    # byte-identical copies of their `corpus_ts` originals — `tests/test_bench_corpus_typed.py`
-    # asserts that on every run — so this arm changes exactly one variable against the one above it.
+    # The class-qualified pair again, in a tree that has a `tsconfig.json`. All 29 sources are
+    # byte-identical copies of `corpus_ts` — `tests/test_bench_corpus_typed.py` globs both trees
+    # and asserts it on every run — so this arm changes exactly one variable against the one above.
     #
     # It answers a question the `corpus-ts` table cannot: with the inferred-project confound
     # removed, can the LSP resolve a class-qualified receiver? It can — once the target is turned
