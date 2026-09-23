@@ -55,6 +55,23 @@ TS_REPO = os.path.expanduser(os.environ.get("CODEINTEL_BENCH_TS", ""))
 
 CORPUS_TS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "corpus_ts")
 
+# The same class-qualified case, with a `tsconfig.json` and nothing else changed.
+#
+# Built to test whether the missing tsconfig is why `corpus_ts` reports both LSP arms as
+# `unanswered`. It is — but it was not the only blocker, and this tree is what separated the two.
+# With the project file in place, `--op symbol --engine lsp --target StrategyChain.resolve` still
+# returned `[]` and "the symbol's file path was not resolved, so references were never requested":
+# `lsp._split_target_file_hint` returned early on a target with no `@file`, so the dotted name
+# reached Serena verbatim while Serena name paths are slash-separated. The dot→slash conversion
+# now runs with or without a file hint, and both LSP arms here score 100% precision and recall.
+#
+# The two causes are serial. Without a tsconfig the server answers every cross-file lookup empty
+# (and `corpus-ts` still correctly reports that as unanswered); with one, the name path was the
+# next wall. Kept so the fix stays measured: this tree has the pair isolated at 100% oracle
+# coverage with the inferred-project confound ruled out by construction.
+CORPUS_TS_TYPED = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "corpus_ts_typed")
+
 # Which `codeintel` to measure. The default is whatever the reader's PATH resolves, because that is
 # what the documented command runs — but the provenance header prints a warning when that build is
 # not the checkout, and until now there was no way to act on the warning short of reinstalling the
@@ -185,6 +202,33 @@ REPOS: dict[str, tuple[str, list[tuple[str, str]], str, bool]] = {
         # the one real caller it does have. Precision and silence, on one pair of classes.
         ("src/fallbackChain.ts", "FallbackChain.resolve"),
     ], "typescript", False),   # smoke fixture — see the note on REPOS
+
+    # The class-qualified pair again, in a tree that has a `tsconfig.json`. The five sources are
+    # byte-identical copies of their `corpus_ts` originals — `tests/test_bench_corpus_typed.py`
+    # asserts that on every run — so this arm changes exactly one variable against the one above it.
+    #
+    # It answers a question the `corpus-ts` table cannot: with the inferred-project confound
+    # removed, can the LSP resolve a class-qualified receiver? It can — once the target is turned
+    # into a Serena name path (see the note on `CORPUS_TS_TYPED` above). Both LSP arms return the
+    # one real caller and none of the four proven non-callers; the graph arms do not.
+    #
+    # ONLY the two qualified targets. The other four `corpus-ts` symbols are already scored one arm
+    # up and copying them here would buy a second number for a question already answered, at the
+    # cost of four more truths to keep in sync by hand.
+    #
+    # Ungated, for the same reason `corpus-ts` is: a hand-written fixture chosen to be maximally
+    # adversarial cannot be held to a production floor without either making the fixture easier or
+    # parking the gate red. Its verdict line still prints, and still says it was not applied.
+    "corpus-ts-typed": (CORPUS_TS_TYPED, [
+        # Truth, readable in `chainAgents.ts` and unchanged from the untyped arm: one real caller
+        # (`StrategyAgent.route`, whose field is declared `StrategyChain`) and four proven
+        # non-callers — `FallbackAgent.route`, which reaches a different class through the identical
+        # `this.chain.resolve` spelling, and the three Promise executors.
+        ("src/strategyChain.ts", "StrategyChain.resolve"),
+        # The same mechanism from the other side, where it fails in the opposite direction. Both are
+        # kept because one target cannot show both failures — see the note on the `corpus-ts` pair.
+        ("src/fallbackChain.ts", "FallbackChain.resolve"),
+    ], "typescript", False),
 
     # A real TypeScript repository, named by the environment. Fill in the disputed symbols.
     "typescript": (TS_REPO, [], "typescript", True),
