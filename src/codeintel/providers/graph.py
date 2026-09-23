@@ -492,6 +492,10 @@ class GraphProvider(GraphOps):
     _pending_withheld: int = 0
     # The body carries `- ` lines that are not result rows, so no row summary of it can be true.
     _pending_nonrow_lines: bool = False
+    # The token a name match did not use, and which of the files in doubt name it. `None` for both
+    # means nobody looked — never "nobody names it".
+    _qualifier_token: str | None = None
+    _qualifier_files: dict[str, bool] | None = None
 
     def _clear_failure(self) -> None:
         self._backend._clear_failure()
@@ -743,6 +747,8 @@ class GraphProvider(GraphOps):
             self._pending_row_cap = False
             self._pending_withheld = 0
             self._pending_nonrow_lines = False
+            self._qualifier_token = None
+            self._qualifier_files = None
             self._clear_failure()
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
             if result_text is not None and self._last_failure is not None:

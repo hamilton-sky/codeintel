@@ -52,14 +52,28 @@ Two consequences worth stating on their own:
 
 On that real repository the true answer is **two**. Both are in the list, and both are `resolved`.
 
-**When name-matched rows dominate, the answer prints the command that settles them:**
+**When name-matched rows dominate, the answer runs the check that settles them and tells you what
+it found:**
 
 ```text
-_Settle it: `rg -n --fixed-strings 'StrategyChain' <root>`_
+_Checked: **43 of 43** name-matched callers are in files that never write `StrategyChain`, the name
+it is qualified by, and the part of the target the name match did not use. They are ranked last
+below and carry `qualifier_seen: false`._
 ```
 
-That is not decoration. On the example above it returns 5 files, none of which is any of the 26
-files the 43 name-matched rows sit in — so all 43 are spurious, established in one command.
+Each row carries the result as `rows[].qualifier_seen`, and `evidence.qualifier_absent` counts them.
+`true` means the file does write the qualifier, `false` that it does not, and **`null` that nobody
+looked** — which includes every `resolved` row, since a row that followed a real binding needs no
+corroboration from a text search.
+
+Read it as narrowing, not as a verdict, and note that the tool does not drop these rows for you.
+A file can reach a method without ever naming its class — through an interface-typed field, a
+subclass, or a renaming re-export — so `qualifier_seen: false` marks the rows to doubt first, not
+rows proven false. The command is still printed so you can re-run it yourself.
+
+If you want the filter, apply it: `rows.filter(r => r.qualifier_seen !== false)` is the middle
+setting between taking every row and taking only `verified` ones, and `bench/README.md` measures
+all three.
 
 ### Before you delete anything
 
@@ -113,7 +127,9 @@ Now read it in this order:
 
 2. **The heading.** Is the count what you expected? If it is much larger, look at the line below it.
 3. **The `resolved · name-matched · unstated` split.** Are your known callers in the unbadged rows?
-4. **`Settle it:`** if it appears. Run the command. Files absent from its output are not callers.
+4. **The qualifier line** (`Checked: N of M …`, or `Settle it:` when the tool could not run the
+   check itself). Rows marked `qualifier_seen: false` sit in files that never write the qualifier —
+   doubt those first. It narrows; it does not decide.
 5. **`confidence`** on the envelope (`--json` shows it). `partial` means read `gaps`.
 
 You have verified the tool when **your known callers appear as `resolved` rows**. If they appear
