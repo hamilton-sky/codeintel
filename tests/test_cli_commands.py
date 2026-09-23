@@ -988,3 +988,35 @@ def test_index_waits_for_another_pass_then_indexes_anyway_on_timeout(monkeypatch
     assert "waiting for another codeintel process" in out
     assert "indexing anyway" in out
     assert "Indexed 7 chunks" in out
+
+
+def test_index_quiet_stays_quiet_while_waiting_for_the_lock(monkeypatch, tmp_path, capsys):
+    """`--quiet` promises the result line only. Contention is not an exception to that."""
+    from codeintel.filelock import _HAVE_FLOCK, exclusive, lock_path
+    if not _HAVE_FLOCK:
+        pytest.skip("advisory locking needs POSIX fcntl")
+    _stub_index(monkeypatch, tmp_path, count=2)
+    mod = import_module("codeintel.commands.index")
+    monkeypatch.setattr(mod, "_LOCK_WAIT_S", 0.2)
+
+    with exclusive(lock_path(os.path.realpath(str(tmp_path)))) as other:
+        assert other
+        assert mod.run(_args(project_root=str(tmp_path), quiet=True)) == 0
+
+    assert capsys.readouterr().out.strip() == "Indexed 2 chunks"
+
+
+def test_index_without_a_resolvable_home_fails_with_a_message_not_a_traceback(
+        monkeypatch, tmp_path, capsys):
+    """A container UID with no home: the lock is skipped, and the failure the semantic pass hits
+    is reported the way it always was — `index failed: …` and exit 1."""
+    _stub_index(monkeypatch, tmp_path)
+
+    def _no_home(*a, **k):
+        raise RuntimeError("could not determine home directory")
+
+    monkeypatch.setattr("codeintel.filelock.lock_path", _no_home)
+    monkeypatch.setattr("codeintel.config.load_config", _no_home)
+
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
+    assert "index failed: could not determine home directory" in capsys.readouterr().out

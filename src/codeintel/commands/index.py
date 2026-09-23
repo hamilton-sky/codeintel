@@ -65,15 +65,26 @@ def run(args: Any) -> int:
     from codeintel.filelock import exclusive_waiting, lock_path
 
     def _say_waiting() -> None:
-        print("waiting for another codeintel process to finish indexing this repository…",
-              flush=True)
+        if not quiet:       # --quiet promises the result line only, contention or not
+            print("waiting for another codeintel process to finish indexing this repository…",
+                  flush=True)
 
     lock = contextlib.ExitStack()
-    got_lock = lock.enter_context(exclusive_waiting(
-        lock_path(os.path.realpath(project_root)), _LOCK_WAIT_S, on_wait=_say_waiting))
-    if not got_lock:
-        print(f"still locked after {int(_LOCK_WAIT_S)}s — indexing anyway; the other pass may "
-              "repeat some of this work", flush=True)
+    # Resolving the lock path reads the codeintel home, which raises where there is no resolvable
+    # home directory (a container UID with no passwd entry and no CODEINTEL_HOME). That must not
+    # turn into a traceback before the semantic pass's own error handling below — which reports
+    # exactly that failure as "index failed: …". A lock we cannot place is a lock we do without,
+    # by the rule in `filelock`: it may dedupe work, never stop it.
+    try:
+        path = lock_path(os.path.realpath(project_root))
+    except Exception:
+        path = None
+    if path is not None:
+        got_lock = lock.enter_context(
+            exclusive_waiting(path, _LOCK_WAIT_S, on_wait=_say_waiting))
+        if not got_lock and not quiet:
+            print(f"still locked after {int(_LOCK_WAIT_S)}s — indexing anyway; the other pass "
+                  "may repeat some of this work", flush=True)
 
     failed = False
     # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
