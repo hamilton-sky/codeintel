@@ -11,12 +11,15 @@ more than it had are closed. **Before deleting or renaming, filter `rows[].verif
 `evidence_class: "evidence"`** — see [docs/trust.md](docs/trust.md).
 
 ### Added
-- **`rows[]`, `evidence` and `evidence_class` on every answered envelope** (#44). `callers`,
-  `callees` and `impact` return each row as fields — `relation`, `verified`, `evidence`, `strategy`,
-  `confidence`, `why` — recorded from the same list the body prints, so the two cannot disagree.
+- **`evidence_class` on every answered envelope, and `rows[]` / `evidence` on row-producing
+  ones** (#44). `evidence_class` says what the answer can be used for — `evidence`, `discovery` or
+  `advisory`, bounded above by the op and decided by the rows — and is set on every non-null result.
+  `rows` and `evidence` are **optional**: present only on a non-empty `callers`, `callees` or
+  `impact` answer from the graph engine, and absent on `search`, `symbol`, fan-outs, empty results,
+  and bodies whose rows cannot be summarised honestly. `rows[]` carries `relation`, `verified`,
+  `evidence`, `strategy`, `confidence` and `why`, recorded from the same list the body prints;
   `evidence` summarises them (`verified` / `possible` / `unstated`, `truncated`,
-  `safe_for_destructive`). `evidence_class` says what the answer can be used for: `evidence`,
-  `discovery` or `advisory`, bounded above by the op and decided by the rows. A verdict line now
+  `safe_for_destructive`). Treat an absent `evidence` as "no summary", never as "safe". A verdict line now
   sits above the heading, where a reader who acts on the heading will see it.
 - **`codeintel uninstall`** (#50) — the inverse of `install`, and only that. It removes codeintel's
   own server entry from each agent's config and nothing else: it never deletes a config file (even
