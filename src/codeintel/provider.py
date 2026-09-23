@@ -191,8 +191,17 @@ def _evidence_class(result: Result, partial: bool) -> str:
     evidence = result.get("evidence")
     if isinstance(evidence, dict):
         return EVIDENCE if evidence.get("safe_for_destructive") else ADVISORY
-    # No row summary to consult — an LSP `symbol` answer with nothing disclosed missing.
-    return EVIDENCE
+    # No row summary to consult. Exactly one answer earns proof without one: a language server's
+    # `symbol`, which resolved a real definition and its references by construction. Everything
+    # else with no summary is advice — and that used to be the default, not the exception. A
+    # `--engine both` fan-out of `callers` carries no `evidence` by design (see
+    # `Gateway._fan_out`), so its concatenated bodies, name-matched graph rows included, were
+    # stamped `evidence`; so was a graph `callers` answer whose summary was withheld, and so would
+    # be any future engine that answers `callers` in prose. Failing closed means a new shape has to
+    # be argued up to proof rather than argued down from it.
+    if result.get("op") == "symbol" and result.get("engine") == "lsp":
+        return EVIDENCE
+    return ADVISORY
 
 
 def attach_confidence(result: Result, gaps: Any = ()) -> Result:

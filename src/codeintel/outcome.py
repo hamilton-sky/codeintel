@@ -53,6 +53,8 @@ MissingKind = Literal[
     "unresolvable",   # the backend answered EMPTY, and the repository is not configured for that
                       # emptiness to carry information — distinct from `unsupported`, which is a
                       # capability limit with nothing to fix, and from `not-asked`, which never ran
+    "row-cap-reached",  # the backend answered, and this side cut the list short — the same kind the
+                        # graph provider records for its own `LIMIT`, so one vocabulary covers both
 ]
 
 _DETAIL: dict[str, str] = {
@@ -63,6 +65,7 @@ _DETAIL: dict[str, str] = {
     "unsupported": "this engine cannot answer that",
     "unresolvable": ("the backend returned an empty result, and this repository is not configured "
                      "for an empty result to mean there is nothing — treat it as unknown"),
+    "row-cap-reached": "the list was truncated, so rows beyond the cap are missing from it",
 }
 
 

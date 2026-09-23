@@ -1084,3 +1084,57 @@ def test_empty_references_with_a_tsproject_remain_a_real_answer(tmp_path, monkey
     assert r["confidence"] == "complete", r
     assert not [g for g in (r.get("gaps") or []) if g["section"] == "references"]
     assert "## References (0)" in r["result"]
+
+
+def _stub_references(p, monkeypatch, n: int):
+    refs = {"src/f1.ts": {"Function": [
+        {"name_path": f"caller{i}", "content_around_reference": f"  >{i + 1}: forwardReleasedItem()"}
+        for i in range(n)
+    ]}}
+
+    def _fake_call_tool(session, tool, args, timeout_s):
+        if tool == "find_symbol":
+            return Ok('[{"name_path":"forwardReleasedItem","kind":"Function",'
+                      '"relative_path":"src/f0.ts","body_location":{"start_line":1,"end_line":2},'
+                      '"body":"export function forwardReleasedItem() {}"}]')
+        if tool == "find_referencing_symbols":
+            return Ok(json.dumps(refs))
+        return Missing("backend-error", "unstubbed tool")
+
+    monkeypatch.setattr(p, "_call_tool", _fake_call_tool)
+
+
+def test_a_capped_reference_list_is_disclosed_as_truncated(tmp_path, monkeypatch):
+    """300 references used to render as `## References (50)` at `confidence: complete` and
+    `evidence_class: evidence` — a cut list stated as the whole one, on the op run before a delete."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    root = _ts_repo(tmp_path, tsconfig=True)
+    p = LspProvider()
+    p._sessions[root] = _make_fake_session(_State.READY)
+    _stub_references(p, monkeypatch, 300)
+
+    r = p.build_result("symbol", "forwardReleasedItem", [], 30000, root)
+
+    assert r["confidence"] == "partial", r
+    assert r["evidence_class"] == "advisory", r
+    gap = next(g for g in r["gaps"] if g["section"] == "references")
+    assert gap["kind"] == "row-cap-reached"
+    assert "300" in gap["detail"]
+    assert "## References (50 of 300)" in r["result"]
+    assert "250 more reference(s)" in r["result"]
+    assert r["result"].count("\n- src/f1.ts") == 50
+
+
+def test_a_reference_list_at_the_cap_exactly_is_still_complete(tmp_path, monkeypatch):
+    """The boundary: 50 references, all listed, is a whole answer and must not be called cut."""
+    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    root = _ts_repo(tmp_path, tsconfig=True)
+    p = LspProvider()
+    p._sessions[root] = _make_fake_session(_State.READY)
+    _stub_references(p, monkeypatch, 50)
+
+    r = p.build_result("symbol", "forwardReleasedItem", [], 30000, root)
+
+    assert r["confidence"] == "complete", r
+    assert r["evidence_class"] == "evidence", r
+    assert "## References (50)\n" in r["result"]

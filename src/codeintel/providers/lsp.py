@@ -58,6 +58,10 @@ _SERENA_GIT = f"git+https://github.com/oraios/serena@{_SERENA_REV}"
 
 # The "LSP toolchain is not installed" remediation, stated ONCE — see the matching block in
 # providers/graph.py for why the query envelope and `doctor` must not keep separate copies.
+# How many reference rows `symbol` prints. Past this the answer is disclosed as truncated rather
+# than shortened in silence — see `_format_refs`.
+_REF_ROW_LIMIT = 50
+
 _UNAVAILABLE_DETAIL = "neither `serena` nor `uvx` found on PATH"
 _UNAVAILABLE_REMEDIATION = (
     "install uv (provides uvx): `codeintel setup --install-uv` (or `brew install uv` / "
@@ -1068,10 +1072,18 @@ class LspProvider:
                 parts.append(f"```\n{body}\n```")
         return "\n".join(parts), first
 
-    def _format_refs(self, data: Any) -> list[str]:
+    def _format_refs(self, data: Any) -> tuple[list[str], int]:
+        """Render at most `_REF_ROW_LIMIT` reference rows, and count all of them.
+
+        The count is the other half of the answer. This used to stop at 50 and return only the
+        rows, so a symbol with 300 references rendered `## References (50)`, with no gap, at
+        `confidence: complete` — a truncated list stated as a whole one, on the op an agent runs
+        before deleting a symbol.
+        """
         lines: list[str] = []
+        total = 0
         if not isinstance(data, dict):
-            return lines
+            return lines, total
         for file, kinds in data.items():
             if not isinstance(kinds, dict):
                 continue
@@ -1081,13 +1093,14 @@ class LspProvider:
                 for ent in entries:
                     if not isinstance(ent, dict):
                         continue
+                    total += 1
+                    if len(lines) >= _REF_ROW_LIMIT:
+                        continue
                     np = str(ent.get("name_path") or "").strip()
                     line0 = self._ref_line(ent.get("content_around_reference"))
                     suffix = f"  ({np})" if np else ""
                     lines.append(f"- {loc(file, line0)}{suffix}")
-                    if len(lines) >= 50:
-                        return lines
-        return lines
+        return lines, total
 
     def _op_symbol(
         self, session: _LspSession, target: str, root: str, timeout_s: float
@@ -1278,8 +1291,20 @@ class LspProvider:
                 retry = " Re-ask in a few seconds." if miss.retry_after_s else ""
                 ref_section = f"## References — not retrieved\n> {miss.describe()}.{retry}"
             else:
-                ref_lines = self._format_refs(parsed)
-                if ref_lines:
+                ref_lines, ref_total = self._format_refs(parsed)
+                if ref_lines and ref_total > len(ref_lines):
+                    capped = Missing(
+                        "row-cap-reached",
+                        f"the language server returned {ref_total} references and "
+                        f"{len(ref_lines)} are listed, so this list is truncated — not a complete "
+                        f"answer for `{target}`",
+                    )
+                    self._add_gap("references", capped)
+                    ref_section = (f"## References ({len(ref_lines)} of {ref_total})\n"
+                                   + "\n".join(ref_lines)
+                                   + f"\n\n_Truncated: {ref_total - len(ref_lines)} more "
+                                     "reference(s) are not listed._")
+                elif ref_lines:
                     ref_section = f"## References ({len(ref_lines)})\n" + "\n".join(ref_lines)
                 else:
                     # Asked, answered, nothing came back — which is a real answer only when the

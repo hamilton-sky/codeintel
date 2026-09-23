@@ -14,6 +14,16 @@ All notable changes to codeintel are documented here. The format is based on
   dot→slash conversion was already there, gated behind the file hint. Measured on the new
   `corpus-ts-typed` bench arm (the `corpus-ts` sources plus a `tsconfig.json`): both LSP arms go
   from unanswered to 100% precision and recall on the class-qualified pair.
+- **An answer with no row summary is no longer proof by default.** `evidence_class` fell back to
+  `"evidence"` whenever an envelope carried no `evidence` summary. A `--engine both` fan-out never
+  carries one by design, so `callers` over name-matched graph rows came back `evidence` through the
+  fan-out while the same graph answer alone said `advisory`. The fallback now fails closed: without
+  a summary, only a language server's `symbol` lookup is `evidence`; everything else is `advisory`.
+- **A truncated LSP reference list now says it is truncated.** `symbol` printed at most 50
+  references and headed them `## References (50)` at `confidence: complete`, however many the server
+  returned. It now counts them all, heads a cut list `## References (50 of 300)`, records a
+  `row-cap-reached` gap (the kind the graph provider already uses), and so reads `partial` and
+  `advisory`.
 - **An `engine-unavailable` answer now carries the hint that makes it actionable**, restoring the
   documented contract ("safe-nulls with a reason *and a hint*") on `--op callers` — the first
   command the Quickstart tells a new user to run. The fix is in `Gateway._dispatch_single`, not
