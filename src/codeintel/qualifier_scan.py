@@ -34,14 +34,16 @@ check every other reader of the tree goes through (`containment.contained_path`:
 link that leaves the root is never opened), only REGULAR files (a FIFO planted at an indexed path
 would block `open` forever), and a file larger than `MAX_SOURCE_BYTES` is not read at all
 (`changed_range`'s own bound, so the two readers cannot disagree about what is too large to read).
-A file that is not plain text — a UTF-16 or UTF-32 byte-order mark, or a NUL byte near the start — is
-unknown too: the printed `rg` decodes a wide encoding and this scan matches raw UTF-8, so the two
-would disagree about the same file.
+A file that is not plain text — a UTF-16 or UTF-32 byte-order mark, or a NUL byte anywhere in it — is
+unknown too: the printed `rg` decodes a wide encoding, and stops searching a file at its first NUL,
+while this scan matches raw UTF-8 bytes end to end, so the two would disagree about the same file.
 The ceilings below bound the cost of an answer by construction, rather than by hoping the repository
 is small: a query that opened four thousand files to sharpen a note would be a worse defect than the
 one being sharpened. They are a file count, a byte total and the seconds spent reading, and a file not
-read before any of them is reached is unknown, not clean. It never raises — it is an improvement on an
-answer that is already whole.
+read before any of them is reached is unknown, not clean. The seconds are a real deadline: each read
+runs on its own daemon thread and is waited on only for the time left, so a read stalled on a slow
+mount cannot hold the answer past it — it is abandoned, and it and every file after it are unknown.
+It never raises — it is an improvement on an answer that is already whole.
 """
 from __future__ import annotations
 
@@ -65,9 +67,11 @@ _MAX_TOTAL_BYTES = 16_000_000
 # for the tree on a slow or stalled mount, where two hundred small reads are not small.
 _MAX_SECONDS = 5.0
 
-# What marks a file as not plain text: a wide-encoding byte-order mark, or a NUL in the first 8 KB.
+# What marks a file as not plain text: a wide-encoding byte-order mark, or a NUL ANYWHERE in it. Not
+# only in the first 8 KB: `rg` stops searching a file at the first NUL it meets, so a file that writes
+# the token only after a late NUL is "no match" to the printed command and would be `true` here. The
+# whole file is at most `MAX_SOURCE_BYTES`, so looking at all of it costs nothing worth saving.
 _WIDE_BOMS = (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
-_SNIFF_BYTES = 8192
 
 
 class Budget:
@@ -89,13 +93,23 @@ class Budget:
         with self._lock:
             self._left -= seconds
 
+    def exhaust(self) -> None:
+        """Nothing more is to be read on this budget: a read outlived it, and is still stalled."""
+        with self._lock:
+            self._left = 0.0
+
+    @property
+    def remaining(self) -> float:
+        with self._lock:
+            return max(0.0, self._left)
+
     @property
     def exhausted(self) -> bool:
         return self._left <= 0
 
 
 def _plain_text(blob: bytes) -> bool:
-    return not blob.startswith(_WIDE_BOMS) and b"\0" not in blob[:_SNIFF_BYTES]
+    return not blob.startswith(_WIDE_BOMS) and b"\0" not in blob
 
 
 def files_naming(
@@ -139,14 +153,47 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
         if spent >= _MAX_TOTAL_BYTES or budget.exhausted:
             break
         began = time.monotonic()
-        blob = _read(root_real, os.path.join(root, rel))
+        blob, finished = _read_within(root_real, os.path.join(root, rel), budget.remaining)
         budget.spend(time.monotonic() - began)
+        if not finished:
+            # The read outlived what was left of the allowance and is still blocked — a stalled mount.
+            # Charging it afterwards would not bound anything, so it is abandoned here: the budget is
+            # spent, and this file and every one after it are unknown.
+            budget.exhaust()
+            break
         if blob is None:
             continue
         spent += len(blob)
         if _plain_text(blob):
             seen[rel] = needle in blob
     return seen or None
+
+
+def _read_within(root_real: str, path: str, seconds: float) -> tuple[bytes | None, bool]:
+    """`_read` on a daemon thread, waited on for at most *seconds*: `(bytes or None, finished)`.
+
+    The read itself is synchronous and cannot be interrupted, so the thread is what bounds it: when it
+    has not returned in time, `finished` is False and the thread is left to end whenever the stalled
+    read does. The scan stops at the first such read, so an answer leaves at most one behind. An
+    exception in the read is re-raised here, so a path the OS refuses (an embedded NUL) still abandons
+    the whole scan exactly as it did when the read ran inline."""
+    box: list[tuple[bytes | None, BaseException | None]] = []
+
+    def work() -> None:
+        try:
+            box.append((_read(root_real, path), None))
+        except BaseException as exc:               # carried to the caller, never lost on the thread
+            box.append((None, exc))
+
+    worker = threading.Thread(target=work, name="codeintel-qualifier-read", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive() or not box:
+        return None, False
+    blob, exc = box[0]
+    if exc is not None:
+        raise exc
+    return blob, True
 
 
 def _read(root_real: str, path: str) -> bytes | None:

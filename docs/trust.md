@@ -88,7 +88,7 @@ looked**. Nobody looks at:
 - a row with no recorded call text, or in a language other than Python, JavaScript and TypeScript —
   in the others a call reaches an inherited member with no receiver at all;
 - module-scope code, and a file the tool could not read, was too large, is not a regular file or not
-  plain text (a UTF-16 byte-order mark, or a NUL byte near the start), lies outside the root, or was
+  plain text (a UTF-16 byte-order mark, or a NUL byte anywhere in it), lies outside the root, or was
   not reached before the scan's time, size or file-count limit.
 
 And nothing is scanned at all for a bare target (`resolve` rather than `StrategyChain.resolve`), for a

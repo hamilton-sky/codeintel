@@ -215,17 +215,49 @@ def test_a_file_with_a_wide_byte_order_mark_is_unknown_not_refuted(tmp_path):
     assert seen == {"plain.ts": False}, seen
 
 
-def test_a_file_with_a_nul_byte_near_the_start_is_unknown_not_refuted(tmp_path):
-    """A NUL in the first 8 KB is what marks a file as binary to `rg` and to `git grep -I`. The scan
-    does not judge it. CONTROL: a NUL past that window is an ordinary text file with one odd byte, and
-    a UTF-8 byte-order mark is plain text."""
+def test_a_file_with_a_nul_byte_anywhere_is_unknown_not_judged(tmp_path):
+    """`rg` stops searching a file at the first NUL it meets, so a file that writes the token only
+    AFTER a NUL — even one past the first 8 KB — is "no match" to the printed command. Judging it here
+    would print a verdict the command beside it cannot reproduce, so such a file is not judged at all.
+    CONTROL: a UTF-8 byte-order mark is plain text, and a file with no NUL is judged."""
     (tmp_path / "binary.ts").write_bytes(b"x" * 100 + b"\0" + TOKEN.encode())
     (tmp_path / "late_nul.ts").write_bytes(b"x" * 9000 + b"\0" + TOKEN.encode())
     (tmp_path / "utf8_bom.ts").write_bytes(b"\xef\xbb\xbf" + TOKEN.encode())
+    (tmp_path / "plain.ts").write_bytes(b"x" * 9000 + TOKEN.encode())
 
-    seen = files_naming(str(tmp_path), TOKEN, ["binary.ts", "late_nul.ts", "utf8_bom.ts"])
+    seen = files_naming(str(tmp_path), TOKEN, ["binary.ts", "late_nul.ts", "utf8_bom.ts", "plain.ts"])
 
-    assert seen == {"late_nul.ts": True, "utf8_bom.ts": True}, seen
+    assert seen == {"utf8_bom.ts": True, "plain.ts": True}, seen
+
+
+def test_a_read_stalled_on_a_slow_mount_is_abandoned_at_the_deadline_not_waited_out(
+        tmp_path, monkeypatch):
+    """The budget is a deadline, not a tally. Charging a read only after it returns bounds nothing
+    when one read does not return — a regular file on a stalled NFS or FUSE mount — and `callers`, or a
+    `changed` worker, would wait on it indefinitely. The stalled read is left on its own thread; it and
+    every file after it are unknown, and the answer comes back on time."""
+    import time
+
+    _write(tmp_path, "stalled.ts", TOKEN)
+    _write(tmp_path, "after.ts", TOKEN)
+    release = threading.Event()
+    real_read = qualifier_scan._read
+
+    def read(root_real, path):
+        if path.endswith("stalled.ts"):
+            release.wait(8)                              # a read that does not come back in time
+        return real_read(root_real, path)
+
+    monkeypatch.setattr(qualifier_scan, "_read", read)
+    started = time.monotonic()
+    try:
+        seen = files_naming(str(tmp_path), TOKEN, ["stalled.ts", "after.ts"],
+                            budget=qualifier_scan.Budget(0.3))
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 4, "a stalled read held the answer past its deadline"
+    assert seen is None, f"a file at or after the stall was judged: {seen}"
 
 
 def test_an_exhausted_time_budget_leaves_every_file_unjudged(tmp_path):

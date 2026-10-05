@@ -393,7 +393,7 @@ leaves it is never opened), only regular files (a FIFO at an indexed path is nev
 raises. A file larger than 1 MB is not read, and the scan stops at 16 MB or 200 files in total or after
 5 seconds spent reading for the whole answer (`changed <ref>` shares one allowance across every
 symbol it looks up, and counts reading time, not the time its backend lookups take). A file
-that is not plain text — a UTF-16 or UTF-32 byte-order mark, or a NUL byte in its first 8 KB — is not
+that is not plain text — a UTF-16 or UTF-32 byte-order mark, or a NUL byte anywhere in it — is not
 judged either: the printed `rg` decodes a wide encoding and the scan matches raw UTF-8, so the two would
 disagree about the same file. Every file not judged is `null` and counted as *could not be judged*, never
 as absent. When nothing could be judged — a root that is not on disk, an unreadable tree — the answer
