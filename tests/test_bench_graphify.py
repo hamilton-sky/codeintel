@@ -210,12 +210,17 @@ def test_build_reads_a_copy_never_the_tree_and_sees_no_api_key(monkeypatch, tmp_
 
 
 def _stub_engines(monkeypatch):
-    monkeypatch.setattr(score, "graph_answer", lambda *a, **k: (Answer(), Answer()))
+    monkeypatch.setattr(score, "graph_answer", lambda *a, **k: (Answer(), Answer(), Answer()))
     monkeypatch.setattr(score, "lsp_answers", lambda *a, **k: (Answer(), Answer()))
     monkeypatch.setattr(score, "_provenance", lambda *a, **k: None)
 
 
-def test_without_the_variable_the_benchmark_prints_exactly_its_four_arms(monkeypatch, capsys):
+def test_without_the_variable_the_benchmark_prints_its_five_arms_and_no_graphify_row(
+        monkeypatch, capsys):
+    """The default table grew a fifth arm, `graph_qualified`, and the point of this test is what did
+    NOT change: no Graphify row appears unless the variable names its executable, and the arm field
+    stays 16 columns wide (`graph_qualified` is 15 characters, so the longest default name still
+    fits the original width)."""
     monkeypatch.delenv(graphify_arm.ENV, raising=False)
     _stub_engines(monkeypatch)
 
@@ -224,6 +229,10 @@ def test_without_the_variable_the_benchmark_prints_exactly_its_four_arms(monkeyp
 
     assert "graphify" not in out
     assert "\ngraph_verified  " in out, "the default table's 16-column arm field changed width"
+    table = [ln.split()[0] for ln in out.splitlines()
+             if ln.split() and not ln.startswith(" ") and ln.split()[0].startswith(("graph", "lsp"))
+             and " / " in ln]
+    assert table == ["graph", "graph_verified", "graph_qualified", "lsp_raw", "lsp_classified"], out
 
 
 def test_with_the_variable_graphify_is_scored_against_the_same_oracle(monkeypatch, tmp_path, capsys):

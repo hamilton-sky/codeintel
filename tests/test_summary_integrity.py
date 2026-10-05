@@ -472,7 +472,19 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "test_the_confidence_note_counts_the_rows_it_describes",
     ("tally", "AnswerRendering._settle_name_matches"):
         "the two counts in the settle note are the rows in doubt and their distinct files — "
-        "test_the_settle_note_counts_the_rows_it_sends_you_to_check",
+        "test_the_settle_note_counts_the_rows_it_sends_you_to_check. The note has a second shape "
+        "once the engine runs the check itself, and its `N of M` is the refuted rows over the "
+        "name-matched rows SHOWN, with the rows nobody judged counted apart. Both numbers are "
+        "re-derived exactly from `rows[]` (`_checked_counts`: M is the name-matched rows with no "
+        "`via`, N the rows whose qualifier_seen is false) in "
+        "test_the_note_states_what_the_scan_found_rather_than_how_to_find_it; M leaves out the "
+        "callers through a base, which are never scanned, in "
+        "test_a_caller_through_a_base_is_never_refuted_by_the_scan_for_not_writing_the_class, and "
+        "leaves out the symbols past the candidate cap, which nobody is shown, in "
+        "test_the_count_is_over_the_symbols_the_answer_prints. The unreadable-file arithmetic is in "
+        "test_an_unreadable_file_is_unknown_and_not_counted_as_absent and the file-defining and "
+        "enclosing-object exclusions in test_a_row_in_the_file_that_defines_the_symbol_is_never_scanned "
+        "and test_a_call_on_the_enclosing_object_is_never_scanned",
     ("tally", "AnswerRendering._no_symbol_matched_the_hint"):
         "a no-match note states only what was asked — "
         "test_a_no_match_note_claims_nothing_about_the_symbol_itself",

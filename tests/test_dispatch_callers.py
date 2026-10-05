@@ -40,6 +40,7 @@ from codeintel.graph_dispatch import (
 )
 from codeintel.outcome import Missing
 from codeintel.providers.graph import GraphProvider
+from tests.test_edge_confidence import _checked_counts
 from tests.test_summary_integrity import _headline_disagreements
 
 ROOT = "/Users/x/Documents/project/codeintel"
@@ -1693,3 +1694,107 @@ def test_the_headline_names_the_class_hierarchy_among_the_ways_a_row_is_bound(mo
 
     assert "1 resolved · 1 name-matched" in body, body
     assert "the caller's own class hierarchy (`self_mro`, over INHERITS edges)" in body, body
+
+
+# ================================================================ the qualifier scan, and the bases
+
+def _scan_graph(tmp_path: Path) -> tuple[_Graph, Path]:
+    """`LspProvider.build_result` as this repository has it, over a REAL tree so the scan can run.
+
+    Two callers reach it directly and are guesses (`unique_name`): one test that writes `LspProvider`,
+    one that does not, and `MapGenerator.generate`, whose file never writes it either. Two callers
+    reach it only THROUGH the Protocol: `Gateway.query`, which calls `provider.build_result` where
+    `provider: CodeProvider` and so never writes `LspProvider` — that is why it is a caller by
+    dispatch and not by name — and `MapGenerator.generate` again, in the very file that holds the
+    direct guess above."""
+    g = _Graph()
+    proto = g.add_class("CodeProvider", file="app/provider.py", bases=["Protocol"],
+                        methods=["build_result", "probe"])
+    impl = g.add_class("LspProvider", file="app/lsp.py", methods=["build_result", "probe", "extra"])
+    guess = {"strategy": "unique_name", "conf": "0.75", "text": "provider.build_result"}
+    g.call("tests.test_lsp.test_names_it", "tests/test_lsp.py", f"{impl}.build_result", "app/lsp.py",
+           **guess)
+    g.call("tests.test_other.test_never_names_it", "tests/test_other.py", f"{impl}.build_result",
+           "app/lsp.py", **guess)
+    g.call("app.mapper.MapGenerator.generate", "app/mapper.py", f"{impl}.build_result", "app/lsp.py",
+           caller_label="Method", **guess)
+    via = {"strategy": "field_type_hint", "conf": "0.85", "text": "provider.build_result",
+           "caller_label": "Method"}
+    g.call("app.gateway.Gateway.query", "app/gateway.py", f"{proto}.build_result", "app/provider.py",
+           **via)
+    g.call("app.mapper.MapGenerator.generate", "app/mapper.py", f"{proto}.build_result",
+           "app/provider.py", **via)
+    files = {
+        "app/lsp.py": "class LspProvider:\n    def build_result(self): ...\n",
+        "app/provider.py": "class CodeProvider:\n    def build_result(self): ...\n",
+        "tests/test_lsp.py": "from app.lsp import LspProvider\n",
+        "tests/test_other.py": "def test_never_names_it(provider):\n    provider.build_result()\n",
+        "app/gateway.py": "def query(provider):\n    return provider.build_result()\n",
+        "app/mapper.py": "def generate(provider):\n    return provider.build_result()\n",
+    }
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    return g, tmp_path
+
+
+def test_a_caller_through_a_base_is_never_refuted_by_the_scan_for_not_writing_the_class(
+        monkeypatch, tmp_path):
+    """The reason `via` rows are excluded, in the shape that motivates it. `gateway.py` calls
+    `provider.build_result` and never writes `LspProvider`: a text search for `LspProvider` would call
+    that real dispatch caller "never writes the qualifier" and rank it last, which is the reverse of
+    what the section is for. Not a caller the index ties to the symbol, so not a caller anything about
+    the symbol's own name could refute.
+
+    The same file holds a direct guess, which IS refuted: the verdict is per ROW, and a file the scan
+    read for one row does not lend its verdict to a row that reached the symbol another way."""
+    graph, root = _scan_graph(tmp_path)
+    env = _provider(monkeypatch, graph, str(root)).build_result(
+        "callers", "LspProvider.build_result", [], 30000, str(root))
+    body = env["result"]
+    direct = {r["name"]: r for r in env["rows"] if not r.get("via")}
+    via = {r["name"]: r for r in env["rows"] if r.get("via")}
+
+    # CONTROL: the scan ran, and refuted what it was entitled to.
+    assert direct["test_names_it"]["qualifier_seen"] is True, direct
+    assert direct["test_never_names_it"]["qualifier_seen"] is False, direct
+    # `MapGenerator.generate` is marked "never writes `LspProvider`" in the direct list AND listed under
+    # "Callers through" below, in the same answer. That is not a contradiction to be fixed; it is the
+    # failure mode the note names first, pinned: `generate(provider)` is handed its instance from
+    # elsewhere (here a Protocol-typed parameter) and never writes the class, yet it reaches the
+    # method — which is why a `false` marks a row to doubt first and not a row proven not to call.
+    assert direct["generate"]["qualifier_seen"] is False, direct
+    assert "generate" in via, "the same caller, reaching the symbol through the base"
+    assert env["evidence"]["qualifier_absent"] == 2 and env["evidence"]["qualifier_present"] == 1
+
+    assert set(via) == {"query", "generate"}, via
+    for name, row in via.items():
+        assert row["qualifier_seen"] is None and row["qualifier"] is None, (name, row)
+        assert row["verified"] is False and row["via"].endswith("CodeProvider.build_result"), row
+        assert "never writes" not in row["why"], row
+    section = _via_section(body)
+    assert "never writes" not in section and "qualifier_seen" not in section, section
+    assert [ln.split(" [")[0] for ln in _row_lines(section)] == [
+        "- app.gateway.Gateway.query", "- app.mapper.MapGenerator.generate"], section
+    # The note speaks about the symbol's own callers: three guesses, not five rows. M is re-derived
+    # from `rows[]` with the `via` rows left out, which is how a consumer has to derive it.
+    assert "_Checked: **2 of 3** name-matched callers shown" in body.split("## Callers through")[0], body
+    assert _checked_counts(env) == (2, 3)
+
+
+def test_the_via_rows_keep_the_order_and_the_split_the_scan_did_not_touch(monkeypatch, tmp_path):
+    """`rows[]` is still the body's `- ` lines in the order printed — the symbol's own callers, ranked
+    by the scan, then the callers through the base, ranked as they were — and the `callers-via-base`
+    gap and the first-screen line about them are what they were."""
+    graph, root = _scan_graph(tmp_path)
+    env = _provider(monkeypatch, graph, str(root)).build_result(
+        "callers", "LspProvider.build_result", [], 30000, str(root))
+
+    # Production before tests inside the one kind of evidence, then the verdict: the production
+    # caller the scan refuted prints ahead of the test that names the class.
+    assert [r["name"] for r in env["rows"]] == [
+        "generate", "test_names_it", "test_never_names_it", "query", "generate"], env["rows"]
+    assert [bool(r.get("via")) for r in env["rows"]] == [False, False, False, True, True], env["rows"]
+    assert len(_row_lines(env["result"])) == env["evidence"]["returned"] == 5
+    assert "callers-via-base" in _gap_kinds(env), env["gaps"]
+    assert "> Of the possible callers, 2 call a base type or Protocol" in env["result"], env["result"]

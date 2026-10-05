@@ -115,13 +115,18 @@ CODEINTEL_BENCH_EXE=/tmp/codeintel-src python bench/run.py corpus-ts
 
 ## What it measures
 
-Three arms, per **question**, because the questions have opposite failure costs:
+Five arms, per **question**, because the questions have opposite failure costs:
 
 | arm | what it is |
 |---|---|
 | `graph` | what codeintel reports today, through its own envelope — what an agent actually receives |
+| `graph_verified` | the `graph` answer with `rows[].verified` applied — only the edges that followed a real binding; the arm the precision gate reads |
+| `graph_qualified` | the `graph` answer minus only the rows a qualifier scan DISPROVED (`rows[].qualifier_seen` is `false`) — see below |
 | `lsp_raw` | the language server's references taken as callers |
 | `lsp_classified` | the same references, with the syntax at each site deciding whether it is a call |
+
+(`graphify` and `graphify_extracted` are two further arms, present only when asked for — see
+[The Graphify arm](#the-graphify-arm).)
 
 * **direct callers** — precision-first. A fabricated caller sends an agent to edit unrelated code.
 * **change impact** — recall-first. A missed dependant is how live code gets broken.
@@ -247,6 +252,114 @@ The rest of the filter's cost is milder and was always visible: the rows it drop
 So this still does not settle the standing argument for keeping heuristic rows in the default
 answer — it prices it, and the price now has a unit. What it removes is the assumption that the
 price was unmeasurable, and the weaker claim that it had been measured at zero.
+
+### `graph_qualified`, the middle of that trade
+
+The two arms above are the endpoints of a choice — keep every guess, or keep only proven bindings —
+and for a long time nothing measured what sits between them. The argument for keeping heuristic rows
+is an argument about rows **nobody checked**. A row a mechanical check has refuted is a different
+object, and this arm is what prices the difference.
+
+`graph_qualified` is the `graph` answer with exactly one class of row removed: a name-matched row
+whose file never writes the qualifier the target was narrowed by (`rows[].qualifier_seen is false`).
+`qualifier_seen` comes from the engine's own scan — it reads the files the name-matched rows sit in and
+looks for the class a qualified target names (`StrategyChain` in `StrategyChain.resolve`), the check the
+answer used to print as `Settle it: rg …` and now runs. The arm is strictly weaker than `verified`: it
+discards what a check refuted rather than everything a binding did not confirm, so it cannot silence a
+symbol that `graph_verified` answers, and a row nobody could judge (`null`) is kept.
+
+The engine itself removes nothing — the scan ranks refuted rows last and labels them — and this arm
+applies the filter a *caller* could apply (`rows.filter(r => r.qualifier_seen !== false)`), which is
+the only way to price it. That is a measurement and not a recommendation: the table below is the case
+against applying it.
+
+#### Measured on 2026-10-05, the `graph_qualified` arm
+
+`codeintel 0.26.0` — branch `feat/qualifier-scan` (uncommitted) on base `0ba4af7`, so the table is
+reproducible from that base plus the branch's diff and not from a commit — run through the source build with
+`CODEINTEL_BENCH_EXE` — against `codebase-memory-mcp 0.10.8`, with the indexes as they stood (nothing
+was re-indexed for the run). Trees: `pathly-adapters` at `c1def41b`, `snitch-simulator` at `373b6dd`,
+`daycap` at `71502b8`, each with a clean tracked tree and left untouched by the run, plus the two
+checked-in TypeScript corpora. Graph arms only. Precision / recall; the three real trees are bare
+targets throughout, so the scan has nothing to do on them.
+
+| tree (targets) | arm | direct | impact | wrongly silent |
+|---|---|---|---|---|
+| `pathly-adapters` (10) | `graph` | 90% / 100% | 93% / 100% | 0 / 10 |
+| | `graph_verified` | 97% / 78% | 97% / 74% | 0 / 10 |
+| | `graph_qualified` | 90% / 100% | 93% / 100% | 0 / 10 |
+| `snitch-simulator` (6) | `graph` | 100% / 100% | 100% / 82% | 0 / 6 |
+| | `graph_verified` | 100% / 100% | 100% / 73% | 0 / 6 |
+| | `graph_qualified` | 100% / 100% | 100% / 82% | 0 / 6 |
+| `daycap` (8) | `graph` | 100% / 100% | 100% / 95% | 0 / 8 |
+| | `graph_verified` | 100% / 100% | 100% / 95% | 0 / 8 |
+| | `graph_qualified` | 100% / 100% | 100% / 95% | 0 / 8 |
+| `corpus-ts` (6) | `graph` | 46% / 67% | 46% / 50% | **1 / 6** |
+| | `graph_verified` | 75% / 33% | 75% / 25% | **3 / 6** |
+| | `graph_qualified` | **60%** / 67% | 60% / 50% | **2 / 6** |
+| `corpus-ts-typed` (2) | `graph` | 0% / 0% | 0% / 0% | **1 / 2** |
+| | `graph_verified` | n/a / 0% | n/a / 0% | **2 / 2** |
+| | `graph_qualified` | n/a / 0% | n/a / 0% | **2 / 2** |
+| **all five (32)** | `graph` | 83% / 93% | 85% / 87% | 2 / 32 |
+| | `graph_verified` | **97%** / 79% | 97% / 70% | 5 / 32 |
+| | `graph_qualified` | **90%** / 93% | 91% / 87% | 4 / 32 |
+
+What it says, in the order it should be read:
+
+* **The +14 points reproduced, to the digit, on the tree it was found on.** `corpus-ts`: `graph` 46% →
+  `graph_qualified` 60% direct precision at the same 67% recall, where `graph_verified` pays 34 points of
+  recall for +29. The first measurement of it (2026-09-19) was made on a branch that was closed; this one
+  is a rewrite against `0.26.0` — with a stricter gate, below — and it lands on identical numbers, `wrongly
+  silent` included (1 / 6, 2 / 6, 3 / 6). The whole movement is one target: the three Promise executors
+  that `FallbackChain.resolve` reports as callers are all in files that never write `FallbackChain`.
+* **Over the 32 targets it is +7 points of direct precision at unchanged recall (83% → 90%), and all of
+  it comes from the fixtures.** On `pathly-adapters`, `snitch-simulator` and `daycap` the arm is
+  *identical* to `graph` — not close, identical — because no target in those lists is a class-qualified
+  method, and the scan does not run on a bare target. So there is **no real-repository measurement of
+  this arm**: it has not been pointed at a tree where twelve classes each define `resolve`, which is
+  the shape it exists for. The only real-world case is the one hand-checked against a private clone
+  (`bright-sky`, 43 name-matched rows in 26 distinct files, none of which writes `StrategyChain`); that clone
+  was not re-measured here.
+* **It is paid for in the column that matters.** `wrongly silent` goes from 2 / 32 to 4 / 32, both on
+  the fixtures: on `FallbackChain.resolve` the true caller was never in the answer — the backend
+  recorded no edge for `this.chain.resolve(q)` — so removing the three refuted rows turns three wrong
+  callers into silence for a symbol that has one. `corpus-ts-typed` shows it undiluted: `graph` claims
+  three callers, all fabricated (0% precision), and `graph_qualified` claims none and answers silence
+  twice. The arm is better than `graph` only on the metric that does not count what was lost; anyone
+  reading it as "strictly better" should read that column first. That is also why the engine ranks and
+  labels these rows and does not drop them.
+* **The one real-repository observation there is, and it is the failure mode the engine is built
+  around.** Run against this repository's own tree (`callers AnswerRendering._render_edge_answer`, a
+  mixin method): four name-matched rows, three in files that write `AnswerRendering`, one that does
+  not — and the one that does not, `tests/test_edge_confidence.py::_render`, is a **true** caller. It
+  calls `gp._render_edge_answer(...)` on a `GraphProvider`, which inherits the mixin, and the file names
+  the subclass and never the class that defines the method. That is the "a subclass inherits it, and its
+  callers name the subclass" case, hit unprompted on the first real tree it touched, and it is why the
+  row is ranked last and labelled rather than removed: on this answer a filter would have dropped a
+  real caller. (`self_mro` rows, which are resolved, were correctly left unjudged.) n = 1, not a rate.
+* **Why a stricter gate, and what it was measured against.** The scan runs only when the *caller*
+  wrote a qualified target and the node it resolves to is a *method* whose defining class the index
+  records and is the one the target named (a `Method` label alone is not a class's member). Scanning on
+  any discriminator — the stem of the defining file for a bare target, or the backend's dotted name, which turns
+  `src.proxy.forwardReleasedItem` into the "qualifier" `proxy`, a module path wearing a class
+  qualifier's clothes — refutes a **true** caller: `callerFacade.ts` imports `forwardReleasedItem` from
+  `./facade` and contains no `proxy`. Re-measured on today's code with both gates removed, in a scratch
+  copy: `graph_qualified` falls to **56% / 56%** (below `graph`'s 67% recall) — `forwardReleasedItem`
+  loses one of its seven claimed rows, and it is a true caller (2 missed against `graph`'s 1). That
+  finding was first made on the closed branch, where the first attempted gate (which branch of the
+  discriminator fired) did nothing and the re-run said so by printing an identical table; the label of
+  the node, not the text of the target, is what separates a class from a module, and it is what the
+  gate reads now.
+
+What this does not say: that 32 targets is a population, that the fixtures are neutral (they were
+written against these failures), or that a text search's "never writes the class" is a proof — a caller
+can reach a method through an instance it gets from elsewhere (a module singleton, a constructor
+argument, a factory call, an alias), an interface-typed field, a subclass or a renaming re-export
+without writing its class's name, which is why nothing is removed by the engine. Nor does it say
+anything about **Python**: every class-qualified target in this table is TypeScript (the fixtures), the
+three real trees are bare targets throughout, and the single Python observation above is one row. Python
+is where untyped injection is the default, so the first of those routes is no edge case there, and
+how often it happens is unmeasured.
 
 ### Why these numbers went UP, and what that says about the instrument
 
@@ -482,6 +595,12 @@ Re-measured on the same repository: the 43 name-matched rows sit in **26 distinc
 command eliminates all 26, leaving the two true callers among the `resolved` rows. The headline is
 still 48 and the count is still the finding; what changed is that discharging the doubt is now one
 command a reader is handed rather than one they have to design.
+
+That command is now **run** when the target is a class-qualified method and the root can be read: the
+answer prints `Checked: 43 of 43 name-matched callers are in files that never write `StrategyChain``,
+publishes the verdict per row as `qualifier_seen`, and ranks those rows last — see
+[`graph_qualified`](#graph_qualified-the-middle-of-that-trade) for what that is worth. The printed
+command remains the answer for a bare target and for a root the tool cannot read.
 
 ### What `corpus-ts` reports today
 

@@ -1078,6 +1078,44 @@ class DispatchCallers(AnswerRendering):
         return (f"\n\n_`{target.short}` is also declared on {named}; the graph records no caller of "
                 f"{'it' if len(bases) == 1 else 'them'} either._")
 
+    # ------------------------------------------------------------ the class behind a qualified method
+
+    def _establish_method_owners(
+        self, op: str, groups: list[_EdgeGroup], wanted: _SymbolTarget, file_key: str,
+        project: str, timeout_ms: int,
+    ) -> None:
+        """Record, on each group the qualifier scan could judge, the class the backend says defines its
+        symbol — and ask for nothing otherwise.
+
+        The scan's token is the segment of the target in front of the method (`StrategyChain` in
+        `StrategyChain.resolve`), and the node's `Method` label does not say that segment is a class:
+        a backend that labels an object-literal method or a Go receiver `Method` would hand the scan a
+        module path (`pkg.proxy.forwardReleasedItem`), the case it was gated to avoid. The class that
+        DEFINES the method is read off the `DEFINES_METHOD` edge into it, the lookup the dispatch rule
+        already relies on, so a method with no class node behind it has no owner.
+
+        Run only when the scan would otherwise run (`_scan_plan`): an answer the note will not speak
+        about, or a target with nothing to scan, costs no query. Fails closed — a lookup that fails,
+        times out or raises leaves `owner` blank, the scan does not run, and the answer prints the
+        command it always printed. It is an improvement on an answer that is already whole, so a
+        failure here is not a gap and never reaches `_last_failure`."""
+        try:
+            plan = self._scan_plan(op, self._shown_groups(groups), wanted, file_key)
+            if plan is None:
+                return
+            asked = [g for g, _ in plan[1]]
+            with self._lookup_scope(timeout_ms):
+                owners, why = self._method_owners(
+                    sorted({g.qn_raw for g in asked if g.qn_raw}), project, timeout_ms, surface=False)
+            if why:
+                return
+            for g in asked:
+                owner = owners.get(g.qn_raw)
+                if owner is not None:
+                    g.owner = owner.qualified
+        except Exception as exc:
+            log_swallowed("DispatchCallers._establish_method_owners", exc)
+
     # ----------------------------------------------------------------- `self.m()` across classes
 
     def _upgrade_self_calls(self, groups: list[_EdgeGroup], project: str, timeout_ms: int) -> None:

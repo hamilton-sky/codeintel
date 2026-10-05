@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 import tempfile
 import threading
@@ -323,7 +324,10 @@ def read_new(root: str, path: str) -> str | None:
     if safe is None:
         return None
     try:
-        if os.path.getsize(safe) > MAX_SOURCE_BYTES:
+        info = os.stat(safe)
+        # A regular file only. A FIFO planted at a tracked path has one link and a size of zero, passes
+        # containment, and blocks `open` forever — which would hang the whole answer.
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SOURCE_BYTES:
             return None
         with open(safe, "rb") as fh:
             return fh.read().decode("utf-8", "replace")

@@ -10,6 +10,8 @@ absent. Every assertion below is one half of "that answer can no longer be produ
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from codeintel.graph_confidence import _EDGE_CONFIDENCE_FLOOR, _EDGE_CONFIDENCE_WEAK
@@ -1055,3 +1057,607 @@ def test_no_hint_recommends_an_engine_and_op_that_returns_unsupported_op(monkeyp
             assert op in supported.get(engine, set()), (
                 f"the {label} tells the reader to run `{op}` on the {engine} engine, which answers "
                 f"`unsupported-op`:\n{text}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# The qualifier scan — running the check the settle note used to tell a reader to run
+#
+# The settle note derives the token a name match did not use and printed `rg -n --fixed-strings
+# 'StrategyChain' <root>`. The token, the root and the rows in doubt are all in hand at render time, so
+# the answer now RUNS that check, states the result, publishes it per row as `qualifier_seen`, counts
+# it, labels the row and ranks the refuted rows last. Everything below is about what the result may
+# and may not be used to claim: the scan narrows an answer, it never empties one.
+#
+# These go through `build_result` against a REAL tree, because the scan reads files — a stub that
+# never opens one cannot show it. Each "never scanned" test carries a CONTROL: the same graph with the
+# one fact changed, in which the scan does run and does refute. A negative that cannot fail before the
+# change proves nothing on its own, so each is paired with an assertion that can.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+_TOKEN = "StrategyChain"
+_CHAIN_FILE = "src/chain.ts"
+
+
+def _chain_row(i: int, *, file: str | None = None, strategy: str = "unique_name",
+               conf: str = "0.75", callee: str = "resolve", caller_label: str = "Function",
+               target_label: str = "Method", target_qn: str = "pkg.chain.StrategyChain.resolve",
+               target_file: str = _CHAIN_FILE, target_name: str = "resolve",
+               name: str | None = None, kind: str = "CALLS") -> dict:
+    """One `callers` row for `StrategyChain.resolve`, in the shape the real backend returns it."""
+    return {
+        "a.name": name or f"c{i}", "a.qualified_name": f"pkg.agents.{name or f'c{i}'}",
+        "a.file_path": file or f"src/agents/f{i}.ts", "labels(a)": json.dumps([caller_label]),
+        "type(c)": kind, "c.confidence": conf, "strategy": strategy, "callee": callee,
+        "b.name": target_name, "b.qualified_name": target_qn, "b.file_path": target_file,
+        "labels(b)": json.dumps([target_label]),
+    }
+
+
+def _write_tree(root, rows: list[dict], *, naming: set[int] = frozenset(),  # type: ignore[assignment]
+                missing: set[int] = frozenset()) -> None:  # type: ignore[assignment]
+    """Every row's file on disk. `naming` is the row indices whose file writes `StrategyChain`;
+    `missing` the ones whose file is not written at all, which is how an unreadable path reaches the
+    scan. The defining file always writes the class, as the file that declares it does."""
+    for i, row in enumerate(rows):
+        if i in missing:
+            continue
+        path = root / row["a.file_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = "export const x = 1;\n"
+        if i in naming:
+            body += f"import {{ {_TOKEN} }} from './chain';\n"
+        if not path.exists() or i in naming:
+            path.write_text(body)
+    for defining in {row["b.file_path"] for row in rows} | {_CHAIN_FILE}:
+        chain = root / defining
+        chain.parent.mkdir(parents=True, exist_ok=True)
+        chain.write_text(f"export class {_TOKEN} {{ resolve() {{}} }}\n")
+
+
+def _scanned_callers(monkeypatch, tmp_path, rows: list[dict], *, naming=frozenset(),
+                     missing=frozenset(), target: str = f"{_TOKEN}.resolve",
+                     op: str = "callers", owner: str | None = "defining",
+                     queries: list[str] | None = None) -> dict:
+    """The envelope for `target` over *rows*, answered from a tree rooted at `tmp_path`.
+
+    *owner* is what the backend says about the class that defines the called method, because the scan
+    asks (`DEFINES_METHOD`) before it reads a file: `"defining"` answers with the class the method's
+    qualified name sits under, which is what a real index holds; `None` answers with no class at all,
+    the shape of a method with no class node behind it; any other string is the class named. Every
+    query sent to the backend is appended to *queries* when it is given."""
+    _write_tree(tmp_path, rows, naming=set(naming), missing=set(missing))
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    listing = {"projects": [{"name": "codeintel", "root_path": str(tmp_path)}]}
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        listing if method == "list_projects" else None))
+
+    def answer(cypher, project, timeout_ms):
+        if queries is not None:
+            queries.append(cypher)
+        if "[:DEFINES_METHOD]" in cypher:
+            if owner is None:
+                return []
+            out = []
+            for qn in sorted({r["b.qualified_name"] for r in rows}):
+                cls = qn.rsplit(".", 1)[0] if owner == "defining" else owner
+                out.append({"c.qualified_name": cls, "c.name": cls.rsplit(".", 1)[-1],
+                            "c.file_path": _CHAIN_FILE, "c.base_classes": None,
+                            "m.qualified_name": qn})
+            return out
+        return [dict(r) for r in rows]
+
+    monkeypatch.setattr(p, "_query_rows", answer)
+    return p.build_result(op, target, [], 30000, str(tmp_path))
+
+
+def _seen(env: dict) -> list:
+    return [r["qualifier_seen"] for r in env["rows"]]
+
+
+def _checked_counts(env: dict) -> tuple[int, int]:
+    """`(N, M)` from the printed `Checked: **N of M**` line AFTER re-deriving both from `rows[]` and
+    asserting they agree — which is the verifier `test_summary_integrity` registers for the note.
+
+    M is the name-matched rows of the DIRECT list as printed: `rows[]` also carries the callers
+    through a base (`via`), which are rendered apart and never scanned, so they are not counted. N is
+    the rows whose file never writes the qualifier."""
+    import re
+
+    stated = re.search(r"_Checked: \*\*(\d+) of (\d+)\*\*", env["result"])
+    assert stated, env["result"]
+    derived_m = sum(1 for r in env["rows"] if r["evidence"] == "name-matched" and not r.get("via"))
+    derived_n = sum(1 for r in env["rows"] if r["qualifier_seen"] is False)
+    assert (int(stated.group(1)), int(stated.group(2))) == (derived_n, derived_m), (
+        "the note's `N of M` is not the rows it describes", stated.group(0), derived_n, derived_m)
+    return derived_n, derived_m
+
+
+def _guesses(n: int, **kw) -> list[dict]:
+    return [_chain_row(i, **kw) for i in range(n)]
+
+
+def test_the_note_states_what_the_scan_found_rather_than_how_to_find_it(monkeypatch, tmp_path):
+    """The whole point of the change. The settle note told a reader to run `rg`; the token, the root
+    and the rows in doubt are all in hand at render time, so the answer states the result.
+
+    The command stays in the body underneath. A claim a reader cannot re-run is a claim they have to
+    take on trust, which is the thing this note exists to avoid."""
+    env = _scanned_callers(monkeypatch, tmp_path, _guesses(4))
+    body = env["result"]
+
+    assert ("_Checked: **4 of 4** name-matched callers shown are in files that never write "
+            "`StrategyChain`") in body, body
+    assert "the name it is qualified by" in body, body
+    assert "rg -n --fixed-strings 'StrategyChain'" in body, body
+    assert "Settle it" not in body, "the instruction is replaced by its result, not printed beside it"
+    assert _seen(env) == [False] * 4, env["rows"]
+    # The note's `N of M` is re-derived from `rows[]` and from the envelope's own counts, not read back
+    # from a second derivation that could drift.
+    assert _checked_counts(env) == (4, 4)
+    assert (env["evidence"]["qualifier_absent"], env["evidence"]["possible"]) == (4, 4), env["evidence"]
+
+
+def test_the_scan_never_removes_a_row(monkeypatch, tmp_path):
+    """The decided constraint, pinned where it would be easiest to break. Dropping a disproved row
+    would trade a false positive for a false negative, and `corpus-ts` prices that trade: filtering
+    the three fabricated rows off `FallbackChain.resolve` also empties an answer for a symbol that
+    has a caller. The scan ranks and labels; the caller decides."""
+    rows = [_chain_row(0, strategy="import_map", conf="0.95"), *(_chain_row(i) for i in range(1, 5))]
+    env = _scanned_callers(monkeypatch, tmp_path, rows)
+
+    assert _seen(env).count(False) == 4, env["rows"]       # the check ran, and refuted four of them
+    assert len(_row_lines(env["result"])) == 5, env["result"]
+    assert env["evidence"]["returned"] == 5 and len(env["rows"]) == 5, env["evidence"]
+
+
+def test_a_disproved_row_ranks_last_but_never_above_a_binding(monkeypatch, tmp_path):
+    """Ordering is the lever the scan is allowed to pull, and only within a bucket. A name-matched
+    row whose file writes the qualifier sorts above one nobody could judge, which sorts above one
+    whose file does not — and none of them can rise above a `resolved` row, because the scan is
+    weaker evidence than a followed binding and ordering it as though it were equal would be the same
+    over-claim in a new place.
+
+    The names that write the qualifier are the LATER ones in the backend's order, so an answer that
+    ignored the scan would print them last."""
+    rows = [_chain_row(0, strategy="import_map", conf="0.95"), *(_chain_row(i) for i in range(1, 6))]
+    env = _scanned_callers(monkeypatch, tmp_path, rows, naming={4, 5}, missing={3})
+
+    assert [r["name"] for r in env["rows"]] == ["c0", "c4", "c5", "c3", "c1", "c2"], env["rows"]
+    assert _seen(env) == [None, True, True, None, False, False], env["rows"]
+    assert [r["evidence"] for r in env["rows"]][:1] == ["resolved"], env["rows"]
+
+
+def test_a_verdict_never_puts_a_test_ahead_of_production_within_the_same_evidence(
+        monkeypatch, tmp_path):
+    """The truncation note promises "Production code is listed first and test files last", and the
+    scan verdict is a finer cut of evidence, not a reason to break it. The verdict is the LAST sort
+    key: kind, evidence bucket, production-versus-test, and only then the verdict. A spec that
+    imports the class (`true`) used to print ahead of a production caller that injects it (`false`) —
+    the one place a name-matched test outranked name-matched production, and the answer was still
+    telling the reader the opposite.
+
+    Within each partition the verdict still orders: names it, unjudged, never writes it."""
+    rows = [
+        _chain_row(0, file="tests/a.test.ts", name="test_never"),      # refuted, a test
+        _chain_row(1, file="src/agents/prod_never.ts", name="prod_never"),  # refuted, production
+        _chain_row(2, file="tests/b.test.ts", name="test_names"),      # names it, a test
+        _chain_row(3, file="src/agents/prod_names.ts", name="prod_names"),  # names it, production
+    ]
+    env = _scanned_callers(monkeypatch, tmp_path, rows, naming={2, 3})
+
+    assert [r["name"] for r in env["rows"]] == [
+        "prod_names", "prod_never", "test_names", "test_never"], env["rows"]
+    assert _seen(env) == [True, False, True, False], env["rows"]
+
+
+def test_a_resolved_row_is_never_marked_by_the_scan(monkeypatch, tmp_path):
+    """`null`, not `true` and not `false`. A row that followed a real binding is not in the scanned
+    population, so reporting either verdict for it would be a claim about a file nobody opened — and
+    `false` would invite the reading that a proven caller is suspect for not writing the class's name.
+    That includes the class-hierarchy resolution (`self_mro`) and a row with no provenance at all."""
+    rows = [
+        _chain_row(0, strategy="import_map", conf="0.95", name="by_import"),
+        _chain_row(1, strategy="lsp_direct", conf="0.95", name="by_lsp"),
+        _chain_row(2, strategy="self_mro", conf="0.90", name="by_hierarchy"),
+        _chain_row(3, strategy="", conf="", name="no_provenance"),
+        *(_chain_row(i, name=f"guess{i}") for i in range(4, 8)),
+    ]
+    env = _scanned_callers(monkeypatch, tmp_path, rows)
+    by_name = {r["name"]: r for r in env["rows"]}
+
+    assert all(by_name[n]["qualifier_seen"] is False for n in ("guess4", "guess5", "guess6", "guess7")), (
+        "the control: the scan ran, and refuted the guesses", env["rows"])
+    for n in ("by_import", "by_lsp", "by_hierarchy", "no_provenance"):
+        assert by_name[n]["qualifier_seen"] is None and by_name[n]["qualifier"] is None, by_name[n]
+        assert "never writes" not in by_name[n]["why"], by_name[n]
+    assert by_name["by_hierarchy"]["evidence"] == "resolved", by_name["by_hierarchy"]
+
+
+def test_an_unreadable_file_is_unknown_and_not_counted_as_absent(monkeypatch, tmp_path):
+    """The distinction every summary in this project exists to keep. "This file does not write
+    `StrategyChain`" and "we could not open this file" are different facts, and collapsing them
+    would let a missing path argue that a row is spurious."""
+    env = _scanned_callers(monkeypatch, tmp_path, _guesses(4), missing={2, 3})
+    body = env["result"]
+
+    seen = _seen(env)
+    assert seen.count(None) == 2 and seen.count(False) == 2, seen
+    assert "_Checked: **2 of 4**" in body, body
+    assert "2 could not be judged" in body and "`qualifier_seen: null`" in body, body
+    assert env["evidence"]["qualifier_absent"] == 2, env["evidence"]
+
+
+def test_a_file_that_cannot_be_judged_at_all_leaves_the_answer_as_it_was(monkeypatch, tmp_path):
+    """Nothing readable means nothing judged: the answer prints the command it always printed and no
+    row is marked, rather than reporting "0 of 4" about files nobody opened."""
+    env = _scanned_callers(monkeypatch, tmp_path, _guesses(4), missing={0, 1, 2, 3})
+    body = env["result"]
+
+    assert "_Settle it:" in body and "Checked:" not in body, body
+    assert _seen(env) == [None] * 4, env["rows"]
+
+
+def test_the_evidence_block_counts_what_the_scan_decided(monkeypatch, tmp_path):
+    """The envelope's counts are the rows' own values, not a second derivation that could drift."""
+    rows = [_chain_row(0, strategy="import_map", conf="0.95"), *(_chain_row(i) for i in range(1, 5))]
+    env = _scanned_callers(monkeypatch, tmp_path, rows, naming={1})
+    ev = env["evidence"]
+
+    assert ev["qualifier_present"] == 1, ev
+    assert ev["qualifier_absent"] == 3, ev
+    assert ev["qualifier_present"] + ev["qualifier_absent"] == ev["possible"], ev
+
+
+def test_the_note_says_so_when_every_row_that_could_be_judged_does_write_the_qualifier(
+        monkeypatch, tmp_path):
+    """A result of "0 of N" is still a result, and it must not borrow the refuted wording. When the
+    check narrows nothing the note says exactly that, and claims no row is ranked last."""
+    env = _scanned_callers(monkeypatch, tmp_path, _guesses(4), naming={0, 1, 2, 3})
+    body = env["result"]
+
+    assert "none of the 4** name-matched callers shown that could be judged" in body, body
+    assert "narrows nothing here" in body, body
+    assert "ranked last" not in body and "qualifier_seen: false" not in body, body
+    assert "[never writes" not in body, "no row is refuted, so no row is labelled"
+    assert env["evidence"]["qualifier_absent"] == 0 and env["evidence"]["qualifier_present"] == 4
+
+
+def test_a_refuted_row_says_so_on_its_own_line_and_in_its_why(monkeypatch, tmp_path):
+    """A reader scanning a list reads rows rather than notes — and `changed <ref>` has no note at all.
+    The fact is on the line it is about, in the same words everywhere, and `why` says what it does
+    and does not establish."""
+    rows = _guesses(3)
+    env = _scanned_callers(monkeypatch, tmp_path, rows, naming={0})
+    lines = _row_lines(env["result"])
+    by_name = {r["name"]: r for r in env["rows"]}
+
+    assert "[never writes `StrategyChain`]" not in lines[0], lines
+    assert all("[?0.75] [never writes `StrategyChain`]" in ln for ln in lines[1:]), lines
+    assert by_name["c1"]["qualifier"] == "StrategyChain" and by_name["c1"]["qualifier_seen"] is False
+    assert "never writes `StrategyChain`" in by_name["c1"]["why"], by_name["c1"]
+    assert "not proof that the call cannot reach this symbol" in by_name["c1"]["why"], by_name["c1"]
+    assert "its file writes `StrategyChain`" in by_name["c0"]["why"], by_name["c0"]
+    assert "which is text and not a call" in by_name["c0"]["why"], by_name["c0"]
+
+
+def test_without_a_readable_root_the_answer_falls_back_to_printing_the_command(monkeypatch, tmp_path):
+    """No scan, no claim. A provider answering about a root that is not on disk must not report
+    "0 of 43 name it" — it must hand the reader the check, which is the behaviour from before the
+    scan, unchanged. CONTROL: the identical graph over a real tree is scanned."""
+    rows = _guesses(5)
+    scanned = _scanned_callers(monkeypatch, tmp_path, rows)
+    assert _seen(scanned) == [False] * 5, scanned["rows"]
+
+    env = _callers(monkeypatch, rows, target=f"{_TOKEN}.resolve")        # ROOT is not a directory
+    assert "_Settle it:" in env["result"] and "Checked:" not in env["result"], env["result"]
+    assert _seen(env) == [None] * 5, env["rows"]
+    assert env["evidence"]["qualifier_absent"] == 0, env["evidence"]
+
+
+def test_the_note_that_hands_over_the_command_no_longer_claims_a_miss_is_spurious(monkeypatch):
+    """The printed-command note said "a file that never names it cannot be reaching this symbol, so
+    any … below whose file is absent from that output is spurious". That is false: an instance obtained
+    elsewhere, an interface-typed field, a subclass or a renaming re-export all reach a method without
+    naming its class. It stays a next step; it stops being a verdict — and it no longer calls the
+    absence "very unlikely" to be a caller, which is a probability nobody measured."""
+    env = _callers(monkeypatch, _guesses(6), target=f"{_TOKEN}.resolve")
+    note = env["result"]
+
+    assert "_Settle it:" in note, note
+    assert "cannot be reaching" not in note and "is spurious" not in note, note
+    assert "very unlikely" not in note, note
+    assert "an instance the file gets from elsewhere" in note, note
+    assert "the ones to doubt first" in note and "not proof" in note, note
+
+
+def test_a_bare_target_is_never_scanned_because_a_re_export_defeats_the_stem(monkeypatch, tmp_path):
+    """The limit that a measurement imposed, not a cautious guess. For a bare target the discriminator
+    falls back to the stem of the defining file, and a caller reaching the symbol through a re-export
+    never writes that stem: on `corpus-ts`, `callerFacade.ts` imports `forwardReleasedItem` from
+    `./facade`, contains no `proxy`, and a scan disproved a TRUE caller. A bare target also gets the
+    qualifier the BACKEND recorded, so a method named bare is no different — the caller did not write
+    one. CONTROL: the identical rows under the dotted target are scanned."""
+    rows = _guesses(4)
+    dotted = _scanned_callers(monkeypatch, tmp_path, rows)
+    assert _seen(dotted) == [False] * 4, dotted["rows"]
+
+    bare = _scanned_callers(monkeypatch, tmp_path, rows, target="resolve")
+    assert _seen(bare) == [None] * 4, bare["rows"]
+    assert "Checked:" not in bare["result"] and "_Settle it:" in bare["result"], bare["result"]
+
+
+def test_a_dotted_target_that_names_a_module_and_not_a_class_is_never_scanned(monkeypatch, tmp_path):
+    """The weak case that survives a gate on "the caller wrote a dotted target": `proxy.forwardReleasedItem`
+    is dotted, and `proxy` is a MODULE — a path a caller may reach through `./facade` without ever
+    spelling it. The text of the target cannot tell it from `StrategyChain.resolve`, and neither can the
+    node's `Method` label alone: a backend that labels an object-literal method or a Go receiver
+    `Method` hands the scan a qualified name with no class in it. What can is the class the backend
+    records as DEFINING the method, so a `Method` node with no class behind it, or behind it a class
+    that is not the one the target named, is never scanned. CONTROL: the same rows over a method whose
+    defining class IS the qualifier."""
+    def rows(label: str = "Method") -> list[dict]:
+        return [_chain_row(i, target_label=label, target_qn="pkg.proxy.forwardReleasedItem",
+                           target_name="forwardReleasedItem", target_file="src/proxy.ts",
+                           callee="forwardReleasedItem") for i in range(4)]
+
+    defined_by_it = _scanned_callers(
+        monkeypatch, tmp_path, rows(), target="proxy.forwardReleasedItem", owner="pkg.proxy")
+    assert _seen(defined_by_it) == [False] * 4, "the control: a class named `proxy` defines it"
+
+    no_class = _scanned_callers(monkeypatch, tmp_path, rows(), target="proxy.forwardReleasedItem",
+                                owner=None)
+    assert _seen(no_class) == [None] * 4, no_class["rows"]
+    assert "Checked:" not in no_class["result"] and "_Settle it:" in no_class["result"], no_class["result"]
+
+    other_class = _scanned_callers(monkeypatch, tmp_path, rows(), target="proxy.forwardReleasedItem",
+                                   owner="pkg.facade.Facade")
+    assert _seen(other_class) == [None] * 4, other_class["rows"]
+
+    function = _scanned_callers(monkeypatch, tmp_path, rows("Function"),
+                                target="proxy.forwardReleasedItem", owner="pkg.proxy")
+    assert _seen(function) == [None] * 4, "a `Function` node is no member of a class"
+    assert "Checked:" not in function["result"], function["result"]
+
+
+def test_a_failed_lookup_of_the_defining_class_leaves_the_answer_as_it_was(monkeypatch, tmp_path):
+    """The lookup is an improvement on an answer that is already whole, so it fails closed: nothing is
+    scanned, the reader is handed the command as before, and the failure is not a gap — the answer
+    claims nothing it did not check. CONTROL: the same rows with the lookup answering are scanned."""
+    rows = _guesses(4)
+    control = _scanned_callers(monkeypatch, tmp_path, rows)
+    assert _seen(control) == [False] * 4, control["rows"]
+
+    _write_tree(tmp_path, rows)
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    listing = {"projects": [{"name": "codeintel", "root_path": str(tmp_path)}]}
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        listing if method == "list_projects" else None))
+
+    def answer(cypher, project, timeout_ms):
+        if "[:DEFINES_METHOD]" in cypher:
+            if "m.qualified_name IN" in cypher:
+                raise RuntimeError("the lookup blew up")      # the one that asks for the owner
+            return []
+        return [dict(r) for r in rows]
+
+    monkeypatch.setattr(p, "_query_rows", answer)
+    env = p.build_result("callers", f"{_TOKEN}.resolve", [], 30000, str(tmp_path))
+
+    assert _seen(env) == [None] * 4, env["rows"]
+    assert "_Settle it:" in env["result"] and "Checked:" not in env["result"], env["result"]
+    assert {g["kind"] for g in env["gaps"]} == {g["kind"] for g in control["gaps"]}, env["gaps"]
+
+
+def test_a_row_in_the_file_that_defines_the_symbol_is_never_scanned(monkeypatch, tmp_path):
+    """The `same_module` case. The backend binds that strategy inside the caller's OWN file, so the
+    file is the one that defines the callee — and the file that declares `class StrategyChain` writes
+    `StrategyChain` whatever the call does. The verdict could only ever be `true`, which would rank a
+    row downgraded for being written through a receiver (`subprocess.resolve(...)`) ABOVE its peers on
+    evidence that cannot discriminate. So it is left unjudged, keeps its `qualified call` badge, and
+    sits between the two verdicts. CONTROL: its peers, in other files, are refuted."""
+    foreign = _chain_row(0, file=_CHAIN_FILE, strategy="same_module", conf="0.90",
+                         callee="subprocess.resolve", name="shells_out")
+    rows = [foreign, *(_chain_row(i) for i in range(1, 5))]
+    env = _scanned_callers(monkeypatch, tmp_path, rows)
+    by_name = {r["name"]: r for r in env["rows"]}
+
+    assert _TOKEN in (tmp_path / _CHAIN_FILE).read_text(), "premise: a scan of it could only say true"
+    assert by_name["shells_out"]["evidence"] == "name-matched", by_name["shells_out"]
+    assert by_name["shells_out"]["qualifier_seen"] is None, by_name["shells_out"]
+    assert [r["qualifier_seen"] for r in env["rows"] if r["name"] != "shells_out"] == [False] * 4
+    line = next(ln for ln in _row_lines(env["result"]) if "shells_out" in ln)
+    assert "[?0.90 qualified call]" in line and "never writes" not in line, line
+    assert "_Checked: **4 of 5**" in env["result"] and "1 could not be judged" in env["result"]
+
+
+@pytest.mark.parametrize("file,callee,defined_in", [
+    ("src/agents/f{i}.ts", "this.resolve", "src/chain.ts"),
+    ("src/agents/f{i}.py", "self.resolve", "src/chain.py")])
+def test_a_call_on_the_enclosing_object_is_never_scanned(
+        monkeypatch, tmp_path, file, callee, defined_in):
+    """`self.m()` and `this.m()` reach the method through the CALLER'S OWN class, by inheritance, and
+    never by writing the ancestor's name — the class hierarchy is the question, and a text search
+    cannot ask it. A subclass in another file that inherits `resolve` through a base this index could
+    not place is exactly the row a scan would wrongly refute. CONTROL: `this.chain.resolve` is a
+    field's method, and is scanned."""
+    own = _scanned_callers(
+        monkeypatch, tmp_path,
+        [_chain_row(i, file=file.format(i=i), callee=callee, target_file=defined_in)
+         for i in range(3)])
+    assert _seen(own) == [None] * 3, own["rows"]
+    assert "Checked:" not in own["result"], own["result"]
+
+    field = callee.replace(".resolve", ".chain.resolve")
+    scanned = _scanned_callers(
+        monkeypatch, tmp_path,
+        [_chain_row(i, file=file.format(i=i), callee=field, target_file=defined_in)
+         for i in range(3)])
+    assert _seen(scanned) == [False] * 3, scanned["rows"]
+
+
+def test_module_scope_code_is_never_scanned(monkeypatch, tmp_path):
+    """The backend attributes a module's scope to the file path it has for that node and has been
+    seen naming a SIBLING file there (`aliases.ini` for `aliases.py`), so a miss in that file is not
+    evidence about the code the row is about. CONTROL: a function in the same file is scanned."""
+    module = _chain_row(0, file="src/agents/top.ts", caller_label="Module", name="top")
+    module["a.qualified_name"] = "pkg.agents.top.__file__"
+    function = _chain_row(1, file="src/agents/top.ts", name="inside")
+    rows = [module, function, *(_chain_row(i) for i in range(2, 5))]
+    env = _scanned_callers(monkeypatch, tmp_path, rows)
+
+    scope = next(r for r in env["rows"] if r["module_scope"])
+    assert scope["qualifier_seen"] is None, scope
+    assert next(r for r in env["rows"] if r["name"] == "inside")["qualifier_seen"] is False, env["rows"]
+
+
+def test_the_scan_applies_to_callers_and_never_to_callees(monkeypatch, tmp_path):
+    """On `callees` the displayed rows are what the target CALLS, and a callee's file has no reason to
+    write the target's own class — a scan there would refute every callee that lives elsewhere.
+    CONTROL: the same target asked as `callers` is scanned."""
+    rows = _guesses(4)
+    as_callers = _scanned_callers(monkeypatch, tmp_path, rows)
+    assert _seen(as_callers) == [False] * 4, as_callers["rows"]
+
+    callees = []
+    for i in range(4):
+        row = _chain_row(i)
+        callees.append({
+            "a.name": "resolve", "a.qualified_name": "pkg.chain.StrategyChain.resolve",
+            "a.file_path": _CHAIN_FILE, "labels(a)": json.dumps(["Method"]),
+            "type(c)": "CALLS", "c.confidence": "0.75", "strategy": "unique_name", "callee": f"h{i}",
+            "b.name": f"h{i}", "b.qualified_name": f"pkg.helpers.Helper.h{i}",
+            "b.file_path": row["a.file_path"], "labels(b)": json.dumps(["Method"]),
+        })
+    env = _scanned_callers(monkeypatch, tmp_path, callees, op="callees")
+
+    assert env["rows"] and all(r["relation"] == "callee" for r in env["rows"]), env["rows"]
+    assert all(r["qualifier_seen"] is None for r in env["rows"]), env["rows"]
+    assert "Checked:" not in env["result"] and "never writes" not in env["result"], env["result"]
+
+
+def test_the_scan_lines_can_never_be_read_as_result_rows(monkeypatch, tmp_path):
+    """`bench/score.py::graph_answer` parses the body back into caller keys and takes every line
+    starting with `- ` as a row. The result line is prose in the settle note's position, and it must
+    stay out of that shape — or the benchmark would score the disclosure as a fabricated caller."""
+    env = _scanned_callers(monkeypatch, tmp_path, _guesses(4), missing={3})
+    added = [ln for ln in env["result"].splitlines() if "Checked:" in ln or "Re-run it yourself" in ln]
+
+    assert len(added) == 2, env["result"]
+    assert not any(ln.startswith("- ") for ln in added), added
+    assert len(_row_lines(env["result"])) == env["evidence"]["returned"] == 4, env["result"]
+
+
+@pytest.mark.parametrize("ext,callee", [
+    ("java", "this.resolve"), ("java", "resolve"), ("kt", "resolve"), ("rb", "resolve"),
+    ("go", "c.resolve"), ("rs", "self.resolve"), ("cs", "resolve")])
+def test_a_row_in_a_language_with_no_own_receiver_rule_is_never_scanned(
+        monkeypatch, tmp_path, ext, callee):
+    """`_OWN_RECEIVERS` is defined for Python, JavaScript and TypeScript only. In Java, Kotlin, C# or
+    Ruby an inherited member is reached with NO receiver (`resolve()`), and `this`/`self` do it in every
+    language here — from a file that never names the ancestor, which is the file a scan would refute.
+    Where the language's rule is not defined the row is left `null`, the same fail-closed answer
+    `_same_module_call` gives. CONTROL: a TypeScript row written through a receiver that is not the
+    enclosing object is scanned."""
+    rows = [_chain_row(i, file=f"src/agents/F{i}.{ext}", callee=callee,
+                       target_file=f"src/Chain.{ext}") for i in range(4)]
+    env = _scanned_callers(monkeypatch, tmp_path, rows)
+    assert _seen(env) == [None] * 4, env["rows"]
+    assert "Checked:" not in env["result"] and "never writes" not in env["result"], env["result"]
+
+    control = _scanned_callers(monkeypatch, tmp_path, _guesses(4, callee="chain.resolve"))
+    assert _seen(control) == [False] * 4, control["rows"]
+
+
+def test_a_row_with_no_recorded_call_text_is_never_scanned(monkeypatch, tmp_path):
+    """A blank `callee` says nothing about the receiver — an older index, or an edge the extractor left
+    blank — so a `self.m()` call could be hiding behind it, and `_same_module_call` treats it as
+    unchecked for that reason. A scan that judged it would fail open. CONTROL: the same rows with the
+    text recorded."""
+    blank = _scanned_callers(monkeypatch, tmp_path, _guesses(4, callee=""))
+    assert _seen(blank) == [None] * 4, blank["rows"]
+    assert "Checked:" not in blank["result"], blank["result"]
+
+    recorded = _scanned_callers(monkeypatch, tmp_path, _guesses(4, callee="chain.resolve"))
+    assert _seen(recorded) == [False] * 4, recorded["rows"]
+
+
+def test_the_scan_and_the_same_module_rule_share_one_definition_of_the_enclosing_object():
+    """Two copies of "is this receiver the enclosing object" drift: one learns `this?.` or `super(`
+    and the other does not. They ask `_is_own_receiver` and `_own_receivers_of`."""
+    import inspect
+
+    from codeintel.graph_confidence import _same_module_call
+
+    for fn in (GraphProvider._text_can_judge, _same_module_call):
+        source = inspect.getsource(fn)
+        assert "_is_own_receiver(" in source and "_own_receivers_of(" in source, fn.__name__
+        assert "_OWN_RECEIVERS" not in source.split('"""')[2], (
+            f"{fn.__name__} reads the table itself instead of asking the shared helper")
+
+
+def test_below_the_floor_nothing_is_scanned_badged_or_re_sorted(monkeypatch, tmp_path):
+    """The note is printed only when name-matched rows are at least `_SETTLE_FLOOR` and at least half
+    the answer. A scan that ran below that floor marked rows `qualifier_seen: false` and badged them
+    `[never writes …]` with no `Checked:` line, no command and no caveat anywhere in the body — a mark
+    with its qualification left off. So below the floor nothing is read, asked, marked or re-sorted.
+    CONTROL: at the floor, the same shape is scanned."""
+    two = _guesses(2)
+    queries: list[str] = []
+    env = _scanned_callers(monkeypatch, tmp_path, two, queries=queries)
+    assert _seen(env) == [None, None], env["rows"]
+    assert "never writes" not in env["result"] and "Checked:" not in env["result"], env["result"]
+    assert [r["name"] for r in env["rows"]] == ["c0", "c1"], "re-sorted although nothing was judged"
+    assert not any("m.qualified_name IN" in q for q in queries), "asked for a class it would not use"
+
+    resolved = [_chain_row(i, strategy="import_map", conf="0.95") for i in range(5)]
+    outweighed = _scanned_callers(monkeypatch, tmp_path, [*resolved, *(_chain_row(i) for i in range(5, 8))])
+    assert _seen(outweighed) == [None] * 8, "3 name-matched rows of 8 are under half the answer"
+    assert "never writes" not in outweighed["result"], outweighed["result"]
+
+    at_floor = _scanned_callers(monkeypatch, tmp_path, _guesses(3))
+    assert _seen(at_floor) == [False] * 3, at_floor["rows"]
+    half = _scanned_callers(monkeypatch, tmp_path, [*resolved[:3], *(_chain_row(i) for i in range(3, 6))])
+    assert _seen(half).count(False) == 3, "3 of 6 is half the answer, which is enough"
+
+
+def test_every_answer_that_badges_a_row_carries_the_note_and_the_command(monkeypatch, tmp_path):
+    """The invariant behind `server.py`'s "it has already run it, and says what it found" and the
+    guide's "the command is kept beneath": over a spread of answers, a body that contains a
+    `[never writes …]` badge also contains the `Checked:` line, the caveat and the `rg` command."""
+    resolved = [_chain_row(i, strategy="import_map", conf="0.95", name=f"r{i}") for i in range(3)]
+    shapes = {
+        "all guesses": _guesses(5),
+        "guesses and some resolved": [*resolved[:2], *(_chain_row(i) for i in range(2, 7))],
+        "outweighed": [*resolved, *(_chain_row(i) for i in range(3, 5))],
+        "two guesses": _guesses(2),
+        "none": [],
+    }
+    badged = 0
+    for label, rows in shapes.items():
+        if not rows:
+            continue
+        body = _scanned_callers(monkeypatch, tmp_path, rows)["result"]
+        if "[never writes" in body:
+            badged += 1
+            assert "_Checked:" in body, (label, body)
+            assert "a text search of the files as they are on disk" in body, (label, body)
+            assert "rg -n --fixed-strings 'StrategyChain'" in body, (label, body)
+    assert badged >= 2, "the spread must include answers that badge, or this proves nothing"
+
+
+def test_the_count_is_over_the_symbols_the_answer_prints(monkeypatch, tmp_path):
+    """`N of M` is about the rows SHOWN. When thirteen distinct symbols carry the name, the answer
+    prints twelve and withholds the rest (`_CANDIDATE_CAP`), and a count taken over the thirteenth's
+    rows is a count of rows no reader can see — one a verifier re-deriving it from `rows[]` could not
+    reproduce."""
+    rows = [_chain_row(i, target_qn=f"pkg.m{i}.StrategyChain.resolve", target_file=f"src/m{i}.ts")
+            for i in range(13)]
+    env = _scanned_callers(monkeypatch, tmp_path, rows)
+
+    assert len(env["rows"]) == 12 and env["evidence"]["total"] == 13, env["evidence"]
+    assert _checked_counts(env) == (12, 12), env["result"][:900]
+    assert "_Checked: **12 of 12** name-matched callers shown" in env["result"], env["result"][:900]

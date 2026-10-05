@@ -85,12 +85,18 @@ class _EdgeGroup:
     Grouping is what stops a `callees` answer from being the union of several questions with no way
     to tell which row came from where. It also makes the per-row language check structural rather
     than remembered: a row can only ever be compared against its own group's caller, so the
-    caller-family UNION bug that `0.15.5` fixed by hand cannot be written again here."""
+    caller-family UNION bug that `0.15.5` fixed by hand cannot be written again here.
+
+    `owner` is the qualified name of the class the backend records as defining this symbol, `""`
+    until a lookup establishes one. Only `callers` asks, and only when the qualifier scan could run
+    (`DispatchCallers._establish_method_owners`): the scan's token is the segment of the target in
+    front of the method, and "that segment is a class" is a fact about the node, not about the text."""
 
     label: str
     qn_raw: str
     file: str
     rows: list[dict]
+    owner: str = ""
 
     def describe(self) -> str:
         if self.label and self.file:
