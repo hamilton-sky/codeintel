@@ -4,13 +4,13 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.26.0] — 2026-10-05
 
-Closes the limit 0.25.0's notes disclosed: callers that reach an override only through a base class
+Closes the limit 0.25.0's notes disclosed (#65): callers that reach an override only through a base class
 or a Protocol were missing from its answer.
 
 ### Fixed
-- **Callers through a base class or Protocol are no longer missing from an override's answer.**
+- **Callers through a base class or Protocol are no longer missing from an override's answer** (#65).
   `gateway.py` and `mapper.py` call `provider.build_result` on a `CodeProvider`, a structural
   `Protocol` no provider inherits, so the graph records those calls on `CodeProvider.build_result`
   and `callers LspProvider.build_result` answered `complete` and safe for a destructive decision
@@ -41,7 +41,7 @@ or a Protocol were missing from its answer.
     (`caller_status: "through-base"`), never "also changed" or "untouched".
 
 ### Changed
-- **`self.m()` and `cls.m()` calls bound by the class hierarchy are resolved** (`self_mro`), in
+- **`self.m()` and `cls.m()` calls bound by the class hierarchy are resolved** (`self_mro`, #65), in
   `callers` and `callees` — but only along inheritance EDGES: the call text is exactly `self.m` /
   `cls.m`, the target's class is the caller's class or an ancestor reached through INHERITS edges,
   and no other class in that ancestry defines `m` or has a base the index cannot resolve. A base
@@ -56,7 +56,7 @@ or a Protocol were missing from its answer.
   deadline of six times the per-call budget. Functions and constructors cost none.
 
 ### Internal
-- **The call-edge benchmark can measure Graphify.** With `CODEINTEL_BENCH_GRAPHIFY` naming a
+- **The call-edge benchmark can measure Graphify** (#66). With `CODEINTEL_BENCH_GRAPHIFY` naming a
   `graphify` executable, `bench/run.py` adds `graphify` and `graphify_extracted` arms on the same
   oracle and scorer. Graphify reads a copy of the tree and runs with no API keys, a scratch `HOME`
   and no model backend on its `PATH`. Without the variable the table is unchanged. The first
