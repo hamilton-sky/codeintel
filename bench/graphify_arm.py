@@ -37,9 +37,12 @@ ENV = "CODEINTEL_BENCH_GRAPHIFY"
 _EXCLUDE = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "graphify-out", "dist",
                       "build", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".next", ".serena"})
 _BUILD_TIMEOUT_S = 1800
-# The relations that answer "who uses this". `imports` and `re_exports` are left out on purpose: the
-# oracle does not count an import as a caller or as change impact, and neither do the other arms.
-_USE_RELATIONS = ("calls", "references")
+# The relations that answer "who uses this". `calls` is a call. `indirect_call` is Graphify's edge for
+# a function passed or stored as a value — a callback, a dispatch table — and `references` any other
+# use: both are change impact, not calls, which is how the oracle labels such a site, and Graphify's
+# own blast-radius walk (`graphify affected`) counts both. `imports` / `re_exports` are left out on
+# purpose: the oracle does not count an import as a caller or as change impact, nor do other arms.
+_USE_RELATIONS = ("calls", "indirect_call", "references")
 
 
 def executable() -> str | None:
@@ -143,9 +146,13 @@ def build(root: str, exe: str) -> GraphifyIndex:
         proc = subprocess.run([exe, "update", copy, "--no-cluster"], env=sealed_env(exe, home),
                               capture_output=True, text=True, timeout=_BUILD_TIMEOUT_S)
         graph_json = os.path.join(copy, "graphify-out", "graph.json")
+        tail = (proc.stdout + proc.stderr).strip()[-300:]
+        # A graph a FAILED process left behind may be partial: scoring it would charge the engine for
+        # a half-built index. A clean build exits 0, so anything else is a failed build, graph or not.
+        if proc.returncode != 0:
+            raise RuntimeError(f"graphify exited {proc.returncode}: {tail}")
         if not os.path.exists(graph_json):
-            tail = (proc.stdout + proc.stderr).strip()[-300:]
-            raise RuntimeError(f"graphify wrote no graph (exit {proc.returncode}): {tail}")
+            raise RuntimeError(f"graphify exited 0 but wrote no graph: {tail}")
         with open(graph_json, encoding="utf-8") as fh:
             graph = json.load(fh)
         summary = next((ln.strip() for ln in proc.stdout.splitlines() if "Rebuilt" in ln), "")

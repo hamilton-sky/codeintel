@@ -150,6 +150,19 @@ def test_a_reference_is_change_impact_not_a_call_and_an_import_is_neither():
     assert every.everything == {("a.py", "a")}, "an import does not break when a body moves"
 
 
+def test_a_function_passed_as_a_value_is_change_impact_not_a_call():
+    """Graphify records a callback or a dispatch-table entry as `indirect_call`, and its own
+    blast-radius walk counts it. Dropping the relation charged Graphify for impact it reported."""
+    gi = _index(
+        [_node("t", "target()", "lib.py"), _node("d", "dispatch()", "d.py")],
+        [_edge("d", "t", relation="indirect_call", file="d.py", line=6)])
+
+    every, _ = graphify_answers(gi, _Lang({("d.py", 6): "dispatch"}), "/root", "lib.py", "target")
+
+    assert every.callers == set(), "a function handed over as a value is not a call of it"
+    assert every.others == {("d.py", "dispatch")}
+
+
 # --------------------------------------------------------------------------- end to end, fake engine
 
 _FAKE = r"""#!/bin/sh
@@ -242,3 +255,14 @@ def test_a_graphify_that_fails_to_build_skips_its_arms_and_says_why(monkeypatch,
     assert not any(ln.startswith("graphify ") for ln in out.splitlines()), (
         "a build that failed was scored as an engine that found nothing")
     assert os.path.isdir(CORPUS_TS) and not (CORPUS_TS / "graphify-out").exists()
+
+
+def test_a_graph_left_behind_by_a_failed_graphify_is_not_scored(monkeypatch, tmp_path):
+    """A process can write `graph.json` and then fail — a later pipeline step, a killed wrapper.
+    That graph may be partial, and scoring it would charge the engine for a half-built index."""
+    exe = tmp_path / "graphify"
+    exe.write_text(_FAKE + "\necho 'clustering failed' >&2\nexit 2\n")
+    exe.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="exited 2"):
+        graphify_arm.build(str(CORPUS_TS), str(exe))
