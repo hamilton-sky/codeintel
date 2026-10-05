@@ -4,13 +4,13 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.25.0] — 2026-10-05
 
-Born of one afternoon: the graph engine went down, the doctor called a one-second refusal a
+Born of one afternoon (#63): the graph engine went down, the doctor called a one-second refusal a
 timeout, and a branch review then had to be done by hand because `changed` could not see a branch.
 
 ### Added
-- **`changed` takes a base ref.** `code.query op=changed target="main"` (or `HEAD~3`, a tag, a SHA,
+- **`changed` takes a base ref** (#63). `code.query op=changed target="main"` (or `HEAD~3`, a tag, a SHA,
   or `<ref>...HEAD`) compares the merge-base with the working tree — committed and uncommitted
   changes together — and classifies each definition as removed, signature-changed, body-rewritten
   or added (Python through `ast`; other languages through the indexer's def-aligned chunks; C/C++
@@ -40,7 +40,7 @@ timeout, and a branch review then had to be done by hand because `changed` could
   the backend failure taxonomy, and how to recover from stale backend lock files.
 
 ### Changed
-- **`changed` with a non-empty `target` no longer answers for uncommitted edits.** It used to ignore
+- **`changed` with a non-empty `target` no longer answers for uncommitted edits** (#63). It used to ignore
   `target`; a target is now a git ref, and one git cannot resolve is a safe-null `unknown-ref` whose
   hint says to leave `target` empty for the old answer. An agent that passed a symbol name out of
   habit gets that hint rather than an answer about something else.
@@ -60,7 +60,7 @@ timeout, and a branch review then had to be done by hand because `changed` could
   the one row that mattered; that row now reads "healthy, but graph degraded".
 
 ### Fixed
-- **A graph backend that refuses to start is quoted, not reported as a timeout.**
+- **A graph backend that refuses to start is quoted, not reported as a timeout** (#63).
   `codebase-memory-mcp` 0.10.8 exited 1 in about a second with "CBM CLI could not start because a
   pre-coordination or unverified CBM generation is active", and the doctor said "list_projects
   failed/timed out" with a remediation to run the command it had just swallowed.
