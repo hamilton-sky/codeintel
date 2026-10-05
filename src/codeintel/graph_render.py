@@ -104,6 +104,11 @@ def _cypher_literal(s: Any) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _in_list(values: Any) -> str:
+    """The inside of a Cypher `IN [...]` list: each value as an escaped, double-quoted literal."""
+    return ", ".join(f'"{_cypher_literal(v)}"' for v in values)
+
+
 def _int_or_zero(value: Any) -> int:
     """Best-effort integer parsing for backend counts, which may arrive as JSON strings."""
     try:

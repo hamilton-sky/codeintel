@@ -58,7 +58,7 @@ this repo is indexed.
 
 | op | target | What it returns |
 |---|---|---|
-| `callers` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 callers of the symbol (name + file path) |
+| `callers` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | The callers of the symbol (name + file path) — and, for a method, the callers written against a [base type or Protocol](#callers-that-reach-a-method-through-a-base-type) instead of it, listed apart |
 | `callees` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 functions called by the symbol |
 | `impact` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Combined callers + callees section |
 | `context` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Alias for `impact` — the graph's contribution to the `context` fan-out |
@@ -107,6 +107,143 @@ Two things still limit these ops, and both are disclosed in the result rather th
   production, and a `row-cap-reached` gap. Only when that follow-up cannot run does the old answer
   stand: truncated, total unknown.
 
+### Callers that reach a method through a base type
+
+A call site is bound to the method on the type its receiver is **declared** as. `provider.build_result(...)`,
+where `provider: CodeProvider`, is an edge to `CodeProvider.build_result` — the Protocol's declaration —
+and not to `GraphProvider.build_result`, which is the method that runs. No provider inherits the Protocol
+(it is structural typing), so the index holds no `INHERITS` edge between the two, and `callers
+GraphProvider.build_result` used to answer with the tests that construct a `GraphProvider` and nothing
+else, at `confidence: complete` and `safe_for_destructive: true`, while its three production callers sat
+on the other node. That is the dangerous direction: the next action is a delete or a rename.
+
+When the target is one method of a class, `callers` — and so the callers half of `impact`, `context` and
+`changed <ref>` — also asks which methods a call site may have been written against, and lists their
+callers under a heading of their own, after the symbol's direct callers:
+
+```text
+## Callers through `CodeProvider.build_result` — they call the Protocol; at run time a call reaches this override only when the object is a `GraphProvider` (3)
+_`GraphProvider` does not inherit `CodeProvider`; it satisfies the Protocol by structure — it defines every method `CodeProvider` declares, checked by method NAME and not by signature. …_
+- src.codeintel.gateway.Gateway._dispatch_single [CALLS] [?via protocol 0.85] (src/codeintel/gateway.py)
+- src.codeintel.gateway.Gateway._query [CALLS] [?via protocol 0.85] (src/codeintel/gateway.py)
+- src.codeintel.mapper.MapGenerator.generate [CALLS] [?via protocol 0.85] (src/codeintel/mapper.py)
+```
+
+**Which methods count as a base.**
+
+| kind | found by | what the answer says |
+|---|---|---|
+| `base` | an ancestor of the class that also defines the method. Ancestors come from `INHERITS` edges and, where the index has none, from the `base_classes` names the class statement wrote, resolved to an indexed class when exactly one candidate carries the name (a class in the child's own file wins a tie). A dotted spelling (`torch.nn.Module`) must match an indexed class by its path: one that matches none names a class the index does not hold, and is **unresolved** whatever else shares its last name | which of the two it used: *INHERITS edges in the index*, or *found by resolving the base-class NAME its statement wrote — the index holds no INHERITS edge for it*; a name-resolved link is also said on every row's `why` |
+| `protocol` | a Protocol that declares the method, where the class — with its nominal ancestors — defines **every** method the Protocol declares, **including those of the Protocols it inherits** (Python only). A Protocol the class provably does not conform to contributes nothing | *checked by method NAME and not by signature*. A Protocol the class inherits explicitly is a `base` found through the hierarchy, not a structural match |
+| `protocol-undecided` | a Protocol that declares the method, where the class lacks a **method** for some member but cannot be said not to satisfy it: the Protocol declares that member as a property (a class can satisfy it with an attribute, and the graph records no class-level assignment or dataclass field at all), or the class has a base the index cannot resolve, which may supply it | *UNDECIDED*; the Protocol's callers are listed so the reader sees what may reach the method, and `dispatch-bases-incomplete` names the Protocol and the members (*an attribute or property could satisfy `name`*) |
+
+What the graph records, for the record: a `@property` member is a `Method` node with a `DEFINES_METHOD` edge and
+`decorators: ["@property"]`, which is what makes a Protocol member recognisable as an attribute-like one; a
+class-level assignment (`name = "f"`, an alias, `staticmethod(...)`) and a dataclass field are **not recorded
+at all** — no node, no edge. So only a Protocol *method* (no property decorator) that the class provably lacks,
+with no unresolvable base to supply it, rules a Protocol out.
+
+The walk is bounded: ancestry is followed 6 levels, at most 10 base methods are asked about, and a
+constructor (`__init__`, `__new__`) is never looked up, because a constructor is chosen by naming the
+class and not by a receiver's declared type. Only a target that is one symbol is looked up — a bare name
+that matches several is already `target-ambiguous`, and is narrowed by asking again with a qualified name.
+TypeScript interfaces have no member nodes in the graph, so there is nothing to carry the edges and an
+interface is not a base here.
+
+**What the rows may claim.** A call to the base is not a binding to the override: whether it reaches the
+target depends on the object's class at run time, which no static graph knows. So a row under this heading
+
+- carries `via` (the base method it actually called, qualified) and `via_kind` (`protocol`,
+  `protocol-undecided` or `base`) in `rows[]`, and is badged `[?via protocol 0.85]` / `[?via base 0.85]` /
+  `[?via protocol-undecided 0.85]` — the number is the backend's score for the edge **to the base**;
+- is **never** `verified`, whatever strategy its edge arrived on: an `lsp_direct` edge at 0.95 is a claim
+  about the Protocol. `why` keeps the strategy as the account of how the call reached the base;
+- is counted as `possible` in `evidence`, so `verified + possible + unstated == returned` still holds and
+  `total` still counts every printed row;
+- is ranked as everywhere else — production before tests, kinds split the way the direct heading splits
+  them — and is capped by the same distinct-caller cap, with the same exact-total note;
+- never feeds `all-rows-name-resolved` or the confidence note of the direct list: they describe the
+  symbol's own callers.
+
+Whenever any such row exists the answer raises `callers-via-base` (naming each base and its row count), so
+`confidence` is `partial` and `safe_for_destructive` is `false`, and the first screen says how many of the
+possible callers called a base. A caller that calls the symbol directly **and** its base is in both lists.
+When the target has bases and none of them has a caller, one line says so and nothing is raised.
+
+**What is left out, and counted.** A `super()` call binds to the class *after* the one it is written in, so a
+call to a base method through it provably cannot reach the target in two cases: the target's own call to the
+method it overrides (`Child.run` calling `super().run()` — the backend records that as an edge
+`Child.run → Base.run`, strategy `lsp_super`, call text `super().run`), and a `super()` call from a class that
+does not descend from the target's own — a sibling override, or another method of the same class. Those rows
+are not listed; one line under the sections says how many were left out and why, so nothing vanishes
+unexplained:
+
+```text
+_Not listed, because a call to `Base.run` from them cannot reach `Child.run`: `Child.run` itself, which calls the method it overrides and 2 `super()` call(s) from classes that do not descend from `Child` (other overrides of `Base.run`)._
+```
+
+A `super()` call from a class that *does* descend from the target's can reach it, and stays, with that stated on
+the row. One whose class the index cannot place (the lookup failed, the ancestry was cut, a base of the same
+name as the target's class is unresolved) is a doubt and not a proof: it stays, and its `why` says it was
+not placed. An override whose only base callers are such calls is not `partial` on their account.
+
+A target with **no** direct caller used to answer "no edge — not proof of dead code" (or, with a qualified
+target and a namesake that has callers, "no symbol matching … has callers"). It now answers with the
+`## Callers of X (0)` heading and the base's callers when there are any. When there are none the answer is
+what it said before — *provided every lookup answered*: if the direct query came back empty and the lookup of
+the bases then failed or timed out, the answer is that failure (`reason: timeout`, say) and not `no-edges`,
+because "nothing calls it" cannot be said while the question of who calls its base went unanswered. When
+the direct query was itself cut at its row limit and could not select the target, the heading says what was
+seen — not that nothing calls the symbol — and the answer carries `row-cap-reached` and an unknown total.
+
+| gap | raised when |
+|---|---|
+| `callers-via-base` | one or more callers were written against a base type or Protocol rather than against the target. Names each base and its count |
+| `dispatch-bases-incomplete` | the lookup of the bases fell short, so a caller that reaches the target through a base is *unknown*, not absent: a lookup failed, ran out of its time or raised; a result hit its row limit; the ancestry is deeper than 6 levels; more than 10 bases were found; the callers of a base could not be fetched; or a Protocol declares the method and whether the class satisfies it is undecided (an attribute or property could supply a member it lacks as a method, or it has a base this index cannot resolve) |
+
+Every shortfall that leaves callers through a base *uncounted* — as opposed to listed-but-undecided — also makes
+the envelope's `evidence.total` `null` and `evidence.truncated` `true`, so an exact total is never printed
+beside a gap that says some callers are missing. That includes a base's callers that came back cut at their
+row limit when every row of them was then filtered out.
+
+**Bounded.** The lookups beyond the direct query share one allowance of time — six times the per-call budget
+of the request — and each call is capped to what is left, so a backend that has stopped answering costs a
+bounded number of timeouts however deep the hierarchy is. The loop over the bases ends at the **first**
+failed fetch, and the bases it did not reach are named in the gap. The class hierarchy and the method listings
+are read once per op and shared by the lookup of the bases and the `self.m()` rule below — `impact` reads them
+once for both of its halves.
+
+What it cannot see, stated so it is not mistaken for a guarantee: a class-level attribute, an alias and a
+dataclass field are not recorded, so a Protocol *method* satisfied by a callable attribute is not recognised
+(a Protocol *property* is, as undecided); a base the index cannot resolve (a library class) cannot be asked
+about; and a call through a value whose declared type is not recorded is no edge at all.
+
+**`self.m()` across a class hierarchy.** The backend binds `self.m()` by bare name, so `GraphOps._op_callers`
+calling `self._render_edge_answer`, defined on a base of its class, arrived as a `unique_name` guess and the
+answer said the name might belong to "a library function". The index holds the class hierarchy, so the
+binding is re-derived from it — and relabelled `self_mro`, a resolution, only when **all** of this is true:
+
+1. the recorded call text is exactly `self.<m>` or `cls.<m>`, in Python;
+2. the caller is a method of a class K — not of a metaclass, where `self` is a class — and the target is a
+   method of class T;
+3. T is K, or one of K's ancestors **reached by `INHERITS` edges**; and
+4. no class that could be reached before T in K's resolution order — every class of K's ancestry that is
+   not T or one of T's own ancestors — defines `m` or has a base this index could not resolve.
+
+A link found by resolving a base **name** is not an edge: the one project class that carries the name is
+not evidence that it is the class K inherits (K may import a library class of that name), and promoting such
+a call to `verified` is the library-collision failure the name-resolution note warns about. A row the
+hierarchy would bind only through such a link stays name-matched, and its `why` says which link it was.
+
+Anything uncertain (a failed lookup, a hierarchy cut at the depth cap, an unresolvable base) leaves the row
+exactly as the backend labelled it, and a failed lookup here is not a gap — the row stays name-matched and
+says so. `why` states the rule and the route it found, and what the rule cannot see: a class that assigns
+`m` (an alias, `staticmethod(...)`, a class variable) is not recorded in the index, so a class that shadows it
+that way is not noticed. A subclass of K that overrides `m` is not
+considered: this is the binding from K's own hierarchy, which is also all `same_module` has ever claimed for
+a `self.` call. The relabelling applies to `callees` as well, so one edge is never a resolution in one op and
+a name guess in the other.
+
 ### `deadcode` is retired
 
 `deadcode` is retired (`_WITHDRAWN_OPS` in `graph.py`): it always returns a safe-null with
@@ -151,7 +288,7 @@ that, not a numeric score, decides how a row is presented:
 
 | class | strategies | shown as |
 |---|---|---|
-| resolved | `lsp_*`, `import_map`, `same_module` for a bare call (`run()` in the module that defines `run`) | no badge |
+| resolved | `lsp_*`, `import_map`, `same_module` for a bare call (`run()` in the module that defines `run`), `self_mro` for a `self.m()` the [class hierarchy binds](#callers-that-reach-a-method-through-a-base-type) over `INHERITS` edges | no badge |
 | **name guess** | `unique_name`, `suffix_match`, `heuristic`, fuzzy — and `same_module` when the recorded call text goes through a receiver (`subprocess.run` bound to the module's own `run`, `console.log` bound to the module's own `log`) | `[?0.75]` and counted in a note |
 
 `same_module` is a lookup by scope, not an import and not a language server, and each row's `why`
@@ -288,7 +425,13 @@ this branch forked is not reported as this branch's. Ranges that mean a differen
    changed in this diff — probably updated together**. That split is the point: the second list is
    what a reviewer would otherwise have to find by hand, and the first is the part nobody has looked
    at. A *module-scope* caller is never counted as touched (the diff compares definitions, not a
-   file's top-level statements), so it stays on the side that over-reports.
+   file's top-level statements), so it stays on the side that over-reports. A caller written against a
+   [base type or Protocol](#callers-that-reach-a-method-through-a-base-type) is **not** sorted by that
+   split — whether the diff touched a caller of the base says nothing about whether its author considered
+   this override. It has a list of its own per base (*Callers through `Base.m` — they call the base class,
+   not this symbol …*), badged `[?via base 0.85]` / `[?via protocol 0.85]`, with its own count; it is never
+   `verified`, so the group is `advisory` and the `callers-via-base` gap is forwarded with the symbol it
+   affects.
 4. **Who still mentions what was removed.** The graph cannot say: it was built from a tree that had
    the function. So a removed symbol's survivors come from `git grep -w` over the working tree, and
    they are **text mentions, not resolved calls** — a same-named symbol elsewhere matches, and so
@@ -309,7 +452,7 @@ mention, then `added` (listed for context — a caller that is itself new is not
 alone). At most 40 symbols are looked up, most severe first, and what the cap drops is named.
 
 **Rows and envelope.** `rows[]` is the body's `- ` lines, line for line, each stamped with
-`changed_symbol`, `change`, `caller_status` (`untouched` / `also-changed`) and `group_class`
+`changed_symbol`, `change`, `caller_status` (`untouched` / `also-changed` / `through-base`) and `group_class`
 (`evidence` / `advisory` for a graph group, `discovery` for text mentions). The envelope's own
 `evidence_class` stays `discovery` — that is `changed`'s ceiling — and `evidence.safe_for_destructive`
 is the existing derivation (no unverified row, nothing withheld, no gap), so it is `false` for any
@@ -343,6 +486,8 @@ answer*:
 | `mentions-outside-source` | a removed name is still written in files this op does not read as code (a manifest, a config); up to five are named, configuration before prose |
 | `stale-index` | the graph index was last written before a changed file, or before HEAD last moved by a checkout, merge, reset or rebase (a plain commit does not count) — so a caller added since is missing |
 | `index-age-unknown` | the index's age could not be read; the answer does not imply it is current |
+| `callers-via-base` | a changed symbol has callers written against a base type or Protocol rather than against it — see [above](#callers-that-reach-a-method-through-a-base-type); each such row is listed apart in its group and is never counted as a verified caller |
+| `dispatch-bases-incomplete` | the lookup of a changed symbol's bases fell short, so callers through a base are unknown |
 | *the `callers` gaps* | `row-cap-reached`, `low-confidence-edges`, `all-rows-name-resolved`, `non-call-relationships`, … are forwarded with the symbols they affect. One gap per kind, and each symbol keeps **its own** detail (`` `a`: 12 of 40 rows …; `b`: 3 of 3 rows … ``) — never the first symbol's figures under every name |
 
 The index's age is read from the graph backend's own file for the project (the directory `reset`

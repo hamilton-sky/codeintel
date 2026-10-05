@@ -22,8 +22,9 @@ engine is.
 | Engine | Answers | Treat it as | Because |
 |---|---|---|---|
 | **LSP** | `symbol` — definitions, references | **Evidence.** Act on it. | A language server resolved a real binding. When it cannot, it now says so rather than returning an empty list. |
-| **Graph**, rows marked `resolved` | `callers`, `callees`, `impact`, `chain` | **Evidence.** Act on it. | The edge was followed through an import or a language-server binding — or, for a bare call to a symbol the caller's own module defines, through that module's scope. A call written through a receiver (`subprocess.run`, `console.log`) is never `resolved` on that basis, in Python, JavaScript or TypeScript (`self`/`cls`/`this`/`super` and the symbol's own class or module are the enclosing object and stay resolved). **For a `same_module` edge the call-site check cannot judge** — another language, or no call text recorded — the row stays `resolved` and `verified`, and its `why` says so: scope resolved it, scope only binds a bare call, and whether this call is bare was not checked. That residual risk is stated on the row, not hidden by it. |
+| **Graph**, rows marked `resolved` | `callers`, `callees`, `impact`, `chain` | **Evidence.** Act on it. | The edge was followed through an import or a language-server binding — or, for a bare call to a symbol the caller's own module defines, through that module's scope — or, for a `self.m()` call, through the caller's own class hierarchy (`self_mro`: the class that defines `m` is the caller's class or an ancestor reached over `INHERITS` edges, and no class that could come first defines `m`; a base found only by resolving its **name** does not count). A call written through a receiver (`subprocess.run`, `console.log`) is never `resolved` on that basis, in Python, JavaScript or TypeScript (`self`/`cls`/`this`/`super` and the symbol's own class or module are the enclosing object and stay resolved). **For a `same_module` edge the call-site check cannot judge** — another language, or no call text recorded — the row stays `resolved` and `verified`, and its `why` says so: scope resolved it, scope only binds a bare call, and whether this call is bare was not checked. That residual risk is stated on the row, not hidden by it. |
 | **Graph**, rows marked `name-matched` | the same ops | **A lead. Verify before acting.** | The backend matched a bare name. On a name the index does not own, that collects every call site in the repository that mentions it. |
+| **Graph**, rows under a `Callers through` heading | `callers`, `impact`, `changed <ref>` | **A candidate, never evidence for the symbol you asked about.** | They called the *base* — a Protocol the class satisfies (or may satisfy: `protocol-undecided`), or a class it inherits — and a call to the base reaches your method only when the object is an instance of your class. See below. |
 | **Semantic** | `search` | **Discovery.** It finds candidates. | Similarity is not reachability. A high score means "reads like your query", never "calls this". |
 | **Pattern** | `pattern` | **Discovery**, same as above. | It is a graph-augmented grep. |
 
@@ -61,6 +62,36 @@ _Settle it: `rg -n --fixed-strings 'StrategyChain' <root>`_
 That is not decoration. On the example above it returns 5 files, none of which is any of the 26
 files the 43 name-matched rows sit in — so all 43 are spurious, established in one command.
 
+**A row under "Callers through" is not a caller of your symbol.** `callers GraphProvider.build_result` used
+to list the tests that construct a `GraphProvider` and nothing else, and answer `confidence: complete` with
+`safe_for_destructive: true` — while the three production callers had called `provider.build_result` where
+`provider: CodeProvider`. The graph binds a call to the type its receiver is *declared* as, so those edges
+point at the Protocol's declaration, and no `INHERITS` edge joins a structural implementation to it. They
+are listed now, apart:
+
+```text
+## Callers through `CodeProvider.build_result` — they call the Protocol; at run time a call reaches this override only when the object is a `GraphProvider` (3)
+- src.codeintel.gateway.Gateway._dispatch_single [CALLS] [?via protocol 0.85] (src/codeintel/gateway.py)
+```
+
+Read them as *the callers you must not change this method blind to*, and nothing stronger. Each carries `via`
+(the base method it actually called) and `via_kind` (`base`, `protocol`, or `protocol-undecided`), is **never**
+`verified` — however strong its edge was, that edge is a claim about the base, and `why` says so — and is
+counted as `possible`. Their presence raises `callers-via-base`, so the answer is `partial` and
+`safe_for_destructive` is `false`; whether a given call reaches your method is decided by the object's class
+at run time, which no static graph knows. The answer also says how it found the base: through `INHERITS`
+edges, through a base-class *name* resolved without one (a library class of that name would be taken for it),
+or — for a Protocol — by method **names** and not signatures. `protocol-undecided` means the class lacks a
+method for a member the Protocol declares as a property, which an attribute could satisfy and the index does
+not record: the Protocol's callers are listed because they may be the ones that reach you.
+`dispatch-bases-incomplete` means the lookup fell short, which makes a caller through a base *unknown*, not
+absent.
+
+What is **not** listed is counted. A `super()` call can only reach the override of a class below the one it is
+written in, so `Child.run` calling `super().run()` is not a caller of `Child.run`, and a sibling override
+doing the same cannot reach it; one line says how many such calls were left out. A `super()` call whose class
+the index cannot place is a doubt, not a proof, and stays, labelled.
+
 ### Before you delete anything
 
 `callers` returning nothing has two meanings and they are opposite: *nothing calls this*, and *the
@@ -71,6 +102,7 @@ lookup did not answer*. The envelope distinguishes them, and you must too:
   part as **unknown**, never as none.
 - `result: null` with a `reason` — nothing was answered at all. `reason` says why and `hint` says
   what to do.
+- `callers-via-base` in `gaps` — callers exist that were written against a base type or Protocol rather than against your symbol (a caller may also call your symbol directly, and then is in both lists). Read the section; a change here can break them.
 - `evidence.safe_for_destructive` — `true` only when there are rows, every one of them followed a
   real binding, the list is not truncated and nothing is disclosed missing. It is deliberately
   strict; if you want a looser rule, `evidence` gives you `verified` / `possible` / `unstated` and

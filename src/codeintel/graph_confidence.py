@@ -68,6 +68,11 @@ def _evidence_class(strategy: str) -> str:
         return "import"
     if st.startswith("same_module"):
         return "same-module"
+    # Not a strategy the backend reports: the label this project gives an edge it RE-RESOLVED from the
+    # class hierarchy (`self.m()` bound through the caller's own ancestry — `graph_dispatch.py`). It
+    # is classified here, with the others, so every reader of `strategy` agrees it is a resolution.
+    if st.startswith("self_mro"):
+        return "self-mro"
     if st.startswith("language_rule"):
         return "language-rule"
     if st.startswith("unresolved"):
@@ -227,7 +232,7 @@ def _edge_strength(row: dict) -> tuple[int, float]:
     """
     evidence = _evidence_class(str(row.get("strategy") or ""))
     conf = _edge_confidence(row)
-    if evidence in ("lsp", "import"):
+    if evidence in ("lsp", "import", "self-mro"):
         rank = 0
     elif evidence == "same-module":
         rank = 2 if _same_module_call(row) == _SAME_MODULE_FOREIGN else 0
@@ -246,6 +251,12 @@ def _callee_for_display(callee: str) -> str:
     return flat if len(flat) <= 60 else flat[:57] + "..."
 
 
+def _via_kind(row: dict) -> str:
+    """`protocol`, `protocol-undecided` or `base`: what kind of base method a `via` row called."""
+    kind = str(row.get("_via_kind") or "")
+    return kind if kind in ("protocol", "protocol-undecided") else "base"
+
+
 def _why(row: dict, bucket: str) -> str:
     """One sentence saying what ACTUALLY happened to produce this row's bucket.
 
@@ -256,8 +267,37 @@ def _why(row: dict, bucket: str) -> str:
     stronger.
     """
     strategy = str(row.get("strategy") or "").strip()
+    via = str(row.get("_via") or "")
+    if via:
+        # A caller of a BASE method listed under a symbol that overrides it. Whatever the edge's own
+        # strategy was, it bound the call to `via` and not to this symbol, so the row is never
+        # `resolved` for the symbol asked about; the strategy is kept here as the account of how it
+        # reached `via`, because that is the part of the claim the backend did make.
+        kind = "base class" if _via_kind(row) == "base" else "Protocol"
+        how = (f"the receiver's declared type (`{strategy}`)" if strategy == "field_type_hint"
+               else f"`{strategy}`" if strategy else "an edge the backend left unlabelled")
+        text = (f"resolved to the {kind} method `{via}` by {how}, not to this symbol; it reaches this "
+                "override only by dispatch, when the object is an instance of this symbol's class, "
+                "so no binding the index records ties it to this symbol")
+        # Each of these is a way the claim is weaker than the line above says, stated on the row so
+        # it is not only in a heading three screens up.
+        if _via_kind(row) == "protocol-undecided":
+            text += ("; and whether that class satisfies the Protocol is undecided — an attribute or "
+                     "property could supply a member it lacks as a method")
+        if row.get("_via_how") == "base_classes":
+            text += ("; and the link from this symbol's class to that base was found by resolving the "
+                     "base-class NAME its statement wrote, not from an INHERITS edge")
+        if row.get("_via_super"):
+            text += (f"; it is a `super()` call inside `{row['_via_super']}`, a class that descends from "
+                     "this symbol's class, so it can reach this symbol")
+        elif row.get("_via_super_unplaced"):
+            text += ("; it is a `super()` call from a class the index could not place in this symbol's "
+                     "hierarchy, so whether it can reach this symbol was not decided")
+        return text
     if bucket == _RESOLVED:
         evidence = str(row.get("_evidence") or "") or _evidence_class(strategy)
+        if evidence == "self-mro":
+            return str(row.get("_self_mro") or "resolved through the caller's own class hierarchy")
         if evidence == "lsp":
             return f"a language server resolved the call to this symbol ({strategy})"
         if evidence == "import":
@@ -295,8 +335,12 @@ def _why(row: dict, bucket: str) -> str:
             return (f"matched by name inside the caller's own module, but the call is written "
                     f"`{callee}` — through a receiver, not as this module's own symbol — so the "
                     f"match is a guess about what the receiver is ({strategy})")
-        return (f"matched by name ({strategy})" if strategy
+        text = (f"matched by name ({strategy})" if strategy
                 else "matched by bare symbol name, not by following a binding")
+        # A `self.m()` the class hierarchy would bind if one of its links were an edge: said here so
+        # a reader who sees a `self.` call still badged knows the rule looked and why it declined.
+        note = str(row.get("_hierarchy_note") or "")
+        return f"{text}; {note}" if note else text
     if bucket == _UNSTATED:
         return "the backend reported no provenance for this edge"
     return "unclassified"
@@ -311,6 +355,12 @@ def _confidence_badge(row: dict) -> str:
     if "_low_confidence" not in row:
         return ""
     conf = row.get("_low_confidence")
+    if row.get("_via"):
+        # The backend's score is for the edge to the BASE method — kept on show as detail, as every
+        # other badge does — but the verdict is about this symbol, and the glyph says which kind of
+        # base the call went through, since that is what a reader scanning the list needs to know.
+        kind = _via_kind(row)
+        return f" [?via {kind}]" if conf is None else f" [?via {kind} {float(conf):.2f}]"
     # A `same_module` edge this module refused to trust keeps the backend's own score on show — the
     # number is the backend's and is still detail — but the verdict is OURS, and a bare `[?0.90]`
     # reads as high confidence behind a question mark. Say what the doubt is about.

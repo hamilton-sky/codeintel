@@ -111,6 +111,9 @@ class _Lookup:
     detail: str = ""
     untouched: list[dict] = field(default_factory=list)
     also: list[dict] = field(default_factory=list)
+    # Callers of a BASE method (`graph_dispatch.py`). Kept out of the two lists above: whether the
+    # diff touched such a caller says nothing about whether its author considered THIS symbol.
+    through: list[dict] = field(default_factory=list)
     mentions: list[dict] = field(default_factory=list)
     quiet: int = 0                                # mentions that are only comments or definitions
     withheld: int = 0                             # rows found and not printed
@@ -396,15 +399,19 @@ class ChangedSince(AnswerRendering):
         if rows:
             lk.state = "ok"
             for r in rows:
-                (lk.also if self._caller_is_changed(r, touched) else lk.untouched).append(
-                    dict(r, module_scope_in_diff=bool(
-                        r.get("module_scope") and str(r.get("file") or "") in files)))
+                row = dict(r, module_scope_in_diff=bool(
+                    r.get("module_scope") and str(r.get("file") or "") in files))
+                if r.get("via"):
+                    lk.through.append(row)
+                else:
+                    (lk.also if self._caller_is_changed(r, touched) else lk.untouched).append(row)
             shown = self._RANGE_ROWS_SHOWN
             # Two different ways a known row goes unprinted, and both are WITHHELD: the rows this
             # group does not print (its own per-list limit), and the ones `callers` itself kept back
             # (its distinct-caller cap) — which it counts and does not publish. Counting only the
             # first made "120 callers, 50 kept" read as "50 in total" in the envelope.
             lk.withheld = (max(0, len(lk.untouched) - shown) + max(0, len(lk.also) - shown)
+                           + sum(max(0, len(rs) - shown) for rs in _by_base(lk.through).values())
                            + omitted)
             lk.complete = not lk.cap_hit and not lk.gaps
             if miss is not None:
@@ -638,7 +645,9 @@ class ChangedSince(AnswerRendering):
         if lk.source == "text":
             return [dict(r, group_class=klass) for r in lk.mentions[:shown]]
         out: list[dict[str, Any]] = []
-        for status, rows in (("untouched", lk.untouched), ("also-changed", lk.also)):
+        lists = [("untouched", lk.untouched), ("also-changed", lk.also),
+                 *(("through-base", rs) for rs in _by_base(lk.through).values())]
+        for status, rows in lists:
             out.extend(dict(r, changed_symbol=e.qn, change=e.change.change,
                             caller_status=status, group_class=klass) for r in rows[:shown])
         return out
@@ -653,7 +662,7 @@ class ChangedSince(AnswerRendering):
         graph lookup produced is `advisory`."""
         if lk.source == "text":
             return _DISCOVERY
-        rows = lk.untouched + lk.also
+        rows = lk.untouched + lk.also + lk.through
         if (lk.state == "ok" and lk.complete and rows and not lk.withheld
                 and all(r.get("verified") is True for r in rows)):
             return _EVIDENCE
@@ -670,11 +679,16 @@ class ChangedSince(AnswerRendering):
             raw["_module_scope"] = row.get("file")
         if row.get("evidence") == _NAME_MATCHED:
             raw["_low_confidence"] = row.get("confidence")
+            if row.get("via"):
+                # A caller of a BASE method (see `graph_dispatch.py`): the badge says which kind of
+                # base, and its strategy — whatever it is — is the account of how the call reached
+                # the base, so the `same_module` reading below must not be applied to it.
+                raw["_via"], raw["_via_kind"] = row.get("via"), row.get("via_kind")
             # A `same_module` edge is only ever name-matched because the call-site check found it
             # written through a receiver (see `_same_module_call`), so the strategy IS the verdict.
             # Without it the badge reads `[?0.90]` — the backend's high score behind a question
             # mark, which is the reading `callers` prints "qualified call" to prevent.
-            if _evidence_class(str(row.get("strategy") or "")) == "same-module":
+            elif _evidence_class(str(row.get("strategy") or "")) == "same-module":
                 raw["_same_module"] = _SAME_MODULE_FOREIGN
         line = self._display(raw, "a.name", "a.qualified_name", "a.file_path")
         if row.get("module_scope_in_diff"):
@@ -702,13 +716,24 @@ class ChangedSince(AnswerRendering):
         out = [self._group_heading(lk)]
         shown = self._RANGE_ROWS_SHOWN
         if lk.state == "ok":
-            for title, rows in (
-                ("Callers this diff did NOT touch — these may break", lk.untouched),
-                ("Callers also changed in this diff — probably updated together", lk.also),
-            ):
+            lists = [
+                (f"**Callers this diff did NOT touch — these may break ({len(lk.untouched)}):**",
+                 lk.untouched),
+                (f"**Callers also changed in this diff — probably updated together ({len(lk.also)}):**",
+                 lk.also),
+                # Apart from the two above, and one list per base: a caller of the BASE is not a
+                # caller of this symbol, and whether the diff touched it does not say that its
+                # author considered this override. It may be the only production caller there is.
+                *((f"**Callers through `{_short_base(via)}` — they call the "
+                   f"{'base class' if rs[0].get('via_kind') == 'base' else 'Protocol'}, not this symbol, "
+                   "and reach it only by dispatch; never counted as verified callers "
+                   f"({len(rs)}):**", rs)
+                  for via, rs in _by_base(lk.through).items()),
+            ]
+            for title, rows in lists:
                 if not rows:
                     continue
-                out.append(f"**{title} ({len(rows)}):**")
+                out.append(title)
                 out.extend(self._caller_line(r) for r in rows[:shown])
                 if len(rows) > shown:
                     out.append(f"… (+{len(rows) - shown} more, not shown)")
@@ -853,6 +878,20 @@ class ChangedSince(AnswerRendering):
 
 
 # ----------------------------------------------------------------------------- module helpers
+
+def _by_base(rows: list[dict]) -> dict[str, list[dict]]:
+    """Rows that reached a symbol through a base, grouped by the base method they called, in the
+    order the bases first appear."""
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(str(r.get("via") or ""), []).append(r)
+    return out
+
+
+def _short_base(via: str) -> str:
+    """`Base.m` from the qualified name of a base method."""
+    return ".".join(via.split(".")[-2:])
+
 
 def _diff_change(root: str, base_sha: str, change: FileChange) -> FileSymbolDiff:
     """One file's symbol diff. A side that SHOULD exist and cannot be read is `unparsable`, not

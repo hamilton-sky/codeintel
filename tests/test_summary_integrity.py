@@ -441,6 +441,23 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("count", "AnswerRendering._empty_edge_answer"):
         "a zero is rendered only when rows were retrieved — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",
+    ("count", "DispatchCallers._render_via"):
+        "each base's heading counts the rows printed beneath it, split into calls and other "
+        "references the way the direct heading is — "
+        "test_every_via_heading_counts_the_rows_beneath_it",
+    ("count", "GraphOps._callers_only_through_bases"):
+        "the zero is rendered only after the direct lookup answered with no rows, and only above the "
+        "rows of a base that has callers — "
+        "test_an_override_with_no_direct_callers_still_lists_the_callers_of_its_base, with the "
+        "failed-lookup side in "
+        "test_a_failed_direct_query_is_reported_as_the_failure_it_is_and_not_answered_from_a_base",
+    ("tally", "DispatchCallers._grow_hierarchy"):
+        "the row limit a hierarchy lookup names is the limit that lookup actually hit — "
+        "test_a_hierarchy_lookup_at_its_row_limit_names_the_limit_it_hit, and for the base-name "
+        "lookup test_a_base_name_lookup_at_its_row_limit_names_the_limit_it_hit",
+    ("tally", "DispatchCallers._members_of"):
+        "the row limit the method listing names is the limit it hit — "
+        "test_a_method_listing_at_its_row_limit_names_the_limit_it_hit",
     ("count", "LspProvider._op_symbol"):
         "the reference count counts the lines rendered — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",

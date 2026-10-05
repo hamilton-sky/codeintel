@@ -4,6 +4,57 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Closes the limit 0.25.0's notes disclosed: callers that reach an override only through a base class
+or a Protocol were missing from its answer.
+
+### Fixed
+- **Callers through a base class or Protocol are no longer missing from an override's answer.**
+  `gateway.py` and `mapper.py` call `provider.build_result` on a `CodeProvider`, a structural
+  `Protocol` no provider inherits, so the graph records those calls on `CodeProvider.build_result`
+  and `callers LspProvider.build_result` answered `complete` and safe for a destructive decision
+  over its test callers alone. `callers`, `impact`, `context` and `changed <ref>` on a method now
+  add a "Callers through `Base.m`" section for every base that declares the method: nominal
+  ancestors (inheritance edges, or the written base-class name when the index has no edge — the
+  answer says which), and Python Protocols the class conforms to, members of inherited Protocols
+  included. Conformance is checked by method names, not signatures.
+  - Those rows carry `via` / `via_kind`, are badged `[?via protocol|base]`, count as `possible`,
+    and are never `verified`: which override a call reaches is decided at run time. They raise
+    `callers-via-base`, so such an answer is `partial` and not safe for a destructive decision.
+  - What cannot reach the override is left out and counted in one line: the override's own call
+    to the method it overrides (`super().run()` or `Base.run(self)`), and `super()` calls from
+    classes that do not descend from it. An override that calls `super()` is therefore not
+    permanently partial. A call the override makes through a delegate (`self.inner.run()`) can
+    reach it again and stays listed.
+  - A Protocol member the class does not define as a method, where the Protocol declares it as a
+    property, leaves conformance undecided: the Protocol's callers are listed as
+    `protocol-undecided` and `dispatch-bases-incomplete` names the member. The graph does not
+    record class-level attributes, so an attribute that satisfies a Protocol method is not seen.
+  - A lookup that failed, hit a cap, or could not decide raises `dispatch-bases-incomplete`, and
+    then `evidence.total` is `null` and `truncated` is `true` — never an exact total backed only
+    by a gap. An empty direct answer with a failed base lookup is `timeout`, not `no-edges`.
+  - A method with no direct callers but callers on its base now answers `(0)` plus the base's
+    callers, instead of `no-edges` or "no symbol matching". A cut direct probe that could not
+    select the target says so instead of stating there is no direct caller.
+  - In `changed <ref>`, callers through a base get their own list per base
+    (`caller_status: "through-base"`), never "also changed" or "untouched".
+
+### Changed
+- **`self.m()` and `cls.m()` calls bound by the class hierarchy are resolved** (`self_mro`), in
+  `callers` and `callees` — but only along inheritance EDGES: the call text is exactly `self.m` /
+  `cls.m`, the target's class is the caller's class or an ancestor reached through INHERITS edges,
+  and no other class in that ancestry defines `m` or has a base the index cannot resolve. A base
+  linked only by its written name — one project `Serializer` against the library one a subclass
+  actually imports — leaves the row a name match, and a dotted base that matches no indexed class
+  (`torch.nn.Module`) is unresolved. `self` inside a metaclass is not upgraded. An override in a
+  subclass of the caller is not considered, and each row's `why` says so, along with the fact that
+  class-level assignments are invisible to the check. `GraphOps._op_callers` calling
+  `self._render_edge_answer` was a name match flagged as "a library function"; it is now resolved.
+- A `callers` question on a method costs a few more backend round trips to find its bases; one
+  hierarchy walk is shared per op, the lookups stop at the first failure, and together they get one
+  deadline of six times the per-call budget. Functions and constructors cost none.
+
 ## [0.25.0] — 2026-10-05
 
 Born of one afternoon (#63): the graph engine went down, the doctor called a one-second refusal a

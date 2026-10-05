@@ -99,8 +99,20 @@ def test_every_gap_kind_the_guide_names_is_one_some_provider_raises():
     kinds = _gap_kinds()
     named = set(re.findall(r"`(ancestor-scope|row-cap-reached|all-rows-name-resolved|"
                            r"low-confidence-edges|name-collisions-dropped|unresolvable|"
-                           r"non-call-relationships|target-ambiguous)`", TEXT))
+                           r"non-call-relationships|target-ambiguous|callers-via-base|"
+                           r"dispatch-bases-incomplete)`", TEXT))
+    assert {"callers-via-base", "dispatch-bases-incomplete"} <= named, (
+        "the guide no longer explains the rows that call a base, which is the one reading of "
+        "`callers` that used to end in a deletion")
     assert named <= kinds, f"named in trust.md but raised nowhere: {named - kinds}"
+
+
+def test_the_guide_names_the_class_hierarchy_among_the_ways_a_row_is_resolved():
+    """`self_mro` is a fourth mechanism that makes a row `resolved` — and a row `verified`. A guide
+    that listed three would have a reader doubting a row the engine is entitled to stand behind, and
+    one that did not say it is only ever over `INHERITS` edges would hide that a name never counts."""
+    assert "`self_mro`" in TEXT, "trust.md does not name the fourth way a row is resolved"
+    assert "reached over `INHERITS` edges" in TEXT and "found only by resolving its **name**" in TEXT
 
 
 # --------------------------------------------------------------------------- the commands
