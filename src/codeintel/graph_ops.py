@@ -20,9 +20,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from codeintel.graph_answer import AnswerRendering
+from codeintel.graph_changed import ChangedSince
 from codeintel.graph_confidence import _EDGE_CONFIDENCE_FLOOR, _edge_confidence, _evidence_class
-from codeintel.graph_edges import _DIRECT_KIND, _EDGE_ROW_LIMIT, _group_edges
+from codeintel.graph_edges import (
+    _DIRECT_KIND,
+    _EDGE_FETCH_CEILING,
+    _EDGE_ROW_LIMIT,
+    _EdgeFetch,
+    _group_edges,
+)
 from codeintel.graph_render import (
     _cypher_literal,
     _int_or_zero,
@@ -31,17 +37,19 @@ from codeintel.graph_render import (
     _repo_display_name,
     _strip_project_prefix,
 )
-from codeintel.graph_targets import _parse_symbol_target
+from codeintel.graph_targets import _parse_symbol_target, _SymbolTarget
 from codeintel.source_kind import is_code_path
 
 
-class GraphOps(AnswerRendering):
+class GraphOps(ChangedSince):
     """One method per graph op. Mixed into `GraphProvider`.
 
-    Inherits `AnswerRendering` rather than declaring its render methods, because the dependency is
-    real: an op's shape is query, filter, then render, and the alternative was fourteen stub
-    signatures asserting a relationship the code already has. The MRO `GraphProvider` ends up with
-    is unchanged either way.
+    Inherits `AnswerRendering` — through `ChangedSince`, the symbol-level `changed <ref>` pipeline,
+    which is itself an `AnswerRendering` — rather than declaring its render methods, because the
+    dependency is real: an op's shape is query, filter, then render, and the alternative was
+    fourteen stub signatures asserting a relationship the code already has. The MRO
+    `GraphProvider` ends up with gains one class between `GraphOps` and `AnswerRendering`, and no
+    method is defined twice.
 
     What it still needs from the provider is transport and per-query state, declared below.
     """
@@ -68,16 +76,12 @@ class GraphOps(AnswerRendering):
         and not the other, and a blast-radius answer whose callers belong to a DIFFERENT symbol of
         the same name is worse than an un-narrowed one: it reads as precise."""
         wanted = _parse_symbol_target(target)
-        cypher = (
-            f'MATCH (a)-[c:CALLS|USAGE|CALL_REFERENCE]->(b) WHERE b.name="{_cypher_literal(wanted.name)}" '
-            "RETURN a.name, a.qualified_name, a.file_path, labels(a), type(c), c.confidence, "
-            "c.strategy AS strategy, "
-            f"b.name, b.qualified_name, b.file_path LIMIT {_EDGE_ROW_LIMIT}"
-        )
-        rows = self._query_rows(cypher, project, timeout_ms)
+        fetched = self._fetch_edges("CALLS|USAGE|CALL_REFERENCE", "b", "a", wanted, project,
+                                    timeout_ms)
+        rows = fetched.rows
         if not rows:
             return None
-        truncated = len(rows) >= _EDGE_ROW_LIMIT
+        truncated = fetched.cut_short
 
         called = _group_edges(rows, "b.name", "b.qualified_name", "b.file_path")
         selected = [g for g in called if wanted.matches(g.qn_raw, g.file)]
@@ -91,15 +95,102 @@ class GraphOps(AnswerRendering):
         # counts or prints a row.
         dropped = self._drop_edge_collisions(selected, "a.file_path", "labels(a)")
         self._collapse_module_scope(selected, "labels(a)", "a.file_path")
+        # Then fold repeats and cap by CALLER. Both have to come after the filters above, so a row
+        # that was never a caller does not take a place from one that is, and before the note below,
+        # so every count it states describes the rows that are actually printed.
+        self._collapse_repeat_edges(selected, "a.name", "a.qualified_name", "a.file_path")
+        omitted = self._cap_distinct_edges(
+            selected, "a.name", "a.qualified_name", "a.file_path", tests_last=True)
         notes = self._confidence_note("callers", selected) + self._collision_note("callers", dropped)
+        if omitted.endpoints and not truncated:
+            notes = self._distinct_cap_note(
+                "callers", "caller", target, omitted, tests_last=True) + notes
         if truncated:
-            notes = self._row_cap_note("callers", target) + notes
+            notes = self._row_cap_note("callers", target, fetched.limit) + notes
         if not any(g.rows for g in selected):
             return self._empty_edge_answer(
                 "callers", "caller", target, wanted, selected, notes, truncated, dropped)
         return self._render_edge_answer(
             "callers", "caller", target, wanted, selected,
-            ("a.name", "a.qualified_name", "a.file_path"), truncated, notes)
+            ("a.name", "a.qualified_name", "a.file_path"), truncated, notes, omitted)
+
+    @staticmethod
+    def _edge_cypher(relationships: str, fixed: str, shown: str, name: str, *,
+                     limit: int, restrict: str = "") -> str:
+        """The edge query for one side of a symbol: `fixed` is the end the target names, `shown` the
+        end the rows are about (`b`/`a` for `callers`, `a`/`b` for `callees`).
+
+        One builder for both ops and for both the probe and the full fetch, so the column list — the
+        thing the renderer reads rows by — cannot differ between the first query and the one that
+        replaces it. `c.callee` is the call as written at the call site; see `_same_module_call`."""
+        return (
+            f'MATCH (a)-[c:{relationships}]->(b) WHERE {fixed}.name="{name}"{restrict} '
+            f"RETURN {shown}.name, {shown}.qualified_name, {shown}.file_path, labels({shown}), "
+            "type(c), c.confidence, c.strategy AS strategy, c.callee AS callee, "
+            f"{fixed}.name, {fixed}.qualified_name, {fixed}.file_path LIMIT {limit}"
+        )
+
+    def _fetch_edges(self, relationships: str, fixed: str, shown: str, wanted: _SymbolTarget,
+                     project: str, timeout_ms: int) -> _EdgeFetch:
+        """The edge rows of the symbol(s) *wanted* names — all of them, when the backend can say.
+
+        The first query is a probe, capped at `_EDGE_ROW_LIMIT`, and over the BARE NAME: it cannot
+        know which of the symbols carrying that name the caller meant, because that is decided
+        afterwards by `wanted.matches`. A probe that comes back short is the whole answer. One that
+        comes back FULL says nothing about the symbol asked about — the fifty may all belong to a
+        namesake — which is how `callers run@bench/score.py` reported a truncated answer with the
+        symbol's own sixth caller missing (see `_EDGE_FETCH_CEILING`).
+
+        So a full probe is followed up, in two queries that use only constructs this module already
+        relies on elsewhere (`count(*)` with grouping, `IN [...]`): an aggregate that returns one row
+        per symbol carrying the name, then a single fetch of just the selected symbols' edges. The
+        selection is made HERE, on the rows in hand, by the same `wanted.matches` the renderer
+        uses. What goes back to the backend is an `IN` over file paths the backend itself just
+        reported — never the hint's own text as a suffix predicate, which is what `_SymbolTarget`
+        records as the part of its dialect this project cannot pin.
+
+        Every way the follow-up can fail returns the probe's own rows marked `cut_short`, which is
+        exactly what a full probe has always meant: a list that may be missing rows, total unknown.
+        A reply that is not an aggregate — a backend that cannot count, a transport that answered
+        something else — is read as exactly that failure, never guessed at."""
+        name = _cypher_literal(wanted.name)
+        probe = self._query_rows(
+            self._edge_cypher(relationships, fixed, shown, name, limit=_EDGE_ROW_LIMIT),
+            project, timeout_ms)
+        if len(probe) < _EDGE_ROW_LIMIT:
+            return _EdgeFetch(probe, False)
+        cut = _EdgeFetch(probe, True)
+
+        held = self._query_rows(
+            f'MATCH (a)-[c:{relationships}]->(b) WHERE {fixed}.name="{name}" '
+            f"RETURN {fixed}.name, {fixed}.qualified_name, {fixed}.file_path, "
+            "count(*) AS edge_count",
+            project, timeout_ms)
+        selected_files: set[str] = set()
+        found = False
+        for r in held:
+            try:
+                int(str(r["edge_count"]))
+            except (KeyError, TypeError, ValueError):
+                return cut
+            qn = str(r.get(f"{fixed}.qualified_name") or "")
+            fp = str(r.get(f"{fixed}.file_path") or "")
+            if wanted.matches(qn, fp):
+                found = True
+                selected_files.add(fp)
+        if not found:
+            return cut                  # nothing to fetch; the op reports the unmatched hint itself
+        restrict = ""
+        if wanted.narrowed and "" not in selected_files:
+            in_list = ", ".join(f'"{_cypher_literal(f)}"' for f in sorted(selected_files))
+            restrict = f" AND {fixed}.file_path IN [{in_list}]"
+        full = self._query_rows(
+            self._edge_cypher(relationships, fixed, shown, name, limit=_EDGE_FETCH_CEILING,
+                              restrict=restrict),
+            project, timeout_ms)
+        if not full:
+            return cut
+        return _EdgeFetch(full, len(full) >= _EDGE_FETCH_CEILING, _EDGE_FETCH_CEILING)
 
     def _op_callees(
         self,
@@ -148,16 +239,11 @@ class GraphOps(AnswerRendering):
         """
         wanted = _parse_symbol_target(target)
         relationships = "CALLS|USAGE|CALL_REFERENCE" if include_references else "CALLS"
-        cypher = (
-            f'MATCH (a)-[c:{relationships}]->(b) WHERE a.name="{_cypher_literal(wanted.name)}" '
-            "RETURN b.name, b.qualified_name, b.file_path, labels(b), type(c), c.confidence, "
-            "c.strategy AS strategy, "
-            f"a.name, a.qualified_name, a.file_path LIMIT {_EDGE_ROW_LIMIT}"
-        )
-        rows = self._query_rows(cypher, project, timeout_ms)
+        fetched = self._fetch_edges(relationships, "a", "b", wanted, project, timeout_ms)
+        rows = fetched.rows
         if not rows:
             return None
-        truncated = len(rows) >= _EDGE_ROW_LIMIT
+        truncated = fetched.cut_short
 
         callers = _group_edges(rows, "a.name", "a.qualified_name", "a.file_path")
         selected = [g for g in callers if wanted.matches(g.qn_raw, g.file)]
@@ -171,15 +257,23 @@ class GraphOps(AnswerRendering):
         # the two ops treat the pseudo-node population identically and a future callee container is
         # handled without a second fix.
         self._collapse_module_scope(selected, "labels(b)", "b.file_path")
+        # Same two steps, same place, as `callers`. Test-ness is not a ranking signal on this side:
+        # a callee in a test file is a helper the target uses, not a lesser reason to look at it.
+        self._collapse_repeat_edges(selected, "b.name", "b.qualified_name", "b.file_path")
+        omitted = self._cap_distinct_edges(
+            selected, "b.name", "b.qualified_name", "b.file_path", tests_last=False)
         notes = self._confidence_note("callees", selected) + self._collision_note("callees", dropped)
+        if omitted.endpoints and not truncated:
+            notes = self._distinct_cap_note(
+                "callees", "callee", target, omitted, tests_last=False) + notes
         if truncated:
-            notes = self._row_cap_note("callees", target) + notes
+            notes = self._row_cap_note("callees", target, fetched.limit) + notes
         if not any(g.rows for g in selected):
             return self._empty_edge_answer(
                 "callees", "callee", target, wanted, selected, notes, truncated, dropped)
         return self._render_edge_answer(
             "callees", "callee", target, wanted, selected,
-            ("b.name", "b.qualified_name", "b.file_path"), truncated, notes)
+            ("b.name", "b.qualified_name", "b.file_path"), truncated, notes, omitted)
 
     def _op_impact(self, target: str, project: str, timeout_ms: int) -> str | None:
         callers = self._op_callers(target, project, timeout_ms)
@@ -441,14 +535,24 @@ class GraphOps(AnswerRendering):
             return None
 
     # -------------------------------------------------- repo-scan ops (no target)
-    # These key on the whole index / git worktree, not a symbol — `target` is ignored. A clean/empty
+    # These key on the whole index / git worktree, not a symbol — `target` is ignored, with one
+    # exception: `changed` reads it as a git base (see `_answer_changed_since`). A clean/empty
     # scan is a TRUE answer ("nothing changed", "no dead code"), not a lookup miss, so they return an
     # informative string; only a backend failure returns None (→ safe-null upstream).
 
-    def _op_changed(self, project: str, timeout_ms: int) -> str | None:
+    def _op_changed(
+        self, project: str, timeout_ms: int, target: str = "", root: str = ""
+    ) -> str | None:
         """Impact of the working tree's UNCOMMITTED changes: changed files → impacted symbols. The
         flagship pre-edit op. detect_changes drives a backend-side reindex of the changed files, so
-        it gets a higher timeout floor than a plain read."""
+        it gets a higher timeout floor than a plain read.
+
+        With a `target` it answers a different question — what a BRANCH changed, at symbol level —
+        and none of the body below runs: see `_answer_changed_since`. An empty target is the original
+        op, unchanged."""
+        since = (target or "").strip()
+        if since:
+            return self._answer_changed_since(since, project, timeout_ms, root)
         try:
             raw = self._run("detect_changes", {"project": project}, max(timeout_ms, 15000))
             if not isinstance(raw, dict):

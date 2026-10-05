@@ -390,9 +390,13 @@ def test_changed_keeps_symbol_with_slash_in_qualified_name(monkeypatch):
     assert "Changes impact (1 files → 1 symbols defined in them" in r["result"]
 
 
-def test_changed_payload_ignores_target_and_raises_timeout_floor(monkeypatch):
+def test_changed_payload_has_no_target_and_raises_timeout_floor(monkeypatch):
+    # `target` used to be IGNORED by `changed`, and this test passed one to prove it never leaked
+    # into the payload. It is now a git base (see tests/test_changed_range.py), so a non-empty
+    # target no longer reaches `detect_changes` at all; what is left to pin here is that the
+    # no-target op is exactly what it always was.
     p, seen = _capturing_provider(monkeypatch, CAP_DETECT_CHANGES_CLEAN)
-    p.build_result("changed", "ignored-target", [], 0, ROOT)
+    p.build_result("changed", "", [], 0, ROOT)
     assert seen["method"] == "detect_changes"
     assert seen["payload"] == {"project": "codeintel"}   # target never leaks into the payload
     assert seen["timeout"] >= 15000                        # higher floor: it drives a backend reindex

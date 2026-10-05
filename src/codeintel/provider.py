@@ -106,9 +106,13 @@ def safe_null_result(
         "op-not-allowed-for-role", "op-not-supported", "op-withdrawn", "project-not-indexed",
         "project-not-indexed-standalone", "root-not-allowed-for-role", "source-unreadable",
         "unknown-engine", "unsupported-op", "warming",
+        # `changed <ref>`: the question cannot be put to this repository right now (git missing, not
+        # a repository, no common ancestor, a range this op does not take) — not a finding about it.
+        "git-unavailable", "no-merge-base", "not-a-git-repo", "unsupported-range",
     }
     not_found_reasons = {
         "below-floor", "no-edges", "no-index", "no-result", "not-found", "not-in-graph",
+        "unknown-ref",
     }
     if reason in failed_reasons:
         outcome = "failed"

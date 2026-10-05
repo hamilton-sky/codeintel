@@ -66,8 +66,18 @@ def run(args: Any) -> int:
         state = _READY.get(str(entry.get("status") or ""), "unavailable")
         detail = entry.get("detail") or ""
         print(f"  {engine:<10} {state:<26} {detail}")
+    # `healthy` ignores the optional graph engine, so a repo whose graph backend is installed and
+    # refusing to run prints a green verdict above a row that says otherwise. Said in words here,
+    # because the table is read as a verdict and this is the line that stops "healthy" reading as
+    # "everything works".
+    degraded = [str(name) for name in (status.get("degraded") or [])]
+    if degraded:
+        lead = "healthy, but " if status.get("healthy") else ""
+        print(f"\n  {lead}{', '.join(degraded)} degraded (installed, but not working for this repo)")
     if status.get("healthy") is False:
         print("\n  run `codeintel doctor` for the fix for each gap")
+    elif degraded:
+        print("\n  run `codeintel doctor` for the reason and the fix")
 
     # Printed before anything else the user might act on. A skew means every line above describes
     # the code this process loaded, not the code installed — so a fix the user can read in the

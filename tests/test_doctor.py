@@ -670,3 +670,182 @@ def test_doctor_deep_reaches_every_engine():
                     if f'"{engine}", {engine}' in line or ("p.probe(root" in line and engine in line))
         assert call, engine
     assert source.count("deep=deep") >= 2 and "p.probe(root, deep=deep)" in source, source
+
+
+# --------------------------------------------------------------------------- #
+# `healthy` ignores the optional engine, so an installed-but-broken one needs its own field
+#
+# `healthy` answers "can this repo be worked on" and leaves the graph engine out on purpose: a
+# machine with no graph binary is fully usable. That conflated "not installed" with "installed and
+# refusing to run", and the second was reported as `healthy: true` with `graph: true` — an agent
+# reading the status payload had no field that said the graph engine would answer every question
+# with nothing. `degraded` is that field. These pin it, and pin that `healthy` did not move.
+# --------------------------------------------------------------------------- #
+
+class _Row:
+    """A provider whose probe returns one fixed row — the doctor's own contract, no subprocess."""
+
+    available = True
+
+    def __init__(self, *, installed=True, runnable=True, indexed=True, detail="", remediation=None):
+        self._row = {"installed": installed, "runnable": runnable, "repo_indexed": indexed,
+                     "detail": detail, "remediation": remediation}
+
+    def probe(self, *a, **k):
+        return dict(self._row)
+
+
+_REFUSING_GRAPH = {
+    "installed": True, "runnable": False, "indexed": False,
+    "detail": "codebase-memory-mcp is installed but refused to run `list_projects` (exit 1): "
+              "CBM CLI could not start",
+    "remediation": "close every codebase-memory-mcp process",
+}
+
+
+def test_an_installed_graph_that_refuses_to_run_is_degraded_while_the_repo_stays_healthy():
+    r = doctor.run_doctor("/repo", graph=_Row(**_REFUSING_GRAPH), lsp=_Row(), semantic=_Row())
+
+    assert r["engines"]["graph"]["status"] == "fail"
+    assert r["degraded"] == ["graph"], r["degraded"]
+    assert r["summary"]["healthy"] is True, "`healthy` ignores the optional engine, and still does"
+    assert (r["summary"]["ready"], r["summary"]["total"]) == (2, 3)
+
+    text = doctor.render_doctor_text(r)
+    assert "healthy, but graph degraded" in text, text
+    assert "CBM CLI could not start" in text, "the backend's own message is in the note"
+    assert "works without it" not in text, (
+        "the 'optional — codeintel works without it' reassurance is about an ABSENT backend; "
+        "printed under one that refused to start it told the reader nothing true that mattered")
+
+
+def test_nothing_is_degraded_when_every_engine_is_fine():
+    r = doctor.run_doctor("/repo", graph=_Row(), lsp=_Row(), semantic=_Row())
+
+    assert r["degraded"] == []
+    assert r["summary"]["healthy"] is True
+    assert "degraded" not in doctor.render_doctor_text(r)
+
+
+def test_an_absent_optional_engine_is_not_degraded():
+    r = doctor.run_doctor("/repo", graph=_Row(installed=False, runnable=False, indexed=False),
+                          lsp=_Row(), semantic=_Row())
+
+    assert r["degraded"] == [], "not installed is a different state, and the fine one"
+    assert r["summary"]["healthy"] is True
+    text = doctor.render_doctor_text(r)
+    assert "optional" in text and "degraded" not in text
+
+
+def test_a_required_engine_that_is_installed_and_failing_is_degraded_and_unhealthy():
+    r = doctor.run_doctor("/repo", graph=_Row(), lsp=_Row(),
+                          semantic=_Row(installed=True, runnable=True, indexed=False))
+
+    assert r["degraded"] == ["semantic"]
+    assert r["summary"]["healthy"] is False
+    text = doctor.render_doctor_text(r)
+    assert "semantic degraded" in text and "healthy, but" not in text, (
+        "an unhealthy repo must not be introduced with 'healthy, but'")
+
+
+def test_a_probe_that_raised_is_not_called_degraded():
+    """A raising probe reports `installed: None` — nobody could tell. Calling it degraded would
+    assert something this report has no evidence for."""
+    r = doctor.run_doctor("/repo", graph=_RaisingProvider(), lsp=_Row(), semantic=_Row())
+    assert r["engines"]["graph"]["status"] == "fail"
+    assert r["degraded"] == []
+
+
+def _gateway_with(graph, lsp, semantic):
+    import types
+
+    return types.SimpleNamespace(
+        graph=graph, lsp=lsp, semantic=semantic,
+        allows_root=lambda role, root: True, adopt_provider=lambda engine, provider: None,
+    )
+
+
+def test_code_status_carries_degraded_and_the_flat_flags_still_mean_installed(monkeypatch):
+    from codeintel import server
+
+    monkeypatch.setattr(server, "_get_gateway", lambda: _gateway_with(
+        _Row(**_REFUSING_GRAPH), _Row(), _Row()))
+    status = server.code_status_handler({"project_root": "/repo"})
+
+    assert status["degraded"] == ["graph"], status
+    assert status["healthy"] is True, "the meaning of `healthy` did not change"
+    assert status["graph"] is True, "the flat flag is INSTALLED, which is what it always meant"
+    assert status["readiness"]["graph"]["status"] == "fail", (
+        "the row that contradicts the flat flag — and the reason `degraded` exists")
+    assert "CBM CLI could not start" in status["readiness"]["graph"]["detail"]
+
+
+def test_code_status_degraded_is_empty_when_every_engine_is_fine(monkeypatch):
+    from codeintel import server
+
+    monkeypatch.setattr(server, "_get_gateway", lambda: _gateway_with(_Row(), _Row(), _Row()))
+    status = server.code_status_handler({"project_root": "/repo"})
+    assert status["degraded"] == [] and status["healthy"] is True
+
+
+def test_the_status_fallback_and_the_refused_doctor_report_carry_the_key():
+    """Shape stability: a caller reading `degraded` must not KeyError on the degraded path, or the
+    check stops running exactly when things are worst. The value is `None` — "could not tell" — and
+    NOT `[]`, which is what a report that actually looked says when nothing is failing."""
+    from codeintel import server
+
+    assert "degraded" in server._STATUS_FALLBACK and server._STATUS_FALLBACK["degraded"] is None
+    gw = server._get_gateway()
+    gw.allows = lambda role, op: False              # type: ignore[method-assign]
+    denied = server._code_doctor_handler_inner({"project_root": "/repo"})
+    assert "degraded" in denied and denied["degraded"] is None
+
+
+def _cli_args(**kw):
+    import argparse
+
+    return argparse.Namespace(project_root=None, json=False, deep=False, **kw)
+
+
+def test_codeintel_status_says_healthy_but_graph_degraded(monkeypatch, capsys):
+    from importlib import import_module
+
+    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+        "readiness": {
+            "graph": {"status": "fail", "detail": "refused to run (exit 1): CBM CLI could not start"},
+            "lsp": {"status": "ok", "detail": "ok"},
+            "semantic": {"status": "ok", "detail": "ok"},
+        },
+        "healthy": True, "degraded": ["graph"],
+    })
+    assert import_module("codeintel.commands.status").run(_cli_args()) == 0
+    out = capsys.readouterr().out
+
+    assert "healthy, but graph degraded" in out, out
+    assert "codeintel doctor" in out, "the way to the reason"
+
+
+def test_codeintel_status_prints_no_degraded_line_when_nothing_is(monkeypatch, capsys):
+    from importlib import import_module
+
+    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+        "readiness": {"graph": {"status": "ok", "detail": "ok"}}, "healthy": True, "degraded": [],
+    })
+    assert import_module("codeintel.commands.status").run(_cli_args()) == 0
+    assert "degraded" not in capsys.readouterr().out
+
+
+def test_codeintel_doctor_says_healthy_but_graph_degraded_and_exits_zero(monkeypatch, capsys):
+    """The exit code is the other half: `healthy` gates scripts and CI, and it is unchanged — the
+    degradation is for the reader, not a new way to fail a pipeline."""
+    from importlib import import_module
+
+    real = doctor.run_doctor
+    monkeypatch.setattr(
+        doctor, "run_doctor",
+        lambda root, deep=False, **k: real(
+            root, deep=deep, graph=_Row(**_REFUSING_GRAPH), lsp=_Row(), semantic=_Row()))
+    args = _cli_args()
+    args.project_root = "/repo"
+    assert import_module("codeintel.commands.doctor").run(args) == 0
+    assert "healthy, but graph degraded" in capsys.readouterr().out

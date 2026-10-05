@@ -48,10 +48,12 @@ the call/import-structure ops.
 **Failure modes → fix**
 - `engine-unavailable` — binary not on PATH → install it, re-run `setup`.
 - `backend-incompatible` — the reply matched neither dialect, so most likely a backend newer than this codeintel. Upgrade codeintel first; failing that pin `codebase-memory-mcp==0.10.*`.
-- `backend-unreachable` (NOT "not indexed") — the binary re-initialises its allocator every
-  invocation (~5.8s measured), and a slow machine can exceed the resolve budget. Raise it:
-  `export CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS=40000`. This is the failure that once reported a fully
-  indexed repo as un-indexed.
+- `backend-unreachable` (NOT "not indexed") — the backend did not answer. If the `hint` says it
+  **refused to run**, the cause is quoted there and the fix is not a longer timeout — see
+  [doctor.md](doctor.md#recovering-from-a-coordination-refusal). Otherwise it timed out: the binary
+  re-initialises its allocator every invocation (~5.8s measured), and a slow machine can exceed the
+  resolve budget. Raise it: `export CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS=40000`. This is the failure
+  that once reported a fully indexed repo as un-indexed.
 - `project-not-indexed` — run `codeintel index <path>`.
 - `project-not-indexed-standalone` — the repo is a nested repo under an indexed ancestor; root-scoped
   ops (`hotspots`/`overview`/`changed`) refuse rather than answer from the parent. Index it on its

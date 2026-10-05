@@ -4,6 +4,97 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Born of one afternoon: the graph engine went down, the doctor called a one-second refusal a
+timeout, and a branch review then had to be done by hand because `changed` could not see a branch.
+
+### Added
+- **`changed` takes a base ref.** `code.query op=changed target="main"` (or `HEAD~3`, a tag, a SHA,
+  or `<ref>...HEAD`) compares the merge-base with the working tree — committed and uncommitted
+  changes together — and classifies each definition as removed, signature-changed, body-rewritten
+  or added (Python through `ast`; other languages through the indexer's def-aligned chunks; C/C++
+  stay file-granular and say so). Each changed symbol's callers are split into those also changed
+  in the diff and those the diff did NOT touch — the ones that may break.
+  - A removed function has no node left in the graph, so its surviving references come from
+    `git grep` and are labelled text mentions (`discovery`), never `evidence`. A removed name still
+    written in a non-source file — a `pyproject.toml` entry point, a YAML config — is reported as
+    still mentioned, with those files named.
+  - What it does not compare, it says: changed files with no supported source extension,
+    module-level statements, the importers of a renamed module, and untracked files git could not
+    list each raise their own gap, so such an answer is never `complete` or safe for a destructive
+    decision. A branch that touched only such files no longer reads as "no source file differs".
+  - Gaps: `stale-index` / `index-age-unknown`, `text-mention-only`, `no-graph-callers`,
+    `callers-incomplete`, `non-source-changes-not-compared`, `module-level-not-compared`,
+    `renamed-module-importers-unchecked`, `mentions-outside-source`, `untracked-files-unknown`, and
+    a symbol cap. Safe-null reasons: `unknown-ref`, `not-a-git-repo`, `no-merge-base`,
+    `unsupported-range`, `git-unavailable`.
+  - `evidence.total` is exact when the backend can count it and `null` when a text search was cut —
+    never the number of rows that happened to fit.
+- **`degraded`** in `code.doctor` and `code.status`: the engines that are installed but not working,
+  optional ones included. `codeintel doctor` / `status` print "healthy, but graph degraded".
+  `healthy` keeps its meaning, and the flat `graph`/`lsp`/`semantic` booleans are now documented as
+  meaning *installed*. Where the report itself failed or was denied, `degraded` is `null` — "could
+  not tell" — rather than an empty list that would read as "nothing is degraded".
+- **`docs/doctor.md`**, which code comments had pointed at without it existing: the field contract,
+  the backend failure taxonomy, and how to recover from stale backend lock files.
+
+### Changed
+- **`changed` with a non-empty `target` no longer answers for uncommitted edits.** It used to ignore
+  `target`; a target is now a git ref, and one git cannot resolve is a safe-null `unknown-ref` whose
+  hint says to leave `target` empty for the old answer. An agent that passed a symbol name out of
+  habit gets that hint rather than an answer about something else.
+- **Each caller row's `why` says what was actually followed** — a language server, an import, a
+  bare same-module call, or a name match — instead of one sentence for every resolved row.
+- **A cut caller list states its exact total** and how many of the missing callers are tests:
+  `50 shown, 63 in total (10 in test files, 3 in production code)`. Production callers rank first.
+- **No hint recommends `--engine lsp` for `callers` any more**, which returns `unsupported-op`;
+  hints point at `--op symbol --engine lsp` and an `rg` command instead.
+- **`callees` gets the same distinct-endpoint cap, collapse and exact totals as `callers`.** When a
+  name has 50 or more edges, one question can now cost up to three backend round trips (probe,
+  per-symbol count, targeted fetch), so `budget` bounds each call rather than the whole question.
+- **`changed <ref>` runs up to four backend lookups at once**, one per changed symbol, under a
+  120-second budget for the whole answer.
+- **The doctor's "(graph optional — works without it)" note now appears only when graph is not
+  installed.** For an installed engine that fails, the note would have told the reader to ignore
+  the one row that mattered; that row now reads "healthy, but graph degraded".
+
+### Fixed
+- **A graph backend that refuses to start is quoted, not reported as a timeout.**
+  `codebase-memory-mcp` 0.10.8 exited 1 in about a second with "CBM CLI could not start because a
+  pre-coordination or unverified CBM generation is active", and the doctor said "list_projects
+  failed/timed out" with a remediation to run the command it had just swallowed.
+  - The exit code and stderr are kept (log lines dropped, bounded, home path redacted), and a
+    refusal, a timeout, an unreadable reply and a missing binary are told apart.
+  - A refusal or a timeout is no longer launched a second time through the deprecated raw-JSON form.
+  - The coordination refusal gets the fix that worked: close every `codebase-memory-mcp` process,
+    then move aside the `cbm-daemon-<uid>` lock directory under the system temp dir — its lock
+    files outlive the processes.
+- **A `same_module` edge through another receiver is no longer a verified caller.** `subprocess.run`
+  inside `bench/score.py` was reported as a resolved caller of that module's own `run`. The call
+  text the backend records on the edge now decides; downgraded rows are labelled, never dropped.
+  The check covers Python, JavaScript and TypeScript (`console.log` is no longer a verified caller
+  of a module's own `log`; `this.log()` and a bare `log()` still are). Other languages keep today's
+  count, and their `why` now says the call site could not be checked rather than contradicting it.
+- **The caller cap counts callers of the symbol asked about.** The probe took 50 edges across every
+  symbol sharing the name and then discarded the namesakes', so `run@bench/score.py` showed 5 of its
+  6 callers as "truncated, total unknown".
+- The doctor's version column no longer shows a backend log line when `--version` fails, and a
+  failed background reindex logs the backend's own reason. A refusal that arrives after the project
+  has resolved carries the same fix as one that arrives before it, not "Re-ask, or run doctor".
+- A Python `def Foo` that becomes `class Foo` is reported as a signature change ("kind changed")
+  instead of marking the whole file unparsable and hiding its other changes.
+
+### Security
+- **Every git call `changed` makes passes `-c core.fsmonitor=false`**, so a repository-configured
+  fsmonitor command never runs because codeintel looked at the repository; and `git grep` output is
+  read up to 2 MB rather than buffered without bound.
+
+### Known limits
+- Callers of a concrete override leave out call sites the graph resolved by declared type to the
+  base or interface method (`gateway.py` calls `CodeProvider.build_result`, not
+  `GraphProvider.build_result`). Ask about the interface method to see them.
+
 ## [0.24.1] — 2026-09-23
 
 Closes the gap 0.24.0's notes disclosed: a terminal `codeintel index` now takes the same reindex

@@ -13,7 +13,14 @@ import subprocess  # noqa: F401
 import threading
 from typing import Any
 
-from codeintel.graph_backend import BackendClient, _parse_query_rows, _parse_search_results
+from codeintel.graph_backend import (
+    BackendClient,
+    BackendRefused,
+    _parse_query_rows,
+    _parse_search_results,
+    coordination_remediation,
+    is_coordination_refusal,
+)
 from codeintel.graph_ops import GraphOps
 from codeintel.graph_render import (
     _cypher_literal,
@@ -127,18 +134,6 @@ def _suggest_op(unknown: str) -> list[str]:
     return (close + prefix)[:3]
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # The supported backend range. `codebase-memory-mcp` 0.9.x answers `query_graph`/`search_graph`
 # with `{"columns": [...], "rows": [...]}`, which every renderer here parses. 0.10.x replaced that
 # with a compact human-readable text format; `list_projects` stayed JSON, so project resolution and
@@ -152,6 +147,20 @@ _INCOMPATIBLE_HINT = (
     "codeintel. Check for a newer codeintel, or pin a known-good backend (pip/uv: "
     "`pip install 'codebase-memory-mcp==0.10.*'`; standalone binary: re-install a 0.10.x build). "
     "This is NOT a statement about whether your repository is indexed."
+)
+
+# The remediation for a backend this release cannot read, stated once: `probe` reaches it from two
+# places — a `list_projects` reply that is not JSON, and a real query whose reply is in a dialect
+# neither parser knows — and the two must not drift apart.
+#
+# Two install shapes exist and only one takes a pip command: the PyPI launcher, and a standalone
+# native binary that self-manages. Naming only pip left the binary users — including this project's
+# own maintainer — with an instruction they could not run, which is the failure mode this whole
+# check exists to avoid.
+_PIN_REMEDIATION = (
+    "upgrade codeintel first — a backend newer than this release is the usual cause. If that does "
+    "not resolve it, pin a known-good backend: pip/uv installs `pip install "
+    "'codebase-memory-mcp==0.10.*'`; standalone binary: re-install a 0.10.x build for your platform."
 )
 
 # The "backend is not installed" remediation, stated ONCE. `probe` hands it to `doctor` as a
@@ -169,41 +178,6 @@ _UNAVAILABLE_HINT = (
     f"{_UNAVAILABLE_DETAIL}; {_UNAVAILABLE_REMEDIATION}. The graph engine is optional: "
     "`--op search` answers with no backend at all. This is NOT evidence the symbol has no callers."
 )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class GraphProvider(GraphOps):
@@ -376,6 +350,91 @@ class GraphProvider(GraphOps):
             return None                     # could not ask — never reported as an empty answer
         return bool(rows)
 
+    @staticmethod
+    def _refusal_fix(miss: BackendRefused) -> str:
+        """What to do about a backend that exited non-zero — one sentence, shared by the doctor
+        row and the query envelope so the two cannot give different advice for the same failure.
+
+        Never "run the command that failed": the caller already ran it, through us, and the part
+        of its output that explains it is what this report quotes. Sending the reader to rerun it
+        by hand was the remediation that shipped with the original incident."""
+        if is_coordination_refusal(miss.message):
+            return coordination_remediation()
+        if miss.message:
+            return "address what the backend says above, then retry"
+        return ("the backend gave no reason, so there is none to quote — close any other "
+                "codebase-memory-mcp processes and retry; if it still exits silently, reinstall it")
+
+    def _listing_failed(self, timeout_ms: int) -> dict:
+        """The doctor row for a backend that IS installed and returned nothing for `list_projects`.
+
+        Four different failures used to share one row — "failed/timed out" — and the remediation
+        sent the reader to run the failing command themselves. They are told apart by what `_run`
+        recorded, because they have nothing in common but the symptom: a refusal is the backend's
+        own decision (and quotes it), a timeout is a budget, an unreadable reply is a version
+        mismatch, and anything else is a launch that never happened. No recorded failure at all
+        means `_run` was substituted by something that returns nothing without saying why, which is
+        reported as exactly that rather than guessed at."""
+        row = {"installed": True, "runnable": False, "repo_indexed": False, "project": None}
+        miss = self._last_failure
+        if isinstance(miss, BackendRefused):
+            said = (f"refused to run `list_projects` (exit {miss.returncode}): {miss.message}"
+                    if miss.message
+                    else f"exited {miss.returncode} on `list_projects` without saying why")
+            return {**row, "detail": f"codebase-memory-mcp is installed but {said}",
+                    "remediation": self._refusal_fix(miss)}
+        if miss is not None and miss.kind == "timeout":
+            return {
+                **row,
+                "detail": (f"codebase-memory-mcp is installed but did not answer `list_projects` "
+                           f"within {timeout_ms / 1000:g}s"),
+                "remediation": "re-run `codeintel doctor` — the backend can take several seconds "
+                               "per call; if it keeps timing out, raise "
+                               "CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS or close any stuck "
+                               "codebase-memory-mcp process",
+            }
+        if miss is not None and miss.kind == "unparsable":
+            return {
+                **row,
+                "detail": "codebase-memory-mcp is installed and answered `list_projects`, but in a "
+                          "form this release cannot read",
+                "remediation": _PIN_REMEDIATION,
+            }
+        why = (f"could not answer `list_projects`: {miss.describe()}" if miss is not None
+               else "returned nothing for `list_projects` and recorded no reason")
+        return {**row, "detail": f"codebase-memory-mcp is installed but {why}",
+                "remediation": "re-run `codeintel doctor`; if it persists, reinstall "
+                               "codebase-memory-mcp and make sure it is on PATH"}
+
+    def _refusal_hint(self, miss: BackendRefused) -> str:
+        """The envelope hint for a backend that refused to run: what it said, and the fix.
+
+        One sentence for both places a refusal reaches a reader — the call that could not even
+        resolve the project (`backend-unreachable`) and a call inside an op that was already running
+        (`backend-error`). They used to differ: only the first had the fix, so the same coordination
+        lock sent an agent to "re-ask, or run doctor" when it struck one query later."""
+        return (f"{miss.describe()} — this says nothing about whether your repository is "
+                f"indexed. To fix: {self._refusal_fix(miss)}")
+
+    def _unreachable_hint(self) -> str:
+        """The envelope hint for `backend-unreachable` — what the backend said, and the fix.
+
+        The reader here is usually an agent with no shell, so a hint that says "check that this
+        command works" is a hint it cannot act on; it needs the message and the remedy in the
+        envelope. A timeout keeps its own advice — a longer budget — which is right for it, minus
+        the instruction to go and run the command by hand."""
+        miss = self._last_failure
+        if isinstance(miss, BackendRefused):
+            return self._refusal_hint(miss)
+        if miss is not None and miss.kind == "unparsable":
+            return _INCOMPATIBLE_HINT
+        if miss is not None and miss.kind != "timeout":
+            return (f"{miss.describe()} — run `codeintel doctor` for the fix. This says nothing "
+                    f"about whether your repository is indexed.")
+        return ("the graph backend did not respond in time — raise "
+                "CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS if it is simply slow on this machine, or run "
+                "`codeintel doctor`")
+
     def probe(self, project_root: str, timeout_ms: int = _RESOLVE_TIMEOUT_MS,
               *, deep: bool = False) -> dict:
         """Never-raise health check for the doctor.
@@ -383,7 +442,10 @@ class GraphProvider(GraphOps):
         Returns ``{installed, runnable, repo_indexed, project, detail, remediation}``. Shallow is
         one ``list_projects`` call, bounded by ``timeout_ms``. ``deep`` adds one real query against
         the resolved project and requires it to return a row — see `_deep_answer`, and
-        `docs/doctor.md` for why booting is not answering."""
+        `docs/doctor.md` for why booting is not answering. When the backend is installed and the
+        call fails, `_listing_failed` says which of four things happened (refused, timed out,
+        unreadable, could not launch); `docs/doctor.md` has the taxonomy and the recovery for the
+        one that has a known fix."""
         if not self.available:
             return {
                 "installed": False, "runnable": False, "repo_indexed": False, "project": None,
@@ -392,11 +454,7 @@ class GraphProvider(GraphOps):
             }
         raw = self._run("list_projects", {}, timeout_ms)
         if raw is None:
-            return {
-                "installed": True, "runnable": False, "repo_indexed": False, "project": None,
-                "detail": "codebase-memory-mcp is installed but list_projects failed/timed out",
-                "remediation": "check `codebase-memory-mcp cli list_projects '{}'` works",
-            }
+            return self._listing_failed(timeout_ms)
         # `list_projects` is the ONE call 0.10.x still answers in JSON, so a probe that stopped
         # here would report a fully healthy graph engine on a backend where every actual query
         # returns nothing. Ask a real query the way a query would, and report the mismatch.
@@ -406,15 +464,7 @@ class GraphProvider(GraphOps):
                 "detail": f"incompatible codebase-memory-mcp — this release speaks "
                           f"{_SUPPORTED_BACKEND}, and the installed backend answers in neither, "
                           f"so every graph op except project resolution returns nothing",
-                # Two install shapes exist and only one takes a pip command: the PyPI launcher, and
-                # a standalone native binary that self-manages. Naming only pip left the binary
-                # users — including this project's own maintainer — with an instruction they could
-                # not run, which is the failure mode this whole check exists to avoid.
-                "remediation": "upgrade codeintel first — a backend newer than this release is "
-                               "the usual cause. If that does not resolve it, pin a known-good "
-                               "backend: pip/uv installs `pip install "
-                               "'codebase-memory-mcp==0.10.*'`; standalone binary: re-install a "
-                               "0.10.x build for your platform.",
+                "remediation": _PIN_REMEDIATION,
             }
         resolution = self._match_project(raw, project_root)
         if resolution is None:
@@ -460,13 +510,18 @@ class GraphProvider(GraphOps):
                     "remediation": f"codeintel index {project_root}",
                 }
             if answered is None:
+                # `_deep_answer` returned None BECAUSE a failure was recorded, so it is there to
+                # quote. The verdict stays "unknown" (the engine may be fine and the query unlucky),
+                # but unknown-and-unexplained is what made this row a dead end.
+                miss = self._last_failure
+                why = f" ({miss.describe()})" if miss is not None else ""
                 return {
                     "installed": True, "runnable": None, "repo_indexed": True,
                     "project": resolution.name,
                     "detail": (f"project '{resolution.name}' resolves, but the verification query "
-                               f"did not complete, so whether it will answer is unknown"),
-                    "remediation": "re-run `codeintel doctor --deep`; if it persists, check "
-                                   "`codebase-memory-mcp cli query_graph`",
+                               f"did not complete{why}, so whether it will answer is unknown"),
+                    "remediation": (self._refusal_fix(miss) if isinstance(miss, BackendRefused)
+                                    else "re-run `codeintel doctor --deep`"),
                 }
         return {
             "installed": True, "runnable": True, "repo_indexed": True, "project": resolution.name,
@@ -620,38 +675,10 @@ class GraphProvider(GraphOps):
         raw = self._run("query_graph", {"project": project, "query": cypher}, timeout_ms)
         return _parse_query_rows(raw)
 
-
-
-
     # Same reasoning as `_query_rows` above: fetch via `self._run`, parse via the shared helper.
     def _search_symbols(self, extra: dict, project: str, timeout_ms: int) -> list[dict] | None:
         raw = self._run("search_graph", {"project": project, **extra}, timeout_ms)
         return _parse_search_results(raw)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     def build_result(
         self,
@@ -682,12 +709,12 @@ class GraphProvider(GraphOps):
             if lookup.reason == "backend-unreachable":
                 # Do NOT say "not indexed" here. That claim is about the repository, this failure
                 # is about the backend, and the remedy it implies (`codeintel index`) cannot fix a
-                # backend that is not answering — it just runs the same timeout again.
+                # backend that is not answering — it just runs the same timeout again. Nor "did not
+                # respond in time" for every cause: a backend that exited in a second refusing to
+                # start was reported that way, with the command to run by hand as the fix.
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="backend-unreachable",
-                    hint="the graph backend did not respond in time — check "
-                         "`codebase-memory-mcp cli list_projects '{}'` runs, and raise "
-                         "CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS if it is simply slow on this machine",
+                    hint=self._unreachable_hint(),
                 )
             resolution = lookup.resolution
             if resolution is None:
@@ -750,6 +777,10 @@ class GraphProvider(GraphOps):
             self._pending_nonrow_lines = False
             self._clear_failure()
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
+            if result_text is None and self._pending_null is not None:
+                reason, why = self._pending_null
+                return safe_null_result(
+                    op_str, target_str, engine="graph", reason=reason, hint=why)
             if result_text is not None and self._last_failure is not None:
                 # A backend call failed somewhere inside this op, yet it still produced a body. That
                 # body may therefore contain a count or an emptiness claim resting on data that was
@@ -791,8 +822,9 @@ class GraphProvider(GraphOps):
                     miss = self._last_failure
                     return safe_null_result(
                         op_str, target_str, engine="graph", reason=miss.kind,
-                        hint=f"{miss.describe()} — this is not a statement about your code: the "
-                             f"query did not return. Re-ask, or run `codeintel doctor`.",
+                        hint=(self._refusal_hint(miss) if isinstance(miss, BackendRefused) else
+                              f"{miss.describe()} — this is not a statement about your code: the "
+                              f"query did not return. Re-ask, or run `codeintel doctor`."),
                     )
                 # Before claiming the symbol is absent, ask whether it is merely unreferenced.
                 # These are different facts and they license opposite actions.
@@ -807,6 +839,9 @@ class GraphProvider(GraphOps):
                                              sorted(kinds.items(), key=lambda kv: -kv[1])[:5])
                                  + " — query those before concluding anything about it."
                                  ) if kinds else ""
+                        # The LSP engine has no `callers`/`callees`/`impact`/`chain` — it answers
+                        # `symbol`, `context` and `overview` — so `--engine lsp` alone, on the op
+                        # that just came back empty, answers `unsupported-op`. Name the op it CAN run.
                         return safe_null_result(
                             op_str, target_str, engine="graph", reason="no-edges",
                             hint=f"`{target_str}` IS indexed ({'; '.join(where[:3])}) — it has no "
@@ -814,7 +849,8 @@ class GraphProvider(GraphOps):
                                  f"absent. Framework-dispatched handlers (routes, ASGI apps) and "
                                  f"symbols passed as a value rather than called look exactly like "
                                  f"this, so do NOT read it as dead code. Re-indexing will not "
-                                 f"change it; confirm with `--engine lsp` or `--op pattern`."
+                                 f"change it; confirm with `--op symbol --engine lsp` or "
+                                 f"`--op pattern`."
                                  + other,
                         )
                 # Name the symbol only when there IS one. `Gateway._query` now rejects a blank
@@ -893,9 +929,17 @@ class GraphProvider(GraphOps):
             log_swallowed("GraphProvider.build_result", exc)
             return safe_null_result(op, target, engine="graph", reason="error")
 
+    # Why an op that returned `None` has no answer, when it knows more than "the target is not in the
+    # index". `changed <ref>` is the one op that does: an unknown ref, a root that is not a git
+    # repository and a history with no merge-base are three different facts, and the bare `None` they
+    # would otherwise return is reported as `not-in-graph` — a claim about the index, which sends the
+    # reader to re-index a repository that was never the problem. `(reason, hint)`, per request.
+    _pending_null: PerThread[tuple[str, str] | None] = PerThread(None)
+
     def _dispatch(
         self, op: str, target: str, project: str, timeout_ms: int, root: str = ""
     ) -> str | None:
+        self._pending_null = None
         if op == "impact" or op == "context":
             # `context` (fan-out op) → the graph's richest single-symbol view: callers + callees.
             return self._op_impact(target, project, timeout_ms)
@@ -910,7 +954,7 @@ class GraphProvider(GraphOps):
         if op == "overview":
             return self._op_overview(target, project, timeout_ms, root)
         if op == "changed" or op == "changes":
-            return self._op_changed(project, timeout_ms)
+            return self._op_changed(project, timeout_ms, target, root)
         if op == "hotspots":
             return self._op_hotspots(project, timeout_ms)
         return None

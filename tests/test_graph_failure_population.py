@@ -103,7 +103,11 @@ def test_no_graph_op_reports_a_backend_failure_as_an_absence():
             gp = _gp()
             gp._run = _fail_backend(gp, missing)                       # type: ignore[method-assign]
 
-            env = gp.build_result(op, "make_widget", [], 30000, "/tmp/x")
+            # `changed` takes a git ref as its target now, and a ref is answered by git — not by the
+            # backend this test fails — so the backend-failure population of `changed` is its
+            # no-target form. The ref form's own failures are pinned in test_changed_range.py.
+            target = "" if op == "changed" else "make_widget"
+            env = gp.build_result(op, target, [], 30000, "/tmp/x")
             assert env["ok"] is True, (op, env)
 
             if op in _NOT_A_USER_OP:

@@ -13,6 +13,8 @@ call and an empty answer.
 """
 from __future__ import annotations
 
+from codeintel.graph_render import _lang_family
+
 # HOW an edge was resolved, which the backend records per edge as `c.strategy`. This is provenance,
 # not a score, and it is the field that should drive policy.
 #
@@ -136,6 +138,170 @@ def _edge_confidence(row: dict) -> float | None:
         return None
 
 
+# `same_module` is the strategy this module used to take on trust, and the one that was wrong.
+#
+# What the backend does for it: the call's bare leaf name is looked up among the symbols defined in
+# the CALLER'S OWN FILE, and a hit is stamped 0.90. That is a sound resolution for a call written as
+# a bare name (`run()` inside the module that defines `run` binds by scope, no import needed) and an
+# unsound one for a call written through a receiver — `subprocess.run(...)` in a module that also
+# defines a `run` is a call to the standard library, and the backend bound it to the local `run`
+# anyway because the leaf matched. Measured on this repository: `callers run@bench/score.py` listed
+# `_run_codeintel` and `_provenance` as `resolved` callers of `bench.score.run`. Neither calls it —
+# both call `subprocess.run` — and the line attached to them said the edge "followed an import or a
+# language-server binding", which is false for `same_module` in every case.
+#
+# The edge carries what is needed to tell the two apart, which is why this reads no source: the
+# backend records the callee EXACTLY AS WRITTEN at the call site (`c.callee` — `subprocess.run`,
+# `run`, `self.helper`), next to the strategy and the score. Reading it back costs nothing and cannot
+# be stale, where re-reading the caller's file would be both slower and a second opinion about text
+# the extractor had already parsed.
+#
+# Three verdicts, because "I checked and it is not" and "I could not check" license opposite things:
+_SAME_MODULE_OWN = "own"
+_SAME_MODULE_FOREIGN = "foreign"
+_SAME_MODULE_UNCHECKED = "unchecked"
+
+# A receiver that denotes the enclosing object itself, so `self.helper()` resolving to a symbol in
+# the same module is the rule working as intended and not a guess. The check is defined for exactly
+# the languages listed here: the ones whose member-call semantics are the same — a bare name binds by
+# scope, a name reached through a receiver binds to whatever the receiver is — and only the SPELLING
+# of "the enclosing object" differs (`self`/`cls` in Python, `this`/`super` in JavaScript and
+# TypeScript). Keyed by `_lang_family`, and a language not in it is `unchecked`: Go's package
+# qualifiers and Rust's paths each need a rule of their own, and one borrowed from the wrong
+# language would downgrade real edges.
+_OWN_RECEIVERS: dict[str, frozenset[str]] = {
+    "python": frozenset({"self", "cls"}),
+    "ts-js": frozenset({"this", "super"}),
+}
+
+
+def _same_module_call(row: dict) -> str:
+    """Whether a `same_module` edge's call site is one that rule can bind: `own`, `foreign`, or
+    `unchecked` when the question cannot be answered from what the edge carries.
+
+    `foreign` is claimed only on clear evidence: the callee text is a dotted expression whose
+    receiver is neither the enclosing object (`self`, `cls`, `super(...)`) nor a name that appears in
+    the called symbol's own qualified name (the class or module that owns it, so `Config.load` and
+    `score.run` inside their own module are left alone). Everything else is `unchecked`, and an
+    unchecked row stays exactly as resolved as it was — a check that cannot run must not move a row,
+    which is the rule `source-unreadable` already follows elsewhere in this project.
+
+    Python, JavaScript and TypeScript only (`_OWN_RECEIVERS`). The rule is a statement about the
+    scoping those languages share (a bare name binds to the module's own definition; an attribute
+    access never does). Go's package qualifiers and Rust's paths each need their own, and a rule
+    borrowed from the wrong language would downgrade real edges — the over-filtering failure this
+    project retired `deadcode` for.
+    """
+    callee = str(row.get("callee") or "").strip()
+    if not callee:
+        return _SAME_MODULE_UNCHECKED           # an older index, or an edge the extractor left blank
+    own_receivers = _OWN_RECEIVERS.get(_lang_family(str(row.get("a.file_path") or "")))
+    if own_receivers is None:
+        return _SAME_MODULE_UNCHECKED
+    target = str(row.get("b.name") or "")
+    receiver, dot, leaf = callee.rpartition(".")
+    # The text has to be ABOUT the symbol the edge points at. A different leaf means this is not the
+    # call the backend bound (an alias, a wrapper), and then nothing here applies.
+    if target and leaf != target:
+        return _SAME_MODULE_UNCHECKED
+    if not dot:
+        return _SAME_MODULE_OWN
+    # `this?.log()` is optional chaining on the enclosing object, which is still the enclosing object.
+    receiver = receiver.rstrip("?")
+    if receiver in own_receivers or receiver.startswith("super("):
+        return _SAME_MODULE_OWN
+    owners = {seg for seg in str(row.get("b.qualified_name") or "").split(".")[:-1] if seg}
+    if receiver.rsplit(".", 1)[-1] in owners:
+        return _SAME_MODULE_OWN
+    return _SAME_MODULE_FOREIGN
+
+
+def _edge_strength(row: dict) -> tuple[int, float]:
+    """How much an edge is worth, as a sort key where SMALLER is stronger.
+
+    The one place the question "which of two edges between the same pair do we keep, and which of
+    two callers do we drop first" is answered, so the answers cannot disagree with each other or with
+    the bucket the row is eventually counted under. Mirrors the classification `_confidence_note`
+    applies — a bound edge, then an unscored one, then a guess — without needing the row to have
+    been classified yet, because ranking happens before the note is written.
+    """
+    evidence = _evidence_class(str(row.get("strategy") or ""))
+    conf = _edge_confidence(row)
+    if evidence in ("lsp", "import"):
+        rank = 0
+    elif evidence == "same-module":
+        rank = 2 if _same_module_call(row) == _SAME_MODULE_FOREIGN else 0
+    elif evidence == "name-guess":
+        rank = 2
+    elif conf is None:
+        rank = 1
+    else:
+        rank = 0 if conf >= _EDGE_CONFIDENCE_FLOOR else 2
+    return rank, -(conf if conf is not None else -1.0)
+
+
+def _callee_for_display(callee: str) -> str:
+    """The callee text, made safe to quote inside a sentence that is parsed back by line."""
+    flat = " ".join(callee.split())
+    return flat if len(flat) <= 60 else flat[:57] + "..."
+
+
+def _why(row: dict, bucket: str) -> str:
+    """One sentence saying what ACTUALLY happened to produce this row's bucket.
+
+    There used to be one sentence for the whole `resolved` bucket — "followed an import or a
+    language-server binding" — which is true of `lsp_*` and `import_map` and false of the third
+    thing that bucket holds. A reader (or an agent) deciding whether to act on a row reads this, so
+    it is stated per strategy: the claim is exactly as strong as the mechanism behind it and no
+    stronger.
+    """
+    strategy = str(row.get("strategy") or "").strip()
+    if bucket == _RESOLVED:
+        evidence = str(row.get("_evidence") or "") or _evidence_class(strategy)
+        if evidence == "lsp":
+            return f"a language server resolved the call to this symbol ({strategy})"
+        if evidence == "import":
+            return ("the caller's file imports this symbol and the call was followed through "
+                    f"that import ({strategy})")
+        if evidence == "same-module":
+            if str(row.get("_same_module") or "") == _SAME_MODULE_OWN:
+                return ("this module defines the symbol and the call names it bare, so scope "
+                        "binds it — no import or language server was involved")
+            # Reached only when the call-site check COULD NOT decide, and the row is counted as
+            # `resolved` (so `verified` is true) all the same — which is why this sentence may not
+            # say "no binding was followed" and stop there. It says what scope did, what scope
+            # needs, and that the second half was not confirmed: the residual risk, stated beside the
+            # verdict it qualifies instead of contradicting it.
+            callee = str(row.get("callee") or "").strip()
+            if not callee:
+                why_unchecked = "the backend recorded no call text for this edge"
+            elif _lang_family(str(row.get("a.file_path") or "")) not in _OWN_RECEIVERS:
+                why_unchecked = ("the call-site check is only defined for Python and "
+                                 "JavaScript/TypeScript")
+            else:
+                why_unchecked = (f"the recorded call text `{_callee_for_display(callee)}` is not a "
+                                 "call of this symbol's name")
+            return ("scope resolved this inside the caller's own module (`same_module`). Scope only "
+                    "binds a call written bare, and whether this call is written bare could not be "
+                    f"checked ({why_unchecked}) — so it is counted as resolved, as every "
+                    "`same_module` edge was before that check existed; if it is written through a "
+                    "receiver, the binding is a guess")
+        return ("the backend scored this edge at or above "
+                f"{_EDGE_CONFIDENCE_FLOOR} without naming a strategy, a tier it only reaches "
+                "through the caller's imports")
+    if bucket == _NAME_MATCHED:
+        if str(row.get("_same_module") or "") == _SAME_MODULE_FOREIGN:
+            callee = _callee_for_display(str(row.get("callee") or ""))
+            return (f"matched by name inside the caller's own module, but the call is written "
+                    f"`{callee}` — through a receiver, not as this module's own symbol — so the "
+                    f"match is a guess about what the receiver is ({strategy})")
+        return (f"matched by name ({strategy})" if strategy
+                else "matched by bare symbol name, not by following a binding")
+    if bucket == _UNSTATED:
+        return "the backend reported no provenance for this edge"
+    return "unclassified"
+
+
 def _confidence_badge(row: dict) -> str:
     """The per-row mark for an edge the backend did not resolve through an import.
 
@@ -145,11 +311,15 @@ def _confidence_badge(row: dict) -> str:
     if "_low_confidence" not in row:
         return ""
     conf = row.get("_low_confidence")
+    # A `same_module` edge this module refused to trust keeps the backend's own score on show — the
+    # number is the backend's and is still detail — but the verdict is OURS, and a bare `[?0.90]`
+    # reads as high confidence behind a question mark. Say what the doubt is about.
+    via = " qualified call" if row.get("_same_module") == _SAME_MODULE_FOREIGN else ""
     if conf is None:
         # Condemned by its strategy, with no number attached. Say the strategy's verdict rather
         # than inventing a score for it.
-        return " [?name-guess]"
+        return f" [?{via.strip()}]" if via else " [?name-guess]"
     # ONE glyph. `!` and `?` used to split on the confidence float, which put `unique_name` at 0.75
     # and `unique_name` at 0.38 — the same strategy, the same kind of evidence — into two different
     # visual classes. The number still shows, as detail behind a single verdict.
-    return f" [?{float(conf):.2f}]"
+    return f" [?{float(conf):.2f}{via}]"

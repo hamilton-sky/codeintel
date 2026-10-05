@@ -314,6 +314,14 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "a booted backend that answers nothing is not runnable — "
         "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable, and under --deep "
         "test_a_graph_project_that_resolves_but_holds_nothing_is_not_deep_runnable",
+    # The row for a backend that is installed and returned nothing to `list_projects`. It only ever
+    # says NOT runnable, so there is no readiness claim in it to over-state; what the verifiers pin
+    # is that the reason it gives is the one that happened (refused / timed out / unreadable), not
+    # a blanket "failed/timed out".
+    ("claim", "GraphProvider._listing_failed"):
+        "a backend that returned nothing for list_projects claims no readiness and names why — "
+        "test_a_backend_that_refuses_to_start_is_reported_in_its_own_words, "
+        "test_a_backend_that_outlasts_the_budget_is_classified_as_a_timeout",
     ("claim", "LspProvider.probe"):
         "a booted backend that answers nothing is not runnable — "
         "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable, and under --deep "
@@ -406,6 +414,21 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("count", "GraphOps._op_pattern"):
         "the headline counts the rows rendered — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
+    ("count", "ChangedSince._render_since"):
+        "each section heading counts the symbol groups beneath it, and the headline is the sum of "
+        "the sections — test_the_headline_counts_exactly_the_symbols_listed_beneath_it",
+    ("tally", "ChangedSince._changed_since"):
+        "the file-cap and symbol-cap notes count what they cut — "
+        "test_the_file_cap_gap_counts_the_files_it_cut, with the symbol cap in "
+        "test_the_symbol_cap_is_disclosed_and_keeps_the_most_severe_first; the not-compared gaps "
+        "count the files they name — test_non_source_files_are_named_up_to_five_and_the_rest_are_counted",
+    ("tally", "ChangedSince._render_removed_group"):
+        "the count of non-source files a removed name survives in equals the files the line names, "
+        "and the gap names the same ones — "
+        "test_the_count_of_files_a_removed_name_survives_in_equals_the_files_it_names",
+    ("claim", "ChangedSince._mention_row"):
+        "a text mention is never `verified`: its bucket is name-matched and its strategy names the "
+        "tool that found it — test_a_text_mention_row_never_claims_to_be_verified",
     ("count", "GraphOps._op_changed"):
         "each section heading counts its own section — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
@@ -484,6 +507,10 @@ _UNCENSUSED: dict[str, str] = {
     "AnswerRendering._evidence_headline / 'N resolved · N name-matched · N unstated'":
         "a bold tally whose units are bucket names, so no unit noun to match — "
         "test_the_evidence_headline_sums_to_the_rows_it_describes",
+    "AnswerRendering._distinct_cap_note / 'N of M distinct callers are shown'":
+        "a count assembled from two attributes of one object across two statements, which the "
+        "tally pattern cannot see — "
+        "test_the_distinct_cap_note_states_the_counts_of_the_rows_it_describes",
     "bench/oracle_py.py / per-site label":
         "a returned enum, not a rendered string — "
         "test_every_python_oracle_label_agrees_with_a_grep, and instance #6 as a rule rather "
@@ -858,6 +885,40 @@ def test_the_confidence_note_counts_the_rows_it_describes():
     for claimed, total in pairs:
         assert int(total) == len(rows), f"note says 'of {total}' over {len(rows)} rows: {note!r}"
         assert int(claimed) <= int(total), f"more rows qualified than exist: {note!r}"
+
+
+def test_the_distinct_cap_note_states_the_counts_of_the_rows_it_describes():
+    """"50 of 63 distinct callers are shown, 13 not (13 in test files, 0 in production code)" is a
+    summary of two lists — the one printed and the one left out — and its referent is those lists.
+
+    Each number is re-derived here from the rows themselves: the first from what survived the cut,
+    the second from what went in, and the test/production split from the paths of the rows that did
+    NOT survive, so a classification that drifted from the ranking it describes fails here."""
+    from codeintel.graph_edges import _EdgeGroup
+
+    gp = _graph_provider()
+    prod = [{"a.name": f"p{i}", "a.qualified_name": f"pkg.p{i}", "a.file_path": f"src/p{i}.py",
+             "type(c)": "CALLS", "strategy": "import_map"} for i in range(40)]
+    tests = [{"a.name": f"test_t{i}", "a.qualified_name": f"tests.t{i}",
+              "a.file_path": f"tests/test_t{i}.py", "type(c)": "CALLS", "strategy": "import_map"}
+             for i in range(30)]
+    group = _EdgeGroup("target", "pkg.target", "src/t.py", tests + prod)   # tests arrive FIRST
+    before = len(group.rows)
+
+    omitted = gp._cap_distinct_edges(
+        [group], "a.name", "a.qualified_name", "a.file_path", tests_last=True)
+    note = gp._distinct_cap_note("callers", "caller", "target", omitted, tests_last=True)
+
+    kept = {r["a.qualified_name"] for r in group.rows}
+    left_out = [r for r in tests + prod if r["a.qualified_name"] not in kept]
+    shown, total = map(int, re.search(r"(\d+) of (\d+) distinct callers", note).groups())
+    assert (shown, total) == (len(group.rows), before) == (50, 70), (shown, total, note)
+
+    in_tests, in_prod = map(int, re.search(r"\((\d+) in test files, (\d+) in production", note).groups())
+    assert in_tests == sum(1 for r in left_out if r["a.file_path"].startswith("tests/")), note
+    assert in_prod == sum(1 for r in left_out if not r["a.file_path"].startswith("tests/")), note
+    assert in_tests + in_prod == total - shown == omitted.endpoints == len(left_out), note
+    assert all(r["a.name"].startswith("p") for r in group.rows[:40]), "production must come first"
 
 
 def test_the_changed_headline_sums_the_sections_beneath_it():

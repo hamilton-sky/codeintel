@@ -117,7 +117,8 @@ read it, and a server returning `ok: true` with an empty body.
 Start a **new** agent session — hosts read MCP config at startup. Then confirm from inside the agent:
 
 - `code.status` — per-engine `installed` / `runnable` / `repo_indexed` (plus `model_cached` for
-  semantic), probed against the live engines a query actually hits.
+  semantic), probed against the live engines a query actually hits, and `degraded`: the engines that
+  are installed but not working. See [doctor.md](doctor.md) for what each field means.
 - `code.doctor` — the same, plus a one-line fix for each gap and any stale registration.
 
 For Claude Code specifically, `claude mcp list` should now show `codeintel`.

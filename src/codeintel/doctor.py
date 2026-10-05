@@ -23,6 +23,29 @@ _VERSION_TIMEOUT_S = 2.0
 _OPTIONAL_ENGINES = frozenset({"graph"})
 
 
+def degraded_engines(engines: dict) -> list[str]:
+    """Engines that ARE installed and are failing — in `_ENGINES` order, optional ones included.
+
+    `healthy` answers "can this repo be worked on", and it ignores the optional graph engine on
+    purpose. That choice conflated two states that need opposite responses: a graph backend that is
+    not installed (nothing to report — codeintel is fully usable without it) and one that is
+    installed and broken (a degradation the reader must be told about, because every graph query
+    now answers nothing while the report says `healthy: true`). This is the second state alone, so
+    a consumer can read "healthy, but graph degraded" instead of inferring it from a row it was
+    never pointed at.
+
+    Derived from the per-engine `status`, not recomputed: "failing" means exactly what the row
+    already says, and a second definition would be one more thing to drift. `installed is True`
+    rather than truthy — a probe that raised reports `installed: None`, which is "could not tell",
+    and an engine nobody could probe is not one anybody can call degraded."""
+    return [
+        name for name in _ENGINES
+        if isinstance(engines.get(name), dict)
+        and engines[name].get("installed") is True
+        and engines[name].get("status") == "fail"
+    ]
+
+
 def _status_for(report: dict) -> str:
     """Roll a probe dict up to ok / warn / fail.
 
@@ -100,9 +123,14 @@ def _cmd_version(argv: list) -> str | None:
         if not shutil.which(argv[0]):
             return None
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=_VERSION_TIMEOUT_S)
+        # A `--version` that failed did not report a version, whatever it printed. A backend that
+        # refuses to start writes its own log line to stderr first, and the doctor once printed
+        # `level=info msg=version_cohort.cl` in the version column for exactly that reason.
+        if proc.returncode != 0:
+            return None
         for line in ((proc.stdout or "") + "\n" + (proc.stderr or "")).splitlines():
             line = line.strip()
-            if not line:
+            if not line or line.startswith("level="):
                 continue
             m = re.search(r"\d+(?:\.\d+)+(?:[\w.\-+]*)", line)
             return m.group(0)[:32] if m else line[:32]
@@ -351,6 +379,10 @@ def run_doctor(
             else None
         ),
         "summary": {"ready": ready, "total": len(engines), "healthy": healthy},
+        # Additive. `healthy` above ignores the optional graph engine, so it stays true for an
+        # installed graph backend that refuses to run; this is where that is said. Always present,
+        # empty when nothing is degraded, so a reader never has to tell "none" from "not reported".
+        "degraded": degraded_engines(engines),
         "engines": engines,
         "registrations": collect_registrations(),
     }
@@ -420,11 +452,25 @@ def render_doctor_text(report: dict) -> str:
         "  (run with --deep to ask each engine a real query)")
     out.append("")
     out.append(f"  {count} engines ready for this repo.{tail}")
+    # Only an engine that is ABSENT gets the "works without it" reassurance. For one that is
+    # installed and failing it is true and beside the point: it was printed under a graph backend
+    # that refused to start, which told the reader the one thing they did not need to be told and
+    # nothing about the thing that had happened.
     opt_down = [n for n in _ENGINES
-                if n in _OPTIONAL_ENGINES and (engines.get(n) or {}).get("status") == "fail"]
+                if n in _OPTIONAL_ENGINES and (engines.get(n) or {}).get("status") == "fail"
+                and (engines.get(n) or {}).get("installed") is not True]
     if opt_down:
         out.append("  " + c.dim(
             f"({', '.join(opt_down)} optional — an external backend; codeintel works without it)"
+        ))
+    degraded = report.get("degraded") or []
+    if degraded:
+        # `healthy` ignores the optional engine, so for a repo that is otherwise fine the count
+        # above is green. This line is what keeps that green from reading as "graph is working".
+        lead = "healthy, but " if healthy else ""
+        out.append("  " + c.yellow(
+            f"{lead}{', '.join(degraded)} degraded — installed, but not working for this repo; "
+            f"see the note above"
         ))
     if healthy is False:
         out.append("  " + c.dim(

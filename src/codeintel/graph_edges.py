@@ -23,6 +23,29 @@ from codeintel.graph_render import _strip_project_prefix
 _EDGE_ROW_LIMIT = 50
 
 
+# What `_EDGE_ROW_LIMIT` bounds, and what it does not. The first query is a PROBE: it asks for the
+# name's edges across EVERY symbol that carries it, and `LIMIT` counts all of them. On the repository
+# that exposed this, `callers run@bench/score.py` came back "5 shown, total unknown — the graph
+# returned the maximum 50 rows" when the symbol asked about has six callers: forty-five of the fifty
+# rows belonged to a different `run` (`server.run`, ninety-eight callers of its own) and were thrown
+# away by the very selection the target hint makes. A cap on raw edges bounds the wrong thing — what
+# a reader needs bounded is how many CALLERS of the symbol they asked about are printed — so when the
+# probe comes back full, the op asks the backend what it actually holds (one aggregate row per
+# symbol), selects the symbol, and fetches ITS edges in one query that is allowed this many rows.
+# Large enough that no real symbol reaches it (the busiest in this repository has ~100), small
+# enough that a pathological one still returns in a query's time; reaching it is reported as an
+# unknown total, exactly as the probe's own cap always was.
+_EDGE_FETCH_CEILING = 2000
+
+
+# How many DISTINCT endpoints (callers, for `callers`) one answer prints. The same number as the
+# probe's limit on purpose: it is what the answer has always shown, and an answer that suddenly
+# printed four hundred rows would trade a disclosed truncation for an unread list. What changed is
+# what the number counts — a caller with three edges is one caller — and which ones survive when
+# there are more (see `AnswerRendering._cap_distinct_edges`).
+_EDGE_ENDPOINT_CAP = _EDGE_ROW_LIMIT
+
+
 # What each relationship kind ASSERTS, in the words a reader needs.
 #
 # These are different facts, not different confidences in one fact, and conflating them is a
@@ -69,6 +92,36 @@ class _EdgeGroup:
         if self.label:
             return f"`{self.label}`"
         return self.file or "(a symbol the index does not name)"
+
+
+@dataclass(frozen=True)
+class _Omitted:
+    """What the distinct-endpoint cap left out of an answer, counted rather than guessed.
+
+    Three numbers because they are three different facts: `endpoints` is how many callers (or
+    callees) are missing from the list, `rows` is how many printed lines that is — a caller with a
+    `CALLS` and a `CALL_REFERENCE` edge is one endpoint and two lines — which is what the envelope's
+    `total` is made of, and `tests` is how many of the missing endpoints are test code, the one split
+    a reader deciding whether the list is missing the part that matters can act on. `shown` is the
+    endpoints that stayed, so `shown + endpoints` is the exact count the backend held."""
+
+    endpoints: int = 0
+    rows: int = 0
+    tests: int = 0
+    shown: int = 0
+
+
+@dataclass(frozen=True)
+class _EdgeFetch:
+    """The rows an edge op will work from, and whether the backend still holds more than they show.
+
+    `cut_short` is True when the list is KNOWN to stop before the backend's own — the probe came
+    back full and the follow-up could not (or was not able to) fetch the rest — so the total is
+    unknown, not merely larger than what is printed."""
+
+    rows: list[dict]
+    cut_short: bool
+    limit: int = _EDGE_ROW_LIMIT
 
 
 def _group_edges(rows: list[dict], name_key: str, qn_key: str, file_key: str) -> list[_EdgeGroup]:
