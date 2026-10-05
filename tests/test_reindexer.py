@@ -142,6 +142,9 @@ class _FakeGraph:
     """Records what the reindexer asks the backend to do."""
 
     available = True
+    # The real provider always carries this: `_run` records WHY it returned None, and the
+    # reindexer quotes it. A fake without it would test an object the reindexer is never handed.
+    _last_failure = None
 
     def __init__(self, reply=None):
         self.calls: list[tuple] = []

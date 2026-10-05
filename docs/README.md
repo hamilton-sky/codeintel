@@ -52,6 +52,7 @@ not the same claim as `not-in-graph`.
 | Doc | What it covers |
 |---|---|
 | [deploy.md](deploy.md) | Running the HTTP transport — auth, RBAC, rate limits, metrics, container notes. |
+| [doctor.md](doctor.md) | **What `doctor` and `status` claim, and what they do not.** The contract for `healthy`, `degraded`, `summary.ready/total` and the per-engine `status`; why the top-level `graph`/`lsp`/`semantic` booleans mean *installed*, not usable; why the graph engine is optional; what `--deep` asserts ("booting is not answering"); how a failing graph backend is classified (refused / timed out / unreadable / not installed); and the recovery for a coordination refusal. |
 | [providers-bringup.md](providers-bringup.md) | Getting all three engines from "installed" to actually answering, and the failure mode behind each safe-null. |
 | [branch-protection.md](branch-protection.md) | The committed rulesets for `main` and the `v*` release tags, which CI checks gate a merge, and which two deliberately don't. |
 

@@ -22,7 +22,7 @@ engine is.
 | Engine | Answers | Treat it as | Because |
 |---|---|---|---|
 | **LSP** | `symbol` — definitions, references | **Evidence.** Act on it. | A language server resolved a real binding. When it cannot, it now says so rather than returning an empty list. |
-| **Graph**, rows marked `resolved` | `callers`, `callees`, `impact`, `chain` | **Evidence.** Act on it. | The edge was followed through an import or a language-server binding. |
+| **Graph**, rows marked `resolved` | `callers`, `callees`, `impact`, `chain` | **Evidence.** Act on it. | The edge was followed through an import or a language-server binding — or, for a bare call to a symbol the caller's own module defines, through that module's scope. A call written through a receiver (`subprocess.run`, `console.log`) is never `resolved` on that basis, in Python, JavaScript or TypeScript (`self`/`cls`/`this`/`super` and the symbol's own class or module are the enclosing object and stay resolved). **For a `same_module` edge the call-site check cannot judge** — another language, or no call text recorded — the row stays `resolved` and `verified`, and its `why` says so: scope resolved it, scope only binds a bare call, and whether this call is bare was not checked. That residual risk is stated on the row, not hidden by it. |
 | **Graph**, rows marked `name-matched` | the same ops | **A lead. Verify before acting.** | The backend matched a bare name. On a name the index does not own, that collects every call site in the repository that mentions it. |
 | **Semantic** | `search` | **Discovery.** It finds candidates. | Similarity is not reachability. A high score means "reads like your query", never "calls this". |
 | **Pattern** | `pattern` | **Discovery**, same as above. | It is a graph-augmented grep. |
@@ -117,11 +117,12 @@ Now read it in this order:
 5. **`confidence`** on the envelope (`--json` shows it). `partial` means read `gaps`.
 
 You have verified the tool when **your known callers appear as `resolved` rows**. If they appear
-only as `name-matched`, the graph is guessing about your code too, and you should prefer
-`--engine lsp` for this repository.
+only as `name-matched`, the graph is guessing about your code too, and you should prefer the
+language server's own reference list for this repository. The language server answers `symbol`, not
+`callers` — `--op callers --engine lsp` is `unsupported-op` — so that is the op to ask:
 
 ```bash
-codeintel query --op callers --target YourSymbol --engine lsp --project-root .
+codeintel query --op symbol --target YourSymbol --engine lsp --project-root .
 ```
 
 That is the whole workflow. It takes about five minutes and it is worth more than any number in

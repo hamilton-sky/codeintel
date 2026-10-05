@@ -685,3 +685,373 @@ def test_the_evidence_class_follows_the_rows_and_not_only_the_op(monkeypatch):
     impact, _ = _shape(monkeypatch, "impact")
     assert impact["evidence_class"] == "advisory", impact["evidence_class"]
     assert any(r["verified"] for r in impact["rows"]), "the per-row verdict is still there"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# `same_module` — a lookup by scope, described and counted as if it were an import
+#
+# `callers run@bench/score.py` listed `_run_codeintel` and `_provenance` as `resolved` callers of
+# `bench.score.run`, with the sentence "followed an import or a language-server binding". Both
+# functions call `subprocess.run`. The backend had looked `run` up among the symbols the caller's own
+# file defines, found one, and stamped it 0.90; codeintel believed the stamp and printed a sentence
+# that is false for `same_module` in every case. The edge records the call as it was written
+# (`c.callee`), which is what separates `run()` from `subprocess.run()`.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _same_module(i: int, callee: str | None, *, caller_file: str = "src/t.py",
+                 strategy: str = "same_module", conf: str = "0.90") -> dict:
+    """A `callers` row for `pkg.t.target`, resolved by `same_module`, with the call text as written.
+
+    `callee=None` leaves the key out, which is what an index built before the backend recorded call
+    text — or any edge it left blank — produces."""
+    row = {
+        "a.name": f"caller{i}", "a.qualified_name": f"pkg.t.caller{i}", "a.file_path": caller_file,
+        "labels(a)": "Function", "type(c)": "CALLS", "c.confidence": conf, "strategy": strategy,
+        # A `same_module` edge never leaves its file: the callee is defined in the caller's own.
+        "b.name": "target", "b.qualified_name": "pkg.t.target", "b.file_path": caller_file,
+    }
+    if callee is not None:
+        row["callee"] = callee
+    return row
+
+
+def test_the_query_asks_for_the_call_text_the_backend_recorded(monkeypatch):
+    """Nothing downstream can tell `run()` from `subprocess.run()` if the SELECT never asked."""
+    seen: list[str] = []
+    p = _provider(monkeypatch, _rows("0.95"))
+    monkeypatch.setattr(p, "_query_rows",
+                        lambda cypher, project, timeout_ms: (seen.append(cypher), _rows("0.95"))[1])
+    p.build_result("callers", "target", [], 30000, ROOT)
+    p.build_result("callees", "target", [], 30000, ROOT)
+    assert len(seen) == 2 and all("c.callee AS callee" in q for q in seen), seen
+
+
+def test_a_same_module_edge_called_through_a_receiver_is_unverified_and_a_bare_one_is_not(
+        monkeypatch):
+    """The reproduction, reduced. Both rows carry the same strategy and the same 0.90; only the call
+    text differs, and it decides the bucket. The foreign row is KEPT — ranking and labelling are
+    allowed here, filtering is the trade this project refuses — and says why it is doubted."""
+    env = _callers(monkeypatch, [
+        _same_module(0, "subprocess.target"),
+        _same_module(1, "target"),
+    ])
+    by_name = {r["name"]: r for r in env["rows"]}
+
+    foreign, bare = by_name["caller0"], by_name["caller1"]
+    assert foreign["verified"] is False and foreign["evidence"] == "name-matched", foreign
+    assert foreign["strategy"] == "same_module" and foreign["confidence"] == 0.9, foreign
+    assert "subprocess.target" in foreign["why"] and "receiver" in foreign["why"], foreign["why"]
+    assert bare["verified"] is True and bare["evidence"] == "resolved", bare
+
+    lines = _row_lines(env["result"])
+    assert len(lines) == len(env["rows"]) == 2, "a downgraded row must never be dropped"
+    assert "[?0.90 qualified call]" in next(ln for ln in lines if "caller0" in ln), lines
+    assert "[?" not in next(ln for ln in lines if "caller1" in ln), lines
+    assert env["evidence"]["verified"] == 1 and env["evidence"]["possible"] == 1
+
+
+def test_the_downgrade_moves_the_envelope_through_the_machinery_that_already_exists(monkeypatch):
+    """`confidence` and `evidence_class` are not set by the downgrade; they are DERIVED from the
+    bucket, so a second code path to them would be the thing that lets the row and the envelope
+    disagree. Same answer, only the call text changed."""
+    foreign = _callers(monkeypatch, [_same_module(0, "subprocess.target"),
+                                     _same_module(1, "os.target")])
+    bare = _callers(monkeypatch, [_same_module(0, "target"), _same_module(1, "target")])
+
+    assert bare["confidence"] == "complete" and bare["evidence_class"] == "evidence", bare
+    assert bare["evidence"]["safe_for_destructive"] is True
+
+    assert foreign["confidence"] == "partial", foreign
+    assert foreign["evidence_class"] == "advisory", foreign["evidence_class"]
+    assert foreign["evidence"]["safe_for_destructive"] is False
+    assert foreign["evidence"]["verified"] == 0 and foreign["evidence"]["possible"] == 2
+    assert any(g["kind"] == "low-confidence-edges" for g in foreign["gaps"]), foreign["gaps"]
+    # The note names the mechanism, so a reader knows what the doubt is about.
+    assert "`same_module` matches whose call is written through a receiver" in foreign["result"]
+    assert "(`same_module`)" in foreign["result"]
+
+
+_UNCHECKED_LANGUAGES = "only defined for Python and JavaScript/TypeScript"
+
+
+@pytest.mark.parametrize("callee, caller_file, why_fragment", [
+    (None, "src/t.py", "recorded no call text"),            # an older index, or a blank edge
+    ("", "src/t.py", "recorded no call text"),
+    (None, "src/t.ts", "recorded no call text"),
+    ("subprocess.target", "src/t.go", _UNCHECKED_LANGUAGES),   # a rule borrowed from Python
+    ("this.target", "src/t.rs", _UNCHECKED_LANGUAGES),
+    ("alias_for_something_else", "src/t.py", "is not a call of this symbol"),   # not THIS symbol
+    ("alias_for_something_else", "src/t.ts", "is not a call of this symbol"),
+])
+def test_a_same_module_edge_the_check_cannot_judge_stays_resolved_and_says_so(
+        monkeypatch, callee, caller_file, why_fragment):
+    """A check that cannot run must not move a row — the rule `source-unreadable` already follows.
+    Unknown is a statement, so it is made: the row stays `resolved` (so bench numbers for these
+    languages do not move) but its `why` says what scope did, that scope only binds a bare call,
+    and that whether this call is bare could not be checked — instead of the old sentence, which
+    said no binding was followed beside `verified: true`."""
+    env = _callers(monkeypatch, [_same_module(0, callee, caller_file=caller_file)])
+    row = env["rows"][0]
+
+    assert row["verified"] is True and row["evidence"] == "resolved", row
+    assert "scope resolved this inside the caller's own module" in row["why"], row["why"]
+    assert "only binds a call written bare" in row["why"], row["why"]
+    assert "could not be checked" in row["why"] and why_fragment in row["why"], row["why"]
+    assert "counted as resolved" in row["why"] and "the binding is a guess" in row["why"], row["why"]
+    assert "followed an import" not in row["why"], row["why"]
+    assert _CONTRADICTION not in row["why"], row["why"]
+    assert "[?" not in env["result"], env["result"]
+
+
+# The sentence a `verified: true` row used to carry: it said, of a row counted as resolved, that no
+# binding was followed. Both claims cannot be true of one row, and an agent filtering on `verified`
+# never reads the sentence.
+_CONTRADICTION = "no import or language-server binding was followed"
+
+
+def test_no_row_that_is_verified_says_that_no_binding_was_followed(monkeypatch):
+    """The invariant, over every way a `same_module` row can reach `resolved` — and over the other
+    strategies for good measure. `verified` is the field integrations branch on and `why` is the field
+    people read, so they may not disagree about the one thing the row exists to say."""
+    rows = [
+        _same_module(0, "target"),                                        # bare, own
+        _same_module(1, "self.target"),                                   # own receiver
+        _same_module(2, None),                                            # no call text
+        _same_module(3, ""),
+        _same_module(4, "other_leaf"),                                    # not this symbol's name
+        _same_module(5, "subprocess.target", caller_file="src/t.go"),     # a language it cannot read
+        _same_module(6, "pkg.target", caller_file="src/t.rs"),
+        _same_module(7, "this.target", caller_file="src/t.ts"),
+        _same_module(8, None, caller_file="src/t.ts"),
+        _same_module(9, "self.target", strategy="lsp_direct", conf="0.95"),
+        _same_module(10, None, strategy="import_map", conf="0.95"),
+        _same_module(11, None, strategy="", conf="0.97"),                 # a score, no strategy
+    ]
+    # One answer per row: rows in different languages are different symbols to `callers`, which
+    # would group them apart, and this is about each row's own sentence, not about the grouping.
+    answered = [_callers(monkeypatch, [row])["rows"][0] for row in rows]
+
+    verified = [r for r in answered if r["verified"]]
+    assert len(verified) == len(rows), "every row here is one the backend resolved and nothing downgrades"
+    for r in verified:
+        assert _CONTRADICTION not in r["why"], r
+
+
+@pytest.mark.parametrize("callee, verdict", [
+    ("console.target", "foreign"),          # the global `console`, bound to this module's own `log`
+    ("obj.target", "foreign"),
+    ("this.handlers.target", "foreign"),    # a member of `this`, not `this`
+    ("target", "own"),                      # a bare call binds by scope
+    ("this.target", "own"),
+    ("super.target", "own"),
+    ("this?.target", "own"),
+    ("t.target", "own"),                    # a segment of the symbol's own qualified name: its module
+])
+def test_a_same_module_edge_in_typescript_is_checked_like_one_in_python(
+        monkeypatch, callee, verdict):
+    """`console.log(x)` in a module that defines its own `log` is a call to the global, which the
+    backend bound to the local `log` because the leaf matched — the same defect as `subprocess.run`
+    in Python, in a language whose member-call semantics are the same: `this`/`super` are the
+    enclosing object, anything else before the dot is some other value."""
+    env = _callers(monkeypatch, [_same_module(0, callee, caller_file="src/t.ts")])
+    row = env["rows"][0]
+    if verdict == "foreign":
+        assert row["verified"] is False and row["evidence"] == "name-matched", row
+        assert callee in row["why"] and "receiver" in row["why"], row["why"]
+        assert row["strategy"] == "same_module" and row["confidence"] == 0.9, row
+        assert "[?0.90 qualified call]" in env["result"], env["result"]
+        assert env["confidence"] == "partial" and env["evidence"]["safe_for_destructive"] is False
+    else:
+        assert row["verified"] is True and row["evidence"] == "resolved", row
+        assert "scope binds it" in row["why"], row["why"]
+        assert "[?" not in env["result"], env["result"]
+        assert env["confidence"] == "complete", env
+
+
+def test_console_log_in_a_module_that_defines_its_own_log_is_not_a_caller_of_it(monkeypatch):
+    """The brief's own example, with the names it used. `utils.ts` defines `log` and calls
+    `console.log(x)`; the backend binds the call to the local `log` by scope. The row is a guess about
+    what `console` is, so it is badged, counted and unverified — and `this.log()` beside it is not."""
+    def edge(i: int, callee: str) -> dict:
+        return {
+            "a.name": f"caller{i}", "a.qualified_name": f"pkg.utils.caller{i}",
+            "a.file_path": "src/utils.ts", "labels(a)": "Function", "type(c)": "CALLS",
+            "c.confidence": "0.90", "strategy": "same_module", "callee": callee,
+            "b.name": "log", "b.qualified_name": "pkg.utils.log", "b.file_path": "src/utils.ts",
+        }
+
+    env = _callers(monkeypatch, [edge(0, "console.log"), edge(1, "this.log"), edge(2, "log")],
+                   target="log")
+    by_name = {r["name"]: r for r in env["rows"]}
+
+    assert by_name["caller0"]["verified"] is False, by_name["caller0"]
+    assert by_name["caller0"]["evidence"] == "name-matched"
+    assert "console.log" in by_name["caller0"]["why"], by_name["caller0"]["why"]
+    assert by_name["caller1"]["verified"] is True and by_name["caller2"]["verified"] is True
+    assert env["evidence"]["verified"] == 2 and env["evidence"]["possible"] == 1, env["evidence"]
+    assert any(g["kind"] == "low-confidence-edges" for g in env["gaps"]), env["gaps"]
+
+
+def test_a_downgraded_typescript_row_is_kept_and_a_bare_one_beside_it_is_not(monkeypatch):
+    """The reproduction, in TypeScript, reduced: both rows carry the same strategy and score, only
+    the call text differs, and neither is dropped."""
+    env = _callers(monkeypatch, [
+        _same_module(0, "console.target", caller_file="src/a.ts"),
+        _same_module(1, "target", caller_file="src/b.ts"),
+    ])
+    by_name = {r["name"]: r for r in env["rows"]}
+    assert by_name["caller0"]["verified"] is False and by_name["caller1"]["verified"] is True
+    assert len(_row_lines(env["result"])) == len(env["rows"]) == 2
+
+
+@pytest.mark.parametrize("callee", [
+    "self.target", "cls.target", "super().target", "super(Base, self).target",
+    "t.target",                 # `t` is a segment of the symbol's own qualified name: its module
+    "target",
+])
+def test_a_receiver_that_names_the_modules_own_symbol_is_never_downgraded(monkeypatch, callee):
+    """The counterweight, and the half that keeps this from over-filtering. `self.helper()` resolving
+    to a method of the same class is the rule working; so is `Config.load` inside the module that
+    defines `Config`. A check that fired on every attribute call would have retired a lot of
+    correct callers to fix two wrong ones."""
+    env = _callers(monkeypatch, [_same_module(0, callee)])
+    row = env["rows"][0]
+
+    assert row["verified"] is True, (callee, row)
+    assert "scope binds it" in row["why"], (callee, row["why"])
+    assert env["evidence_class"] == "evidence" and env["confidence"] == "complete", env
+
+
+def test_the_same_module_call_check_states_the_rule_it_applies():
+    """The check as a function, one line per case, so a change to the rule is a change to this table."""
+    from codeintel.graph_confidence import (
+        _SAME_MODULE_FOREIGN,
+        _SAME_MODULE_OWN,
+        _SAME_MODULE_UNCHECKED,
+        _same_module_call,
+    )
+
+    def row(callee, *, file="src/t.py", target="target", qn="pkg.t.Owner.target"):
+        return {"callee": callee, "a.file_path": file, "b.name": target, "b.qualified_name": qn}
+
+    assert _same_module_call(row("target")) == _SAME_MODULE_OWN
+    assert _same_module_call(row("self.target")) == _SAME_MODULE_OWN
+    assert _same_module_call(row("Owner.target")) == _SAME_MODULE_OWN      # the class that owns it
+    assert _same_module_call(row("subprocess.target")) == _SAME_MODULE_FOREIGN
+    assert _same_module_call(row("self.helper.target")) == _SAME_MODULE_FOREIGN
+    assert _same_module_call(row("p.target")) == _SAME_MODULE_FOREIGN
+    assert _same_module_call(row("x[0].target")) == _SAME_MODULE_FOREIGN
+    assert _same_module_call(row("")) == _SAME_MODULE_UNCHECKED
+    assert _same_module_call(row("subprocess.target", file="src/t.go")) == _SAME_MODULE_UNCHECKED
+    assert _same_module_call(row("subprocess.target", file="src/t.rs")) == _SAME_MODULE_UNCHECKED
+    assert _same_module_call(row("subprocess.other")) == _SAME_MODULE_UNCHECKED  # not this symbol
+    # JavaScript and TypeScript: `this`/`super` are the enclosing object where Python has `self`.
+    assert _same_module_call(row("target", file="src/t.ts")) == _SAME_MODULE_OWN
+    assert _same_module_call(row("this.target", file="src/t.tsx")) == _SAME_MODULE_OWN
+    assert _same_module_call(row("super.target", file="src/t.js")) == _SAME_MODULE_OWN
+    assert _same_module_call(row("Owner.target", file="src/t.ts")) == _SAME_MODULE_OWN
+    assert _same_module_call(row("console.target", file="src/t.ts")) == _SAME_MODULE_FOREIGN
+    assert _same_module_call(row("this.helper.target", file="src/t.ts")) == _SAME_MODULE_FOREIGN
+    assert _same_module_call(row("self.target", file="src/t.ts")) == _SAME_MODULE_FOREIGN  # not JS
+    assert _same_module_call(row("this.target")) == _SAME_MODULE_FOREIGN                   # not Python
+    assert _same_module_call(row("console.other", file="src/t.ts")) == _SAME_MODULE_UNCHECKED
+
+
+def test_why_says_what_each_strategy_actually_did(monkeypatch):
+    """One sentence per mechanism, because the bucket the old sentence covered held three of them.
+
+    "followed an import or a language-server binding" is true of `lsp_*` and `import_map`, and it was
+    attached to `same_module` and to an unnamed 0.9x edge as well. Each claim below is exactly as
+    strong as what the backend did, and the two that did not follow an import say so."""
+    def edge(i, strategy, conf, callee=None):
+        row = _same_module(i, callee, strategy=strategy, conf=conf)
+        row["a.file_path"] = f"src/c{i}.py"
+        return row
+
+    rows = [
+        edge(0, "lsp_direct", "0.95"),
+        edge(1, "import_map", "0.95"),
+        edge(2, "same_module", "0.90", "target"),
+        edge(3, "", "0.97"),                                 # a high score, no strategy named
+        edge(4, "suffix_match", "0.40"),
+        edge(5, "same_module", "0.90", "subprocess.target"),
+    ]
+    why = {r["name"]: r["why"] for r in _callers(monkeypatch, rows)["rows"]}
+
+    assert "language server" in why["caller0"] and "lsp_direct" in why["caller0"], why
+    assert "imports this symbol" in why["caller1"], why
+    assert "scope binds it" in why["caller2"] and "no import" in why["caller2"], why
+    assert "no import or language-server binding was followed" not in " ".join(why.values()), why
+    assert "without naming a strategy" in why["caller3"], why
+    assert "matched by name (suffix_match)" in why["caller4"], why
+    assert "through a receiver" in why["caller5"], why
+    # No sentence outside the two that DID follow a binding may claim one was followed.
+    for who in ("caller2", "caller3", "caller4", "caller5"):
+        assert "followed an import or a language-server binding" not in why[who], (who, why[who])
+    assert len(set(why.values())) == len(why), "two strategies share one sentence"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# Advice the tool cannot honour
+#
+# A name-matched answer tells the reader to confirm with `--engine lsp`. The language server has no
+# `callers`, so that command answers `unsupported-op` — the tool recommended a check it then
+# refused to run, at the moment the reader had just been told not to trust the answer.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _lsp_ops() -> set[str]:
+    """The ops the LSP engine's dispatcher actually handles, read from the dispatcher itself."""
+    import inspect
+    import re
+
+    from codeintel.providers.lsp import LspProvider
+
+    return set(re.findall(r'op == "(\w+)"', inspect.getsource(LspProvider._dispatch)))
+
+
+def _advice_spans(text: str, answered_op: str) -> list[tuple[str, str]]:
+    """Every `(engine, op)` a backticked command in *text* tells the reader to run.
+
+    A command that names an engine and no op means the op the reader just asked, which is the very
+    reading that made the old advice wrong."""
+    import re
+
+    out = []
+    for span in re.findall(r"`([^`]*--engine\s+\w+[^`]*)`", text):
+        engine = re.search(r"--engine\s+(\w+)", span).group(1)
+        op = re.search(r"--op\s+(\w+)", span)
+        out.append((engine, op.group(1) if op else answered_op))
+    return out
+
+
+def test_no_hint_recommends_an_engine_and_op_that_returns_unsupported_op(monkeypatch):
+    from codeintel.providers.graph import _GRAPH_OPS
+
+    lsp_ops = _lsp_ops()
+    assert lsp_ops and "callers" not in lsp_ops, (
+        "the premise of this test is that the language server answers symbol-shaped ops only; if "
+        f"that changed, the advice is allowed to change with it. dispatcher ops: {lsp_ops}")
+    supported = {"lsp": lsp_ops, "graph": set(_GRAPH_OPS), "semantic": {"search"}}
+
+    # 1. the name-collision signature: five rows, none of them resolved through an import.
+    collision = _callers(monkeypatch, _rows(*["0.75"] * 6))
+    assert any(g["kind"] == "all-rows-name-resolved" for g in collision["gaps"]), collision["gaps"]
+
+    # 2. the `no-edges` safe-null, which tells the reader how to confirm a symbol nobody calls.
+    monkeypatch.setattr(
+        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        LIST_PROJECTS if method == "list_projects" else None))
+    monkeypatch.setattr(p, "_query_rows", lambda cypher, project, timeout_ms: (
+        [] if "-[" in cypher else [{"n.qualified_name": "pkg.target", "n.file_path": "src/t.py"}]))
+    no_edges = p.build_result("callers", "target", [], 30000, ROOT)
+    assert no_edges["reason"] == "no-edges", no_edges
+
+    for label, text in (("collision note", collision["result"]), ("no-edges hint", no_edges["hint"])):
+        advice = _advice_spans(text, "callers")
+        assert advice, f"the {label} no longer names a command; this test has nothing to pin"
+        for engine, op in advice:
+            assert op in supported.get(engine, set()), (
+                f"the {label} tells the reader to run `{op}` on the {engine} engine, which answers "
+                f"`unsupported-op`:\n{text}")

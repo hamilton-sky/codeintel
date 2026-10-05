@@ -96,7 +96,7 @@ _MODULES = {
 # here?" list end to end produced a working CLI and an agent that still greps. README's quickstart
 # is `setup --all` -> `install` -> `query`; `_START_HERE` now matches it.
 _EXAMPLES = [
-    ('codeintel query --op changed --target ""', "what do my edits break?"),
+    ("codeintel query --op changed --target main", "what does this branch break?"),
     ("codeintel query --op callers --target foo", "who calls it?"),
     ("codeintel graph . --html", "open the call graph"),
     ("codeintel doctor", "why is a query empty?"),
@@ -263,12 +263,16 @@ Run this first, and again after big changes. `codeintel status` shows index
 age.""",
     "query": """examples:
   codeintel query --op changed
+  codeintel query --op changed  --target main
   codeintel query --op callers  --target build_parser
   codeintel query --op impact   --target Gateway.query
   codeintel query --op search   --target "where do we validate tokens"
   codeintel query --op hotspots --json
 
-`overview`, `changed` and `hotspots` ignore --target — omit it, or pass "".
+`overview` and `hotspots` ignore --target — omit it, or pass "".
+`changed` reads it as a base ref: omit it for your uncommitted edits, or pass
+a ref (`main`, `HEAD~3`, a SHA) to see what a whole branch removed or
+rewrote, and who still uses it.
 Prefer this over grep: results are ranked by graph importance, not by match
 order.
 
@@ -281,7 +285,7 @@ operations:
   chain       how one symbol reaches another
   context     search + symbol together
   pattern     structural pattern match over the graph
-  changed     what your uncommitted edits ripple into   --target ignored
+  changed     what your edits break      --target: optional base ref
   hotspots    highest fan-in / complexity symbols       --target ignored
   overview    ranked architecture summary               --target ignored
 
@@ -433,14 +437,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--op", choices=QUERY_OPS, required=True,
         help="Which question to ask; see \"operations\" below",
     )
-    # NOT required — `overview`/`changed`/`hotspots` ignore it, and every epilog example for those
-    # ops used to show `--op changed` etc. with no `--target` at all, which the parser rejected
-    # (`required=True` disagreeing with its own prose). A blank default lets those ops be run
-    # exactly as documented, while `--target` stays available for the ops that read it.
+    # NOT required — `overview`/`changed`/`hotspots` need none (`changed` takes an optional base
+    # ref), and every epilog example for those ops used to show `--op changed` etc. with no
+    # `--target` at all, which the parser rejected (`required=True` disagreeing with its own
+    # prose). A blank default lets those ops be run exactly as documented, while `--target` stays
+    # available for the ops that read it.
     query_parser.add_argument(
         "--target", default="",
-        help="Symbol name, or a natural-language query for `search`. Ignored (and safe to omit) "
-             "by `overview`/`changed`/`hotspots`.",
+        help="Symbol name, or a natural-language query for `search`; for `changed`, an optional "
+             "base ref (`main`, `HEAD~3`) — empty means uncommitted edits only. Ignored (and "
+             "safe to omit) by `overview`/`hotspots`.",
     )
     query_parser.add_argument(
         "--engine", choices=QUERY_ENGINES, default="auto",

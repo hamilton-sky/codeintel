@@ -26,17 +26,24 @@ from codeintel.graph_confidence import (
     _EDGE_CONFIDENCE_WEAK,
     _NAME_MATCHED,
     _RESOLVED,
+    _SAME_MODULE_FOREIGN,
     _UNSTATED,
+    _callee_for_display,
     _confidence_badge,
     _edge_confidence,
+    _edge_strength,
     _evidence_class,
+    _same_module_call,
+    _why,
 )
 from codeintel.graph_edges import (
     _CANDIDATE_CAP,
     _DIRECT_KIND,
+    _EDGE_ENDPOINT_CAP,
     _EDGE_KINDS,
     _EDGE_ROW_LIMIT,
     _EdgeGroup,
+    _Omitted,
 )
 from codeintel.graph_render import (
     _collapse_repeats,
@@ -154,6 +161,133 @@ class AnswerRendering:
                 marked["_module_scope"] = fp
                 kept.append(marked)
             group.rows = kept
+
+    @staticmethod
+    def _collapse_repeat_edges(
+        groups: list[_EdgeGroup], name_key: str, qn_key: str, file_key: str
+    ) -> None:
+        """One row per (endpoint, relationship kind) in each group, keeping the STRONGEST edge.
+
+        A backend may hold several edges between the same two symbols — one per call site, or one
+        per resolution it tried — and each used to be its own printed row and its own entry in the
+        heading's count. A caller reached by one edge and a caller reached by three are one caller
+        each, and a cap that is meant to bound callers has to count them that way.
+
+        Measured, so the claim is not larger than the evidence: codebase-memory-mcp 0.10.8 stores ONE
+        edge per (caller, callee, kind) — the maximum `count(*)` over every CALLS pair in this
+        repository's own index is 1 — so on that backend this is a no-op, and it is kept because
+        the cap's unit is the caller on every backend, including one that records call sites.
+
+        Where the repeats disagree, the strongest wins and the weaker ones are folded into it, not
+        listed beside it: a caller with a language-server edge and a name-guess edge to the same
+        symbol has a bound edge, and showing it twice — once as proof and once as a guess — is two
+        answers to one question. `_edge_strength` is the order, and it is the same order the cap uses
+        to decide what to drop, so the two cannot disagree about which rows are the good ones.
+
+        Different KINDS are not repeats: a call and a registration of the same symbol are different
+        facts (`_EDGE_KINDS`) and each stays. Module-scope rows are left to `_collapse_module_scope`,
+        which has already reduced them to one per file."""
+        for group in groups:
+            at: dict[tuple[str, str, str], int] = {}
+            kept: list[dict] = []
+            for row in group.rows:
+                ident = str(row.get(qn_key) or row.get(name_key) or "")
+                if row.get("_module_scope") is not None or not ident:
+                    kept.append(row)            # nothing to say two rows are the same endpoint
+                    continue
+                key = (ident, str(row.get(file_key) or ""), str(row.get("type(c)") or ""))
+                if key not in at:
+                    at[key] = len(kept)
+                    kept.append(row)
+                elif _edge_strength(row) < _edge_strength(kept[at[key]]):
+                    kept[at[key]] = row
+            group.rows = kept
+
+    @classmethod
+    def _cap_distinct_edges(
+        cls, groups: list[_EdgeGroup], name_key: str, qn_key: str, file_key: str,
+        *, tests_last: bool, cap: int = _EDGE_ENDPOINT_CAP,
+    ) -> _Omitted:
+        """Keep at most `cap` DISTINCT endpoints across the groups, in place, and count the rest.
+
+        The cap used to be on raw edges, applied by the backend's `LIMIT` before anything was
+        selected, grouped or collapsed — so it bounded the wrong thing, and which rows survived it
+        was whichever the backend happened to return first. On `GraphProvider.build_result` that was
+        twenty rows and every one of them a test function: the three production call sites, which
+        are the ones a reader changing the method has to look at, were somewhere past the cut.
+
+        Here the endpoints are whole — every edge of the symbols asked about is in hand when this
+        runs, unless the fetch itself was cut short — so what is kept can be CHOSEN, and the choice is
+        a ranking rather than a filter: nothing leaves the answer's accounting. Each omitted endpoint
+        is counted, and the count reaches the body, the `gaps` and the envelope's `total`.
+
+        The order, strongest first:
+
+        * production before test code, when `tests_last` (callers). A test that calls a function is a
+          weaker reason to be careful with it than a production caller, and a heavily tested symbol
+          is exactly the one whose tests fill the list. Ranked, not dropped — the tests that do fit
+          are still listed, and the omitted ones are counted as tests.
+        * bound edges before guesses (`_edge_strength`), so a reader who stops early stops on the
+          evidence.
+
+        Every group keeps its best endpoint before any group keeps a second, so a symbol that has
+        callers cannot vanish from an ambiguous answer ("3 distinct symbols named `handle`") because
+        another symbol's callers outranked it."""
+        def ident(row: dict) -> tuple[str, str]:
+            scope = row.get("_module_scope")
+            if scope is not None:
+                return "scope", str(scope)
+            return str(row.get(qn_key) or row.get(name_key) or ""), str(row.get(file_key) or "")
+
+        def is_test(row: dict) -> bool:
+            scope = row.get("_module_scope")
+            return tests_last and cls._looks_like_test(
+                str(scope) if scope is not None else str(row.get(file_key) or ""),
+                str(row.get(name_key) or ""))
+
+        # Production before tests inside each group, whether or not anything is cut. This is NOT the
+        # whole printed order: `_render_edge_answer` re-sorts every group afterwards by edge kind and
+        # then by evidence bucket, so a RESOLVED test caller prints ahead of a name-matched
+        # production one. Because that sort is stable, production still precedes tests within each
+        # (kind, bucket) — which is all this partition guarantees, and what a reader who stops early
+        # within one kind of evidence gets.
+        if tests_last:
+            for group in groups:
+                group.rows.sort(key=is_test)
+
+        endpoints: list[tuple[int, tuple[str, str], list[dict]]] = []
+        for gi, group in enumerate(groups):
+            by_ident: dict[tuple[str, str], list[dict]] = {}
+            for row in group.rows:
+                by_ident.setdefault(ident(row), []).append(row)
+            endpoints.extend((gi, key, rows) for key, rows in by_ident.items())
+        if len(endpoints) <= cap:
+            return _Omitted(shown=len(endpoints))
+
+        tested = [is_test(rows[0]) for _, _, rows in endpoints]
+        order = sorted(
+            range(len(endpoints)),
+            key=lambda i: (tested[i], min(_edge_strength(r) for r in endpoints[i][2]), i))
+        keep: set[int] = set()
+        for gi in range(len(groups)):
+            best = next((i for i in order if endpoints[i][0] == gi), None)
+            if best is not None and len(keep) < cap:
+                keep.add(best)
+        for i in order:
+            if len(keep) >= cap:
+                break
+            keep.add(i)
+
+        kept_ids = {(endpoints[i][0], endpoints[i][1]) for i in keep}
+        for gi, group in enumerate(groups):
+            group.rows = [r for r in group.rows if (gi, ident(r)) in kept_ids]
+        gone = [i for i in range(len(endpoints)) if i not in keep]
+        return _Omitted(
+            endpoints=len(gone),
+            rows=sum(len(endpoints[i][2]) for i in gone),
+            tests=sum(1 for i in gone if tested[i]),
+            shown=len(keep),
+        )
 
     @staticmethod
     def _drop_edge_collisions(groups: list[_EdgeGroup], file_key: str, label_key: str) -> int:
@@ -346,20 +480,47 @@ class AnswerRendering:
                 f"edge of this kind. {len(candidates)} symbol(s) named `{wanted.name}` do have "
                 f"{op} here:\n" + listing + more)
 
-    def _row_cap_note(self, op: str, target: str) -> str:
+    def _row_cap_note(self, op: str, target: str, limit: int = _EDGE_ROW_LIMIT) -> str:
         """Disclose a list this op truncated itself.
 
         A query that came back exactly at its own `LIMIT` has almost certainly been cut short, and
         the rendered list gives no sign of it. For `callees` in particular the whole point is
         "everything this reaches", so a silently-capped list is the partial-reads-as-complete
-        failure in its purest form."""
+        failure in its purest form.
+
+        This is the note for a cap whose TOTAL is unknown. When the op could ask the backend what it
+        holds, the cap is on distinct endpoints and the total is exact — that is
+        `_distinct_cap_note`."""
         self._add_gap(
             op, "row-cap-reached",
-            f"the query returned the maximum {_EDGE_ROW_LIMIT} rows, so this list is truncated "
+            f"the query returned the maximum {limit} rows, so this list is truncated "
             f"and may be missing rows — not a complete answer for `{target}`",
         )
-        return (f"\n\n_Truncated: the graph returned the maximum {_EDGE_ROW_LIMIT} rows, so rows "
+        return (f"\n\n_Truncated: the graph returned the maximum {limit} rows, so rows "
                 f"beyond that are missing from this list._")
+
+    def _distinct_cap_note(
+        self, op: str, unit: str, target: str, omitted: _Omitted, *, tests_last: bool
+    ) -> str:
+        """Disclose endpoints left out by the distinct-endpoint cap — with the exact count.
+
+        Unlike `_row_cap_note` this knows the total, because every edge of the symbol was fetched
+        before anything was dropped; what is missing is therefore a number, not "possibly more".
+        When the endpoints are callers it also says how many of the missing ones are test code and
+        how many production, which is the question a reader facing a truncated list actually has:
+        is the part I cannot see the part that matters?"""
+        total = omitted.shown + omitted.endpoints
+        production = omitted.endpoints - omitted.tests
+        split = (f" ({omitted.tests} in test files, {production} in production code)"
+                 if tests_last else "")
+        self._add_gap(
+            op, "row-cap-reached",
+            f"{total} distinct {unit}s exist and {omitted.shown} are shown; {omitted.endpoints} are "
+            f"not{split}, so this list is truncated — not a complete answer for `{target}`",
+        )
+        order = " Production code is listed first and test files last." if tests_last else ""
+        return (f"\n\n_Truncated: {omitted.shown} of {total} distinct {unit}s are shown, and "
+                f"{omitted.endpoints} are not{split}.{order}_")
 
     @staticmethod
     def _kind_counts(groups: list[_EdgeGroup]) -> dict[str, int]:
@@ -426,8 +587,9 @@ class AnswerRendering:
         would never reach. Unstamped rows are counted apart and never badged: silence from the
         backend is not a low score, and flattening the two is the same error one level down.
         """
-        weak = unverified = unstamped = no_column = total = 0
+        weak = unverified = unstamped = no_column = total = foreign = 0
         guessed_by: set[str] = set()
+        foreign_call = ""
         for g in groups:
             for r in g.rows:
                 total += 1
@@ -445,6 +607,23 @@ class AnswerRendering:
                     continue
                 if evidence in ("lsp", "import", "same-module"):
                     r["_evidence"] = evidence
+                    if evidence == "same-module":
+                        # `same_module` is a bare-name lookup inside the caller's own file, and it
+                        # is only a binding when the call is written as that bare name. The edge
+                        # records the call text, so ask it (see `_same_module_call`): a call written
+                        # through a receiver is a guess, and is counted and badged as one. A call the
+                        # check cannot judge stays resolved, as it always was.
+                        verdict = _same_module_call(r)
+                        r["_same_module"] = verdict
+                        if verdict == _SAME_MODULE_FOREIGN:
+                            r["_low_confidence"] = _edge_confidence(r)
+                            r["_bucket"] = _NAME_MATCHED
+                            guessed_by.add(str(r.get("strategy") or "").strip())
+                            unverified += 1
+                            foreign += 1
+                            foreign_call = foreign_call or _callee_for_display(
+                                str(r.get("callee") or ""))
+                            continue
                     r["_bucket"] = _RESOLVED
                     continue
                 conf = _edge_confidence(r)
@@ -508,6 +687,15 @@ class AnswerRendering:
                 f"following an import or a language-server binding. Correct when the call really "
                 f"targets this symbol; wrong when it targets a same-named symbol the index never "
                 f"saw.")
+            if foreign:
+                details.append(
+                    f"{foreign} of {total} row(s) are `same_module` matches whose call is written "
+                    f"through a receiver (`{foreign_call}`), which the module's own symbol is not")
+                parts.append(
+                    f"{foreign} of those are `same_module` matches whose call is written through a "
+                    f"receiver (`{foreign_call}`): the backend matched the bare name inside the "
+                    f"caller's own module and ignored the receiver, so the callee is as likely to be "
+                    f"a same-named function from elsewhere.")
         if unstamped:
             details.append(
                 f"{unstamped} of {total} row(s) carry no confidence from the backend at all, so how "
@@ -529,11 +717,23 @@ class AnswerRendering:
                 "name the index does not own (a library function, a framework global, a builtin "
                 "method) collecting every call site that mentions it",
             )
+            # The way to confirm has to be one this tool can actually run. This sentence used to
+            # send the reader to `--engine lsp`, and the language server has no `callers` or
+            # `callees` — `--engine lsp` on this op answers `unsupported-op`, so the advice ended
+            # in a refusal at the exact moment the reader had been told not to trust the answer.
+            # The language server DOES answer `symbol` (definition and references), and a text
+            # search needs no engine at all; those are the two checks named.
+            leaf = (groups[0].label if groups else "").rsplit(".", 1)[-1]
+            check = (f"`--op symbol --engine lsp` (the language server's own reference list) or "
+                     f"`rg -n -w --fixed-strings '{leaf}' {getattr(self, '_answered_root', None) or '.'}`"
+                     if leaf and "'" not in leaf else
+                     "`--op symbol --engine lsp` (the language server's own reference list) or a "
+                     "text search for the name")
             parts.append(
                 "**Not one row here was resolved through an import.** That is the signature of a "
                 "name this index does not own — a library function, a framework global, a builtin "
                 "method — collecting every call site in the repository that mentions it. Treat the "
-                "whole answer as unconfirmed until `--engine lsp` agrees.")
+                f"whole answer as unconfirmed until {check} agrees.")
         self._add_gap(op, "low-confidence-edges", "; ".join(details))
         marked = "Marked `[?…]` below. " if (weak or unverified) else ""
         return "\n\n_" + marked + " ".join(parts) + "_"
@@ -606,7 +806,8 @@ class AnswerRendering:
         tally = " · ".join(f"{n} {b}" for b, n in present)
         return (
             f"**{tally}.** The heading counts rows, not confirmed {unit}s — only the `{_RESOLVED}` "
-            f"rows followed an import or a language-server binding. Per-row detail below.\n"
+            f"rows were bound by an import, a language server or the caller's own module scope. "
+            f"Per-row detail below.\n"
         )
 
     # How many name-matched rows make a command worth printing. Below this the reader can eyeball
@@ -704,9 +905,12 @@ class AnswerRendering:
         structured row and the printed row cannot disagree about a fact.
 
         `verified` is the field to filter on and the only one that is a VERDICT: true exactly when
-        the edge was followed through an import or a language-server binding. An unstamped row is
-        not verified — silence from the backend is not evidence — and it is not `possible` either,
-        which is why `evidence` keeps all three states rather than collapsing to a boolean pair.
+        a binding was followed — through an import, a language server, or (for a bare call to a
+        symbol the caller's own module defines) the module's own scope. `why` says WHICH, per
+        strategy, because the three are different strengths of claim and one sentence for the
+        bucket was false for one of them. An unstamped row is not verified — silence from the
+        backend is not evidence — and it is not `possible` either, which is why `evidence` keeps
+        all three states rather than collapsing to a boolean pair.
 
         `relation` says which side of the edge this row is, because `impact` renders callers and
         callees into ONE answer and therefore into one `rows` list. Without it a reader filtering
@@ -734,12 +938,7 @@ class AnswerRendering:
             "evidence": bucket,
             "strategy": strategy or None,
             "confidence": float(confidence) if confidence is not None else None,
-            "why": {
-                _RESOLVED: "followed an import or a language-server binding",
-                _NAME_MATCHED: (f"matched by name ({strategy})" if strategy
-                                else "matched by bare symbol name, not by following a binding"),
-                _UNSTATED: "the backend reported no provenance for this edge",
-            }.get(bucket, "unclassified"),
+            "why": _why(row, bucket),
         }
 
     def _record_rows(self, rendered: list[dict], row_keys: tuple[str, str, str], unit: str,
@@ -858,7 +1057,7 @@ class AnswerRendering:
     def _render_edge_answer(
         self, op: str, unit: str, target: str, wanted: _SymbolTarget,
         groups: list[_EdgeGroup], row_keys: tuple[str, str, str], truncated: bool,
-        extra_notes: str = "",
+        extra_notes: str = "", omitted: _Omitted | None = None,
     ) -> str:
         """Render one edge-op answer from rows already grouped by the symbol they belong to.
 
@@ -927,6 +1126,10 @@ class AnswerRendering:
                     + "\n" + "\n\n".join(sections))
         # Recorded from the list that was displayed, after it was displayed: `rows` and the `- `
         # lines beneath this heading are then the same rows, not two derivations that agree today.
+        # Endpoints the distinct cap left out are withheld rows like any other: known, counted, and
+        # not printed — which is what makes the envelope's `total` exact instead of unknown.
+        if omitted is not None:
+            withheld += omitted.rows
         self._record_rows(rendered, row_keys, unit, row_cap_hit=truncated, withheld=withheld)
         return (body + self._kind_note(op, counts) + extra_notes
                 + self._name_resolution_note(wanted, answered, truncated))

@@ -206,6 +206,7 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
 | Everything about one symbol | `context` | graph + lsp | both views merged |
 | **Impact of your uncommitted edits** | `changed` | graph | changed files → impacted symbols |
+| **What a branch changes, and who still calls it** | `changed` with `target="main"` | graph + git | each removed / re-signed / rewritten function → callers the branch did not touch |
 | Refactor-risk hotspots | `hotspots` | graph | highest complexity / fan-in symbols |
 | Unreferenced (dead) code | `deadcode` | graph | **withdrawn and now retired** — a labelled corpus measured its precision at 25%; safe-nulls with `reason: "op-withdrawn"`, and no flag brings it back — [the measurement, and what to use instead](#deadcode-is-retired) |
 
@@ -498,7 +499,7 @@ Register codeintel as an MCP server (`codeintel install`) and the agent gets fou
 | MCP tool | HTTP equivalent | Purpose |
 |---|---|---|
 | `code.query` | `POST /code/query` | The main call — search, trace, understand (the `op` table above) |
-| `code.status` | `GET /code/status` | Per-engine `installed` / `runnable` / `repo_indexed` (plus `model_cached` for semantic), probed against the live engines a query actually hits |
+| `code.status` | `GET /code/status` | Per-engine `installed` / `runnable` / `repo_indexed` (plus `model_cached` for semantic), probed against the live engines a query actually hits, plus `degraded`: engines that are installed but not working — see [docs/doctor.md](docs/doctor.md) |
 | `code.doctor` | `POST /code/doctor` | Per-engine health + repo index status, with a fix for each gap |
 | `code.map` | — | Generate/refresh `CODE_INTEL.md`, a static orientation file for hosts without MCP |
 

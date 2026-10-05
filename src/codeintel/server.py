@@ -178,6 +178,10 @@ _STATUS_FALLBACK: dict = {
     "indexed": False,
     "model": None,
     "healthy": False,
+    # `None`, not `[]`: this fallback means the status could not be produced, and `[]` is the report's
+    # own way of saying "nothing is degraded". A caller reading "none degraded" off an error is
+    # being told the engines are fine by a handler that never looked.
+    "degraded": None,
     "readiness": {},
     "version_skew": None,
 }
@@ -193,7 +197,11 @@ def _code_status_handler_inner(args: dict) -> dict:
     never boots — an agent reading that would reason from a readiness claim nothing verified.
 
     The flat `graph`/`lsp`/`semantic`/`indexed`/`model` keys keep their original meaning for
-    existing callers; `readiness` and `healthy` carry the full picture.
+    existing callers; `readiness` and `healthy` carry the full picture. That meaning is
+    INSTALLED, not usable: `graph: true` is a binary on PATH, and was reported next to a backend
+    that refused to start. `degraded` names the engines that are installed and failing — including
+    the optional graph engine, which `healthy` deliberately ignores — so a caller reads that
+    instead of trusting a boolean for something it does not say. See docs/doctor.md.
 
     `on_provider` closes the last gap between what this reports and what a query can do: for an
     engine the gateway lacks, doctor builds an ephemeral provider to probe — and any engine it
@@ -279,6 +287,9 @@ def _code_status_handler_inner(args: dict) -> dict:
             "indexed": indexed,
             "model": model,
             "healthy": bool(summary.get("healthy")),
+            # Derived from the probes read above rather than copied from `report`, so a report that
+            # predates the field (or a stubbed `run_doctor`) cannot make this key vanish.
+            "degraded": _doctor.degraded_engines(probes),
             "deep": deep,
             "readiness": readiness,
             "versions": report.get("versions", {}) if isinstance(report, dict) else {},
@@ -310,7 +321,7 @@ def _code_doctor_handler_inner(args: dict) -> dict:
         if not gw.allows(role, "doctor"):
             return {
                 "ok": True, "project_root": project_root, "deep": deep,
-                "summary": {"ready": 0, "total": 3, "healthy": False},
+                "summary": {"ready": 0, "total": 3, "healthy": False}, "degraded": None,
                 "engines": {}, "reason": "op-not-allowed-for-role",
             }
         # An op gate alone leaves the TARGET unbounded: a role scoped to /srv/team-a could still
@@ -318,7 +329,7 @@ def _code_doctor_handler_inner(args: dict) -> dict:
         if not gw.allows_root(role, project_root):
             return {
                 "ok": True, "project_root": project_root, "deep": deep,
-                "summary": {"ready": 0, "total": 3, "healthy": False},
+                "summary": {"ready": 0, "total": 3, "healthy": False}, "degraded": None,
                 "engines": {}, "reason": "root-not-allowed-for-role",
             }
         return _doctor.run_doctor(
@@ -328,7 +339,7 @@ def _code_doctor_handler_inner(args: dict) -> dict:
     except Exception:
         return {
             "ok": True, "project_root": "", "deep": False,
-            "summary": {"ready": 0, "total": 3, "healthy": False},
+            "summary": {"ready": 0, "total": 3, "healthy": False}, "degraded": None,
             "engines": {}, "note": "doctor-error",
         }
 
@@ -384,7 +395,9 @@ _MCP_INSTRUCTIONS = (
     "natural-language 'find the code that does Y' search. It is graph-augmented and ranked, so it "
     "beats raw grep for locating and relating code.\n\n"
     "Before you edit, run `changed` to see which symbols your uncommitted edits ripple into; "
-    "reach for `hotspots` (complexity/fan-in risk) when planning a refactor.\n\n"
+    "to review a branch, run `changed` with `target` set to its base (e.g. `main`) — it lists each "
+    "function the branch removed, re-signed or rewrote, and the callers the branch did NOT touch. "
+    "Reach for `hotspots` (complexity/fan-in risk) when planning a refactor.\n\n"
     "Orient on a new repo with `code.map` (ranked architecture: top symbols, entry points, routes). "
     "If results look empty, call `code.doctor` — it says exactly what to index or install. "
     "`code.status` reports engine health.\n\n"
@@ -442,12 +455,19 @@ _OP_FIELD_DESCRIPTION = (
     "pattern(target) [discovery] — literal/regex match ranked by graph importance "
     "(graph-augmented grep). "
     "overview() [discovery] — this repo's architecture; `target` is IGNORED. "
-    "changed() [discovery] — impact of your uncommitted git edits; `target` is IGNORED. "
+    "changed() [discovery] — what your edits break. With no `target`: the files and symbols your "
+    "UNCOMMITTED git edits ripple into. With a git ref as `target` (`main`, `HEAD~3`, a SHA or a "
+    "tag): the merge-base of that ref and HEAD against the WORKING TREE — a branch's committed "
+    "plus uncommitted changes — as which functions were removed, re-signed or rewritten, and who "
+    "still uses each (callers the diff also touched vs. callers it did not; a removed function's "
+    "users are text mentions, never resolved calls). "
     "hotspots() [discovery] — highest fan-in/complexity symbols; `target` is IGNORED."
 )
 _TARGET_FIELD_DESCRIPTION = (
-    "The symbol name or natural-language query. Ignored by `overview`/`changed`/`hotspots` — "
-    "those answer for the whole repo, scoped by `project_root` alone."
+    "The symbol name or natural-language query. For `changed`, an OPTIONAL git ref (`main`, "
+    "`HEAD~3`, a SHA, a tag, or `<ref>...HEAD`) to compare the working tree against; leave it "
+    "empty for uncommitted edits only. Ignored by `overview`/`hotspots` — those answer for the "
+    "whole repo, scoped by `project_root` alone."
 )
 _PROJECT_ROOT_FIELD_DESCRIPTION = (
     "Absolute path to the repo root. Optional on this (stdio) transport: if omitted, it falls back "
@@ -543,7 +563,10 @@ def run() -> None:
         annotations=ToolAnnotations(read_only_hint=True),
         description=(
             "Read-only. Which engines (graph/LSP/semantic) are available and whether this repo is "
-            "indexed. Check this first if code.query keeps returning nothing."
+            "indexed. Check this first if code.query keeps returning nothing. The top-level "
+            "`graph`/`lsp`/`semantic` flags mean INSTALLED, not usable — read `readiness` for "
+            "that, and `degraded` for engines that are installed but failing (`healthy` ignores "
+            "the optional graph engine)."
         ),
     )
     mcp.add_tool(

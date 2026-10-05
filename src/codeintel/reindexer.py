@@ -231,7 +231,12 @@ class Reindexer:
                 logger.warning("graph index_repository reported an error for %s: %s",
                                project_root, result.get("hint") or result)
             elif result is None:
-                logger.warning("graph index_repository returned nothing for %s "
-                               "(backend timed out, crashed, or rejected the call)", project_root)
+                # `_run` now records WHICH of those it was — a refusal carries the backend's own
+                # words — so say that instead of listing every possibility. The list stays only for
+                # the case where nothing was recorded.
+                failure = gp._last_failure
+                logger.warning("graph index_repository returned nothing for %s: %s", project_root,
+                               failure.detail if failure is not None
+                               else "backend timed out, crashed, or rejected the call")
         except Exception as exc:
             logger.warning("graph index_repository failed: %s", exc)
