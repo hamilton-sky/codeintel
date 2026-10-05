@@ -55,6 +55,14 @@ or a Protocol were missing from its answer.
   hierarchy walk is shared per op, the lookups stop at the first failure, and together they get one
   deadline of six times the per-call budget. Functions and constructors cost none.
 
+### Internal
+- **The call-edge benchmark can measure Graphify.** With `CODEINTEL_BENCH_GRAPHIFY` naming a
+  `graphify` executable, `bench/run.py` adds `graphify` and `graphify_extracted` arms on the same
+  oracle and scorer. Graphify reads a copy of the tree and runs with no API keys, a scratch `HOME`
+  and no model backend on its `PATH`. Without the variable the table is unchanged. The first
+  comparison (32 targets, 5 trees) is in `bench/README.md`: codeintel 83% precision / 93% recall,
+  Graphify 94% / 85%.
+
 ## [0.25.0] — 2026-10-05
 
 Born of one afternoon (#63): the graph engine went down, the doctor called a one-second refusal a
