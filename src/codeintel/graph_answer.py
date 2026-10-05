@@ -605,7 +605,7 @@ class AnswerRendering:
                     guessed_by.add(str(r.get("strategy") or "").strip())
                     unverified += 1
                     continue
-                if evidence in ("lsp", "import", "same-module"):
+                if evidence in ("lsp", "import", "same-module", "self-mro"):
                     r["_evidence"] = evidence
                     if evidence == "same-module":
                         # `same_module` is a bare-name lookup inside the caller's own file, and it
@@ -806,7 +806,8 @@ class AnswerRendering:
         tally = " · ".join(f"{n} {b}" for b, n in present)
         return (
             f"**{tally}.** The heading counts rows, not confirmed {unit}s — only the `{_RESOLVED}` "
-            f"rows were bound by an import, a language server or the caller's own module scope. "
+            f"rows were bound by an import, a language server, the caller's own module scope or, for "
+            f"a `self.` call, the caller's own class hierarchy (`self_mro`, over INHERITS edges). "
             f"Per-row detail below.\n"
         )
 
@@ -905,10 +906,11 @@ class AnswerRendering:
         structured row and the printed row cannot disagree about a fact.
 
         `verified` is the field to filter on and the only one that is a VERDICT: true exactly when
-        a binding was followed — through an import, a language server, or (for a bare call to a
-        symbol the caller's own module defines) the module's own scope. `why` says WHICH, per
-        strategy, because the three are different strengths of claim and one sentence for the
-        bucket was false for one of them. An unstamped row is not verified — silence from the
+        a binding was followed — through an import, a language server, (for a bare call to a symbol
+        the caller's own module defines) the module's own scope, or (for a `self.m()` call) the
+        caller's own class hierarchy, over INHERITS edges. `why` says WHICH, per strategy, because
+        the four are different strengths of claim and one sentence for the bucket was false for one
+        of them. An unstamped row is not verified — silence from the
         backend is not evidence — and it is not `possible` either, which is why `evidence` keeps
         all three states rather than collapsing to a boolean pair.
 
@@ -926,7 +928,7 @@ class AnswerRendering:
         confidence = row.get("_low_confidence")
         scope = row.get("_module_scope")
         edge = str(row.get("type(c)") or "").strip()
-        return {
+        out: dict[str, Any] = {
             "relation": unit,
             "name": str(row.get(name_key) or ""),
             "qualified_name": _strip_project_prefix(
@@ -940,6 +942,16 @@ class AnswerRendering:
             "confidence": float(confidence) if confidence is not None else None,
             "why": _why(row, bucket),
         }
+        via = row.get("_via")
+        if via:
+            # Only on a row that reached the symbol through a base, so every other answer keeps the
+            # exact row shape it always had. `via` is the base method the call was actually resolved
+            # to; `via_kind` says whether that base is a Protocol the symbol satisfies structurally or
+            # a class it inherits from. Neither changes `verified`, which stays false: a call to the
+            # base is not a binding to this override.
+            out["via"] = str(via)
+            out["via_kind"] = str(row.get("_via_kind") or "")
+        return out
 
     def _record_rows(self, rendered: list[dict], row_keys: tuple[str, str, str], unit: str,
                      *, row_cap_hit: bool, withheld: int) -> None:
@@ -1046,6 +1058,13 @@ class AnswerRendering:
         if ev["verified"] or ev["possible"]:
             lines.append(f"> Verified {noun}s: {ev['verified']} · "
                          f"possible: {ev['possible']} · unstated: {ev['unstated']}")
+        # Said here because `possible` alone reads as "weak evidence about this symbol", and a row
+        # that called the BASE method is a different claim: it may be the only production caller
+        # there is, and no binding ties it to the symbol asked about.
+        through = sum(1 for r in self._pending_rows if r.get("via"))
+        if through:
+            lines.append(f"> Of the possible {noun}s, {through} call a base type or Protocol rather "
+                         "than this symbol, and reach it only by dispatch")
         if ev["truncated"]:
             total = ev["total"]
             shown = (f"{ev['returned']} shown, {total} in total" if total is not None

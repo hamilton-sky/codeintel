@@ -67,6 +67,12 @@ _EDGE_KINDS: dict[str, str] = {
 _DIRECT_KIND = "CALLS"
 
 
+# The relationship kinds a `callers` question matches. One spelling, because the dispatch lookup asks
+# the same question about a BASE method and a second spelling of it is how the two answers would come
+# to disagree about what a caller is.
+_CALLER_KINDS = "CALLS|USAGE|CALL_REFERENCE"
+
+
 # How many same-named candidates to name when the answer has to ask "which one?". A list long enough
 # to be unreadable is not a choice offered, and the count always states the full total.
 _CANDIDATE_CAP = 12

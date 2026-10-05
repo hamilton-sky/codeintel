@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Any
 
 from codeintel.graph_changed import ChangedSince
 from codeintel.graph_confidence import _EDGE_CONFIDENCE_FLOOR, _edge_confidence, _evidence_class
+from codeintel.graph_dispatch import DispatchCallers, _direct_target, _DirectTarget
 from codeintel.graph_edges import (
+    _CALLER_KINDS,
     _DIRECT_KIND,
     _EDGE_FETCH_CEILING,
     _EDGE_ROW_LIMIT,
@@ -31,6 +33,7 @@ from codeintel.graph_edges import (
 )
 from codeintel.graph_render import (
     _cypher_literal,
+    _in_list,
     _int_or_zero,
     _label_of,
     _language_coverage_note,
@@ -41,14 +44,15 @@ from codeintel.graph_targets import _parse_symbol_target, _SymbolTarget
 from codeintel.source_kind import is_code_path
 
 
-class GraphOps(ChangedSince):
+class GraphOps(DispatchCallers, ChangedSince):
     """One method per graph op. Mixed into `GraphProvider`.
 
     Inherits `AnswerRendering` — through `ChangedSince`, the symbol-level `changed <ref>` pipeline,
-    which is itself an `AnswerRendering` — rather than declaring its render methods, because the
-    dependency is real: an op's shape is query, filter, then render, and the alternative was
-    fourteen stub signatures asserting a relationship the code already has. The MRO
-    `GraphProvider` ends up with gains one class between `GraphOps` and `AnswerRendering`, and no
+    and through `DispatchCallers`, the lookup of callers that reach a method through a base type,
+    both of which are themselves an `AnswerRendering` — rather than declaring its render methods,
+    because the dependency is real: an op's shape is query, filter, then render, and the alternative
+    was fourteen stub signatures asserting a relationship the code already has. The MRO
+    `GraphProvider` ends up with gains two classes between `GraphOps` and `AnswerRendering`, and no
     method is defined twice.
 
     What it still needs from the provider is transport and per-query state, declared below.
@@ -76,43 +80,102 @@ class GraphOps(ChangedSince):
         and not the other, and a blast-radius answer whose callers belong to a DIFFERENT symbol of
         the same name is worse than an un-narrowed one: it reads as precise."""
         wanted = _parse_symbol_target(target)
-        fetched = self._fetch_edges("CALLS|USAGE|CALL_REFERENCE", "b", "a", wanted, project,
-                                    timeout_ms)
-        rows = fetched.rows
-        if not rows:
+        # One scope for the whole op: the `self.m()` rule and the lookup of the target's bases both
+        # read the class hierarchy, and `impact` joins this scope for its other half.
+        with self._lookup_scope(timeout_ms):
+            fetched = self._fetch_edges(_CALLER_KINDS, "b", "a", wanted, project, timeout_ms)
+            rows = fetched.rows
+            if not rows:
+                return self._callers_only_through_bases(target, wanted, project, timeout_ms)
+            truncated = fetched.cut_short
+
+            called = _group_edges(rows, "b.name", "b.qualified_name", "b.file_path")
+            selected = [g for g in called if wanted.matches(g.qn_raw, g.file)]
+            if wanted.narrowed and not selected:
+                # The symbol asked about has no edge of its own, and a namesake does. When it is an
+                # override, that namesake is very often the BASE its callers were written against —
+                # the case this op used to answer "no symbol matching" about, one line before telling
+                # the reader which symbols do have callers. Ask whether it is, and say what was found.
+                through = self._callers_only_through_bases(
+                    target, wanted, project, timeout_ms, cut_at=fetched.limit if truncated else 0)
+                if through is not None:
+                    return through
+                return self._no_symbol_matched_the_hint("callers", target, wanted, called)
+
+            # The caller is the displayed side here, so both the collision pollution and the
+            # module-scope pseudo-nodes land in the rows a reader sees. Drop the cross-language /
+            # non-code collisions (a `.ts` function three files over sharing the bare name is not a
+            # caller), relabel the module-scope nodes that remain, and disclose anything dropped — all
+            # before the renderer counts or prints a row.
+            # Read from the rows BEFORE the filters below can empty a group: whether the target is a
+            # method, and which one, is what the lookup of its bases is keyed on.
+            direct = _direct_target(selected)
+            dropped = self._drop_edge_collisions(selected, "a.file_path", "labels(a)")
+            self._collapse_module_scope(selected, "labels(a)", "a.file_path")
+            # A `self.m()` call the class hierarchy binds is a resolution, not a name guess. Before
+            # the collapse and the cap, so the ranking those apply sees the row as the resolution it
+            # is.
+            self._upgrade_self_calls(selected, project, timeout_ms)
+            # Then fold repeats and cap by CALLER. Both have to come after the filters above, so a
+            # row that was never a caller does not take a place from one that is, and before the note
+            # below, so every count it states describes the rows that are actually printed.
+            self._collapse_repeat_edges(selected, "a.name", "a.qualified_name", "a.file_path")
+            omitted = self._cap_distinct_edges(
+                selected, "a.name", "a.qualified_name", "a.file_path", tests_last=True)
+            notes = (self._confidence_note("callers", selected)
+                     + self._collision_note("callers", dropped))
+            if omitted.endpoints and not truncated:
+                notes = self._distinct_cap_note(
+                    "callers", "caller", target, omitted, tests_last=True) + notes
+            if truncated:
+                notes = self._row_cap_note("callers", target, fetched.limit) + notes
+            if not any(g.rows for g in selected):
+                answer = self._empty_edge_answer(
+                    "callers", "caller", target, wanted, selected, notes, truncated, dropped)
+            else:
+                answer = self._render_edge_answer(
+                    "callers", "caller", target, wanted, selected,
+                    ("a.name", "a.qualified_name", "a.file_path"), truncated, notes, omitted)
+            # After the direct answer has recorded its rows, so `rows[]` stays the body's `- ` lines
+            # in the order they are printed: the symbol's own callers, then the ones that reach it
+            # through a base. Empty — and the answer byte-identical — for a target with no base.
+            through_text, _ = self._callers_through_bases(target, wanted, direct, project, timeout_ms)
+            return answer + through_text
+
+    def _callers_only_through_bases(
+        self, target: str, wanted: _SymbolTarget, project: str, timeout_ms: int, *, cut_at: int = 0
+    ) -> str | None:
+        """No edge points at the target itself — but one may point at a method it overrides.
+
+        The canonical polymorphic case: a plugin or a strategy that is only ever called through the
+        interface it implements has NO direct caller, and "no edge, not proof of dead code" was the
+        most this op could say about it. When the lookup finds callers of a base the answer is those,
+        under the heading that says so; when it finds none the answer is what it was before — and so
+        is the gap list, which a lookup that found nothing has no business adding to.
+
+        A backend failure on the direct query is not an absence, and is left for `build_result` to
+        report as the failure it is. So is a failure of the lookup of the bases (`timeout`, not
+        `no-edges`): "nothing calls it" cannot be said while the question of who calls its base went
+        unanswered.
+
+        `cut_at` is the row limit the direct query was cut at, `0` when it was not. A cut probe that
+        could not select the target does not show that nothing calls it, so the heading says what was
+        and was not seen, and the answer carries the cap gap and an unknown total."""
+        if self._last_failure is not None:
             return None
-        truncated = fetched.cut_short
-
-        called = _group_edges(rows, "b.name", "b.qualified_name", "b.file_path")
-        selected = [g for g in called if wanted.matches(g.qn_raw, g.file)]
-        if wanted.narrowed and not selected:
-            return self._no_symbol_matched_the_hint("callers", target, wanted, called)
-
-        # The caller is the displayed side here, so both the collision pollution and the module-scope
-        # pseudo-nodes land in the rows a reader sees. Drop the cross-language / non-code collisions
-        # (a `.ts` function three files over sharing the bare name is not a caller), relabel the
-        # module-scope nodes that remain, and disclose anything dropped — all before the renderer
-        # counts or prints a row.
-        dropped = self._drop_edge_collisions(selected, "a.file_path", "labels(a)")
-        self._collapse_module_scope(selected, "labels(a)", "a.file_path")
-        # Then fold repeats and cap by CALLER. Both have to come after the filters above, so a row
-        # that was never a caller does not take a place from one that is, and before the note below,
-        # so every count it states describes the rows that are actually printed.
-        self._collapse_repeat_edges(selected, "a.name", "a.qualified_name", "a.file_path")
-        omitted = self._cap_distinct_edges(
-            selected, "a.name", "a.qualified_name", "a.file_path", tests_last=True)
-        notes = self._confidence_note("callers", selected) + self._collision_note("callers", dropped)
-        if omitted.endpoints and not truncated:
-            notes = self._distinct_cap_note(
-                "callers", "caller", target, omitted, tests_last=True) + notes
-        if truncated:
-            notes = self._row_cap_note("callers", target, fetched.limit) + notes
-        if not any(g.rows for g in selected):
-            return self._empty_edge_answer(
-                "callers", "caller", target, wanted, selected, notes, truncated, dropped)
-        return self._render_edge_answer(
-            "callers", "caller", target, wanted, selected,
-            ("a.name", "a.qualified_name", "a.file_path"), truncated, notes, omitted)
+        saved = (self._pending_gaps, self._pending_row_cap)
+        through, rows = self._callers_through_bases(target, wanted, _DirectTarget(), project, timeout_ms)
+        if not rows:
+            self._pending_gaps, self._pending_row_cap = saved
+            return None
+        if cut_at:
+            self._pending_row_cap = True
+            return (f"## Callers of {target} (0)\n(no caller of this symbol itself was found in the "
+                    f"{cut_at} rows the graph returned, and that list was cut short, so this is not "
+                    "proof there is none — the callers below were written against a base type)"
+                    + through + self._row_cap_note("callers", target, cut_at))
+        return (f"## Callers of {target} (0)\n(no caller is recorded against this symbol itself — "
+                "every caller below was written against a base type)" + through)
 
     @staticmethod
     def _edge_cypher(relationships: str, fixed: str, shown: str, name: str, *,
@@ -122,12 +185,16 @@ class GraphOps(ChangedSince):
 
         One builder for both ops and for both the probe and the full fetch, so the column list — the
         thing the renderer reads rows by — cannot differ between the first query and the one that
-        replaces it. `c.callee` is the call as written at the call site; see `_same_module_call`."""
+        replaces it. `c.callee` is the call as written at the call site; see `_same_module_call`.
+
+        `labels({fixed})` is the fixed end's kind of node, asked for so the dispatch lookup
+        (`graph_dispatch.py`) runs only for a target that IS a method, and so the `self.m()` rule can
+        tell a method caller from a function without a second query per row."""
         return (
             f'MATCH (a)-[c:{relationships}]->(b) WHERE {fixed}.name="{name}"{restrict} '
             f"RETURN {shown}.name, {shown}.qualified_name, {shown}.file_path, labels({shown}), "
             "type(c), c.confidence, c.strategy AS strategy, c.callee AS callee, "
-            f"{fixed}.name, {fixed}.qualified_name, {fixed}.file_path LIMIT {limit}"
+            f"{fixed}.name, {fixed}.qualified_name, {fixed}.file_path, labels({fixed}) LIMIT {limit}"
         )
 
     def _fetch_edges(self, relationships: str, fixed: str, shown: str, wanted: _SymbolTarget,
@@ -182,8 +249,7 @@ class GraphOps(ChangedSince):
             return cut                  # nothing to fetch; the op reports the unmatched hint itself
         restrict = ""
         if wanted.narrowed and "" not in selected_files:
-            in_list = ", ".join(f'"{_cypher_literal(f)}"' for f in sorted(selected_files))
-            restrict = f" AND {fixed}.file_path IN [{in_list}]"
+            restrict = f" AND {fixed}.file_path IN [{_in_list(sorted(selected_files))}]"
         full = self._query_rows(
             self._edge_cypher(relationships, fixed, shown, name, limit=_EDGE_FETCH_CEILING,
                               restrict=restrict),
@@ -257,6 +323,9 @@ class GraphOps(ChangedSince):
         # the two ops treat the pseudo-node population identically and a future callee container is
         # handled without a second fix.
         self._collapse_module_scope(selected, "labels(b)", "b.file_path")
+        # The same relabelling `callers` applies to a `self.m()` call the class hierarchy binds, so the
+        # one edge cannot be a resolution in one op and a name guess in the other.
+        self._upgrade_self_calls(selected, project, timeout_ms)
         # Same two steps, same place, as `callers`. Test-ness is not a ranking signal on this side:
         # a callee in a test file is a helper the target uses, not a lesser reason to look at it.
         self._collapse_repeat_edges(selected, "b.name", "b.qualified_name", "b.file_path")
@@ -276,8 +345,11 @@ class GraphOps(ChangedSince):
             ("b.name", "b.qualified_name", "b.file_path"), truncated, notes, omitted)
 
     def _op_impact(self, target: str, project: str, timeout_ms: int) -> str | None:
-        callers = self._op_callers(target, project, timeout_ms)
-        callees = self._op_callees(target, project, timeout_ms, include_references=True)
+        # Both halves read the class hierarchy of the same classes, and share one allowance of time
+        # for the lookups beyond their own queries; opened here so the second half does not ask again.
+        with self._lookup_scope(timeout_ms):
+            callers = self._op_callers(target, project, timeout_ms)
+            callees = self._op_callees(target, project, timeout_ms, include_references=True)
         if callers is None and callees is None:
             return None
         # callers/callees already carry their own "## Callers of X (N)" header — don't wrap them
@@ -721,7 +793,7 @@ class GraphOps(ChangedSince):
         if not files:
             return [], False
         listed = files[: self._RIPPLE_FILE_CAP]
-        in_list = ", ".join(f'"{_cypher_literal(f)}"' for f in listed)
+        in_list = _in_list(listed)
         # CALLS is not the whole blast radius. A function REGISTERED somewhere
         # (`set_forward_fn(app.forward_released_item)`) breaks just as thoroughly when its signature
         # moves, and the edge recording that is CALL_REFERENCE. USAGE is in for the same reason:
