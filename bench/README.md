@@ -592,6 +592,73 @@ Two consequences visible in the numbers above, and one that is deliberately invi
   repository returns for a symbol nothing references, and keeping that answer at `complete` is what
   keeps `partial` worth reading.
 
+## The Graphify arm
+
+[Graphify](https://github.com/Graphify-Labs/graphify) (`graphifyy` on PyPI) is the most widely used
+code knowledge graph, and the obvious "why not that instead?". It is measured here as two more arms,
+on the same oracle, targets and scorer:
+
+```bash
+uv venv /tmp/gfy && uv pip install --python /tmp/gfy/bin/python graphifyy   # isolated; nothing on PATH
+CODEINTEL_BENCH_GRAPHIFY=/tmp/gfy/bin/graphify python bench/run.py corpus-ts
+```
+
+| arm | what it reads |
+|---|---|
+| `graphify` | every `calls` edge Graphify records into the target |
+| `graphify_extracted` | only the edges Graphify labels `EXTRACTED` — its own "certain" label, the counterpart of `graph_verified` |
+
+Without the variable the arms do not exist and the table is byte-identical to before.
+`bench/graphify_arm.py` holds two properties fixed, and `tests/test_bench_graphify.py` reads both
+back from a fake `graphify` rather than trusting them:
+
+* **Graphify reads a copy.** It writes `graphify-out/` into whatever it is pointed at; the copy is
+  deleted after the build.
+* **Graphify cannot reach a model.** It runs `graphify update <copy> --no-cluster` — its code-only,
+  no-LLM path — with no API keys in the environment, a scratch `HOME`, and a `PATH` of system
+  directories plus Graphify's own install. `claude` and `ollama`, two backends it auto-detects, are
+  not findable, so a private repository measured here never leaves the machine.
+
+Its answers are keyed by where the call is — the edge's file and call-site line through the same
+enclosing map the LSP arms use — never by Graphify's node names, so a difference in the table is a
+difference between engines. A target Graphify has no node for is **unanswered**, not "no callers".
+
+### Measured on 2026-10-05
+
+codeintel at `777e4be` on `codebase-memory-mcp` 0.10.8, Graphify 0.9.76; the graph arms only (the LSP
+arms were not part of this comparison). Every graph index was newer than its tree's newest source
+file, so codeintel was not charged for staleness.
+
+| DIRECT callers, 32 targets, 5 trees | precision | recall | wrongly silent |
+|---|---|---|---|
+| `graph` | 83% | **93%** | 2 / 32 |
+| `graph_verified` | **97%** | 79% | 5 / 32 |
+| `graphify` | 94% | 85% | 2 / 30, 2 unanswered |
+| `graphify_extracted` | 94% | 43% | 5 / 30, 2 unanswered |
+
+| per tree (precision / recall) | `graph` | `graphify` |
+|---|---|---|
+| pathly-adapters (Python, 10) | 90% / 100% | 100% / 100% |
+| snitch-simulator (Python, 6) | 100% / 100% | 100% / 100% (2 targets unanswered, both with no callers) |
+| daycap (TypeScript, 8) | 100% / 100% | 100% / **65%** — 8 of 23 true callers missed, unannounced |
+| corpus-ts + corpus-ts-typed (8) | 46% / 67%, 0% / 0% | 67% / 67%, 50% / 50% |
+
+What it says:
+
+* **codeintel finds more of the real callers; Graphify's raw answer is cleaner.** On the three real
+  repositories codeintel's recall was 100%; Graphify missed a third of `daycap`'s callers with nothing
+  in its answer to say so — the delete that breaks a build. On the adversarial corpora, built to
+  catch codeintel's own known failures, Graphify claimed fewer fabricated callers.
+* **The two trust labels do not do the same job.** Filtering to codeintel's `verified` rows moves
+  precision 83% → 97%. Filtering to Graphify's `EXTRACTED` edges leaves precision at 94% and halves
+  recall to 43%: the label mostly discards correct `INFERRED` call edges rather than wrong ones, and
+  Graphify labelled all three of `corpus-ts`'s shadowing traps — a local name hiding the import —
+  `EXTRACTED`.
+
+What it does not say: 32 targets is a small population; the fixtures are not neutral (they were
+written against codeintel); and the Graphify side is this adapter reading `graph.json`, not
+Graphify's own `affected` / MCP query path. Speed and token cost are not measured here.
+
 ---
 
 # Agent-cost benchmark

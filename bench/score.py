@@ -50,6 +50,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+import graphify_arm
 import oracle_py
 import oracle_ts
 from oracle_py import CALL, UNDECIDABLE, Truth
@@ -363,6 +364,31 @@ def lsp_answers(root: str, target_name: str, target_qn: str, exe: str,
     return raw, classified
 
 
+def graphify_answers(gi: graphify_arm.GraphifyIndex, lang, root: str, def_file: str,
+                     symbol: str) -> tuple[Answer, Answer]:
+    """`(graphify, graphify_extracted)` for one target, keyed exactly as the oracle keys a site.
+
+    Graphify's own node names are not used for the key: the edge's file and call-site line are, run
+    through the same per-language enclosing map the LSP arms use. Two engines that spell a method
+    differently are then compared on WHERE the call is, which is the fact being measured.
+
+    A target Graphify has no node for is UNANSWERED, not "no callers": it could not ask, and scoring
+    that as a confident empty answer is the deletion trap this benchmark counts on its own line."""
+    ids = gi.find(def_file, symbol)
+    if not ids:
+        why = "graphify has no node for this symbol"
+        return Answer(reason=why, unavailable=True), Answer(reason=why, unavailable=True)
+    every, extracted = Answer(), Answer()
+    for e in gi.uses_of(ids):
+        enclosing = lang.enclosing(root, e.source_file, e.line) if e.line is not None else None
+        if enclosing is None:
+            continue
+        key = (e.source_file, enclosing)
+        for a in ((every, extracted) if e.confidence == "EXTRACTED" else (every,)):
+            (a.callers if e.relation == "calls" else a.others).add(key)
+    return every, extracted
+
+
 @dataclass
 class Scores:
     tp: int = 0
@@ -539,7 +565,23 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
     # `graph_verified` sits beside `graph` deliberately: the pair is the measurement, and reading
     # either number without the other is how "filter the heuristic rows out" became an obvious
     # improvement that nobody had priced.
-    arms = ("graph", "graph_verified", "lsp_raw", "lsp_classified")
+    # Graphify is two more arms when `CODEINTEL_BENCH_GRAPHIFY` names its executable (see
+    # bench/graphify_arm.py). A build that fails skips them and says why — it is never scored as a
+    # row of empty answers, which would read as an engine that found nothing.
+    gi: graphify_arm.GraphifyIndex | None = None
+    graphify_exe = graphify_arm.executable()
+    if graphify_exe:
+        try:
+            gi = graphify_arm.build(root, graphify_exe)
+            print(f"graphify: {graphify_arm.version(graphify_exe)} — {gi.summary or 'graph built'} "
+                  "(built from a copy of the tree, with no model reachable)")
+        except Exception as exc:                             # one engine never kills the run
+            print(f"graphify: arms skipped — {type(exc).__name__}: {exc}")
+    arms = ("graph", "graph_verified", "lsp_raw", "lsp_classified") + (
+        ("graphify", "graphify_extracted") if gi is not None else ())
+    # Wide enough for the longest arm name; with the four default arms this is the original 16, so
+    # a run without Graphify prints exactly what it always printed.
+    w = max(16, max(len(a) for a in arms) + 1)
     direct = {a: Scores() for a in arms}
     impact = {a: Scores() for a in arms}
     covered: list[float] = []
@@ -560,6 +602,9 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
         g, gv = graph_answer(root, symbol, exe)
         lr, lc = lsp_answers(root, symbol, qn, exe, lang)
         got = {"graph": g, "graph_verified": gv, "lsp_raw": lr, "lsp_classified": lc}
+        if gi is not None:
+            got["graphify"], got["graphify_extracted"] = graphify_answers(
+                gi, lang, root, def_file, symbol)
         for a in arms:
             direct[a].add(got[a].callers, true_calls, decidable, got[a].unavailable)
             impact[a].add(got[a].everything, true_impact, decidable, got[a].unavailable)
@@ -570,23 +615,23 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
               + (f"  [oracle abstained on {len(t.undecidable)}]" if t.undecidable else ""))
         for a in arms:
             if got[a].unavailable:
-                print(f"      {a:<15} UNANSWERED — {got[a].reason}"
+                print(f"      {a:<{w - 1}} UNANSWERED — {got[a].reason}"
                       f"  (excluded from scoring)")
                 continue
             claimed = got[a].callers & decidable
             miss = true_calls - claimed
             extra = claimed - true_calls
             note = got[a].reason or ""
-            print(f"      {a:<15} claimed {len(claimed):>2}  "
+            print(f"      {a:<{w - 1}} claimed {len(claimed):>2}  "
                   f"missed {len(miss):>2}  spurious {len(extra):>2}  {note}")
 
     print("\n" + "=" * 74)
-    print(f"{'arm':<16}{'DIRECT CALLERS':>22}{'CHANGE IMPACT':>22}{'':>8}")
-    print(f"{'':<16}{'precision':>11}{'recall':>11}{'precision':>11}{'recall':>11}"
+    print(f"{'arm':<{w}}{'DIRECT CALLERS':>22}{'CHANGE IMPACT':>22}{'':>8}")
+    print(f"{'':<{w}}{'precision':>11}{'recall':>11}{'precision':>11}{'recall':>11}"
           f"{'  wrongly silent':>16}")
     for a in arms:
         d, i = direct[a], impact[a]
-        print(f"{a:<16}{_pct(d.precision):>11}{_pct(d.recall):>11}"
+        print(f"{a:<{w}}{_pct(d.precision):>11}{_pct(d.recall):>11}"
               f"{_pct(i.precision):>11}{_pct(i.recall):>11}"
               f"{d.said_nothing_wrongly:>10} / {d.symbols}"
               + (f"   [{d.unavailable} unanswered]" if d.unavailable else ""))
