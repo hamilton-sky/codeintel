@@ -75,7 +75,7 @@ _WIDE_BOMS = (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE, codecs.BOM_UTF16_LE, cod
 
 
 class Budget:
-    """The time one ANSWER may spend reading files, shared by every scan that answer runs.
+    """What one ANSWER may spend reading files — seconds, files and bytes — shared by every scan it runs.
 
     `changed` asks `callers` once per changed symbol, forty at most, each on a pool worker, so a bound
     per scan is forty times the bound the answer was promised. A deadline set when the op starts is no
@@ -83,11 +83,32 @@ class Budget:
     so by the time the later symbols are scanned the instant has passed and every one of them would
     come back unknown. What is bounded here is the time spent READING, which is the thing that stalls,
     summed over the threads that read — conservative for a pool, and exact for `callers`, which is one
-    scan."""
+    scan.
 
-    def __init__(self, seconds: float = _MAX_SECONDS) -> None:
-        self._left = seconds
+    The file and byte ceilings are the answer's for the same reason. Counted per scan, `changed`'s
+    forty scans would each get the full two hundred files and sixteen megabytes, and on a fast local
+    tree finish all of it inside the time allowance — forty times the I/O the answer was promised."""
+
+    def __init__(self, seconds: float | None = None, *, files: int | None = None,
+                 total_bytes: int | None = None) -> None:
+        # The module's ceilings are read here, not bound as defaults at import, so they stay in one
+        # place and a test that lowers one lowers it for every budget made after.
+        self._left = _MAX_SECONDS if seconds is None else seconds
+        self._files = _MAX_FILES if files is None else files
+        self._bytes = _MAX_TOTAL_BYTES if total_bytes is None else total_bytes
         self._lock = threading.Lock()
+
+    def take_file(self) -> bool:
+        """Claim one file read; False once the answer's files or bytes are used up."""
+        with self._lock:
+            if self._files <= 0 or self._bytes <= 0:
+                return False
+            self._files -= 1
+            return True
+
+    def spend_bytes(self, count: int) -> None:
+        with self._lock:
+            self._bytes -= count
 
     def spend(self, seconds: float) -> None:
         with self._lock:
@@ -106,6 +127,23 @@ class Budget:
     @property
     def exhausted(self) -> bool:
         return self._left <= 0
+
+
+# Reads abandoned past their deadline and still blocked, across the whole PROCESS. Each answer leaves
+# at most one behind, but a server queried again and again about a tree on a stalled mount would leave
+# one per answer, until it ran out of threads or memory. So while `_MAX_STALLED` of them are still
+# blocked, no scan starts another read: it judges nothing, and the answer prints the `rg` command
+# instead — what it printed before the scan existed. Reading resumes on its own once they return.
+_MAX_STALLED = 1
+_stalled: set[threading.Thread] = set()
+_stalled_lock = threading.Lock()
+
+
+def _stalled_reads() -> int:
+    """How many abandoned reads are still blocked, forgetting the ones that have since returned."""
+    with _stalled_lock:
+        _stalled.difference_update([t for t in _stalled if not t.is_alive()])
+        return len(_stalled)
 
 
 def _plain_text(blob: bytes) -> bool:
@@ -147,10 +185,11 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
         return None
     root_real = real_root(root)
     needle = token.encode("utf-8", "replace")
+    if _stalled_reads() >= _MAX_STALLED:
+        return None                                 # see `_MAX_STALLED`: judged nothing, prints the command
     seen: dict[str, bool] = {}
-    spent = 0
-    for rel in list(dict.fromkeys(f for f in files if f))[:_MAX_FILES]:
-        if spent >= _MAX_TOTAL_BYTES or budget.exhausted:
+    for rel in dict.fromkeys(f for f in files if f):
+        if budget.exhausted or not budget.take_file():
             break
         began = time.monotonic()
         blob, finished = _read_within(root_real, os.path.join(root, rel), budget.remaining)
@@ -163,7 +202,7 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
             break
         if blob is None:
             continue
-        spent += len(blob)
+        budget.spend_bytes(len(blob))
         if _plain_text(blob):
             seen[rel] = needle in blob
     return seen or None
@@ -189,6 +228,8 @@ def _read_within(root_real: str, path: str, seconds: float) -> tuple[bytes | Non
     worker.start()
     worker.join(seconds)
     if worker.is_alive() or not box:
+        with _stalled_lock:
+            _stalled.add(worker)
         return None, False
     blob, exc = box[0]
     if exc is not None:

@@ -249,6 +249,7 @@ def test_a_read_stalled_on_a_slow_mount_is_abandoned_at_the_deadline_not_waited_
         return real_read(root_real, path)
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
+    monkeypatch.setattr(qualifier_scan, "_stalled", set())   # this test's abandoned read stays its own
     started = time.monotonic()
     try:
         seen = files_naming(str(tmp_path), TOKEN, ["stalled.ts", "after.ts"],
@@ -258,6 +259,43 @@ def test_a_read_stalled_on_a_slow_mount_is_abandoned_at_the_deadline_not_waited_
 
     assert time.monotonic() - started < 4, "a stalled read held the answer past its deadline"
     assert seen is None, f"a file at or after the stall was judged: {seen}"
+
+
+def test_reads_left_blocked_by_earlier_answers_are_bounded_across_the_process(tmp_path, monkeypatch):
+    """Each answer leaves at most one stalled read behind, but a server asked again and again about a
+    tree on a stalled mount would leave one per answer until it ran out of threads. While one is still
+    blocked, later scans start no read at all — they judge nothing and print the command — and reading
+    resumes by itself once the stalled read returns."""
+    import time
+
+    _write(tmp_path, "stalled.ts", TOKEN)
+    _write(tmp_path, "fine.ts", TOKEN)
+    release = threading.Event()
+    real_read = qualifier_scan._read
+    began: list[str] = []
+
+    def read(root_real, path):
+        began.append(os.path.basename(path))
+        if path.endswith("stalled.ts"):
+            release.wait(8)
+        return real_read(root_real, path)
+
+    monkeypatch.setattr(qualifier_scan, "_read", read)
+    monkeypatch.setattr(qualifier_scan, "_stalled", set())
+    try:
+        first = files_naming(str(tmp_path), TOKEN, ["stalled.ts"], budget=qualifier_scan.Budget(0.2))
+        second = files_naming(str(tmp_path), TOKEN, ["stalled.ts"], budget=qualifier_scan.Budget(0.2))
+        third = files_naming(str(tmp_path), TOKEN, ["fine.ts"], budget=qualifier_scan.Budget(5.0))
+    finally:
+        release.set()
+
+    assert (first, second, third) == (None, None, None)
+    assert began == ["stalled.ts"], f"a later answer started another read behind a stalled one: {began}"
+    deadline = time.monotonic() + 5
+    while qualifier_scan._stalled_reads() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert files_naming(str(tmp_path), TOKEN, ["fine.ts"], budget=qualifier_scan.Budget(5.0)) == {
+        "fine.ts": True}, "reading did not resume once the stalled read returned"
 
 
 def test_an_exhausted_time_budget_leaves_every_file_unjudged(tmp_path):
@@ -287,6 +325,25 @@ def test_a_budget_used_up_part_way_leaves_the_rest_unjudged_rather_than_clean(tm
                         budget=qualifier_scan.Budget(2.0))
 
     assert seen == {"f0.ts": False, "f1.ts": False}, seen
+
+
+def test_one_budget_also_caps_the_files_and_bytes_of_every_scan_that_shares_it(tmp_path):
+    """`changed` runs up to forty scans on one budget. Counted per scan, each would get the full file
+    and byte allowance, and a fast local tree would read forty times what the answer was promised
+    inside the time limit. The second scan here gets only what the first left."""
+    for i in range(4):
+        _write(tmp_path, f"f{i}.ts", "z" * 10)
+
+    by_files = qualifier_scan.Budget(60.0, files=3)
+    first = files_naming(str(tmp_path), TOKEN, ["f0.ts", "f1.ts"], budget=by_files)
+    second = files_naming(str(tmp_path), TOKEN, ["f2.ts", "f3.ts"], budget=by_files)
+    assert (first, second) == ({"f0.ts": False, "f1.ts": False}, {"f2.ts": False})
+
+    by_bytes = qualifier_scan.Budget(60.0, total_bytes=25)
+    first = files_naming(str(tmp_path), TOKEN, ["f0.ts", "f1.ts"], budget=by_bytes)
+    second = files_naming(str(tmp_path), TOKEN, ["f2.ts", "f3.ts"], budget=by_bytes)
+    assert (first, second) == ({"f0.ts": False, "f1.ts": False}, {"f2.ts": False}), (
+        "the bytes the first scan read were not charged to the second")
 
 
 def test_one_budget_is_drawn_on_by_every_scan_that_shares_it(tmp_path, monkeypatch):
