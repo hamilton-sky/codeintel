@@ -1104,9 +1104,21 @@ class DispatchCallers(AnswerRendering):
             if plan is None:
                 return
             asked = [g for g, _ in plan[1]]
-            with self._lookup_scope(timeout_ms):
+            # Its OWN allowance — one call's budget — never the op's. This lookup only serves an
+            # annotation, while the op's shared allowance still has to pay for the lookups that decide
+            # whether the answer is whole: the callers through a base, `impact`'s callee half. Run in
+            # the shared scope, a slow or failing lookup here started that clock and spent it, and an
+            # answer near the limit came back partial for the sake of a note. A fresh scope with its
+            # own caches also keeps whatever this lookup fails at out of the op's.
+            shared = self._lookup_state
+            own = _Scope(timeout_ms)
+            own.deadline = _clock() + timeout_ms / 1000
+            self._lookup_state = own
+            try:
                 owners, why = self._method_owners(
                     sorted({g.qn_raw for g in asked if g.qn_raw}), project, timeout_ms, surface=False)
+            finally:
+                self._lookup_state = shared
             if why:
                 return
             for g in asked:

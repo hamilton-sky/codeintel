@@ -1599,6 +1599,37 @@ def test_the_scan_and_the_same_module_rule_share_one_definition_of_the_enclosing
             f"{fn.__name__} reads the table itself instead of asking the shared helper")
 
 
+def test_the_owner_lookup_spends_its_own_allowance_never_the_ops(monkeypatch, tmp_path):
+    """The lookup of the method's class only serves the scan's annotation. Run inside the op's shared
+    lookup scope, a slow or failing one started that clock and spent it, and the lookups that decide
+    whether the answer is whole — callers through a base, `impact`'s callee half — had less, so an
+    answer near the limit came back partial for the sake of a note. It runs in a scope of its own,
+    holding one call's allowance, and the op's scope is left as it was."""
+    from codeintel.graph_dispatch import _LOOKUP_TIMEOUTS
+
+    seen: dict[str, object] = {}
+    real_owners = GraphProvider._method_owners
+    real_bases = GraphProvider._callers_through_bases
+
+    def owners(self, *args, **kwargs):
+        seen["owner_scope"] = self._lookup_state
+        seen["owner_left_ms"] = self._lookup_state.left_ms()
+        return real_owners(self, *args, **kwargs)
+
+    def bases(self, *args, **kwargs):
+        seen["op_scope"] = self._lookup_state
+        return real_bases(self, *args, **kwargs)
+
+    monkeypatch.setattr(GraphProvider, "_method_owners", owners)
+    monkeypatch.setattr(GraphProvider, "_callers_through_bases", bases)
+    _scanned_callers(monkeypatch, tmp_path, _guesses(3))
+
+    assert "owner_scope" in seen, "the scan never asked for the method's class — this proves nothing"
+    assert seen["owner_scope"] is not seen["op_scope"], "the owner lookup ran in the op's shared scope"
+    assert seen["owner_left_ms"] <= 30_000 < _LOOKUP_TIMEOUTS * 30_000, (
+        f"the owner lookup was given {seen['owner_left_ms']} ms — more than one call's allowance")
+
+
 def test_below_the_floor_nothing_is_scanned_badged_or_re_sorted(monkeypatch, tmp_path):
     """The note is printed only when name-matched rows are at least `_SETTLE_FLOOR` and at least half
     the answer. A scan that ran below that floor marked rows `qualifier_seen: false` and badged them
