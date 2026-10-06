@@ -51,10 +51,12 @@ class Result(TypedDict):
     # value is already stated in `result`'s prose; this is the same facts in a shape that does not
     # require parsing markdown this project reserves the right to reword. Present only on ops that
     # produce rows, and only when they produced some.
-    #   rows[]   {relation, name, qualified_name, file, module_scope, edge, verified, evidence,
-    #             strategy, confidence, why}
-    #   evidence {verified, possible, unstated, returned, total, truncated,
-    #             safe_for_destructive}
+    #   rows[]   {relation, name, qualified_name, file, module_scope, edge, verified, qualifier,
+    #             qualifier_seen, evidence, strategy, confidence, why}
+    #   evidence {verified, possible, unstated, qualifier_absent, qualifier_present, returned,
+    #             total, truncated, safe_for_destructive[, qualifier_checked]}
+    # `qualifier_seen` is true / false / null: whether the row's file writes the class the target was
+    # qualified by (`qualifier`), and null wherever nobody looked. A text fact, never a verdict.
     # `rows` are exactly the rows the body printed, in the order it printed them — verified first.
     # `relation` is `caller` or `callee`, which `impact` needs because it answers both in one body.
     # `evidence.total` is None when the query hit the BACKEND's row cap: we know it had at least

@@ -191,6 +191,93 @@ def test_the_guide_states_the_rule_that_precedes_a_deletion():
         "the partial-means-unknown rule is the one a reader must not miss")
 
 
+# --------------------------------------------------------------------------- the qualifier check
+
+def test_the_checked_line_the_guide_quotes_is_the_line_the_answer_prints(monkeypatch, tmp_path):
+    """The one sentence a reader is told to look for. It is quoted at the width of a page, so the
+    comparison ignores line breaks — and nothing else: a reworded note fails here rather than leaving
+    the guide describing an answer the tool no longer gives."""
+    from tests.test_edge_confidence import _guesses, _scanned_callers
+
+    env = _scanned_callers(monkeypatch, tmp_path, _guesses(43))
+    printed = next(ln for ln in env["result"].splitlines() if ln.startswith("_Checked:"))
+
+    assert " ".join(printed.split()) in " ".join(TEXT.split()), printed
+
+
+def test_the_fields_the_guide_names_for_the_qualifier_check_are_fields_the_answer_publishes():
+    """`qualifier_seen` and `evidence.qualifier_absent` are what a reader is told to branch on, so
+    both have to be keys the product emits, not names the guide made up."""
+    from codeintel.graph_answer import AnswerRendering
+    from codeintel.providers.graph import GraphProvider
+
+    row = AnswerRendering._structured_row(
+        {"a.name": "x", "_bucket": "name-matched"}, "a.name", "a.qualified_name", "a.file_path",
+        "caller")
+    gp = GraphProvider.__new__(GraphProvider)
+    gp._pending_rows = (row,)  # type: ignore[assignment]
+    evidence = gp._settle_evidence() or {}
+
+    assert "`rows[].qualifier_seen`" in TEXT and "qualifier_seen" in row, row
+    assert "`evidence.qualifier_absent`" in TEXT and "qualifier_absent" in evidence, evidence
+
+
+def test_the_instructions_an_agent_is_handed_describe_the_check_and_not_the_retired_command():
+    """The MCP instructions are the one place a model reads about these fields before it asks
+    anything. They named a `Settle it:` command the answer prints; for a qualified method the answer
+    now runs it, and a model told to run a command that has already been run wastes the turn."""
+    from codeintel.server import _MCP_INSTRUCTIONS
+
+    assert "qualifier_seen" in _MCP_INSTRUCTIONS and "qualifier_absent" in _MCP_INSTRUCTIONS
+    assert "the `Settle it:` command the answer prints" not in _MCP_INSTRUCTIONS
+    assert "not proof" in _MCP_INSTRUCTIONS, "the instructions describe the field as a verdict"
+
+
+def test_the_guide_does_not_recommend_filtering_on_the_qualifier_check():
+    """`qualifier_seen: false` is a fact about a file and not a verdict on a caller, and the guide used
+    to hand the reader `rows.filter(r => r.qualifier_seen !== false)` as "the middle setting". Measured,
+    an agent that drops the marked rows is wrongly silent on 4 of the 32 symbols where one that keeps
+    every row is wrongly silent on 2, and the one real tree it marked a row on, the row was a true
+    caller. A reader who follows a recommendation deletes on the filtered list."""
+    flat = " ".join(TEXT.split())
+
+    assert "qualifier_seen !== false" not in flat, "the guide recommends the filter"
+    assert "If you want the filter, apply it" not in flat and "middle setting" not in flat
+    assert "Do not filter on it before a delete or a rename" in flat
+    assert "wrongly silent on **4**" in flat and "wrongly silent on 2" in flat, (
+        "the guide must say what the filter costs, in the numbers `bench/README.md` measured")
+    assert "a true caller" in flat, "and that the one real observation was a true caller"
+
+
+def test_every_text_that_lists_how_a_caller_avoids_the_class_name_lists_an_instance_from_elsewhere(
+        monkeypatch, tmp_path):
+    """The failure modes of "the file never writes the class" were an interface-typed field, a subclass
+    and a renaming re-export. The ordinary one was missing from all of them: a caller that holds an
+    instance imported, injected or built elsewhere — a module singleton, a constructor argument, a
+    factory call, an alias — reaches the method without writing the class's name. Every place that
+    lists the ways gets the whole list, and the four that put a `false` in front of a reader say that
+    no class-qualified Python target has been measured, which is where untyped injection is the
+    default."""
+    from codeintel.server import _MCP_INSTRUCTIONS
+    from tests.test_edge_confidence import _callers, _guesses, _scanned_callers
+
+    checked = _scanned_callers(monkeypatch, tmp_path, _guesses(4))["result"]
+    settle = _callers(monkeypatch, _guesses(6), target="StrategyChain.resolve")["result"]
+    listing = {
+        "docs/trust.md": TEXT,
+        "docs/graph.md": (ROOT / "docs" / "graph.md").read_text(encoding="utf-8"),
+        "the MCP instructions": _MCP_INSTRUCTIONS,
+        "the Checked note": checked,
+        "the Settle it note": settle,
+    }
+    for label, text in listing.items():
+        flat = " ".join(text.split()).lower()
+        for route in ("instance", "elsewhere", "interface-typed field", "subclass", "re-export"):
+            assert route in flat, f"{label} omits `{route}` from how a real caller avoids the class name"
+    for label in ("docs/trust.md", "docs/graph.md", "the MCP instructions", "the Checked note"):
+        assert "class-qualified python target" in " ".join(listing[label].split()).lower(), label
+
+
 # --------------------------------------------------------------------------- it has to be findable
 
 def test_the_guide_is_listed_in_the_docs_index():

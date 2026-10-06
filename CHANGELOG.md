@@ -4,6 +4,50 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`callers` runs the qualifier check instead of telling the reader to run it.** For a
+  class-qualified method target (`StrategyChain.resolve`) whose answer is mostly name-matched
+  callers, the answer used to end with `Settle it: rg -n --fixed-strings 'StrategyChain' <root>`. It
+  now reads those callers' files itself and says what it found — `Checked: 3 of 3 name-matched
+  callers shown are in files that never write StrategyChain` — with the command kept beneath.
+  - Each row publishes `qualifier_seen` (`true` / `false` / `null` for not judged) and `qualifier`;
+    `evidence` gains `qualifier_absent` and `qualifier_present`. `impact` and `changed <ref>` publish
+    them too, and `changed` prints the same caveat and command once under any group it marks.
+  - **`false` is a fact about the file, not a verdict on the call.** A caller reaches the method
+    without writing its class when it holds an instance obtained elsewhere — a module singleton, a
+    constructor argument, a factory call, an alias — or through a subclass, an interface-typed field
+    or a renaming re-export. A refuted row is badged `[never writes X]` and sorted last within its
+    own kind and partition — production code still before tests — and is never removed. Do not
+    filter on it before a delete or rename: measured, an agent that drops refuted rows is wrongly
+    silent on 4 of 32 symbols instead of 2, and the one refuted row seen on a real tree was a true
+    caller. No class-qualified Python target is in the benchmark yet.
+  - The scan fails closed. It runs only when name-matched rows are at least three and at least half
+    the answer, and only for a method whose defining class the index records and the target named
+    (one extra backend query). A row is left `null` when it is resolved (including `self_mro`),
+    reached through a base class or Protocol, in the file that defines the symbol, a call on `self`
+    / `this`, module-scope, without recorded call text, or in a language other than Python,
+    JavaScript and TypeScript. A file is left unknown when it is not a regular file, larger than
+    1 MB, UTF-16/32 or NUL-bearing, outside the project root, or past the answer's 5-second reading
+    budget. Otherwise the `Settle it:` command is printed as before.
+
+### Changed
+- The `Settle it:` note no longer says a file that never names the qualifier "cannot be reaching"
+  the symbol, or that such a caller is "very unlikely"; it names the routes by which one can.
+
+### Fixed
+- **Reading a file never blocks on a FIFO.** `changed <ref>` opened whatever path the diff named, so
+  a named pipe planted in a repository hung the answer; only regular files are read now.
+
+### Internal
+- **`bench/score.py` gains a `graph_qualified` arm** — verified rows plus name-matched rows the scan
+  did not refute, read from `rows[]` like `graph_verified` — so the default table has five rows.
+  On 32 targets over 5 trees it measures 90% direct precision against `graph`'s 83%, at the same 93%
+  recall; the whole gain comes from the checked-in corpora, because every real-repository target is
+  a bare name the scan does not judge. The gate still reads `graph_verified`. Details in
+  `bench/README.md`.
+
 ## [0.26.0] — 2026-10-05
 
 Closes the limit 0.25.0's notes disclosed (#65): callers that reach an override only through a base class

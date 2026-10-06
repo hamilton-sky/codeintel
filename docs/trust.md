@@ -53,14 +53,81 @@ Two consequences worth stating on their own:
 
 On that real repository the true answer is **two**. Both are in the list, and both are `resolved`.
 
-**When name-matched rows dominate, the answer prints the command that settles them:**
+**When name-matched rows dominate and you asked about a method by its class, the answer runs the check
+that settles them and tells you what it found:**
 
 ```text
-_Settle it: `rg -n --fixed-strings 'StrategyChain' <root>`_
+_Checked: **43 of 43** name-matched callers shown are in files that never write `StrategyChain`, the
+name it is qualified by, and the part of the target the name match did not use. They are ranked last
+below and carry `qualifier_seen: false`._
 ```
 
-That is not decoration. On the example above it returns 5 files, none of which is any of the 26
-files the 43 name-matched rows sit in — so all 43 are spurious, established in one command.
+The check is the one this page used to tell you to run by hand — a text search for the part of the
+target the name match did not use — and every answer that says `Checked` prints the command that
+re-runs it beneath the result: `rg -n --fixed-strings -- 'StrategyChain'` followed by the files it
+judged, named one by one. `rg` always searches a file named on its command line, so the command
+reproduces each verdict even for a caller in a dot-directory, an ignored path or a symlink, and it
+reads nothing the scan did not — a recursive search either skips those or, with `--follow`, follows
+links out of the project. On the example above
+the five files that write `StrategyChain` at all include none of the 26 files the 43 name-matched rows
+sit in. `43 of 43` counts the rows **shown**: the name-matched rows of the direct list as printed, not
+the callers under *Callers through* (never scanned) and not any the distinct-caller cap left out. Both
+numbers can be re-derived from `rows[]`.
+
+The check runs only when name-matched rows are at least three and at least half of the callers shown.
+Below that nothing is scanned, nothing is badged and nothing is re-sorted: a mark with its note left
+off would say more than the scan found.
+
+Each row carries the result as `rows[].qualifier_seen` (and its line is badged
+``[never writes `StrategyChain`]`` when it is `false`), and `evidence.qualifier_absent` counts them.
+`true` means the file does write the qualifier, `false` that it does not, and **`null` that nobody
+looked**. Nobody looks at:
+
+- every `resolved` row — a row that followed a real binding needs no corroboration from a text search;
+- every row under *Callers through* — a caller of the base is a caller because it never has to write
+  your class, so a file that does not write it says nothing about whether that call reaches you;
+- a row in the file that defines the symbol, which writes the class because it declares it;
+- a call on the enclosing object (`self.m()`, `this.m()`), which reaches the method through the
+  caller's own class hierarchy and not through a mention of the ancestor;
+- a row with no recorded call text, or in a language other than Python, JavaScript and TypeScript —
+  in the others a call reaches an inherited member with no receiver at all;
+- module-scope code, and a file the tool could not read, was too large, is not a regular file or not
+  plain text (a UTF-16 byte-order mark, or a NUL byte anywhere in it), lies outside the root, or was
+  not reached before the scan's time, size or file-count limit.
+
+And nothing is scanned at all for a bare target (`resolve` rather than `StrategyChain.resolve`), for a
+function or a module-dotted name rather than a method, or for a method the index does not record as
+defined by a class named the way you wrote it: there is no class qualifier to look for, and the file
+stem a bare target falls back to is exactly what a re-export never writes. In those cases, and whenever
+the tool cannot read the root, the answer prints `Settle it:` and the command and leaves the check to
+you.
+
+Read it as narrowing, not as a verdict, and note that the tool does not drop these rows for you.
+A file can reach a method without ever naming its class:
+
+- a caller that holds **an instance it got from elsewhere** — a module singleton it imports
+  (`chain = StrategyChain()` in `registry.py`, `from registry import chain` in the caller), an
+  instance handed to a constructor or a field, a factory call (`get_chain().resolve()`), an alias
+  (`Chain = StrategyChain`);
+- an interface-typed field, whose class the caller names only as the interface;
+- a subclass, whose callers name the subclass;
+- a renaming re-export.
+
+So `qualifier_seen: false` marks the rows to doubt first, not rows proven false. They sort last within
+the name-matched rows and never above a `resolved` one (production code still before test files).
+The first of the four is ordinary code, and in Python, where untyped injection is the default, it is
+no edge case — yet **no class-qualified Python target is in the measurement** (`bench/README.md`), so
+how often `false` is wrong there is not known. The scan reads the files as they are on disk now, not as
+the index saw them.
+
+**Do not filter on it before a delete or a rename.** `qualifier_seen` is a fact about the file, not a
+verdict on the caller. Measured on the benchmark's 32 symbols, an agent that drops the rows marked
+`false` is wrongly silent on **4** of them where one that keeps every row is wrongly silent on 2 —
+removing the marked rows empties an answer, and an empty answer reads as "no callers" for a symbol that
+has them — and on the one real tree where the check marked a row `false`, that row was a true caller
+(a subclass inherits the method and its caller names the subclass). Use it as an ordering signal: look
+at the rows it does not mark first, and at the rows it does mark with the doubt the list above
+describes.
 
 **A row under "Callers through" is not a caller of your symbol.** `callers GraphProvider.build_result` used
 to list the tests that construct a `GraphProvider` and nothing else, and answer `confidence: complete` with
@@ -145,7 +212,9 @@ Now read it in this order:
 
 2. **The heading.** Is the count what you expected? If it is much larger, look at the line below it.
 3. **The `resolved · name-matched · unstated` split.** Are your known callers in the unbadged rows?
-4. **`Settle it:`** if it appears. Run the command. Files absent from its output are not callers.
+4. **The qualifier line** (`Checked: N of M …`, or `Settle it:` when the tool could not run the
+   check itself — run the command it prints). Rows marked `qualifier_seen: false` sit in files that
+   never write the qualifier — doubt those first. It narrows; it does not decide.
 5. **`confidence`** on the envelope (`--json` shows it). `partial` means read `gaps`.
 
 You have verified the tool when **your known callers appear as `resolved` rows**. If they appear

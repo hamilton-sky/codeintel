@@ -41,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from codeintel import qualifier_scan
 from codeintel.changed_range import (
     MAX_SOURCE_BYTES,
     FileChange,
@@ -55,7 +56,12 @@ from codeintel.changed_range import (
 )
 from codeintel.graph_answer import AnswerRendering
 from codeintel.graph_backend import BackendRefused
-from codeintel.graph_confidence import _NAME_MATCHED, _SAME_MODULE_FOREIGN, _evidence_class
+from codeintel.graph_confidence import (
+    _NAME_MATCHED,
+    _QUALIFIER_BYPASSES,
+    _SAME_MODULE_FOREIGN,
+    _evidence_class,
+)
 from codeintel.provider import log_swallowed
 from codeintel.source_kind import is_code_path
 from codeintel.symbol_diff import (
@@ -319,8 +325,21 @@ class ChangedSince(AnswerRendering):
         # The graph lookups are independent backend round trips, each costing seconds without a
         # warm daemon, so they run a few at a time. The state they accumulate is per-thread
         # (`PerThread`), which is the property that makes this safe; the results come back in order.
+        # The root the answering project is registered under is a fact about THIS request, so it is
+        # per-thread like the rest, and a worker does not inherit it. `callers` reads it to find the
+        # files its qualifier scan opens; without it every worker would scan nothing, and the rows
+        # here would say less than the same `callers` answer says.
+        answered_root = self._answered_root
+        # One allowance of reading time for every scan in this answer, not one per symbol: forty
+        # symbols of two hundred files each would otherwise be forty times the bound `qualifier_scan`
+        # promises. An allowance of time spent and not an instant on the clock, because the lookups
+        # this answer mostly waits on take seconds each and an instant would pass before the later
+        # symbols were scanned.
+        scan_budget = self._scan_budget = qualifier_scan.Budget()
         with ThreadPoolExecutor(max_workers=self._RANGE_LOOKUP_WORKERS) as pool:
             def one(e: _Entry) -> _Lookup:
+                self._answered_root = answered_root
+                self._scan_budget = scan_budget
                 if e.change.change == REMOVED:
                     lk = self._lookup_mentions(root, e)
                     lk.moved_to = [p for p in added_at.get(e.qn, []) if p != e.path]
@@ -522,6 +541,11 @@ class ChangedSince(AnswerRendering):
             "module_scope": False,
             "edge": None,
             "verified": False,
+            # Nobody scanned a text mention for a qualifier: it is a hit for a bare name in a tree
+            # the graph never saw, so there is no qualifier it was narrowed by. `null`, as on every
+            # row the scan did not judge.
+            "qualifier": None,
+            "qualifier_seen": None,
             "evidence": _NAME_MATCHED,
             "strategy": "git-grep",
             "confidence": None,
@@ -690,6 +714,11 @@ class ChangedSince(AnswerRendering):
             # mark, which is the reading `callers` prints "qualified call" to prevent.
             elif _evidence_class(str(row.get("strategy") or "")) == "same-module":
                 raw["_same_module"] = _SAME_MODULE_FOREIGN
+            # What the qualifier scan found, carried through as `callers` published it. The label on
+            # the line is the same one, from the same function, as in `callers`; `changed` has no
+            # `Checked:` note, so the group that prints a label prints the caveat beneath its rows
+            # (`_qualifier_caveat`).
+            raw["_qualifier"], raw["_qualifier_seen"] = row.get("qualifier"), row.get("qualifier_seen")
         line = self._display(raw, "a.name", "a.qualified_name", "a.file_path")
         if row.get("module_scope_in_diff"):
             line += "  (module-level code in a file this diff touches — not compared)"
@@ -737,6 +766,13 @@ class ChangedSince(AnswerRendering):
                 out.extend(self._caller_line(r) for r in rows[:shown])
                 if len(rows) > shown:
                     out.append(f"… (+{len(rows) - shown} more, not shown)")
+            refuted = sorted({str(r.get("qualifier") or "") for _, rows in lists for r in rows[:shown]
+                              if r.get("qualifier_seen") is False} - {""})
+            if refuted:
+                judged = {t: [str(r.get("file") or "") for _, rows in lists for r in rows[:shown]
+                              if r.get("qualifier") == t and r.get("qualifier_seen") is not None]
+                          for t in refuted}
+                out.append(self._qualifier_caveat(refuted, judged))
             return out
         out.append({
             "no-edges": "_The graph records no caller of this symbol. That is not proof there is "
@@ -750,6 +786,21 @@ class ChangedSince(AnswerRendering):
                             "below) — its callers are UNKNOWN, not none._",
         }.get(lk.state, "_No caller information._"))
         return out
+
+    def _qualifier_caveat(self, tokens: list[str], judged: dict[str, list[str]]) -> str:
+        """The note a `[never writes …]` mark travels with, once per group that prints one.
+
+        `callers` says this in the `Checked:` note above its rows. `changed` prints no such note, and a
+        mark on a line with the qualification left off would say more than the scan found — so the
+        group that carries a mark carries its caveat and the command that reproduces it."""
+        root = getattr(self, "_answered_root", None) or "."
+        names = ", ".join(f"`{t}`" for t in tokens)
+        rerun = " ".join(f"`{qualifier_scan.rerun_command(t, root, judged.get(t))}`" for t in tokens)
+        return (f"_Rows marked `[never writes …]` are in files that do not write {names}, the name the "
+                f"symbol is qualified by. That is a text search of the files as they are on disk, and "
+                f"it narrows; it does not decide. A file can reach the method through "
+                f"{_QUALIFIER_BYPASSES}, so these are the callers to doubt first, not callers proven "
+                f"false. Re-run it yourself: {rerun}_")
 
     def _render_removed_group(self, lk: _Lookup) -> list[str]:
         e = lk.entry

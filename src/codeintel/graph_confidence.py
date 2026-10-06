@@ -180,6 +180,24 @@ _OWN_RECEIVERS: dict[str, frozenset[str]] = {
 }
 
 
+def _own_receivers_of(file: str) -> frozenset[str] | None:
+    """The spellings of "the enclosing object" in the language of *file*, or ``None`` for a language
+    that has no rule (`_OWN_RECEIVERS`) — where nothing may be concluded from how a call is written,
+    because an implicit-`this` call (Java, Kotlin, C#, Ruby) reaches a member without a receiver at
+    all."""
+    return _OWN_RECEIVERS.get(_lang_family(file))
+
+
+def _is_own_receiver(receiver: str, own_receivers: frozenset[str]) -> bool:
+    """Whether *receiver*, the text before the last dot of a call, denotes the enclosing object.
+
+    `this?.log()` is optional chaining on the enclosing object, which is still the enclosing object,
+    and `super(...)` is the enclosing object's base. The one definition `_same_module_call` and the
+    qualifier scan both ask, so the two cannot come to disagree about what `self.m()` is."""
+    receiver = receiver.rstrip("?")
+    return receiver in own_receivers or receiver.startswith("super(")
+
+
 def _same_module_call(row: dict) -> str:
     """Whether a `same_module` edge's call site is one that rule can bind: `own`, `foreign`, or
     `unchecked` when the question cannot be answered from what the edge carries.
@@ -200,7 +218,7 @@ def _same_module_call(row: dict) -> str:
     callee = str(row.get("callee") or "").strip()
     if not callee:
         return _SAME_MODULE_UNCHECKED           # an older index, or an edge the extractor left blank
-    own_receivers = _OWN_RECEIVERS.get(_lang_family(str(row.get("a.file_path") or "")))
+    own_receivers = _own_receivers_of(str(row.get("a.file_path") or ""))
     if own_receivers is None:
         return _SAME_MODULE_UNCHECKED
     target = str(row.get("b.name") or "")
@@ -211,11 +229,10 @@ def _same_module_call(row: dict) -> str:
         return _SAME_MODULE_UNCHECKED
     if not dot:
         return _SAME_MODULE_OWN
-    # `this?.log()` is optional chaining on the enclosing object, which is still the enclosing object.
-    receiver = receiver.rstrip("?")
-    if receiver in own_receivers or receiver.startswith("super("):
+    if _is_own_receiver(receiver, own_receivers):
         return _SAME_MODULE_OWN
-    owners = {seg for seg in str(row.get("b.qualified_name") or "").split(".")[:-1] if seg}
+    receiver = receiver.rstrip("?")
+    owners ={seg for seg in str(row.get("b.qualified_name") or "").split(".")[:-1] if seg}
     if receiver.rsplit(".", 1)[-1] in owners:
         return _SAME_MODULE_OWN
     return _SAME_MODULE_FOREIGN
@@ -340,7 +357,8 @@ def _why(row: dict, bucket: str) -> str:
         # A `self.m()` the class hierarchy would bind if one of its links were an edge: said here so
         # a reader who sees a `self.` call still badged knows the rule looked and why it declined.
         note = str(row.get("_hierarchy_note") or "")
-        return f"{text}; {note}" if note else text
+        text = f"{text}; {note}" if note else text
+        return text + _qualifier_clause(row)
     if bucket == _UNSTATED:
         return "the backend reported no provenance for this edge"
     return "unclassified"
@@ -373,3 +391,46 @@ def _confidence_badge(row: dict) -> str:
     # and `unique_name` at 0.38 — the same strategy, the same kind of evidence — into two different
     # visual classes. The number still shows, as detail behind a single verdict.
     return f" [?{float(conf):.2f}{via}]"
+
+
+# The ways a genuine caller reaches a method from a file that never writes its class's name. The
+# first is the commonest: Python and TypeScript both default to holding an instance somebody else
+# built, so the caller has no reason to spell the class. Said in one place because the answer's note,
+# `changed`'s caveat and the docs all state it, and a list one item shorter in one of them is the
+# version that licenses a deletion.
+_QUALIFIER_BYPASSES = (
+    "an instance the file gets from elsewhere (a module singleton it imports, a constructor "
+    "argument, a factory call, an alias for the class), an interface-typed field, a subclass, or a "
+    "renaming re-export"
+)
+
+
+def _qualifier_clause(row: dict) -> str:
+    """What the qualifier scan found about THIS row, as the clause `why` appends — `""` when the scan
+    did not judge the row, which is every row it did not cover and every row that needs no scan.
+
+    Both verdicts are said as what they are, a fact about text. `true` is not a call, and `false` is
+    not proof that the call cannot reach the symbol: `_QUALIFIER_BYPASSES` all reach a method from a
+    file that never writes its class's name."""
+    seen, token = row.get("_qualifier_seen"), str(row.get("_qualifier") or "")
+    if seen is None or not token:
+        return ""
+    if seen:
+        return (f"; its file writes `{token}`, the name the target is qualified by — which is text "
+                "and not a call, so the row ranks above the name-matched rows whose file does not")
+    return (f"; its file never writes `{token}`, the name the target is qualified by, so the row "
+            "ranks below the name-matched rows whose file does — a text search, not proof that "
+            "the call cannot reach this symbol")
+
+
+def _qualifier_badge(row: dict) -> str:
+    """The per-row mark for a row whose file never writes the qualifier — and only for that verdict.
+
+    Printed for `false` alone, because it is the only one that changes how a reader should read the
+    row; `true` is the unremarkable case, and a badge on it would be furniture. A reader scanning a
+    list reads rows rather than notes, and `changed <ref>` has no note at all, so the fact has to be
+    on the line it is about."""
+    token = str(row.get("_qualifier") or "")
+    if row.get("_qualifier_seen") is False and token:
+        return f" [never writes `{token}`]"
+    return ""

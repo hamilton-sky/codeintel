@@ -133,6 +133,11 @@ class GraphOps(DispatchCallers, ChangedSince):
                 answer = self._empty_edge_answer(
                     "callers", "caller", target, wanted, selected, notes, truncated, dropped)
             else:
+                # After the confidence note, which is what classifies each row as resolved or
+                # name-matched, and after the cap, so only rows that will be printed are asked about;
+                # before the render, which reads what this records.
+                self._establish_method_owners(
+                    "callers", selected, wanted, "a.file_path", project, timeout_ms)
                 answer = self._render_edge_answer(
                     "callers", "caller", target, wanted, selected,
                     ("a.name", "a.qualified_name", "a.file_path"), truncated, notes, omitted)

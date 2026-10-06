@@ -1350,3 +1350,178 @@ def test_an_unreadable_file_message_quotes_the_size_limit_the_reader_actually_en
     (repo / "pkg" / "escape.py").symlink_to(outside)
     env = _ask(_provider(monkeypatch, tmp_path, repo, _standard_graph()), repo)
     assert "larger than 3 MB" in env["result"], env["result"]
+
+
+# ================================================================ the qualifier scan, carried through
+
+def _svc_provider(monkeypatch, tmp_path, repo: Path, callers: list[dict]) -> GraphProvider:
+    """`Svc.run` rewritten in the working tree, with *callers* recorded against it.
+
+    The fake backend answers the one class-lookup the method target triggers (so the answer is not
+    qualified by a lookup that fell over), and nothing else about the hierarchy."""
+    (repo / "pkg" / "core.py").write_text(
+        (repo / "pkg" / "core.py").read_text().replace("    def run(self, x):\n        return x\n",
+                                                       "    def run(self, x):\n        return x + 1\n"))
+    graph = _Graph()
+    graph.edges["run"] = callers
+    p = _provider(monkeypatch, tmp_path, repo, graph)
+    served = p._query_rows
+
+    def rows(cypher, project, timeout_ms):
+        if "[:DEFINES_METHOD]" in cypher and 'm.name="run"' in cypher:
+            return [{"c.qualified_name": f"{PROJECT}.pkg.core.Svc", "c.name": "Svc",
+                     "c.file_path": "pkg/core.py", "c.base_classes": None,
+                     "m.qualified_name": f"{PROJECT}.pkg.core.Svc.run", "m.file_path": "pkg/core.py"}]
+        if "[:DEFINES_METHOD]" in cypher and "m.qualified_name IN" in cypher:
+            # The qualifier scan asks which class defines the method it is about to scan on: a node
+            # labelled `Method` is not by itself a class's member.
+            return [{"c.qualified_name": f"{PROJECT}.pkg.core.Svc", "c.name": "Svc",
+                     "c.file_path": "pkg/core.py", "c.base_classes": None,
+                     "m.qualified_name": f"{PROJECT}.pkg.core.Svc.run"}]
+        if "[:DEFINES_METHOD]" in cypher or "INHERITS" in cypher or "(p:Class)" in cypher:
+            return []
+        return served(cypher, project, timeout_ms)
+
+    monkeypatch.setattr(p, "_query_rows", rows)
+    return p
+
+
+def _run_edge(caller_qn: str, caller_file: str, **kw) -> dict:
+    """An edge into `Svc.run`, name-matched by default, in the shape the real backend returns."""
+    row = _edge("run", "pkg/core.py", caller_qn, caller_file, conf="0.55", strategy="suffix_match", **kw)
+    row["b.qualified_name"] = f"{PROJECT}.pkg.core.Svc.run"
+    row["labels(b)"] = '["Method"]'
+    row["callee"] = "svc.run"
+    return row
+
+
+def test_changed_carries_the_qualifier_scan_through_and_shows_the_label_callers_shows(
+        monkeypatch, tmp_path, repo):
+    """`changed <ref>` reuses `callers`' rows by the fields `rows[]` publishes, so the scan has to
+    travel in them — and `changed` has no note to say it in, so the label on the line is the only
+    place its reader meets the verdict. It is the same label, from the same function, as `callers`.
+
+    The lookups run on a thread pool, and the root they read is per-thread state a worker does not
+    inherit: without it every worker scans nothing and `changed` says less than the identical
+    `callers` answer. The split into callers the diff touched and those it did not is untouched by
+    any of this."""
+    _write(repo, "pkg/svc_user.py",
+           "from pkg.core import Svc\n\n\ndef fresh_user():\n    return Svc().run(1)\n")
+    callers = [
+        _run_edge("pkg.legacy.legacy", "pkg/legacy.py"),            # untouched; never writes `Svc`
+        _run_edge("pkg.also.use_resig", "pkg/also.py"),             # edited in this diff; never writes it
+        _run_edge("pkg.svc_user.fresh_user", "pkg/svc_user.py"),    # added in this diff; writes it
+    ]
+    env = _ask(_svc_provider(monkeypatch, tmp_path, repo, callers), repo)
+    group = env["result"].split("#### `Svc.run`")[1].split("\n####")[0]
+    rows = {r["name"]: r for r in env["rows"] if r["changed_symbol"] == "Svc.run"}
+
+    assert rows["legacy"]["caller_status"] == "untouched", rows
+    assert rows["use_resig"]["caller_status"] == "also-changed", rows
+    assert rows["fresh_user"]["caller_status"] == "also-changed", rows
+    assert (rows["legacy"]["qualifier_seen"], rows["use_resig"]["qualifier_seen"],
+            rows["fresh_user"]["qualifier_seen"]) == (False, False, True), rows
+    assert rows["legacy"]["qualifier"] == "Svc", rows["legacy"]
+    legacy_line = next(ln for ln in group.splitlines() if "pkg.legacy.legacy" in ln)
+    fresh_line = next(ln for ln in group.splitlines() if "fresh_user" in ln)
+    assert "[?0.55] [never writes `Svc`]" in legacy_line, legacy_line
+    assert "never writes" not in fresh_line, fresh_line
+    assert env["evidence"]["qualifier_absent"] == 2 and env["evidence"]["qualifier_present"] == 1
+    assert len([ln for ln in env["result"].splitlines() if ln.startswith("- ")]) == len(env["rows"])
+
+
+def test_a_group_that_prints_a_never_writes_line_prints_the_caveat_and_the_command_once(
+        monkeypatch, tmp_path, repo):
+    """`changed` has no `Checked:` note, so a `[never writes …]` mark on one of its lines would be a
+    mark with its qualification left off. The group that prints one carries the caveat beneath its
+    rows — once per group, however many rows are marked — with the command that reproduces it. A group
+    with no marked row carries nothing."""
+    _write(repo, "pkg/other.py", "def third():\n    return 1\n")
+    callers = [
+        _run_edge("pkg.legacy.legacy", "pkg/legacy.py"),
+        _run_edge("pkg.also.use_resig", "pkg/also.py"),
+        _run_edge("pkg.other.third", "pkg/other.py"),
+    ]
+    env = _ask(_svc_provider(monkeypatch, tmp_path, repo, callers), repo)
+    group = env["result"].split("#### `Svc.run`")[1].split("\n####")[0]
+
+    assert [r["qualifier_seen"] for r in env["rows"] if r["changed_symbol"] == "Svc.run"] == [False] * 3
+    assert group.count("[never writes `Svc`]") == 3, group
+    assert group.count("_Rows marked `[never writes …]`") == 1, group
+    assert "a text search of the files as they are on disk" in group, group
+    assert "an instance the file gets from elsewhere" in group, group
+    assert "rg -n --fixed-strings -- 'Svc' " in group, group
+    assert not [ln for ln in group.splitlines() if ln.startswith("- ") and "_Rows marked" in ln]
+    assert len([ln for ln in env["result"].splitlines() if ln.startswith("- ")]) == len(env["rows"])
+
+
+def test_changed_scans_nothing_below_the_floor_and_so_prints_no_mark_and_no_caveat(
+        monkeypatch, tmp_path, repo):
+    """`callers` scans only when its note will be printed (three name-matched rows, at least half the
+    answer), and `changed` reuses those rows, so a group with two callers carries neither a mark nor
+    the caveat for one. CONTROL: the same symbol with three is marked and carries the caveat."""
+    two = [_run_edge("pkg.legacy.legacy", "pkg/legacy.py"),
+           _run_edge("pkg.also.use_resig", "pkg/also.py")]
+    env = _ask(_svc_provider(monkeypatch, tmp_path, repo, two), repo)
+    group = env["result"].split("#### `Svc.run`")[1].split("\n####")[0]
+
+    assert [r["qualifier_seen"] for r in env["rows"] if r["changed_symbol"] == "Svc.run"] == [None] * 2
+    assert "never writes" not in group and "_Rows marked" not in group, group
+    assert env["evidence"]["qualifier_absent"] == 0, env["evidence"]
+
+
+def test_changed_shares_one_scan_budget_across_its_workers(monkeypatch, tmp_path, repo):
+    """The scan's reading time is one allowance per ANSWER. `changed` runs its lookups on a pool, each
+    calling `callers`, which scans — so the allowance is created once, on the op, and handed to every
+    worker, or forty symbols would each get the whole of it. The worker is another thread, so what it
+    passes the scan is the proof it received the op's budget and not a fresh one."""
+    from codeintel import qualifier_scan
+
+    given: list[Any] = []
+    real = qualifier_scan.files_naming
+
+    def spy(root, token, files, *, budget=None):
+        given.append(budget)
+        return real(root, token, files, budget=budget)
+
+    monkeypatch.setattr(qualifier_scan, "files_naming", spy)
+    for i in range(3):
+        _write(repo, f"pkg/m{i}.py", f"def c{i}():\n    return {i}\n")
+    callers = [_run_edge(f"pkg.m{i}.c{i}", f"pkg/m{i}.py") for i in range(3)]
+    provider = _svc_provider(monkeypatch, tmp_path, repo, callers)
+    env = _ask(provider, repo)
+
+    assert [r["qualifier_seen"] for r in env["rows"] if r["changed_symbol"] == "Svc.run"] == [False] * 3
+    assert given and all(b is not None for b in given), given
+    assert all(b is provider._scan_budget for b in given), (given, provider._scan_budget)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+def test_a_fifo_at_a_tracked_path_is_not_read_and_cannot_hang_the_reader(tmp_path):
+    """`read_new` goes through `contained_path`, which checks where a file is and how many links it
+    has — not what it is. A FIFO planted at a tracked path has one link and a size of zero, so it
+    passed both, and `open` on it blocks until a writer appears. Only a regular file is opened.
+    CONTROL: a regular file in the same directory is read."""
+    import threading
+
+    from codeintel.changed_range import read_new
+
+    (tmp_path / "plain.py").write_text("x = 1\n")
+    fifo = tmp_path / "pipe.py"
+    os.mkfifo(fifo)
+    out: dict[str, Any] = {}
+
+    def run() -> None:
+        out["pipe"] = read_new(str(tmp_path), "pipe.py")
+        out["plain"] = read_new(str(tmp_path), "plain.py")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(3.0)
+    if thread.is_alive():
+        try:
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))   # let the stuck reader go
+        except OSError:
+            pass
+    assert not thread.is_alive(), "read_new blocked on a FIFO"
+    assert out == {"pipe": None, "plain": "x = 1\n"}, out

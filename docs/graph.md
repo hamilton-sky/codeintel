@@ -328,6 +328,83 @@ caveat that its numbers are **Python**. The `describe` failure above is TypeScri
 TypeScript arm now exists, it has not been pointed at a real TypeScript repository, so no
 measurement in that table speaks to the case this section describes.
 
+### The qualifier check on name-matched callers
+
+A `callers StrategyChain.resolve` answer binds most of its rows by the **leaf** name, `resolve`, which in
+TypeScript is also what every `new Promise((resolve, reject) => …)` binds. The part of the target the
+match did *not* use — `StrategyChain` — is what separates them, and the answer used to print the command
+that checks it (`Settle it: rg -n --fixed-strings 'StrategyChain' <root>`). It now **runs** that check and
+states the result, and the command it prints to re-run it names the files the scan judged, so `rg`
+reproduces each verdict — a dot-directory, an ignored path or an in-root symlink included — without
+searching anything outside the project:
+
+```text
+_Checked: **3 of 3** name-matched callers shown are in files that never write `FallbackChain`, the name it is qualified by, and the part of the target the name match did not use. They are ranked last below and carry `qualifier_seen: false`._
+- src.promiseExecutors.fetchLater [CALLS] [?0.55] [never writes `FallbackChain`] (src/promiseExecutors.ts)
+```
+
+A row's `qualifier_seen` is `true` (its file writes the qualifier), `false` (it does not) or `null` (nobody
+looked), with `qualifier` naming the token; `evidence.qualifier_absent` / `qualifier_present` count the
+first two, and `evidence.qualifier_checked: true` appears whenever the check was eligible and attempted —
+however much it judged, a stall or a spent budget included — and marks an answer about the files as they
+were when asked, which the gateway therefore never caches. It is a fact about the text, published as one — never folded into `verified`, and never a
+verdict on the caller. **Nothing is removed**, and nothing should be filtered on it before a delete or a
+rename: a file can reach a method without writing its class — a caller that holds an instance it got from
+elsewhere (a module singleton it imports, an instance handed to a constructor or field, a factory call, an
+alias for the class), an interface-typed field, a subclass, a renaming re-export — and dropping the marked
+rows empties an answer for a symbol that has a caller (measured: wrongly silent on 4 of 32 symbols against
+2 for the unfiltered list; see [../bench/README.md](../bench/README.md)). The first of those is the
+ordinary case in Python, where untyped injection is the default, and **no class-qualified Python target is
+in that measurement**. The verdict is a sort key and a label. A `false` row sorts last within the
+name-matched rows, a `true` row first, an unjudged one between; none rises above a `resolved` row, and
+production still precedes tests ahead of the verdict.
+
+**What `N of M` counts.** `M` is the name-matched rows of the *direct* list as printed: not the callers
+under [Callers through a base](#callers-that-reach-a-method-through-a-base-type) (`evidence.possible` counts those too,
+so it can exceed `M`; they are never scanned), not the callers the distinct-caller cap left out
+(`withheld`), and not rows of any symbol past the twelfth when a name is ambiguous. `N` is those whose
+`qualifier_seen` is `false`. Both are re-derivable from `rows[]`: `M` is the rows with `evidence ==
+"name-matched"` and no `via`, `N` the rows with `qualifier_seen == false`.
+
+It runs only when **all** of these hold, and each limit is a place a text search cannot speak:
+
+- the op is `callers` (on `callees` the displayed rows are what the target *calls*);
+- name-matched rows are at least three and at least half the callers shown — the same floor the
+  `Settle it:` note has always had. Below it nothing is scanned, badged or re-sorted, so a mark never
+  appears without the `Checked:` note that qualifies it;
+- the caller wrote a **qualified** target, and the node it resolves to is a **method of a class named by
+  it**. A bare target falls back to the stem of the defining file, which a re-export never writes
+  (measured: a scan on the stem refuted a true caller on `corpus-ts`). The node's label is not enough on
+  its own to tell a class qualifier from a module path wearing one (`src.proxy.forwardReleasedItem`), so
+  the answer also asks which class the index records as defining the method (the `DEFINES_METHOD` edge
+  into it) and scans only when that class is the one the target named. A method with no class node behind
+  it, or a lookup that failed, is not scanned and the answer prints the command as before;
+- the row is **name-matched**. `resolved` rows (including `self_mro`) and unstated ones are `null`;
+- the row is not a caller **through a base** (below): `gateway.py` calls `provider.build_result` and never
+  writes `LspProvider`, which is exactly why it is a caller by dispatch — scanning it would refute the
+  callers that section exists to show;
+- the row is not in the file that **defines** the symbol (it writes the class because it declares it, so
+  the verdict could only be `true` — this is what a `same_module` edge downgraded for a receiver-written
+  call always is), not a call on the **enclosing object** (`self.m()` / `this.m()`, which reach the method
+  by inheritance), and not **module-scope** code (whose file path the backend is known to misattribute);
+- the row has a **recorded call text**, and is in **Python, JavaScript or TypeScript** — the languages
+  whose own-receiver spellings (`self`/`cls`, `this`/`super`) are defined (the same table the
+  `same_module` rule uses). In Java, Kotlin, C# or Ruby a call reaches an inherited member with no
+  receiver at all, so nothing can be concluded from how it is written; such a row is `null`.
+
+The scan reads only the files the rows name, only inside the project root (a symlink or hard link that
+leaves it is never opened), only regular files (a FIFO at an indexed path is never opened), and never
+raises. A file larger than 1 MB is not read, and the scan stops at 16 MB or 200 files in total or after
+5 seconds spent reading for the whole answer (`changed <ref>` shares one allowance across every
+symbol it looks up, and counts reading time, not the time its backend lookups take). A file
+that is not plain text — a UTF-16 or UTF-32 byte-order mark, or a NUL byte anywhere in it — is not
+judged either: the printed `rg` decodes a wide encoding and the scan matches raw UTF-8, so the two would
+disagree about the same file. Every file not judged is `null` and counted as *could not be judged*, never
+as absent. When nothing could be judged — a root that is not on disk, an unreadable tree — the answer
+prints the command as before. `changed <ref>` carries `qualifier` and `qualifier_seen` through from the
+`callers` rows it reuses and badges its lines the same way; it prints no `Checked:` note, so every group
+that prints a `[never writes …]` line prints the same caveat and the `rg` command beneath its rows.
+
 ### The repo-scan ops
 
 `changed` and `hotspots` key on the whole index / git state, not a symbol, so `hotspots` ignores
@@ -453,7 +530,9 @@ alone). At most 40 symbols are looked up, most severe first, and what the cap dr
 
 **Rows and envelope.** `rows[]` is the body's `- ` lines, line for line, each stamped with
 `changed_symbol`, `change`, `caller_status` (`untouched` / `also-changed` / `through-base`) and `group_class`
-(`evidence` / `advisory` for a graph group, `discovery` for text mentions). The envelope's own
+(`evidence` / `advisory` for a graph group, `discovery` for text mentions). A graph row also carries the
+[qualifier check](#the-qualifier-check-on-name-matched-callers)'s `qualifier` and `qualifier_seen` exactly
+as `callers` published them, and a text mention carries both as `null`. The envelope's own
 `evidence_class` stays `discovery` — that is `changed`'s ceiling — and `evidence.safe_for_destructive`
 is the existing derivation (no unverified row, nothing withheld, no gap), so it is `false` for any
 answer containing a text mention or a gap, and `true` only when every group's callers were resolved
