@@ -100,6 +100,28 @@ class Budget:
         self._files = _MAX_FILES if files is None else files
         self._bytes = _MAX_TOTAL_BYTES if total_bytes is None else total_bytes
         self._lock = threading.Lock()
+        # Calls still running on this budget, by when they began. They are spending it NOW, before
+        # anything is charged, so every waiter counts them — otherwise two stalled reads that begin a
+        # few seconds apart each wait out the full allowance, and the answer takes nearly twice it.
+        self._inflight: dict[int, float] = {}
+        self._next = 0
+
+    def enter(self) -> int:
+        """Start one call on this budget; its running time counts against every waiter until `leave`."""
+        with self._lock:
+            self._next += 1
+            self._inflight[self._next] = _clock()
+            return self._next
+
+    def leave(self, key: int) -> None:
+        with self._lock:
+            self._inflight.pop(key, None)
+
+    def live_remaining(self) -> float:
+        """What is left now: the charged allowance, less what every call still running has used."""
+        with self._lock:
+            now = _clock()
+            return self._left - sum(now - began for began in self._inflight.values())
 
     def take_file(self) -> bool:
         """Claim one file read; False once the answer's files or bytes are used up."""
@@ -216,7 +238,7 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
     # Checking and canonicalising the root are filesystem calls too, and on a stale mount they block
     # like a read does, so they run under the same deadline.
     began = _clock()
-    root_real, finished = _within(functools.partial(_root, root), budget.remaining)
+    root_real, finished = _within(functools.partial(_root, root), budget)
     budget.spend(_clock() - began)
     if not finished:
         budget.exhaust()
@@ -229,8 +251,7 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
         if budget.exhausted or not budget.take_file():
             break
         began = time.monotonic()
-        blob, finished = _within(functools.partial(_read, root_real, os.path.join(root, rel)),
-                                 budget.remaining)
+        blob, finished = _within(functools.partial(_read, root_real, os.path.join(root, rel)), budget)
         budget.spend(time.monotonic() - began)
         if not finished:
             # The read outlived what was left of the allowance and is still blocked — a stalled mount.
@@ -246,9 +267,24 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
     return seen or None
 
 
-def _within(call: Callable[[], _T], seconds: float) -> tuple[_T | None, bool]:
-    """*call* on a daemon thread holding one of `_MAX_READERS` slots, waited on for at most *seconds*
-    in all: `(result, finished)`.
+# How often a wait looks again at what the other calls on its budget have spent.
+_POLL = 0.05
+
+
+def _acquire(slots: threading.BoundedSemaphore, budget: Budget) -> bool:
+    while True:
+        left = budget.live_remaining()
+        if left <= 0:
+            return False
+        if slots.acquire(timeout=min(_POLL, left)):
+            return True
+
+
+def _within(call: Callable[[], _T], budget: Budget) -> tuple[_T | None, bool]:
+    """*call* on a daemon thread holding one of `_MAX_READERS` slots, waited on only while *budget*
+    has time left — counting what every other call still running on it is spending: `(result,
+    finished)`. That is what makes the allowance one ANSWER's: `changed`'s workers share a budget, and a
+    wait that only knew the time left when it began could run a whole allowance past another's.
 
     A filesystem call cannot be interrupted, so the thread is what bounds it: when it has not returned
     in time, `finished` is False and the thread is left to end whenever the stalled call does — still
@@ -256,14 +292,11 @@ def _within(call: Callable[[], _T], seconds: float) -> tuple[_T | None, bool]:
     that cannot get a slot in time is treated the same way: every slot is held, most likely by calls
     still blocked. An exception in the call is re-raised here, so a path the OS refuses (an embedded
     NUL) still abandons the whole scan exactly as it did when the read ran inline."""
-    if seconds <= 0:
+    if budget.live_remaining() <= 0:
         # Nothing can finish in no time, and a thread started only to be abandoned at once would be
         # recorded as stalled while it is merely running — shutting every other scan out until it ends.
         return None, False
-    deadline = _clock() + seconds
     slots = _slots                                  # the semaphore this call takes is the one it gives back
-    if not slots.acquire(timeout=seconds):
-        return None, False
     box: list[tuple[_T | None, BaseException | None]] = []
 
     def work() -> None:
@@ -274,9 +307,19 @@ def _within(call: Callable[[], _T], seconds: float) -> tuple[_T | None, bool]:
         finally:
             slots.release()
 
-    worker = threading.Thread(target=work, name="codeintel-qualifier-read", daemon=True)
-    worker.start()
-    worker.join(max(0.0, deadline - _clock()))
+    key = budget.enter()
+    try:
+        if not _acquire(slots, budget):
+            return None, False
+        worker = threading.Thread(target=work, name="codeintel-qualifier-read", daemon=True)
+        worker.start()
+        while worker.is_alive():
+            left = budget.live_remaining()
+            if left <= 0:
+                break
+            worker.join(min(_POLL, left))
+    finally:
+        budget.leave(key)
     if worker.is_alive() or not box:
         with _stalled_lock:
             _stalled.add(worker)

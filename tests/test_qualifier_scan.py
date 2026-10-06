@@ -429,6 +429,49 @@ def test_scans_that_arrive_together_cannot_leave_more_blocked_reads_than_there_a
     assert elapsed < 5, "a scan waited past its deadline for a slot"
 
 
+def test_scans_sharing_a_budget_stop_together_when_its_time_is_gone(tmp_path, monkeypatch):
+    """`changed`'s workers share one budget. Each wait used to know only the time left when ITS call
+    began, and nothing is charged until a call returns — so a second stalled read starting late in the
+    allowance waited nearly a whole allowance more, and the answer took close to twice it. Every wait
+    now counts what the other calls still running are spending, so they all stop when it is gone."""
+    import time
+
+    _write(tmp_path, "a.ts", TOKEN)
+    _write(tmp_path, "b.ts", TOKEN)
+    release = threading.Event()
+    real_read = qualifier_scan._read
+
+    def read(root_real, path):
+        release.wait(8)                                  # both reads stall
+        return real_read(root_real, path)
+
+    monkeypatch.setattr(qualifier_scan, "_read", read)
+    monkeypatch.setattr(qualifier_scan, "_stalled", set())
+    monkeypatch.setattr(qualifier_scan, "_slots", threading.BoundedSemaphore(4))
+    shared = qualifier_scan.Budget(1.0)
+    ended: dict[str, float] = {}
+
+    def scan(name, delay):
+        time.sleep(delay)
+        files_naming(str(tmp_path), TOKEN, [name], budget=shared)
+        ended[name] = time.monotonic()
+
+    started = time.monotonic()
+    workers = [threading.Thread(target=scan, args=("a.ts", 0.0)),
+               threading.Thread(target=scan, args=("b.ts", 0.6))]
+    try:
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(6)
+    finally:
+        release.set()
+
+    assert set(ended) == {"a.ts", "b.ts"}, ended
+    assert max(ended.values()) - started < 1.3, (
+        f"the answer spent {max(ended.values()) - started:.2f}s reading on a 1.0s shared budget")
+
+
 def test_one_budget_also_caps_the_files_and_bytes_of_every_scan_that_shares_it(tmp_path):
     """`changed` runs up to forty scans on one budget. Counted per scan, each would get the full file
     and byte allowance, and a fast local tree would read forty times what the answer was promised
