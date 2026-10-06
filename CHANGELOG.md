@@ -4,17 +4,24 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.27.0] — 2026-10-06
+
+`callers` runs the qualifier check itself (#68), the rewrite of closed #55 against 0.26.0 — through
+eleven rounds of review, nearly all of them about how a check that reads files bounds itself.
 
 ### Added
-- **`callers` runs the qualifier check instead of telling the reader to run it.** For a
+- **`callers` runs the qualifier check instead of telling the reader to run it** (#68). For a
   class-qualified method target (`StrategyChain.resolve`) whose answer is mostly name-matched
   callers, the answer used to end with `Settle it: rg -n --fixed-strings 'StrategyChain' <root>`. It
   now reads those callers' files itself and says what it found — `Checked: 3 of 3 name-matched
-  callers shown are in files that never write StrategyChain` — with the command kept beneath.
+  callers shown are in files that never write StrategyChain` — and prints beneath it the command
+  that reproduces it: `rg -n --fixed-strings -- 'StrategyChain'` followed by the files it judged,
+  named one by one, so a caller in a dot-directory, an ignored path or an in-root symlink is
+  reproduced and nothing outside the project is searched.
   - Each row publishes `qualifier_seen` (`true` / `false` / `null` for not judged) and `qualifier`;
-    `evidence` gains `qualifier_absent` and `qualifier_present`. `impact` and `changed <ref>` publish
-    them too, and `changed` prints the same caveat and command once under any group it marks.
+    `evidence` gains `qualifier_absent` and `qualifier_present`, and `qualifier_checked: true`
+    whenever the check was eligible and attempted. `impact` and `changed <ref>` publish them too,
+    and `changed` prints the same caveat and command once under any group it marks.
   - **`false` is a fact about the file, not a verdict on the call.** A caller reaches the method
     without writing its class when it holds an instance obtained elsewhere — a module singleton, a
     constructor argument, a factory call, an alias — or through a subclass, an interface-typed field
@@ -24,15 +31,26 @@ All notable changes to codeintel are documented here. The format is based on
     silent on 4 of 32 symbols instead of 2, and the one refuted row seen on a real tree was a true
     caller. No class-qualified Python target is in the benchmark yet.
   - The scan fails closed. It runs only when name-matched rows are at least three and at least half
-    the answer, and only for a method whose defining class the index records and the target named
-    (one extra backend query). A row is left `null` when it is resolved (including `self_mro`),
-    reached through a base class or Protocol, in the file that defines the symbol, a call on `self`
-    / `this`, module-scope, without recorded call text, or in a language other than Python,
-    JavaScript and TypeScript. A file is left unknown when it is not a regular file, larger than
-    1 MB, UTF-16/32 or NUL-bearing, outside the project root, or past the answer's 5-second reading
-    budget. Otherwise the `Settle it:` command is printed as before.
+    the answer, and only for a method whose defining class the index records and the target named.
+    A row is left `null` when it is resolved (including `self_mro`), reached through a base class or
+    Protocol, in the file that defines the symbol, a call on `self` / `this`, module-scope, without
+    recorded call text, or in a language other than Python, JavaScript and TypeScript. A file is
+    left unknown when it is not a regular file, larger than 1 MB, UTF-16/32 or holds a NUL anywhere,
+    or lies outside the project root. Otherwise the `Settle it:` command is printed, now searching
+    the tree with `--hidden --no-ignore` and never following links out of it.
+  - **Its cost is bounded by construction, per answer and per process.** One answer may spend 5
+    seconds, 200 files and 16 MB reading — shared by all of `changed`'s workers, with bytes reserved
+    before a file is opened. Every filesystem call, the root probes included, runs on its own thread
+    and is abandoned at the deadline rather than waited out; at most four calls can be left blocked
+    across the process, and while one is, new scans judge nothing until it returns. The lookup of
+    the method's class has its own allowance, so it never takes time from the lookups that decide
+    whether an answer is whole.
 
 ### Changed
+- **An answer whose qualifier check was attempted is never cached** — whether it judged files or,
+  after a stall or a spent budget, judged none. The cache key does not move when a caller file
+  changes, so caching it would serve the files as they were, or keep the check switched off until
+  the next reindex.
 - The `Settle it:` note no longer says a file that never names the qualifier "cannot be reaching"
   the symbol, or that such a caller is "very unlikely"; it names the routes by which one can.
 
