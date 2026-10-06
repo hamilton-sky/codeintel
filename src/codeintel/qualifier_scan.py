@@ -5,7 +5,7 @@ in TypeScript is also what every `new Promise((resolve, reject) => …)` binds. 
 the match did NOT use — `StrategyChain` — is what separates the two, and the answer has printed the
 command that checks it since the settle note was added:
 
-    _Settle it: `rg -n --fixed-strings 'StrategyChain' <root>`_
+    _Settle it: `rg -n --fixed-strings --hidden --no-ignore 'StrategyChain' <root>`_
 
 This module runs that command's substance. Nothing more: it reports, per file, whether the token
 appears in it. That is a FACT about the text, and it is published as one.
@@ -190,6 +190,18 @@ def files_naming(
     except Exception as exc:                        # an embedded NUL in a path, a vanished mount
         log_swallowed("qualifier_scan.files_naming", exc)
         return None
+
+
+def rerun_command(token: str, root: str) -> str:
+    """The `rg` command that repeats this check, over every file the scan could have read.
+
+    `--hidden --no-ignore` are not decoration. By default `rg` skips dot-directories and anything a
+    `.gitignore`, `.ignore`, `.rgignore` or global ignore rule names, while this scan reads whatever
+    file a caller row names — an indexed `.internal/chain.ts` included. Without them the command
+    printed beneath a `true` could find no match in that very file. With them it searches a superset of
+    what the scan read, so its output may hold more files, but never a different verdict for one the
+    scan judged. (A file with a NUL in it is never judged, so `rg`'s binary handling cannot differ.)"""
+    return f"rg -n --fixed-strings --hidden --no-ignore '{token}' {root}"
 
 
 def _root(root: str) -> str | None:

@@ -261,7 +261,7 @@ def test_a_dominated_answer_prints_the_command_that_would_settle_it():
     hand to establish that finding."""
     body = _render(*_guessed(n=43, resolved=5))
 
-    assert "rg -n --fixed-strings 'StrategyChain' /repo" in body, body
+    assert "rg -n --fixed-strings --hidden --no-ignore 'StrategyChain' /repo" in body, body
     assert "43 name-matched caller" in body, body
 
 
@@ -283,7 +283,7 @@ def test_a_bare_target_falls_back_to_the_module_it_is_defined_in():
         n=32, resolved=0, qualified="pkg.domain.budget.describe", leaf="describe")
     body = _render(gp, groups, wanted, leaf="describe")
 
-    assert "rg -n --fixed-strings 'budget' /repo" in body, body
+    assert "rg -n --fixed-strings --hidden --no-ignore 'budget' /repo" in body, body
 
 
 def test_the_command_appears_where_the_breakdown_cannot():
@@ -1190,7 +1190,7 @@ def test_the_note_states_what_the_scan_found_rather_than_how_to_find_it(monkeypa
     assert ("_Checked: **4 of 4** name-matched callers shown are in files that never write "
             "`StrategyChain`") in body, body
     assert "the name it is qualified by" in body, body
-    assert "rg -n --fixed-strings 'StrategyChain'" in body, body
+    assert "rg -n --fixed-strings --hidden --no-ignore 'StrategyChain'" in body, body
     assert "Settle it" not in body, "the instruction is replaced by its result, not printed beside it"
     assert _seen(env) == [False] * 4, env["rows"]
     # The note's `N of M` is re-derived from `rows[]` and from the envelope's own counts, not read back
@@ -1645,7 +1645,7 @@ def test_every_answer_that_badges_a_row_carries_the_note_and_the_command(monkeyp
             badged += 1
             assert "_Checked:" in body, (label, body)
             assert "a text search of the files as they are on disk" in body, (label, body)
-            assert "rg -n --fixed-strings 'StrategyChain'" in body, (label, body)
+            assert "rg -n --fixed-strings --hidden --no-ignore 'StrategyChain'" in body, (label, body)
     assert badged >= 2, "the spread must include answers that badge, or this proves nothing"
 
 

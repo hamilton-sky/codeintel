@@ -329,6 +329,32 @@ def test_a_budget_used_up_part_way_leaves_the_rest_unjudged_rather_than_clean(tm
     assert seen == {"f0.ts": False, "f1.ts": False}, seen
 
 
+@pytest.mark.skipif(not __import__("shutil").which("rg"), reason="needs ripgrep on PATH")
+def test_the_printed_command_finds_what_the_scan_found_in_hidden_and_ignored_files(tmp_path):
+    """The scan reads whatever file a caller row names, a dot-directory or an ignored path included.
+    `rg` skips both by default, so the plain command printed beneath a `true` found no match in the
+    very file the scan had matched. The printed command must reproduce every verdict — run it for
+    real and see. CONTROL: the plain command really does miss them, which is the defect."""
+    import shlex
+    import subprocess
+
+    _write(tmp_path, ".internal/chain.ts", f"new {TOKEN}()")
+    _write(tmp_path, "ignored/use.ts", f"{TOKEN}.resolve()")
+    (tmp_path / ".ignore").write_text("ignored/\n")
+    files = [".internal/chain.ts", "ignored/use.ts"]
+
+    seen = files_naming(str(tmp_path), TOKEN, files)
+    printed = subprocess.run(shlex.split(qualifier_scan.rerun_command(TOKEN, str(tmp_path))),
+                             capture_output=True, text=True, timeout=30).stdout
+    plain = subprocess.run(["rg", "-n", "--fixed-strings", TOKEN, str(tmp_path)],
+                           capture_output=True, text=True, timeout=30).stdout
+
+    assert seen == {".internal/chain.ts": True, "ignored/use.ts": True}, seen
+    for rel in files:
+        assert rel in printed, f"the printed command does not reproduce the scan's verdict on {rel}"
+        assert rel not in plain, f"CONTROL: plain rg was expected to skip {rel}"
+
+
 def test_a_root_whose_metadata_stalls_is_abandoned_at_the_deadline_too(tmp_path, monkeypatch):
     """Checking that the root is a directory and canonicalising it are filesystem calls: on a stale
     NFS or FUSE root they block exactly as a read does, before any read starts. They run under the

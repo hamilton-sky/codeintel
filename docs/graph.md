@@ -334,7 +334,8 @@ A `callers StrategyChain.resolve` answer binds most of its rows by the **leaf** 
 TypeScript is also what every `new Promise((resolve, reject) => …)` binds. The part of the target the
 match did *not* use — `StrategyChain` — is what separates them, and the answer used to print the command
 that checks it (`Settle it: rg -n --fixed-strings 'StrategyChain' <root>`). It now **runs** that check and
-states the result:
+states the result, and the command it prints to re-run it adds `--hidden --no-ignore`, so `rg` searches
+the dot-directories and ignored paths the scan reads too:
 
 ```text
 _Checked: **3 of 3** name-matched callers shown are in files that never write `FallbackChain`, the name it is qualified by, and the part of the target the name match did not use. They are ranked last below and carry `qualifier_seen: false`._

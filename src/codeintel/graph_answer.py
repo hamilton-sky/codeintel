@@ -1088,7 +1088,7 @@ class AnswerRendering:
                     f"not plain text, the file that defines the symbol, a call on `self`/`this`, a "
                     f"call in a language this check has no rule for, or module-scope code) and carry "
                     f"`qualifier_seen: null`." if unjudged else "")
-            rerun = f"Re-run it yourself: `rg -n --fixed-strings '{token}' {root}`_\n"
+            rerun = f"Re-run it yourself: `{qualifier_scan.rerun_command(token, root)}`_\n"
             if not absent:
                 return (
                     f"\n\n_Checked: **none of the {len(matched) - unjudged}** name-matched {unit}s "
@@ -1112,7 +1112,7 @@ class AnswerRendering:
             more = f", … (+{len(files) - 10} more)" if len(files) > 10 else ""
             listing = f"_The {len(files)} file(s) to check against: {shown}{more}._\n"
         return (
-            f"\n\n_Settle it: `rg -n --fixed-strings '{token}' {root}`_\n"
+            f"\n\n_Settle it: `{qualifier_scan.rerun_command(token, root)}`_\n"
             f"_`{token}` is {why}, and it is the part of the target the name match did not use. "
             f"A file that never names it is less likely to be reaching this symbol, and that is not "
             f"proof it is not: a caller can reach it through {_QUALIFIER_BYPASSES}. So the "

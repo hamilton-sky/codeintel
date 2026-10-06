@@ -792,7 +792,7 @@ class ChangedSince(AnswerRendering):
         group that carries a mark carries its caveat and the command that reproduces it."""
         root = getattr(self, "_answered_root", None) or "."
         names = ", ".join(f"`{t}`" for t in tokens)
-        rerun = " ".join(f"`rg -n --fixed-strings '{t}' {root}`" for t in tokens)
+        rerun = " ".join(f"`{qualifier_scan.rerun_command(t, root)}`" for t in tokens)
         return (f"_Rows marked `[never writes …]` are in files that do not write {names}, the name the "
                 f"symbol is qualified by. That is a text search of the files as they are on disk, and "
                 f"it narrows; it does not decide. A file can reach the method through "
