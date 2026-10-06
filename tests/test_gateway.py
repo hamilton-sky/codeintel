@@ -244,6 +244,53 @@ def test_changed_op_is_never_cached_but_hotspots_is():
     assert graph.call_count == 1
 
 
+class _ScanStub(_StubProvider):
+    """A callers answer whose qualifier scan judged a file — or, with `judged=False`, one that judged
+    nothing and printed only the command."""
+
+    def __init__(self, engine_name: str, judged: bool) -> None:
+        super().__init__(engine_name, "callers")
+        self._judged = judged
+
+    def build_result(self, op, target, files, budget, project_root) -> Result:
+        base = super().build_result(op, target, files, budget, project_root)
+        seen = False if self._judged else None
+        return {**base,
+                "rows": [{"relation": "caller", "name": "relay", "qualifier_seen": seen,
+                          "qualifier": "StrategyChain" if self._judged else None}],
+                "evidence": {"qualifier_absent": 1 if self._judged else 0, "qualifier_present": 0}}
+
+
+def test_an_answer_that_states_what_the_files_hold_now_is_never_cached():
+    """The qualifier scan reads caller files as they are on disk. The cache key — target string plus
+    the index's freshness generation — does not move when a caller file starts or stops writing the
+    qualifier, so a cached verdict would be about the files as they WERE. CONTROL: an answer whose
+    scan judged nothing states nothing about the files, and is cached as before."""
+    judged = _ScanStub("graph", judged=True)
+    gw = Gateway(graph=judged)
+    r1 = gw.query(op="callers", target="StrategyChain.resolve", engine="graph")
+    r2 = gw.query(op="callers", target="StrategyChain.resolve", engine="graph")
+    assert r1["cached"] is False and r2["cached"] is False
+    assert judged.call_count == 2, "a scan verdict was served from the cache instead of re-read"
+
+    nothing = _ScanStub("graph", judged=False)
+    gw = Gateway(graph=nothing)
+    n1 = gw.query(op="callers", target="StrategyChain.resolve", engine="graph")
+    n2 = gw.query(op="callers", target="StrategyChain.resolve", engine="graph")
+    assert n1["cached"] is False and n2["cached"] is True
+    assert nothing.call_count == 1
+
+
+def test_an_answer_that_states_what_the_files_hold_now_is_not_cached_on_the_fanout_path():
+    graph = _ScanStub("graph", judged=True)
+    lsp = _StubProvider("lsp", "lsp-data")
+    gw = Gateway(graph=graph, lsp=lsp)
+    r1 = gw.query(op="callers", target="StrategyChain.resolve", engine="both")
+    r2 = gw.query(op="callers", target="StrategyChain.resolve", engine="both")
+    assert r1["cached"] is False and r2["cached"] is False
+    assert graph.call_count == 2
+
+
 def test_changed_not_cached_on_fanout_path():
     # Regression for the reviewer's HIGH finding: the fan-out path (engine="both"/"all") must ALSO
     # bypass the cache for `changed` — else an explicit engine="both" serves a stale diff.

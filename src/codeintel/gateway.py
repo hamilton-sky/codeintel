@@ -83,6 +83,37 @@ def _is_retryable(result: Result) -> bool:
     )
 
 
+def _states_live_file_contents(result: Result | dict[str, Result]) -> bool:
+    """Whether the answer states something read from the files on disk as it was asked — the qualifier
+    scan's verdicts (`qualifier_seen` on a row, or the `qualifier_absent` / `qualifier_present`
+    counts).
+
+    The cache is keyed by the target string and the index's freshness generation, and neither moves
+    when a caller file starts or stops writing the qualifier — only a reindex does. Caching such an
+    answer would serve a verdict about the files as they WERE, in prose that says "as they are on
+    disk": the reason `changed` is never cached, met by a narrower population. An answer whose scan
+    judged nothing printed only the command, states nothing about the files, and stays cacheable.
+    Walks the whole answer, because a fan-out answer nests each engine's envelope."""
+    def walk(node: object, depth: int) -> bool:
+        if depth > 8:
+            return False
+        if isinstance(node, dict):
+            evidence = node.get("evidence")
+            if isinstance(evidence, dict) and (evidence.get("qualifier_absent")
+                                               or evidence.get("qualifier_present")):
+                return True
+            rows = node.get("rows")
+            if isinstance(rows, list) and any(
+                    isinstance(r, dict) and r.get("qualifier_seen") is not None for r in rows):
+                return True
+            return any(walk(v, depth + 1) for v in node.values() if isinstance(v, (dict, list)))
+        if isinstance(node, list):
+            return any(walk(v, depth + 1) for v in node)
+        return False
+
+    return walk(result, 0)
+
+
 class Gateway:
     def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None,
                  reindexer: Reindexer | None = None, oneshot: bool = False):
@@ -682,7 +713,10 @@ class Gateway:
                 engines = ["graph", "lsp"] if engine_str == "both" else ["graph", "lsp", "semantic"]
                 fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
-                if not uncacheable and not _is_retryable(result):
+                # The merged answer drops each engine's `rows` and `evidence` but keeps their prose,
+                # so whether it states what the files hold now is read from the engines' own answers.
+                if (not uncacheable and not _is_retryable(result)
+                        and not _states_live_file_contents(fan_results)):
                     self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
                 return _mark_reindexing(result, reindexing)
 
@@ -721,7 +755,8 @@ class Gateway:
             result = self._cross_check_name_resolved(
                 result, op_str, target_str, budget, project_root, was_auto)
 
-            if not uncacheable and not _is_retryable(result):
+            if (not uncacheable and not _is_retryable(result)
+                    and not _states_live_file_contents(result)):
                 self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
             return _mark_reindexing(result, reindexing)
 
