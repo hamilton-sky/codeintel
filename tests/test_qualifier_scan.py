@@ -120,7 +120,10 @@ def test_the_total_budget_leaves_the_rest_unjudged_rather_than_reading_on(tmp_pa
 
     seen = files_naming(str(tmp_path), TOKEN, [f"f{i}.ts" for i in range(5)])
 
-    assert seen == {"f0.ts": False, "f1.ts": False, "f2.ts": False}, seen
+    # A hard ceiling, not a stopping threshold: each read reserves its size (+1 byte to see growth)
+    # first, so two 10-byte files fit in 25 bytes and a third does not. This test used to accept three
+    # — 30 bytes read against a 25-byte ceiling.
+    assert seen == {"f0.ts": False, "f1.ts": False}, seen
 
 
 def test_the_file_ceiling_leaves_the_rest_unjudged(tmp_path, monkeypatch):
@@ -243,10 +246,10 @@ def test_a_read_stalled_on_a_slow_mount_is_abandoned_at_the_deadline_not_waited_
     release = threading.Event()
     real_read = qualifier_scan._read
 
-    def read(root_real, path):
+    def read(root_real, path, *rest):
         if path.endswith("stalled.ts"):
             release.wait(8)                              # a read that does not come back in time
-        return real_read(root_real, path)
+        return real_read(root_real, path, *rest)
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
     monkeypatch.setattr(qualifier_scan, "_stalled", set())   # this test's abandoned read stays its own
@@ -275,11 +278,11 @@ def test_reads_left_blocked_by_earlier_answers_are_bounded_across_the_process(tm
     real_read = qualifier_scan._read
     began: list[str] = []
 
-    def read(root_real, path):
+    def read(root_real, path, *rest):
         began.append(os.path.basename(path))
         if path.endswith("stalled.ts"):
             release.wait(8)
-        return real_read(root_real, path)
+        return real_read(root_real, path, *rest)
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
     monkeypatch.setattr(qualifier_scan, "_stalled", set())
@@ -331,8 +334,8 @@ def test_a_budget_used_up_part_way_leaves_the_rest_unjudged_rather_than_clean(tm
 
 @pytest.mark.skipif(not __import__("shutil").which("rg"), reason="needs ripgrep on PATH")
 def test_the_printed_command_finds_what_the_scan_found_in_hidden_and_ignored_files(tmp_path):
-    """The scan reads whatever file a caller row names, a dot-directory or an ignored path included.
-    `rg` skips both by default, so the plain command printed beneath a `true` found no match in the
+    """The scan reads whatever file a caller row names — a dot-directory, an ignored path, a symlink
+    to a file inside the root included. `rg` skips all three by default, so the plain command printed beneath a `true` found no match in the
     very file the scan had matched. The printed command must reproduce every verdict — run it for
     real and see. CONTROL: the plain command really does miss them, which is the defect."""
     import shlex
@@ -341,7 +344,9 @@ def test_the_printed_command_finds_what_the_scan_found_in_hidden_and_ignored_fil
     _write(tmp_path, ".internal/chain.ts", f"new {TOKEN}()")
     _write(tmp_path, "ignored/use.ts", f"{TOKEN}.resolve()")
     (tmp_path / ".ignore").write_text("ignored/\n")
-    files = [".internal/chain.ts", "ignored/use.ts"]
+    _write(tmp_path, "real/target.ts", f"const c = new {TOKEN}()")
+    (tmp_path / "link.ts").symlink_to(tmp_path / "real" / "target.ts")   # an in-root file symlink
+    files = [".internal/chain.ts", "ignored/use.ts", "link.ts"]
 
     seen = files_naming(str(tmp_path), TOKEN, files)
     printed = subprocess.run(shlex.split(qualifier_scan.rerun_command(TOKEN, str(tmp_path))),
@@ -349,10 +354,60 @@ def test_the_printed_command_finds_what_the_scan_found_in_hidden_and_ignored_fil
     plain = subprocess.run(["rg", "-n", "--fixed-strings", TOKEN, str(tmp_path)],
                            capture_output=True, text=True, timeout=30).stdout
 
-    assert seen == {".internal/chain.ts": True, "ignored/use.ts": True}, seen
+    assert seen == {".internal/chain.ts": True, "ignored/use.ts": True, "link.ts": True}, seen
     for rel in files:
         assert rel in printed, f"the printed command does not reproduce the scan's verdict on {rel}"
         assert rel not in plain, f"CONTROL: plain rg was expected to skip {rel}"
+
+
+def test_scans_racing_on_one_budget_cannot_read_past_its_byte_ceiling(tmp_path):
+    """The byte ceiling used to be a stopping threshold: a file got through whenever any byte was left,
+    and `changed`'s workers, all seeing the same positive balance, each got one — 4 MB over the
+    advertised ceiling. Each read now reserves its bytes first, under the budget's lock. Thirty-three
+    bytes hold three 10-byte files (each reserves 11, the extra byte that shows a file grew), and four
+    scans racing for them get three between them — never more."""
+    for i in range(8):
+        _write(tmp_path, f"f{i}.ts", "w" * 10)
+    shared = qualifier_scan.Budget(60.0, total_bytes=33)
+    gate = threading.Barrier(4)
+    results: list[dict | None] = []
+    lock = threading.Lock()
+
+    def scan(k):
+        gate.wait()
+        got = files_naming(str(tmp_path), TOKEN, [f"f{2 * k}.ts", f"f{2 * k + 1}.ts"], budget=shared)
+        with lock:
+            results.append(got)
+
+    workers = [threading.Thread(target=scan, args=(k,)) for k in range(4)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(10)
+
+    judged = sum(len(r) for r in results if r)
+    assert judged == 3, f"{judged} files were read on a budget that holds three"
+
+
+def test_a_file_that_grew_since_its_stat_is_unknown_not_judged_on_part_of_itself(tmp_path, monkeypatch):
+    """The read is bounded by the stat — its size plus one byte — so a file that grew between the two
+    calls is noticed by that one byte and left unknown, never judged on whatever prefix was read.
+    CONTROL: a file whose stat is true is judged."""
+    _write(tmp_path, "grew.ts", "x" * 12 + TOKEN)
+    _write(tmp_path, "same.ts", "x" * 12 + TOKEN)
+    real_stat = os.stat
+
+    def stale_stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if str(path).endswith("grew.ts"):
+            fields = list(info)
+            fields[6] = 10                                # st_size as it was before the file grew
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(qualifier_scan.os, "stat", stale_stat)
+
+    assert files_naming(str(tmp_path), TOKEN, ["grew.ts", "same.ts"]) == {"same.ts": True}
 
 
 def test_a_root_whose_metadata_stalls_is_abandoned_at_the_deadline_too(tmp_path, monkeypatch):
@@ -396,11 +451,11 @@ def test_scans_that_arrive_together_cannot_leave_more_blocked_reads_than_there_a
     began: list[str] = []
     lock = threading.Lock()
 
-    def read(root_real, path):
+    def read(root_real, path, *rest):
         with lock:
             began.append(path)
         release.wait(8)
-        return real_read(root_real, path)
+        return real_read(root_real, path, *rest)
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
     monkeypatch.setattr(qualifier_scan, "_stalled", set())
@@ -441,9 +496,9 @@ def test_scans_sharing_a_budget_stop_together_when_its_time_is_gone(tmp_path, mo
     release = threading.Event()
     real_read = qualifier_scan._read
 
-    def read(root_real, path):
+    def read(root_real, path, *rest):
         release.wait(8)                                  # both reads stall
-        return real_read(root_real, path)
+        return real_read(root_real, path, *rest)
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
     monkeypatch.setattr(qualifier_scan, "_stalled", set())
@@ -487,8 +542,8 @@ def test_one_budget_also_caps_the_files_and_bytes_of_every_scan_that_shares_it(t
     by_bytes = qualifier_scan.Budget(60.0, total_bytes=25)
     first = files_naming(str(tmp_path), TOKEN, ["f0.ts", "f1.ts"], budget=by_bytes)
     second = files_naming(str(tmp_path), TOKEN, ["f2.ts", "f3.ts"], budget=by_bytes)
-    assert (first, second) == ({"f0.ts": False, "f1.ts": False}, {"f2.ts": False}), (
-        "the bytes the first scan read were not charged to the second")
+    assert (first, second) == ({"f0.ts": False, "f1.ts": False}, None), (
+        "the bytes the first scan reserved were not charged to the second, or the ceiling overshot")
 
 
 def test_one_budget_is_drawn_on_by_every_scan_that_shares_it(tmp_path, monkeypatch):

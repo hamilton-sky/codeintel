@@ -5,7 +5,7 @@ in TypeScript is also what every `new Promise((resolve, reject) => …)` binds. 
 the match did NOT use — `StrategyChain` — is what separates the two, and the answer has printed the
 command that checks it since the settle note was added:
 
-    _Settle it: `rg -n --fixed-strings --hidden --no-ignore 'StrategyChain' <root>`_
+    _Settle it: `rg -n --fixed-strings --hidden --no-ignore --follow 'StrategyChain' <root>`_
 
 This module runs that command's substance. Nothing more: it reports, per file, whether the token
 appears in it. That is a FACT about the text, and it is published as one.
@@ -99,6 +99,7 @@ class Budget:
         self._left = _MAX_SECONDS if seconds is None else seconds
         self._files = _MAX_FILES if files is None else files
         self._bytes = _MAX_TOTAL_BYTES if total_bytes is None else total_bytes
+        self._out_of_bytes = False
         self._lock = threading.Lock()
         # Calls still running on this budget, by when they began. They are spending it NOW, before
         # anything is charged, so every waiter counts them — otherwise two stalled reads that begin a
@@ -124,16 +125,29 @@ class Budget:
             return self._left - sum(now - began for began in self._inflight.values())
 
     def take_file(self) -> bool:
-        """Claim one file read; False once the answer's files or bytes are used up."""
+        """Claim one file read; False once the answer's files are used up."""
         with self._lock:
-            if self._files <= 0 or self._bytes <= 0:
+            if self._files <= 0 or self._out_of_bytes:
                 return False
             self._files -= 1
             return True
 
-    def spend_bytes(self, count: int) -> None:
+    def reserve_bytes(self, count: int) -> bool:
+        """Reserve *count* bytes BEFORE reading them, or refuse. Deducting after a read made the byte
+        ceiling a stopping threshold: one more file got through whenever any byte was left, and
+        `changed`'s workers, seeing the same positive balance, each got one. Reserved first, the bytes
+        read can never pass the ceiling however the workers race. A refusal is remembered, and every
+        scan on this budget stops there."""
         with self._lock:
+            if count > self._bytes:
+                self._out_of_bytes = True
+                return False
             self._bytes -= count
+            return True
+
+    @property
+    def out_of_bytes(self) -> bool:
+        return self._out_of_bytes
 
     def spend(self, seconds: float) -> None:
         with self._lock:
@@ -217,13 +231,14 @@ def files_naming(
 def rerun_command(token: str, root: str) -> str:
     """The `rg` command that repeats this check, over every file the scan could have read.
 
-    `--hidden --no-ignore` are not decoration. By default `rg` skips dot-directories and anything a
-    `.gitignore`, `.ignore`, `.rgignore` or global ignore rule names, while this scan reads whatever
-    file a caller row names — an indexed `.internal/chain.ts` included. Without them the command
+    `--hidden --no-ignore --follow` are not decoration. By default `rg` skips dot-directories, anything
+    a `.gitignore`, `.ignore`, `.rgignore` or global ignore rule names, and symbolic links, while this
+    scan reads whatever file a caller row names — an indexed `.internal/chain.ts`, or a `link.ts` that
+    points at a file inside the root, included. Without them the command
     printed beneath a `true` could find no match in that very file. With them it searches a superset of
     what the scan read, so its output may hold more files, but never a different verdict for one the
     scan judged. (A file with a NUL in it is never judged, so `rg`'s binary handling cannot differ.)"""
-    return f"rg -n --fixed-strings --hidden --no-ignore '{token}' {root}"
+    return f"rg -n --fixed-strings --hidden --no-ignore --follow '{token}' {root}"
 
 
 def _root(root: str) -> str | None:
@@ -251,7 +266,8 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
         if budget.exhausted or not budget.take_file():
             break
         began = time.monotonic()
-        blob, finished = _within(functools.partial(_read, root_real, os.path.join(root, rel)), budget)
+        blob, finished = _within(functools.partial(_read, root_real, os.path.join(root, rel), budget),
+                                 budget)
         budget.spend(time.monotonic() - began)
         if not finished:
             # The read outlived what was left of the allowance and is still blocked — a stalled mount.
@@ -260,8 +276,9 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
             budget.exhaust()
             break
         if blob is None:
+            if budget.out_of_bytes:
+                break                               # this file and every one after it are unknown
             continue
-        budget.spend_bytes(len(blob))
         if _plain_text(blob):
             seen[rel] = needle in blob
     return seen or None
@@ -330,9 +347,14 @@ def _within(call: Callable[[], _T], budget: Budget) -> tuple[_T | None, bool]:
     return value, True
 
 
-def _read(root_real: str, path: str) -> bytes | None:
+def _read(root_real: str, path: str, budget: Budget | None = None) -> bytes | None:
     """The bytes of one file, or ``None`` when it is not to be judged — outside the root, not a regular
-    file, too large, unreadable, or grown past the limit between the stat and the read."""
+    file, too large, unreadable, past what *budget* has left to read, or grown since its stat.
+
+    The read is bounded by the stat, not by the size limit: it reserves the file's size plus one byte
+    from *budget* first and reads no more than that, so the byte ceiling holds as a ceiling. The one
+    byte past the stated size is what shows that the file grew between the two calls — and a file
+    that changed while it was being judged is unknown, not judged on half of itself."""
     safe = contained_path(root_real, path)
     if safe is None:
         return None
@@ -340,8 +362,11 @@ def _read(root_real: str, path: str) -> bytes | None:
         info = os.stat(safe)
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SOURCE_BYTES:
             return None                             # a FIFO would block the open; a big file is unknown
+        want = info.st_size + 1
+        if budget is not None and not budget.reserve_bytes(want):
+            return None                             # the answer cannot afford it; the budget remembers
         with open(safe, "rb") as fh:
-            blob = fh.read(MAX_SOURCE_BYTES + 1)
+            blob = fh.read(want)
     except OSError:
         return None                                 # unreadable stays unknown
-    return blob if len(blob) <= MAX_SOURCE_BYTES else None
+    return blob if len(blob) <= info.st_size else None

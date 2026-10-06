@@ -1450,7 +1450,7 @@ def test_a_group_that_prints_a_never_writes_line_prints_the_caveat_and_the_comma
     assert group.count("_Rows marked `[never writes …]`") == 1, group
     assert "a text search of the files as they are on disk" in group, group
     assert "an instance the file gets from elsewhere" in group, group
-    assert "rg -n --fixed-strings --hidden --no-ignore 'Svc'" in group, group
+    assert "rg -n --fixed-strings --hidden --no-ignore --follow 'Svc'" in group, group
     assert not [ln for ln in group.splitlines() if ln.startswith("- ") and "_Rows marked" in ln]
     assert len([ln for ln in env["result"].splitlines() if ln.startswith("- ")]) == len(env["rows"])
 
