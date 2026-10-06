@@ -448,6 +448,27 @@ def test_a_root_whose_metadata_stalls_is_abandoned_at_the_deadline_too(tmp_path,
     assert seen is None, seen
 
 
+def test_a_thread_that_fails_to_start_gives_its_slot_back(tmp_path, monkeypatch):
+    """A slot is released by the thread that holds it, when its call returns. A thread that never
+    starts — the process at its thread limit — never runs that release, so the slot was lost for good,
+    and four such failures switched the check off for the whole process. The slot now goes back, and
+    the scan judges nothing rather than raising."""
+    _write(tmp_path, "a.ts", TOKEN)
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(qualifier_scan, "_slots", slots)
+    monkeypatch.setattr(qualifier_scan, "_stalled", set())
+
+    class _Unstartable(threading.Thread):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(qualifier_scan.threading, "Thread", _Unstartable)
+
+    assert files_naming(str(tmp_path), TOKEN, ["a.ts"]) is None
+    assert slots.acquire(blocking=False), "the slot taken for a thread that never started was kept"
+    slots.release()
+
+
 def test_scans_that_arrive_together_cannot_leave_more_blocked_reads_than_there_are_slots(
         tmp_path, monkeypatch):
     """The "is anything stalled?" check is not atomic: scans arriving together — concurrent requests,

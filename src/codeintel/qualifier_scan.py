@@ -338,7 +338,14 @@ def _within(call: Callable[[], _T], budget: Budget) -> tuple[_T | None, bool]:
         if not _acquire(slots, budget):
             return None, False
         worker = threading.Thread(target=work, name="codeintel-qualifier-read", daemon=True)
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            # The slot is released by `work`, which never ran: a thread that failed to start — the
+            # process at its thread limit — would otherwise hold it forever, and four of those switch
+            # the check off for the whole process. Re-raised, so `files_naming` judges nothing.
+            slots.release()
+            raise
         while worker.is_alive():
             left = budget.live_remaining()
             if left <= 0:
