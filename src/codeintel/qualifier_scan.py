@@ -5,7 +5,7 @@ in TypeScript is also what every `new Promise((resolve, reject) => …)` binds. 
 the match did NOT use — `StrategyChain` — is what separates the two, and the answer has printed the
 command that checks it since the settle note was added:
 
-    _Settle it: `rg -n --fixed-strings --hidden --no-ignore --follow 'StrategyChain' <root>`_
+    _Settle it: `rg -n --fixed-strings --hidden --no-ignore 'StrategyChain' <root>`_
 
 This module runs that command's substance. Nothing more: it reports, per file, whether the token
 appears in it. That is a FACT about the text, and it is published as one.
@@ -50,6 +50,7 @@ from __future__ import annotations
 import codecs
 import functools
 import os
+import shlex
 import stat
 import threading
 import time
@@ -228,17 +229,25 @@ def files_naming(
         return None
 
 
-def rerun_command(token: str, root: str) -> str:
-    """The `rg` command that repeats this check, over every file the scan could have read.
+def rerun_command(token: str, root: str, files: Iterable[str] | None = None) -> str:
+    """The `rg` command that repeats this check.
 
-    `--hidden --no-ignore --follow` are not decoration. By default `rg` skips dot-directories, anything
-    a `.gitignore`, `.ignore`, `.rgignore` or global ignore rule names, and symbolic links, while this
-    scan reads whatever file a caller row names — an indexed `.internal/chain.ts`, or a `link.ts` that
-    points at a file inside the root, included. Without them the command
-    printed beneath a `true` could find no match in that very file. With them it searches a superset of
-    what the scan read, so its output may hold more files, but never a different verdict for one the
-    scan judged. (A file with a NUL in it is never judged, so `rg`'s binary handling cannot differ.)"""
-    return f"rg -n --fixed-strings --hidden --no-ignore --follow '{token}' {root}"
+    With *files* — the files a verdict was read from — it NAMES them, each joined to the root. `rg`
+    always searches a path given on its command line, whether it is in a dot-directory, ignored, or a
+    symbolic link to a file inside the root, so the command reproduces every verdict exactly, and it
+    reads no file the scan did not. A recursive search cannot promise both: by default it skips
+    dot-directories, ignored paths and links, and `--follow`, the flag that would reach a link, follows
+    every link — a directory symlinked to an external cache or dependency tree included — which the
+    scan, confined to the root, never reads.
+
+    Without *files* — the note printed when the scan did not run, so there is no verdict to reproduce —
+    it searches the tree: `--hidden --no-ignore` reach the dot-directories and ignored paths a caller
+    can live in, and no `--follow`, so it never leaves the project."""
+    if files:
+        paths = " ".join(shlex.quote(os.path.join(root, f)) for f in dict.fromkeys(files) if f)
+        if paths:
+            return f"rg -n --fixed-strings -- '{token}' {paths}"
+    return f"rg -n --fixed-strings --hidden --no-ignore '{token}' {shlex.quote(root)}"
 
 
 def _root(root: str) -> str | None:

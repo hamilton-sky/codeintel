@@ -63,10 +63,12 @@ below and carry `qualifier_seen: false`._
 ```
 
 The check is the one this page used to tell you to run by hand — a text search for the part of the
-target the name match did not use, `rg -n --fixed-strings --hidden --no-ignore --follow 'StrategyChain'
-<root>` — and every answer that says `Checked` prints that command beneath the result, so you can
-re-run it. `--hidden --no-ignore --follow` make `rg` search every file the scan could read: by default
-it skips dot-directories, ignored paths and symbolic links, any of which a caller can live in. On the example above
+target the name match did not use — and every answer that says `Checked` prints the command that
+re-runs it beneath the result: `rg -n --fixed-strings -- 'StrategyChain'` followed by the files it
+judged, named one by one. `rg` always searches a file named on its command line, so the command
+reproduces each verdict even for a caller in a dot-directory, an ignored path or a symlink, and it
+reads nothing the scan did not — a recursive search either skips those or, with `--follow`, follows
+links out of the project. On the example above
 the five files that write `StrategyChain` at all include none of the 26 files the 43 name-matched rows
 sit in. `43 of 43` counts the rows **shown**: the name-matched rows of the direct list as printed, not
 the callers under *Callers through* (never scanned) and not any the distinct-caller cap left out. Both

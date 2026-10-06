@@ -1088,7 +1088,9 @@ class AnswerRendering:
                     f"not plain text, the file that defines the symbol, a call on `self`/`this`, a "
                     f"call in a language this check has no rule for, or module-scope code) and carry "
                     f"`qualifier_seen: null`." if unjudged else "")
-            rerun = f"Re-run it yourself: `{qualifier_scan.rerun_command(token, root)}`_\n"
+            judged = [str(r.get(file_key) or "") for r in matched
+                      if r.get("_qualifier_seen") is not None]
+            rerun = f"Re-run it yourself: `{qualifier_scan.rerun_command(token, root, judged)}`_\n"
             if not absent:
                 return (
                     f"\n\n_Checked: **none of the {len(matched) - unjudged}** name-matched {unit}s "

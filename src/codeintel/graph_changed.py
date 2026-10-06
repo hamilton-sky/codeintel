@@ -769,7 +769,10 @@ class ChangedSince(AnswerRendering):
             refuted = sorted({str(r.get("qualifier") or "") for _, rows in lists for r in rows[:shown]
                               if r.get("qualifier_seen") is False} - {""})
             if refuted:
-                out.append(self._qualifier_caveat(refuted))
+                judged = {t: [str(r.get("file") or "") for _, rows in lists for r in rows[:shown]
+                              if r.get("qualifier") == t and r.get("qualifier_seen") is not None]
+                          for t in refuted}
+                out.append(self._qualifier_caveat(refuted, judged))
             return out
         out.append({
             "no-edges": "_The graph records no caller of this symbol. That is not proof there is "
@@ -784,7 +787,7 @@ class ChangedSince(AnswerRendering):
         }.get(lk.state, "_No caller information._"))
         return out
 
-    def _qualifier_caveat(self, tokens: list[str]) -> str:
+    def _qualifier_caveat(self, tokens: list[str], judged: dict[str, list[str]]) -> str:
         """The note a `[never writes …]` mark travels with, once per group that prints one.
 
         `callers` says this in the `Checked:` note above its rows. `changed` prints no such note, and a
@@ -792,7 +795,7 @@ class ChangedSince(AnswerRendering):
         group that carries a mark carries its caveat and the command that reproduces it."""
         root = getattr(self, "_answered_root", None) or "."
         names = ", ".join(f"`{t}`" for t in tokens)
-        rerun = " ".join(f"`{qualifier_scan.rerun_command(t, root)}`" for t in tokens)
+        rerun = " ".join(f"`{qualifier_scan.rerun_command(t, root, judged.get(t))}`" for t in tokens)
         return (f"_Rows marked `[never writes …]` are in files that do not write {names}, the name the "
                 f"symbol is qualified by. That is a text search of the files as they are on disk, and "
                 f"it narrows; it does not decide. A file can reach the method through "

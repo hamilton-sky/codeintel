@@ -333,31 +333,42 @@ def test_a_budget_used_up_part_way_leaves_the_rest_unjudged_rather_than_clean(tm
 
 
 @pytest.mark.skipif(not __import__("shutil").which("rg"), reason="needs ripgrep on PATH")
-def test_the_printed_command_finds_what_the_scan_found_in_hidden_and_ignored_files(tmp_path):
-    """The scan reads whatever file a caller row names — a dot-directory, an ignored path, a symlink
-    to a file inside the root included. `rg` skips all three by default, so the plain command printed beneath a `true` found no match in the
-    very file the scan had matched. The printed command must reproduce every verdict — run it for
-    real and see. CONTROL: the plain command really does miss them, which is the defect."""
+def test_the_printed_command_reproduces_every_verdict_and_never_leaves_the_project(tmp_path):
+    """The scan reads whatever file a caller row names — a dot-directory, an ignored path, an in-root
+    symlink — and nothing outside the root. A recursive `rg` skips the first three by default, and its
+    `--follow` would follow a directory link OUT of the project too. So the command printed beneath a
+    verdict names the judged files: run it for real and it finds every verdict, and neither form of
+    the command reaches the linked directory outside. CONTROL: plain `rg` misses the three, and
+    `rg --follow` does leave the project — the two defects this replaces."""
     import shlex
     import subprocess
 
-    _write(tmp_path, ".internal/chain.ts", f"new {TOKEN}()")
-    _write(tmp_path, "ignored/use.ts", f"{TOKEN}.resolve()")
-    (tmp_path / ".ignore").write_text("ignored/\n")
-    _write(tmp_path, "real/target.ts", f"const c = new {TOKEN}()")
-    (tmp_path / "link.ts").symlink_to(tmp_path / "real" / "target.ts")   # an in-root file symlink
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    _write(outside, "cache/dep.ts", f"{TOKEN}.resolve()")
+    _write(root, ".internal/chain.ts", f"new {TOKEN}()")
+    _write(root, "ignored/use.ts", f"{TOKEN}.resolve()")
+    (root / ".ignore").write_text("ignored/\n")
+    _write(root, "real/target.ts", f"const c = new {TOKEN}()")
+    (root / "link.ts").symlink_to(root / "real" / "target.ts")       # an in-root file symlink
+    (root / "vendor").symlink_to(outside, target_is_directory=True)  # a directory link OUT of it
     files = [".internal/chain.ts", "ignored/use.ts", "link.ts"]
 
-    seen = files_naming(str(tmp_path), TOKEN, files)
-    printed = subprocess.run(shlex.split(qualifier_scan.rerun_command(TOKEN, str(tmp_path))),
-                             capture_output=True, text=True, timeout=30).stdout
-    plain = subprocess.run(["rg", "-n", "--fixed-strings", TOKEN, str(tmp_path)],
-                           capture_output=True, text=True, timeout=30).stdout
+    def run(command: str) -> str:
+        return subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30).stdout
+
+    seen = files_naming(str(root), TOKEN, files)
+    verdict = run(qualifier_scan.rerun_command(TOKEN, str(root), files))
+    settle = run(qualifier_scan.rerun_command(TOKEN, str(root)))
 
     assert seen == {".internal/chain.ts": True, "ignored/use.ts": True, "link.ts": True}, seen
     for rel in files:
-        assert rel in printed, f"the printed command does not reproduce the scan's verdict on {rel}"
-        assert rel not in plain, f"CONTROL: plain rg was expected to skip {rel}"
+        assert rel in verdict, f"the printed command does not reproduce the verdict on {rel}"
+    assert "dep.ts" not in verdict and "dep.ts" not in settle, "the command searched outside the project"
+    plain = run(f"rg -n --fixed-strings {TOKEN} {root}")
+    followed = run(f"rg -n --fixed-strings --follow {TOKEN} {root}")
+    assert not any(rel in plain for rel in files), "CONTROL: plain rg was expected to miss all three"
+    assert "dep.ts" in followed, "CONTROL: rg --follow was expected to leave the project"
 
 
 def test_scans_racing_on_one_budget_cannot_read_past_its_byte_ceiling(tmp_path):
