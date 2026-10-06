@@ -48,11 +48,14 @@ It never raises — it is an improvement on an answer that is already whole.
 from __future__ import annotations
 
 import codecs
+import functools
 import os
 import stat
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from time import monotonic as _clock
+from typing import TypeVar
 
 from codeintel.changed_range import MAX_SOURCE_BYTES
 from codeintel.containment import contained_path, real_root
@@ -137,6 +140,15 @@ class Budget:
 _MAX_STALLED = 1
 _stalled: set[threading.Thread] = set()
 _stalled_lock = threading.Lock()
+# That check alone is not atomic: scans arriving together — concurrent requests, `changed`'s pool —
+# can all see nothing stalled and each start a read that then stalls. So every blocking call also
+# holds one of `_MAX_READERS` process-wide slots from before its thread starts until the call RETURNS.
+# A stalled call keeps its slot, so however scans race, no more than `_MAX_READERS` threads can ever
+# be left blocked; a scan that finds every slot held judges nothing, as above.
+_MAX_READERS = 4
+_slots = threading.BoundedSemaphore(_MAX_READERS)
+
+_T = TypeVar("_T")
 
 
 def _stalled_reads() -> int:
@@ -180,19 +192,33 @@ def files_naming(
         return None
 
 
+def _root(root: str) -> str | None:
+    return real_root(root) if os.path.isdir(root) else None
+
+
 def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[str, bool] | None:
-    if not os.path.isdir(root):
-        return None
-    root_real = real_root(root)
-    needle = token.encode("utf-8", "replace")
+    if budget.exhausted:
+        return None                                 # nothing left to read with: start no call at all
     if _stalled_reads() >= _MAX_STALLED:
         return None                                 # see `_MAX_STALLED`: judged nothing, prints the command
+    # Checking and canonicalising the root are filesystem calls too, and on a stale mount they block
+    # like a read does, so they run under the same deadline.
+    began = _clock()
+    root_real, finished = _within(functools.partial(_root, root), budget.remaining)
+    budget.spend(_clock() - began)
+    if not finished:
+        budget.exhaust()
+        return None
+    if root_real is None:
+        return None
+    needle = token.encode("utf-8", "replace")
     seen: dict[str, bool] = {}
     for rel in dict.fromkeys(f for f in files if f):
         if budget.exhausted or not budget.take_file():
             break
         began = time.monotonic()
-        blob, finished = _read_within(root_real, os.path.join(root, rel), budget.remaining)
+        blob, finished = _within(functools.partial(_read, root_real, os.path.join(root, rel)),
+                                 budget.remaining)
         budget.spend(time.monotonic() - began)
         if not finished:
             # The read outlived what was left of the allowance and is still blocked — a stalled mount.
@@ -208,33 +234,45 @@ def _scan(root: str, token: str, files: Iterable[str], budget: Budget) -> dict[s
     return seen or None
 
 
-def _read_within(root_real: str, path: str, seconds: float) -> tuple[bytes | None, bool]:
-    """`_read` on a daemon thread, waited on for at most *seconds*: `(bytes or None, finished)`.
+def _within(call: Callable[[], _T], seconds: float) -> tuple[_T | None, bool]:
+    """*call* on a daemon thread holding one of `_MAX_READERS` slots, waited on for at most *seconds*
+    in all: `(result, finished)`.
 
-    The read itself is synchronous and cannot be interrupted, so the thread is what bounds it: when it
-    has not returned in time, `finished` is False and the thread is left to end whenever the stalled
-    read does. The scan stops at the first such read, so an answer leaves at most one behind. An
-    exception in the read is re-raised here, so a path the OS refuses (an embedded NUL) still abandons
-    the whole scan exactly as it did when the read ran inline."""
-    box: list[tuple[bytes | None, BaseException | None]] = []
+    A filesystem call cannot be interrupted, so the thread is what bounds it: when it has not returned
+    in time, `finished` is False and the thread is left to end whenever the stalled call does — still
+    holding its slot, which is what keeps the number left behind finite however scans race. A scan
+    that cannot get a slot in time is treated the same way: every slot is held, most likely by calls
+    still blocked. An exception in the call is re-raised here, so a path the OS refuses (an embedded
+    NUL) still abandons the whole scan exactly as it did when the read ran inline."""
+    if seconds <= 0:
+        # Nothing can finish in no time, and a thread started only to be abandoned at once would be
+        # recorded as stalled while it is merely running — shutting every other scan out until it ends.
+        return None, False
+    deadline = _clock() + seconds
+    slots = _slots                                  # the semaphore this call takes is the one it gives back
+    if not slots.acquire(timeout=seconds):
+        return None, False
+    box: list[tuple[_T | None, BaseException | None]] = []
 
     def work() -> None:
         try:
-            box.append((_read(root_real, path), None))
+            box.append((call(), None))
         except BaseException as exc:               # carried to the caller, never lost on the thread
             box.append((None, exc))
+        finally:
+            slots.release()
 
     worker = threading.Thread(target=work, name="codeintel-qualifier-read", daemon=True)
     worker.start()
-    worker.join(seconds)
+    worker.join(max(0.0, deadline - _clock()))
     if worker.is_alive() or not box:
         with _stalled_lock:
             _stalled.add(worker)
         return None, False
-    blob, exc = box[0]
+    value, exc = box[0]
     if exc is not None:
         raise exc
-    return blob, True
+    return value, True
 
 
 def _read(root_real: str, path: str) -> bytes | None:

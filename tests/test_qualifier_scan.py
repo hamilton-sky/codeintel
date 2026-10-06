@@ -250,6 +250,7 @@ def test_a_read_stalled_on_a_slow_mount_is_abandoned_at_the_deadline_not_waited_
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
     monkeypatch.setattr(qualifier_scan, "_stalled", set())   # this test's abandoned read stays its own
+    monkeypatch.setattr(qualifier_scan, "_slots", threading.BoundedSemaphore(4))
     started = time.monotonic()
     try:
         seen = files_naming(str(tmp_path), TOKEN, ["stalled.ts", "after.ts"],
@@ -282,6 +283,7 @@ def test_reads_left_blocked_by_earlier_answers_are_bounded_across_the_process(tm
 
     monkeypatch.setattr(qualifier_scan, "_read", read)
     monkeypatch.setattr(qualifier_scan, "_stalled", set())
+    monkeypatch.setattr(qualifier_scan, "_slots", threading.BoundedSemaphore(4))
     try:
         first = files_naming(str(tmp_path), TOKEN, ["stalled.ts"], budget=qualifier_scan.Budget(0.2))
         second = files_naming(str(tmp_path), TOKEN, ["stalled.ts"], budget=qualifier_scan.Budget(0.2))
@@ -325,6 +327,80 @@ def test_a_budget_used_up_part_way_leaves_the_rest_unjudged_rather_than_clean(tm
                         budget=qualifier_scan.Budget(2.0))
 
     assert seen == {"f0.ts": False, "f1.ts": False}, seen
+
+
+def test_a_root_whose_metadata_stalls_is_abandoned_at_the_deadline_too(tmp_path, monkeypatch):
+    """Checking that the root is a directory and canonicalising it are filesystem calls: on a stale
+    NFS or FUSE root they block exactly as a read does, before any read starts. They run under the
+    same deadline, so the answer still comes back on time — with nothing judged."""
+    import time
+
+    _write(tmp_path, "a.ts", TOKEN)
+    release = threading.Event()
+    real = qualifier_scan.real_root
+
+    def stalled_root(root):
+        release.wait(8)                                  # a metadata call that does not come back
+        return real(root)
+
+    monkeypatch.setattr(qualifier_scan, "real_root", stalled_root)
+    monkeypatch.setattr(qualifier_scan, "_stalled", set())
+    monkeypatch.setattr(qualifier_scan, "_slots", threading.BoundedSemaphore(4))
+    started = time.monotonic()
+    try:
+        seen = files_naming(str(tmp_path), TOKEN, ["a.ts"], budget=qualifier_scan.Budget(0.3))
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 4, "a stalled root probe held the answer past its deadline"
+    assert seen is None, seen
+
+
+def test_scans_that_arrive_together_cannot_leave_more_blocked_reads_than_there_are_slots(
+        tmp_path, monkeypatch):
+    """The "is anything stalled?" check is not atomic: scans arriving together — concurrent requests,
+    `changed`'s pool — all see nothing stalled yet. Each blocking call therefore holds a process-wide
+    slot from before its thread starts until it returns, so however many scans race, no more reads
+    can be left blocked than there are slots."""
+    import time
+
+    _write(tmp_path, "stalled.ts", TOKEN)
+    release = threading.Event()
+    real_read = qualifier_scan._read
+    began: list[str] = []
+    lock = threading.Lock()
+
+    def read(root_real, path):
+        with lock:
+            began.append(path)
+        release.wait(8)
+        return real_read(root_real, path)
+
+    monkeypatch.setattr(qualifier_scan, "_read", read)
+    monkeypatch.setattr(qualifier_scan, "_stalled", set())
+    monkeypatch.setattr(qualifier_scan, "_slots", threading.BoundedSemaphore(2))
+    gate = threading.Barrier(6)
+    results: list[object] = []
+
+    def scan():
+        gate.wait()
+        results.append(files_naming(str(tmp_path), TOKEN, ["stalled.ts"],
+                                    budget=qualifier_scan.Budget(0.5)))
+
+    workers = [threading.Thread(target=scan) for _ in range(6)]
+    started = time.monotonic()
+    try:
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(6)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert len(began) <= 2, f"{len(began)} reads were started behind a stalled mount with 2 slots"
+    assert results == [None] * 6, results
+    assert elapsed < 5, "a scan waited past its deadline for a slot"
 
 
 def test_one_budget_also_caps_the_files_and_bytes_of_every_scan_that_shares_it(tmp_path):
