@@ -1599,6 +1599,23 @@ def test_the_scan_and_the_same_module_rule_share_one_definition_of_the_enclosing
             f"{fn.__name__} reads the table itself instead of asking the shared helper")
 
 
+def test_an_attempted_check_is_marked_even_when_it_judges_nothing(monkeypatch, tmp_path):
+    """A check that was eligible can still judge nothing — a stalled read, a spent budget, an owner
+    lookup that timed out — and then the answer prints the `Settle it:` command. That answer is about
+    the filesystem as it was NOW too, so it is marked `qualifier_checked`, which keeps the gateway from
+    caching it and switching the check off for the symbol until the next reindex. CONTROL: an answer
+    the check was never eligible for (below the floor) carries no mark, and its evidence is unchanged."""
+    from codeintel import qualifier_scan as scan
+
+    monkeypatch.setattr(scan, "files_naming", lambda *a, **k: None)   # judged nothing, as on a stall
+    attempted = _scanned_callers(monkeypatch, tmp_path, _guesses(3))
+    assert attempted["evidence"].get("qualifier_checked") is True, attempted["evidence"]
+    assert "Settle it:" in attempted["result"] and "Checked:" not in attempted["result"]
+
+    below = _scanned_callers(monkeypatch, tmp_path, _guesses(2))
+    assert "qualifier_checked" not in below["evidence"], below["evidence"]
+
+
 def test_the_owner_lookup_spends_its_own_allowance_never_the_ops(monkeypatch, tmp_path):
     """The lookup of the method's class only serves the scan's annotation. Run inside the op's shared
     lookup scope, a slow or failing one started that clock and spent it, and the lookups that decide

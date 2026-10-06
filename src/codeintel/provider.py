@@ -54,7 +54,7 @@ class Result(TypedDict):
     #   rows[]   {relation, name, qualified_name, file, module_scope, edge, verified, qualifier,
     #             qualifier_seen, evidence, strategy, confidence, why}
     #   evidence {verified, possible, unstated, qualifier_absent, qualifier_present, returned,
-    #             total, truncated, safe_for_destructive}
+    #             total, truncated, safe_for_destructive[, qualifier_checked]}
     # `qualifier_seen` is true / false / null: whether the row's file writes the class the target was
     # qualified by (`qualifier`), and null wherever nobody looked. A text fact, never a verdict.
     # `rows` are exactly the rows the body printed, in the order it printed them — verified first.

@@ -1022,6 +1022,11 @@ class AnswerRendering:
         plan = self._scan_plan(op, shown, wanted, file_key)
         if plan is None:
             return None
+        # Eligible from here on, whatever the scan then finds — and whatever it fails to: a stalled
+        # read, a spent budget or an owner lookup that timed out leave it judging nothing, and an
+        # answer that says so is still about the filesystem as it was NOW. Recorded so the gateway
+        # does not cache it (`evidence.qualifier_checked`).
+        self._qualifier_attempted = True
         token, planned = plan
         doubt = [(g, i) for g, i in planned if self._owned_by(g, token)]
         if not doubt:
@@ -1269,6 +1274,11 @@ class AnswerRendering:
             "safe_for_destructive": bool(
                 counts[_NAME_MATCHED] == 0 and counts[_UNSTATED] == 0
                 and not self._pending_row_cap and not withheld and not self._pending_gaps),
+            # Present only when the qualifier check was eligible and attempted, so every other
+            # answer's evidence is as it was. It marks an answer that depends on the files as they
+            # were when it was asked — judged or, after a stall or a spent budget, not — which the
+            # gateway therefore never caches.
+            **({"qualifier_checked": True} if getattr(self, "_qualifier_attempted", False) else {}),
         }
 
     def _row_noun(self) -> str:

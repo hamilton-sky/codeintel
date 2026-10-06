@@ -281,6 +281,25 @@ def test_an_answer_that_states_what_the_files_hold_now_is_never_cached():
     assert nothing.call_count == 1
 
 
+def test_an_answer_whose_check_was_attempted_but_judged_nothing_is_not_cached():
+    """An eligible check that judged nothing — a stall, a spent budget — prints only the command, and
+    caching it would keep the check switched off for the symbol until the next reindex, long after the
+    filesystem recovered. `evidence.qualifier_checked` marks it, and it is asked afresh each time."""
+    class _Interrupted(_StubProvider):
+        def build_result(self, op, target, files, budget, project_root):
+            base = super().build_result(op, target, files, budget, project_root)
+            return {**base, "rows": [{"relation": "caller", "name": "relay", "qualifier_seen": None}],
+                    "evidence": {"qualifier_absent": 0, "qualifier_present": 0,
+                                 "qualifier_checked": True}}
+
+    interrupted = _Interrupted("graph", "callers")
+    gw = Gateway(graph=interrupted)
+    r1 = gw.query(op="callers", target="StrategyChain.resolve", engine="graph")
+    r2 = gw.query(op="callers", target="StrategyChain.resolve", engine="graph")
+    assert r1["cached"] is False and r2["cached"] is False
+    assert interrupted.call_count == 2, "an interrupted check was served from the cache"
+
+
 def test_an_answer_that_states_what_the_files_hold_now_is_not_cached_on_the_fanout_path():
     graph = _ScanStub("graph", judged=True)
     lsp = _StubProvider("lsp", "lsp-data")

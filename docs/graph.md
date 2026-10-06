@@ -345,7 +345,9 @@ _Checked: **3 of 3** name-matched callers shown are in files that never write `F
 
 A row's `qualifier_seen` is `true` (its file writes the qualifier), `false` (it does not) or `null` (nobody
 looked), with `qualifier` naming the token; `evidence.qualifier_absent` / `qualifier_present` count the
-first two. It is a fact about the text, published as one — never folded into `verified`, and never a
+first two, and `evidence.qualifier_checked: true` appears whenever the check was eligible and attempted —
+however much it judged, a stall or a spent budget included — and marks an answer about the files as they
+were when asked, which the gateway therefore never caches. It is a fact about the text, published as one — never folded into `verified`, and never a
 verdict on the caller. **Nothing is removed**, and nothing should be filtered on it before a delete or a
 rename: a file can reach a method without writing its class — a caller that holds an instance it got from
 elsewhere (a module singleton it imports, an instance handed to a constructor or field, a factory call, an

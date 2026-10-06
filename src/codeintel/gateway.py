@@ -92,7 +92,10 @@ def _states_live_file_contents(result: Result | dict[str, Result]) -> bool:
     when a caller file starts or stops writing the qualifier — only a reindex does. Caching such an
     answer would serve a verdict about the files as they WERE, in prose that says "as they are on
     disk": the reason `changed` is never cached, met by a narrower population. An answer whose scan
-    judged nothing printed only the command, states nothing about the files, and stays cacheable.
+    judged nothing printed only the command — but if it was eligible and judged nothing because a
+    call stalled, the budget ran out or a lookup timed out (`qualifier_checked`), caching that would
+    keep the check switched off for the symbol until the next reindex, long after the filesystem
+    recovered. So an answer whose check was attempted at all is not cached either.
     Walks the whole answer, because a fan-out answer nests each engine's envelope."""
     def walk(node: object, depth: int) -> bool:
         if depth > 8:
@@ -100,7 +103,8 @@ def _states_live_file_contents(result: Result | dict[str, Result]) -> bool:
         if isinstance(node, dict):
             evidence = node.get("evidence")
             if isinstance(evidence, dict) and (evidence.get("qualifier_absent")
-                                               or evidence.get("qualifier_present")):
+                                               or evidence.get("qualifier_present")
+                                               or evidence.get("qualifier_checked")):
                 return True
             rows = node.get("rows")
             if isinstance(rows, list) and any(

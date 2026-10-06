@@ -542,6 +542,9 @@ class GraphProvider(GraphOps):
     # many times in one answer (`changed`), so the scans draw on one allowance instead of each taking
     # all of it. `None` means the scan starts its own.
     _scan_budget: PerThread[Budget | None] = PerThread(None)
+    # Set when this answer's qualifier check was eligible and attempted — whatever it then found or
+    # failed to find. The gateway reads it off `evidence.qualifier_checked` and does not cache.
+    _qualifier_attempted: PerThread[bool] = PerThread(False)
     # Parts of this answer known to be short of an answer. Graph has two real cases: a symbol-scoped
     # answer served from a CONTAINING project, and callee rows dropped as name collisions.
     _pending_gaps: PerThread[tuple[dict[str, Any], ...]] = PerThread(())
@@ -776,6 +779,7 @@ class GraphProvider(GraphOps):
             # attribute it to the caller's repo.
             self._answered_root = resolution.matched_root
             self._scan_budget = None
+            self._qualifier_attempted = False
             self._pending_gaps = ()
             self._pending_rows = ()
             self._pending_row_cap = False
