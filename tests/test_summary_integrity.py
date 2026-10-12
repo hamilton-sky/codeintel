@@ -352,6 +352,11 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "a refused report asserts no readiness — test_a_refused_doctor_report_claims_no_readiness",
     ("claim", "server.<module>"):
         "the status fallback fails closed — test_the_status_fallback_claims_nothing",
+    # D3: over MCP an answer too large for the client keeps its `result` and cuts `rows`; the count
+    # of what was cut is a tally, true when it equals the rows the envelope no longer carries.
+    ("tally", "server.compact_for_mcp"):
+        "rows_omitted is rows_total less the rows still carried, and the kept rows are the leading "
+        "ones in order — test_rows_left_out_over_mcp_are_counted_and_say_where_the_rest_are",
 
     # ── completeness: `confidence: complete` ⟹ no gap-worthy condition is detectable ──────────
     ("claim", "provider.attach_confidence"):

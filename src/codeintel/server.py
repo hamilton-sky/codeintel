@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import threading
 import time
 from typing import Annotated, Literal
@@ -12,7 +14,7 @@ from pydantic import Field
 
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
-from codeintel.provider import Result, safe_null_result
+from codeintel.provider import Result, log_swallowed, safe_null_result
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider
 from codeintel.providers.semantic import SemanticProvider
@@ -122,6 +124,59 @@ def _refresh_missing_engines(gw: Gateway) -> None:
                 continue
     except Exception:
         pass
+
+
+# The most an MCP `code.query` envelope may serialize to. Claude Code's client refuses a tool result
+# over its token limit (25,000 by default) and spills it to a file the agent never reads, and a
+# branch-wide `changed` came back at 113,352 bytes — its `rows` repeating, as structured data, every
+# finding the `result` text already states. 40,000 bytes is about 10,000 tokens: under the limit with
+# room for the agent's own context. The CLI (`codeintel query --json`) is not bound by it.
+MCP_ENVELOPE_BUDGET_BYTES = 40_000
+
+
+def _size(obj: object) -> int:
+    return len(json.dumps(obj, default=str).encode("utf-8"))
+
+
+def compact_for_mcp(env: dict, op: str, target: str) -> dict:
+    """*env* as an MCP client can take it: unchanged when it fits the byte budget; otherwise with
+    `rows` cut to the leading rows that fit, and the cut counted (`rows_total`, `rows_omitted`)
+    and explained (`rows_note`, with the command that prints them all).
+
+    Only `rows` is cut. `result` is the answer — every finding is stated there — and the rest of the
+    envelope (`gaps`, `evidence`, `confidence`) is what says how far to trust it, so neither is
+    trimmed: an answer cut mid-text, or stripped of its caveats, is worse than one that is long."""
+    try:
+        rows = env.get("rows")
+        if not isinstance(rows, list) or not rows or _size(env) <= MCP_ENVELOPE_BUDGET_BYTES:
+            return env
+        cmd = (f"codeintel query --op {shlex.quote(op)}"
+               + (f" --target {shlex.quote(target)}" if target else "") + " --json")
+        out = dict(env)
+        out["rows"] = []
+        out["rows_total"] = len(rows)
+        out["rows_omitted"] = len(rows)
+        out["rows_note"] = (
+            f"{len(rows)} of {len(rows)} rows left out to keep this answer under the MCP client's "
+            f"size limit. The answer text in `result` is not cut; for all rows as data run "
+            f"`{cmd}` in the project root.")
+        room = MCP_ENVELOPE_BUDGET_BYTES - _size(out) - 16      # the note's count can grow a digit
+        kept = 0
+        for row in rows:
+            cost = _size(row) + 2                               # ", " between rows
+            if cost > room:
+                break
+            room -= cost
+            kept += 1
+        omitted = len(rows) - kept
+        out["rows"] = rows[:kept]
+        out["rows_omitted"] = omitted
+        out["rows_note"] = out["rows_note"].replace(
+            f"{len(rows)} of {len(rows)} rows", f"{omitted} of {len(rows)} rows", 1)
+        return out
+    except Exception as exc:
+        log_swallowed("server.compact_for_mcp", exc)
+        return env
 
 
 def code_query_handler(args: dict) -> Result:
@@ -429,7 +484,10 @@ _MCP_INSTRUCTIONS = (
     "argument, a factory call, an alias) reaches the method without ever writing the class's name, "
     "as does an interface-typed field, a subclass or a renaming re-export — so false is not proof, "
     "and you should not filter on it before a delete or a rename. No class-qualified Python target "
-    "has been measured."
+    "has been measured.\n\n"
+    "An answer too large for this client keeps its whole `result` text but cuts `rows[]` to the "
+    "leading rows that fit: `rows_total` and `rows_omitted` count the cut, and `rows_note` gives the "
+    "`codeintel query ... --json` command that prints every row."
 )
 
 
@@ -513,9 +571,10 @@ def run() -> None:
         # annotation, and it validates a TypedDict's NotRequired keys (`reason`, `hint`) as
         # REQUIRED — so every successful query, which carries neither, comes back to the agent as
         # `isError: true`. Guarded by test_mcp_server.py::test_no_tool_advertises_the_optional_*.
-        return dict(code_query_handler(
+        # Bounded for the MCP client (`compact_for_mcp`); the CLI's `--json` keeps every row.
+        return compact_for_mcp(dict(code_query_handler(
             {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
-        ))
+        )), op, target)
 
     async def _code_status(
         project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
