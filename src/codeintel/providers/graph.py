@@ -560,6 +560,19 @@ class GraphProvider(GraphOps):
     _pending_withheld: PerThread[int] = PerThread(0)
     # The body carries `- ` lines that are not result rows, so no row summary of it can be true.
     _pending_nonrow_lines: PerThread[bool] = PerThread(False)
+    # `changed <ref>`'s page cursor: where in the severity-ordered list of changed symbols this
+    # answer's capped lookup starts. Set from `build_result(offset=)` on every call, so it never
+    # outlives the question it came with.
+    _changed_offset: PerThread[int] = PerThread(0)
+    # The page this answer covered — `{offset, limit, total, next_offset}` — published as the
+    # envelope's `page` so a caller can ask for the next one without parsing the gap's prose.
+    _pending_page: PerThread[dict[str, Any] | None] = PerThread(None)
+
+    def _page_published(self) -> dict[str, Any] | None:
+        """The page this answer covered, read through a call so the reset at the top of
+        `build_result` does not narrow it to `None` for the type checker."""
+        page = self._pending_page
+        return dict(page) if page is not None else None
 
     def _clear_failure(self) -> None:
         self._backend._clear_failure()
@@ -695,11 +708,17 @@ class GraphProvider(GraphOps):
         files: Any,
         budget: Any,
         project_root: Any,
+        offset: Any = 0,
     ) -> Result:
         try:
             op_str = str(op or "")
             target_str = str(target or "")
             root_str = str(project_root or "")
+            try:
+                self._changed_offset = max(0, int(offset or 0))
+            except (TypeError, ValueError):
+                self._changed_offset = 0
+            self._pending_page = None
 
             if not self.available:
                 return safe_null_result(
@@ -934,6 +953,9 @@ class GraphProvider(GraphOps):
             if evidence is not None:
                 envelope["rows"] = list(self._pending_rows)
                 envelope["evidence"] = evidence
+            page = self._page_published()
+            if page is not None:
+                envelope["page"] = page
             return attach_confidence(envelope, self._pending_gaps)
         except Exception as exc:
             log_swallowed("GraphProvider.build_result", exc)

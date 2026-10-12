@@ -630,6 +630,13 @@ class GraphOps(DispatchCallers, ChangedSince):
         since = (target or "").strip()
         if since:
             return self._answer_changed_since(since, project, timeout_ms, root)
+        if self._changed_offset:
+            # Nothing here is paged: the uncommitted answer lists files and impacted symbols, not a
+            # capped symbol lookup. Saying so beats an answer that reads as "page 2".
+            self._add_gap(
+                "changed", "offset-not-applied",
+                f"offset={self._changed_offset} was ignored: only `changed` with a base ref as "
+                "`target` pages its symbol lookup; this is the uncommitted-edits answer, whole")
         try:
             raw = self._run("detect_changes", {"project": project}, max(timeout_ms, 15000))
             if not isinstance(raw, dict):

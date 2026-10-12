@@ -65,6 +65,9 @@ class Result(TypedDict):
     # `total > returned` and `truncated` is still true.
     rows: NotRequired[list[dict[str, Any]]]
     evidence: NotRequired[dict[str, Any]]
+    # `changed <ref>` only: which page of its capped, severity-ordered symbol lookup this answer
+    # covered — `{offset, limit, total, next_offset}`, `next_offset` null on the last page.
+    page: NotRequired[dict[str, Any]]
     # What this answer can be USED for, in one word — `evidence`, `discovery` or `advisory`. The
     # readiness doc's "distinguish discovery from proof", as a field rather than as a convention a
     # reader has to have absorbed. Stamped on every answered envelope by `attach_confidence`.

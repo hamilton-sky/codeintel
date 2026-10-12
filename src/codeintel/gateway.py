@@ -501,6 +501,7 @@ class Gateway:
         budget,
         project_root,
         engine_str: str,
+        offset: int = 0,
     ) -> Result:
         # Both arms short-circuit BEFORE `build_result`, so the provider's own unavailable-hint is
         # never reached from here — which is exactly how the documented contract ("safe-nulls with
@@ -521,7 +522,12 @@ class Gateway:
                 or f"the {engine_str} engine is not available — run `codeintel doctor` for why",
             )
         try:
-            r = provider.build_result(op_str, target_str, [], budget or 0, project_root or "")
+            # Only `changed` pages, and only the graph engine answers it; the other providers keep
+            # the five-argument `build_result` of the `Provider` protocol.
+            paged = bool(offset) and op_str in _UNCACHED_OPS and engine_str == "graph"
+            r = (provider.build_result(op_str, target_str, [], budget or 0, project_root or "",
+                                       offset=offset) if paged
+                 else provider.build_result(op_str, target_str, [], budget or 0, project_root or ""))
             if r is not None:
                 return r
             return safe_null_result(op_str, target_str, engine=engine_str, reason="no-result")
@@ -554,14 +560,18 @@ class Gateway:
         role: str = "",
         budget=None,
         project_root=None,
+        offset: int = 0,
     ) -> Result:
         """Answer one question. Never raises.
+
+        `offset` is `changed <ref>`'s page cursor into its capped symbol lookup; every other op
+        ignores it.
 
         A thin wrapper over `_query`, existing so that redaction has exactly ONE seam to cover.
         Every leak found in the evaluation was in a field some renderer built and no one swept —
         the scope note inside `result`, the "index it standalone with:" command inside `hint`. Both
         are downstream of here, and so is anything added later."""
-        result = self._query(op, target, engine, role, budget, project_root)
+        result = self._query(op, target, engine, role, budget, project_root, offset)
         try:
             return redact(result)  # type: ignore[return-value]
         except Exception as exc:
@@ -576,6 +586,7 @@ class Gateway:
         role: str = "",
         budget=None,
         project_root=None,
+        offset: int = 0,
     ) -> Result:
         try:
             op_str = str(op or "")
@@ -738,7 +749,8 @@ class Gateway:
                 # stale answer were the three that stayed silent about it.
                 return _mark_reindexing({**cached_result, "cached": True}, reindexing)
             provider = self._provider_for(engine_str)
-            result = self._dispatch_single(provider, op_str, target_str, budget, project_root, engine_str)
+            result = self._dispatch_single(
+                provider, op_str, target_str, budget, project_root, engine_str, offset)
 
             # overview auto-fallback (F4 Story 2): when auto-routed to graph but graph can't serve
             # it — the backend is unavailable, OR this repo simply isn't in the graph — try lsp,
