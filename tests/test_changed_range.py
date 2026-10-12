@@ -1525,3 +1525,103 @@ def test_a_fifo_at_a_tracked_path_is_not_read_and_cannot_hang_the_reader(tmp_pat
             pass
     assert not thread.is_alive(), "read_new blocked on a FIFO"
     assert out == {"pipe": None, "plain": "x = 1\n"}, out
+
+
+# ========================== D2: a closure the diff rewrote is a caller the diff touched, not one it left
+
+def _status_of(env: dict, symbol: str) -> dict[str, str]:
+    return {r["qualified_name"].removeprefix(f"{PROJECT}."): r["caller_status"]
+            for r in env["rows"] if r["changed_symbol"] == symbol}
+
+
+_PY_USE = '''\
+from m.core import f
+
+
+def outer():
+    def edited():
+        return f(1)
+
+    def left():
+        return f(3)
+
+    return edited() + left()
+
+
+VALUE = f(4)
+'''
+
+
+def test_a_python_closure_rewritten_with_the_callee_lands_under_also_changed(monkeypatch, tmp_path):
+    """`f` gains a parameter and `outer.edited` is rewritten to pass it. The graph names the
+    closure as the caller, the diff's key is `outer`, and the two never matched — so the one caller
+    that was fixed was reported as one that may break. Its sibling `left`, which the diff did not
+    touch, and the module-scope call, which the diff cannot see, stay on the untouched side."""
+    repo = _branch(tmp_path, "py-closure",
+                   {"m/__init__.py": "", "m/core.py": "def f(a):\n    return a\n",
+                    "m/use.py": _PY_USE},
+                   {"m/core.py": "def f(a, b):\n    return a\n",
+                    "m/use.py": _PY_USE.replace("f(1)", "f(1, 2)")})
+    graph = _Graph()
+    graph.edges["f"] = [
+        _edge("f", "m/core.py", "m.use.outer.edited", "m/use.py"),
+        _edge("f", "m/core.py", "m.use.outer.left", "m/use.py"),
+    ]
+    env = _ask(_provider(monkeypatch, tmp_path, repo, graph), repo)
+    assert _status_of(env, "f") == {
+        "m.use.outer.edited": "also-changed", "m.use.outer.left": "untouched"}, env["result"]
+
+
+_APP_BASE = '''\
+import { runnerFile } from "./runner"
+
+export function App() {
+  function downloadPlan() {
+    return runnerFile(plan)
+  }
+  const exportPlan = () => {
+    return runnerFile(plan)
+  }
+  const printPlan = () => runnerFile(plan)
+  return null
+}
+'''
+
+_APP_WORK = '''\
+import { runnerFile } from "./runner"
+
+export function App() {
+  async function downloadPlan() {
+    return await runnerFile(plan, "zip")
+  }
+  const exportPlan = async () => {
+    return await runnerFile(plan, "json")
+  }
+  const printPlan = () => runnerFile(plan)
+  return null
+}
+'''
+
+
+@pytest.mark.parametrize("nesting", ["flattened", "qualified"])
+def test_a_react_components_inner_functions_rewritten_with_the_callee_land_under_also_changed(
+        monkeypatch, tmp_path, nesting):
+    """The defect as found: `runnerFile` re-signed, and `App`'s `downloadPlan` and `exportPlan`
+    rewritten to match, were listed under "Callers this diff did NOT touch". The graph has been
+    seen filing a closure directly under its module (`web.src.App.downloadPlan`); a graph that
+    keeps the enclosing function (`web.src.App.App.downloadPlan`) must match too. `printPlan` was
+    not edited and stays untouched."""
+    repo = _branch(tmp_path, f"tsx-{nesting}",
+                   {"web/src/runner.ts": "export function runnerFile(p) { return p }\n",
+                    "web/src/App.tsx": _APP_BASE},
+                   {"web/src/runner.ts": "export function runnerFile(p, fmt) { return p }\n",
+                    "web/src/App.tsx": _APP_WORK})
+    scope = "web.src.App." if nesting == "flattened" else "web.src.App.App."
+    graph = _Graph()
+    graph.edges["runnerFile"] = [
+        _edge("runnerFile", "web/src/runner.ts", scope + name, "web/src/App.tsx")
+        for name in ("downloadPlan", "exportPlan", "printPlan")]
+    env = _ask(_provider(monkeypatch, tmp_path, repo, graph), repo)
+    assert _status_of(env, "runnerFile") == {
+        scope + "downloadPlan": "also-changed", scope + "exportPlan": "also-changed",
+        scope + "printPlan": "untouched"}, env["result"]

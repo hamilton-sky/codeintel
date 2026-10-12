@@ -387,3 +387,57 @@ def test_mentions_in_a_python_3_14_file_are_still_labelled():
     src = "try:\n    foo()\nexcept ValueError, OSError:\n    pass\n# foo\n"
     assert classify_mentions(src, "foo", [2, 5]) == {2: "code", 5: "comment"}
 
+
+# ----------------------------------------- D2: a nested function the diff changed is named as such
+
+def _nested(old: str | None, new: str | None, path: str = "pkg/mod.py") -> dict[str, tuple]:
+    out = diff_file(path, old, new)
+    assert out.status == STATUS_OK, out
+    return {c.qualified_name: c.nested_changed for c in out.changes}
+
+
+def test_a_changed_nested_function_is_named_on_its_parents_change():
+    """The parent is still the one symbol (a closure is not something another module can name), but
+    the graph records the closure as a caller in its own right — so the diff has to say which of
+    the parent's inner functions it actually rewrote, or the caller split cannot place them."""
+    old = ("def outer():\n    def inner():\n        return f(1)\n"
+           "    def other():\n        return 0\n    return inner() + other()\n")
+    new = old.replace("f(1)", "f(1, 2)")
+    assert _nested(old, new) == {"outer": ("outer.inner",)}
+
+
+def test_a_nested_function_the_diff_did_not_touch_is_not_named():
+    old = ("def outer():\n    def inner():\n        return f(1)\n"
+           "    def other():\n        return 0\n    return inner() + other()\n")
+    new = old.replace("return 0", "return 1")
+    assert _nested(old, new) == {"outer": ("outer.other",)}
+
+
+def test_nested_functions_are_named_through_every_level_and_inside_methods():
+    old = ("class C:\n    def m(self):\n        def a():\n            def b():\n"
+           "                return 1\n            return b\n        return a\n")
+    new = old.replace("return 1", "return 2")
+    assert _nested(old, new) == {"C.m": ("C.m.a", "C.m.a.b")}
+
+
+def test_the_nested_functions_of_an_added_definition_are_all_named():
+    assert _nested(None, "def outer():\n    def inner():\n        return 1\n    return inner\n") == {
+        "outer": ("outer.inner",)}
+
+
+def test_a_typescript_component_names_the_inner_functions_the_diff_rewrote():
+    """The defect as it was found: `App` (a React component) holds `downloadPlan` and `exportPlan`,
+    both rewritten together with `runnerFile`'s signature, and both were then reported as callers
+    the diff did NOT touch."""
+    old = ("export function App() {\n"
+           "  function downloadPlan() { return runnerFile(plan) }\n"
+           "  const exportPlan = () => { return runnerFile(plan) }\n"
+           "  const untouched = () => 1\n"
+           "  return null\n}\n")
+    new = ("export function App() {\n"
+           "  async function downloadPlan() { return await runnerFile(plan, 2) }\n"
+           "  const exportPlan = async () => { return await runnerFile(plan, 2) }\n"
+           "  const untouched = () => 1\n"
+           "  return null\n}\n")
+    got = _nested(old, new, path="web/src/App.tsx")
+    assert got == {"App": ("App.downloadPlan", "App.exportPlan")}

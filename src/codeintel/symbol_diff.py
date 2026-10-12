@@ -76,6 +76,10 @@ _TS_SUPPORTED = frozenset({"typescript", "tsx", "javascript", "go", "rust", "jav
 
 _PYTHON_EXTS = (".py", ".pyi")
 
+# The tree-sitter definition types that, found inside a function's body, are a nested function.
+_TS_NESTED_FUNC_TYPES = frozenset({
+    "function_declaration", "generator_function_declaration", "function_item"})
+
 
 @dataclass(frozen=True)
 class SymbolChange:
@@ -89,6 +93,15 @@ class SymbolChange:
     # What part moved: for `signature`, which header facet(s) (`parameters (+x, -y)`, `return
     # annotation`, `decorators`, `async`); for `body`, `docstring only` when nothing else did.
     facets: tuple[str, ...] = ()
+    # The functions nested inside this one that the diff added or rewrote (`App.downloadPlan`). A
+    # closure is not a symbol of its own here — no other module can name it — but the graph records
+    # it as a CALLER in its own right, and without this a closure edited together with a callee's
+    # signature was reported as a caller the diff did not touch.
+    nested_changed: tuple[str, ...] = ()
+    # The same closures by their bare name (`downloadPlan`), for a graph that files a closure
+    # directly under its module. Only names no definition of the file's own also uses: a bare name
+    # shared with a top-level function would mark THAT function touched when it was not.
+    nested_bare: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +129,9 @@ class _One:
     plain_body: tuple                 # the body without a leading docstring
     line: int
     params: tuple[str, ...] = ()
+    # Every function nested in this one, at any depth, by its name relative to this one
+    # (`inner`, `inner.helper`) with a fingerprint of its whole text.
+    nested: tuple[tuple[str, tuple], ...] = ()
 
 
 class _Unparsable(Exception):
@@ -168,6 +184,11 @@ def diff_file(path: str, old_source: str | None, new_source: str | None) -> File
             (old_defs if side == "old" else new_defs).update(table)
         changes = [c for qn in sorted(set(old_defs) | set(new_defs))
                    if (c := _classify(qn, old_defs.get(qn), new_defs.get(qn))) is not None]
+        own_bare = {qn.rsplit(".", 1)[-1] for qn in (*old_defs, *new_defs)}
+        changes = [replace(c, nested_bare=tuple(dict.fromkeys(
+                       b for n in c.nested_changed
+                       if (b := n.rsplit(".", 1)[-1]) not in own_bare)))
+                   if c.nested_changed else c for c in changes]
         changes.sort(key=lambda c: (SEVERITY[c.change], c.new_line or c.old_line or 0))
         return FileSymbolDiff(path, STATUS_OK, language, tuple(changes), unnamed=unnamed)
     except _Unsupported as exc:
@@ -179,7 +200,28 @@ def diff_file(path: str, old_source: str | None, new_source: str | None) -> File
 
 # ------------------------------------------------------------------------------------ comparing
 
+def _nested_changed(qn: str, old: list[_One] | None, new: list[_One] | None) -> tuple[str, ...]:
+    """The nested functions present in *new* whose text is not the same as in *old*."""
+    before = {name: print_ for o in old or () for name, print_ in o.nested}
+    out: dict[str, None] = {}
+    for n in new or ():
+        for name, print_ in n.nested:
+            if before.get(name) != print_:
+                out[f"{qn}.{name}"] = None
+    return tuple(out)
+
+
 def _classify(
+    qn: str, old: list[_One] | None, new: list[_One] | None
+) -> SymbolChange | None:
+    change = _classify_one(qn, old, new)
+    if change is None or change.change == REMOVED:
+        return change
+    nested = _nested_changed(qn, old, new)
+    return replace(change, nested_changed=nested) if nested else change
+
+
+def _classify_one(
     qn: str, old: list[_One] | None, new: list[_One] | None
 ) -> SymbolChange | None:
     if old and not new:
@@ -242,6 +284,20 @@ def _dump_all(nodes: Iterable[ast.AST]) -> tuple[str, ...]:
     return tuple(ast.dump(n) for n in nodes)
 
 
+def _py_nested(stmts: list[ast.stmt], prefix: str = "") -> list[tuple[str, tuple]]:
+    """Every function defined inside *stmts*, at any depth, named relative to the enclosing one."""
+    out: list[tuple[str, tuple]] = []
+    for node in stmts:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = prefix + node.name
+            out.append((name, (ast.dump(node),)))
+            out.extend(_py_nested(node.body, name + "."))
+        elif not isinstance(node, ast.ClassDef):
+            for block in _child_blocks(node):
+                out.extend(_py_nested(block, prefix))
+    return out
+
+
 def _py_function(node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool) -> _One:
     args = node.args
     every = [*args.posonlyargs, *args.args, *([args.vararg] if args.vararg else []),
@@ -260,6 +316,7 @@ def _py_function(node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool) -
         plain_body=body[1:] if node.body and _is_docstring(node.body[0]) else body,
         line=node.lineno,
         params=tuple(a.arg for a in every),
+        nested=tuple(_py_nested(node.body)),
     )
 
 
@@ -438,7 +495,26 @@ def _ts_function_value(node):
     return node
 
 
-def _ts_one(node, is_method: bool) -> _One:
+def _ts_nested(body, is_nested, name_of, prefix: str = "") -> list[tuple[str, tuple]]:
+    """Every named function declared inside *body*, at any depth, named relative to the enclosing
+    one: `function f() {}` and `const f = () => {}` alike, the second being how React components
+    write their handlers."""
+    out: list[tuple[str, tuple]] = []
+    stack = list(reversed(body.children))
+    while stack:
+        n = stack.pop()
+        if is_nested(n) and (name := name_of(n)):
+            qn = prefix + name
+            out.append((qn, _tokens(n)))
+            inner = _ts_function_value(n).child_by_field_name("body")
+            if inner is not None:
+                out.extend(_ts_nested(inner, is_nested, name_of, qn + "."))
+            continue
+        stack.extend(reversed(n.children))
+    return out
+
+
+def _ts_one(node, is_method: bool, is_nested=None, name_of=None) -> _One:
     target = _ts_function_value(node)
     body = target.child_by_field_name("body")
     tail: tuple[str, ...] = ()
@@ -452,6 +528,8 @@ def _ts_one(node, is_method: bool) -> _One:
         body=tail,
         plain_body=tail,
         line=node.start_point[0] + 1,
+        nested=tuple(_ts_nested(body, is_nested, name_of))
+        if body is not None and is_nested is not None else (),
     )
 
 
@@ -512,6 +590,14 @@ def _treesitter_definitions(source: str, lang: str) -> tuple[dict[str, list[_One
     cont_types = _TS_CONTAINER_TYPES.get(lang, set())
     arrow_ok = lang in _TS_ARROW_LANGS
     name_of = Indexer._ts_node_name
+    # What counts as a function NESTED in another: a declaration of one, never a method (an object
+    # literal's method is not a closure the graph files as a caller of its own).
+    nested_types = {t for t in func_types if t in _TS_NESTED_FUNC_TYPES}
+
+    def is_nested(n) -> bool:
+        return n.type in nested_types or (
+            arrow_ok and n.type in _TS_DECL_TYPES and _ts_decl_is_function(n))
+
     out: dict[str, list[_One]] = {}
     unnamed = 0
     stack: list[tuple[Any, str]] = [(root, "")]
@@ -541,7 +627,8 @@ def _treesitter_definitions(source: str, lang: str) -> tuple[dict[str, list[_One
                 is_go_method = lang == "go" and child.type == "method_declaration"
                 recv = _go_receiver(child) if is_go_method else None
                 qn = f"{recv}.{name}" if recv else prefix + name
-                out.setdefault(qn, []).append(_ts_one(child, bool(prefix) or is_go_method))
+                out.setdefault(qn, []).append(
+                    _ts_one(child, bool(prefix) or is_go_method, is_nested, name_of))
             else:
                 stack.append((child, prefix))
     return out, unnamed
