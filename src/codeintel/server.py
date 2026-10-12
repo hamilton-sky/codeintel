@@ -231,6 +231,7 @@ _STATUS_FALLBACK: dict = {
     "lsp": False,
     "semantic": False,
     "indexed": False,
+    "indexed_by": [],
     "model": None,
     "healthy": False,
     # `None`, not `[]`: this fallback means the status could not be produced, and `[]` is the report's
@@ -251,8 +252,10 @@ def _code_status_handler_inner(args: dict) -> dict:
     boolean per engine, so `lsp: true` could mean "uvx is on PATH" for an engine that in fact
     never boots — an agent reading that would reason from a readiness claim nothing verified.
 
-    The flat `graph`/`lsp`/`semantic`/`indexed`/`model` keys keep their original meaning for
-    existing callers; `readiness` and `healthy` carry the full picture. That meaning is
+    The flat `graph`/`lsp`/`semantic`/`model` keys keep their original meaning for existing
+    callers; `readiness` and `healthy` carry the full picture. `indexed` changed meaning in 0.28.0:
+    it is "some indexing engine has indexed this repo" (`indexed_by` names which), no longer the
+    semantic engine's word alone. That meaning is
     INSTALLED, not usable: `graph: true` is a binary on PATH, and was reported next to a backend
     that refused to start. `degraded` names the engines that are installed and failing — including
     the optional graph engine, which `healthy` deliberately ignores — so a caller reads that
@@ -308,12 +311,17 @@ def _code_status_handler_inner(args: dict) -> dict:
         if not engines:
             engines = ["none"]
 
-        # `indexed` stays semantic-scoped and back-compatible: for a given repo it means "this
-        # repo has chunks"; with no project_root it falls back to "any index exists on this box".
-        indexed = False
+        # `indexed`: SOME engine that indexes (graph, semantic) has indexed THIS repo, and
+        # `indexed_by` names which. It used to be the semantic engine's word alone, so a repo the
+        # graph had indexed read `indexed: false` — "this repo is not indexed" — and with no
+        # project_root it was "any semantic*.db exists in the per-machine cache", which made every
+        # repo on the machine indexed once one was. Both now come from the probes of the root
+        # doctor resolved (the server's cwd when none is given), like every other field here.
+        indexed_by = [n for n in ("graph", "semantic") if readiness[n]["repo_indexed"] is True]
+        indexed = bool(indexed_by)
         model = None
         try:
-            from codeintel.semantic_db import DEFAULT_MODEL, default_db_path
+            from codeintel.semantic_db import DEFAULT_MODEL
             if semantic_available:
                 model = DEFAULT_MODEL
                 if project_root:
@@ -322,13 +330,6 @@ def _code_status_handler_inner(args: dict) -> dict:
                         model = str(load_config(project_root).get("model") or DEFAULT_MODEL)
                     except Exception:
                         pass
-                    indexed = readiness["semantic"]["repo_indexed"] is True
-                else:
-                    import glob
-                    import os
-                    # any per-model cache file (semantic.db / semantic-<hash>.db) counts as "indexed"
-                    base = os.path.dirname(default_db_path())
-                    indexed = bool(glob.glob(os.path.join(base, "semantic*.db")))
         except Exception:
             pass
 
@@ -340,6 +341,7 @@ def _code_status_handler_inner(args: dict) -> dict:
             "lsp": lsp_available,
             "semantic": semantic_available,
             "indexed": indexed,
+            "indexed_by": indexed_by,
             "model": model,
             "healthy": bool(summary.get("healthy")),
             # Derived from the probes read above rather than copied from `report`, so a report that
@@ -633,7 +635,9 @@ def run() -> None:
         annotations=ToolAnnotations(read_only_hint=True),
         description=(
             "Read-only. Which engines (graph/LSP/semantic) are available and whether this repo is "
-            "indexed. Check this first if code.query keeps returning nothing. The top-level "
+            "indexed. Check this first if code.query keeps returning nothing. `indexed` is true "
+            "when ANY indexing engine (graph or semantic) has indexed this repo, and `indexed_by` "
+            "names which — per-engine detail is `readiness.<engine>.repo_indexed`. The top-level "
             "`graph`/`lsp`/`semantic` flags mean INSTALLED, not usable — read `readiness` for "
             "that, and `degraded` for engines that are installed but failing (`healthy` ignores "
             "the optional graph engine)."

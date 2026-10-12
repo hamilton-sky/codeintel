@@ -347,7 +347,10 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "test_a_registration_runnable_flag_is_only_about_the_file",
     ("claim", "server._code_status_handler_inner"):
         "status relays doctor's tri-state without widening it — "
-        "test_code_status_relays_the_same_tri_state_as_doctor",
+        "test_code_status_relays_the_same_tri_state_as_doctor; and `indexed` is true exactly when "
+        "graph or semantic reports repo_indexed for THIS root, `indexed_by` naming which — "
+        "test_status_indexed_means_some_engine_has_indexed_this_repo_and_names_which, and with no "
+        "root test_status_with_no_root_does_not_call_a_repo_indexed_because_another_one_is",
     ("claim", "server._code_doctor_handler_inner"):
         "a refused report asserts no readiness — test_a_refused_doctor_report_claims_no_readiness",
     ("claim", "server.<module>"):
@@ -1670,7 +1673,52 @@ def test_code_status_relays_the_same_tri_state_as_doctor(monkeypatch):
             assert out["readiness"][name][field] == probe[field], (
                 f"{name}.{field} changed value between doctor and code.status")
     assert out["healthy"] is False, out
-    assert out["indexed"] is False, "semantic has no chunks for this repo and `indexed` says it does"
+    # D6: `indexed` used to be the semantic engine's word alone, so this repo — which the graph HAS
+    # indexed — was reported `indexed: false`, read as "this repo is not indexed".
+    assert out["indexed"] is True and out["indexed_by"] == ["graph"], out
+
+
+def _status_with(monkeypatch, graph_indexed, semantic_indexed, project_root="/repo") -> dict:
+    from codeintel import doctor, server
+
+    def engine(indexed):
+        return {"status": "ok" if indexed else "fail", "installed": True, "runnable": True,
+                "repo_indexed": indexed, "detail": "", "remediation": None}
+
+    report = {
+        "ok": True, "project_root": project_root, "deep": False,
+        "engines": {"graph": engine(graph_indexed), "lsp": engine(None),
+                    "semantic": engine(semantic_indexed)},
+        "summary": {"ready": 1, "total": 3, "healthy": False}, "versions": {}, "version_skew": None,
+    }
+    monkeypatch.setattr(doctor, "run_doctor", lambda *a, **k: report)
+    return server._code_status_handler_inner({"project_root": project_root})
+
+
+@pytest.mark.parametrize(("graph", "semantic", "indexed", "by"), [
+    (True, False, True, ["graph"]),
+    (False, True, True, ["semantic"]),
+    (True, True, True, ["graph", "semantic"]),
+    (False, False, False, []),
+    (None, None, False, []),
+])
+def test_status_indexed_means_some_engine_has_indexed_this_repo_and_names_which(
+        monkeypatch, graph, semantic, indexed, by):
+    out = _status_with(monkeypatch, graph, semantic)
+    assert out["indexed"] is indexed and out["indexed_by"] == by, out
+
+
+def test_status_with_no_root_does_not_call_a_repo_indexed_because_another_one_is(
+        monkeypatch, tmp_path):
+    """With no `project_root`, `indexed` was true when ANY `semantic*.db` sat in the per-machine
+    cache directory — so once one repo was indexed, every repo on the machine was. It is the probe of
+    the root doctor resolved (the server's cwd) now, like every other field."""
+    from codeintel import semantic_db
+
+    (tmp_path / "semantic.db").write_bytes(b"")
+    monkeypatch.setattr(semantic_db, "default_db_path", lambda model=None: str(tmp_path / "semantic.db"))
+    out = _status_with(monkeypatch, False, False, project_root="")
+    assert out["indexed"] is False and out["indexed_by"] == [], out
 
 
 def test_a_refused_doctor_report_claims_no_readiness():
@@ -1704,6 +1752,7 @@ def test_the_status_fallback_claims_nothing():
 
     assert _STATUS_FALLBACK["healthy"] is False
     assert _STATUS_FALLBACK["indexed"] is False
+    assert _STATUS_FALLBACK["indexed_by"] == []
     for engine in ("graph", "lsp", "semantic"):
         assert _STATUS_FALLBACK[engine] is False, engine
     assert _STATUS_FALLBACK["readiness"] == {}
