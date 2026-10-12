@@ -4,6 +4,43 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] — 2026-10-12
+
+Four defects in the `changed` and `status` answers, each found on a real branch review on
+2026-10-12 and each pinned by a test that failed before its fix.
+
+### Fixed
+- **A Python 3.14 file is no longer "unparsable" to `changed`.** PEP 758 lets `except A, B:` drop
+  its parentheses; `ast.parse` on the tool's 3.13 interpreter rejected the whole file, so every
+  definition in it was invisible to `changed` (reported as `does not parse as Python (line 91:
+  multiple exception types must be parenthesized)`) and mention labelling failed quietly on it. The
+  except list is now read as `except (A, B):` — the same tree 3.14 builds — and line numbers are
+  unchanged. `except A, B as e:`, which 3.14 still rejects, stays unparsable. A file that does not
+  parse now says which Python tried, so a file newer than the tool is not read as a broken one.
+- **A closure the diff rewrote is a caller it touched.** The diff's keys are top-level definitions
+  (`App`) while the graph files a closure as its own caller (`App.downloadPlan`, or directly under
+  the module), so a component's inner functions rewritten together with a callee's signature were
+  listed under "Callers this diff did NOT touch — these may break". `symbol_diff` now names, on each
+  changed definition, the nested functions whose own text changed (`nested_changed`), and only those
+  count as touched: a sibling closure the diff left alone, and any module-scope caller, stay on the
+  untouched side. Python and TS/JS (function declarations and `const f = () => {}` alike).
+- **An MCP `code.query` answer stays under the client's size limit.** A branch-wide `changed` came
+  back at 113,352 bytes — the `result` text plus a `rows` list repeating the same findings — and
+  Claude Code's MCP client refused it and spilled it to a file. Over MCP the envelope is now bounded
+  at 40,000 bytes (`server.MCP_ENVELOPE_BUDGET_BYTES`): `rows` are cut to the leading rows that fit,
+  counted by `rows_total` / `rows_omitted`, and `rows_note` gives the `codeintel query ... --json`
+  command that prints them all. `result`, `gaps` and `evidence` are never cut, and the CLI's `--json`
+  is unchanged.
+
+### Changed
+- **`code.status` `indexed` means "some engine has indexed this repo".** It was the semantic engine's
+  word alone, so a repo with `readiness.graph.repo_indexed: true` reported `indexed: false`, read as
+  "this repo is not indexed"; and with no `project_root` it was true whenever any `semantic*.db` sat
+  in the per-machine cache, so once one repo was indexed every repo was. It now comes from the probes
+  of the resolved root (the server's cwd when none is given), is true when graph or semantic has
+  indexed it, and the new `indexed_by` names which. Per-engine detail stays in
+  `readiness.<engine>.repo_indexed`.
+
 ## [0.27.0] — 2026-10-06
 
 `callers` runs the qualifier check itself (#68), the rewrite of closed #55 against 0.26.0 — through

@@ -44,10 +44,13 @@ THREE THINGS IT DECLINES TO DO, because the alternative is a classification nobo
 from __future__ import annotations
 
 import ast
+import io
 import os
 import re
+import sys
+import tokenize
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 REMOVED = "removed"
@@ -73,6 +76,10 @@ _TS_SUPPORTED = frozenset({"typescript", "tsx", "javascript", "go", "rust", "jav
 
 _PYTHON_EXTS = (".py", ".pyi")
 
+# The tree-sitter definition types that, found inside a function's body, are a nested function.
+_TS_NESTED_FUNC_TYPES = frozenset({
+    "function_declaration", "generator_function_declaration", "function_item"})
+
 
 @dataclass(frozen=True)
 class SymbolChange:
@@ -86,6 +93,15 @@ class SymbolChange:
     # What part moved: for `signature`, which header facet(s) (`parameters (+x, -y)`, `return
     # annotation`, `decorators`, `async`); for `body`, `docstring only` when nothing else did.
     facets: tuple[str, ...] = ()
+    # The functions nested inside this one that the diff added or rewrote (`App.downloadPlan`). A
+    # closure is not a symbol of its own here — no other module can name it — but the graph records
+    # it as a CALLER in its own right, and without this a closure edited together with a callee's
+    # signature was reported as a caller the diff did not touch.
+    nested_changed: tuple[str, ...] = ()
+    # The same closures by their bare name (`downloadPlan`), for a graph that files a closure
+    # directly under its module. Only names no definition of the file's own also uses: a bare name
+    # shared with a top-level function would mark THAT function touched when it was not.
+    nested_bare: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,6 +129,9 @@ class _One:
     plain_body: tuple                 # the body without a leading docstring
     line: int
     params: tuple[str, ...] = ()
+    # Every function nested in this one, at any depth, by its name relative to this one
+    # (`inner`, `inner.helper`) with a fingerprint of its whole text.
+    nested: tuple[tuple[str, tuple], ...] = ()
 
 
 class _Unparsable(Exception):
@@ -165,6 +184,11 @@ def diff_file(path: str, old_source: str | None, new_source: str | None) -> File
             (old_defs if side == "old" else new_defs).update(table)
         changes = [c for qn in sorted(set(old_defs) | set(new_defs))
                    if (c := _classify(qn, old_defs.get(qn), new_defs.get(qn))) is not None]
+        own_bare = {qn.rsplit(".", 1)[-1] for qn in (*old_defs, *new_defs)}
+        changes = [replace(c, nested_bare=tuple(dict.fromkeys(
+                       b for n in c.nested_changed
+                       if (b := n.rsplit(".", 1)[-1]) not in own_bare)))
+                   if c.nested_changed else c for c in changes]
         changes.sort(key=lambda c: (SEVERITY[c.change], c.new_line or c.old_line or 0))
         return FileSymbolDiff(path, STATUS_OK, language, tuple(changes), unnamed=unnamed)
     except _Unsupported as exc:
@@ -176,7 +200,28 @@ def diff_file(path: str, old_source: str | None, new_source: str | None) -> File
 
 # ------------------------------------------------------------------------------------ comparing
 
+def _nested_changed(qn: str, old: list[_One] | None, new: list[_One] | None) -> tuple[str, ...]:
+    """The nested functions present in *new* whose text is not the same as in *old*."""
+    before = {name: print_ for o in old or () for name, print_ in o.nested}
+    out: dict[str, None] = {}
+    for n in new or ():
+        for name, print_ in n.nested:
+            if before.get(name) != print_:
+                out[f"{qn}.{name}"] = None
+    return tuple(out)
+
+
 def _classify(
+    qn: str, old: list[_One] | None, new: list[_One] | None
+) -> SymbolChange | None:
+    change = _classify_one(qn, old, new)
+    if change is None or change.change == REMOVED:
+        return change
+    nested = _nested_changed(qn, old, new)
+    return replace(change, nested_changed=nested) if nested else change
+
+
+def _classify_one(
     qn: str, old: list[_One] | None, new: list[_One] | None
 ) -> SymbolChange | None:
     if old and not new:
@@ -239,6 +284,20 @@ def _dump_all(nodes: Iterable[ast.AST]) -> tuple[str, ...]:
     return tuple(ast.dump(n) for n in nodes)
 
 
+def _py_nested(stmts: list[ast.stmt], prefix: str = "") -> list[tuple[str, tuple]]:
+    """Every function defined inside *stmts*, at any depth, named relative to the enclosing one."""
+    out: list[tuple[str, tuple]] = []
+    for node in stmts:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = prefix + node.name
+            out.append((name, (ast.dump(node),)))
+            out.extend(_py_nested(node.body, name + "."))
+        elif not isinstance(node, ast.ClassDef):
+            for block in _child_blocks(node):
+                out.extend(_py_nested(block, prefix))
+    return out
+
+
 def _py_function(node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool) -> _One:
     args = node.args
     every = [*args.posonlyargs, *args.args, *([args.vararg] if args.vararg else []),
@@ -257,6 +316,7 @@ def _py_function(node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool) -
         plain_body=body[1:] if node.body and _is_docstring(node.body[0]) else body,
         line=node.lineno,
         params=tuple(a.arg for a in every),
+        nested=tuple(_py_nested(node.body)),
     )
 
 
@@ -294,13 +354,95 @@ def _child_blocks(node: ast.AST) -> Iterable[list[ast.stmt]]:
                 yield v.body
 
 
+_PARSE_ERRORS = (SyntaxError, ValueError, RecursionError, MemoryError)
+
+
+def _parenthesize_except_lists(source: str) -> str | None:
+    """*source* with every PEP 758 `except A, B:` written as `except (A, B):`, or None if it has none.
+
+    Python 3.14 dropped the parentheses (PEP 758); an older interpreter's `ast.parse` rejects the
+    whole file for it, and every definition in it then went unseen. The two spellings are the same
+    tree on 3.14 — an `ExceptHandler` whose `type` is a `Tuple` — so rewriting them is a reading of
+    the file, not a guess at it. A list followed by `as` is left alone: that still needs the
+    parentheses on 3.14, and accepting it would read a file no interpreter runs. Only the clause's
+    own line(s) change, and only by inserting two characters, so line numbers survive."""
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    inserts: list[tuple[tuple[int, int], str]] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if not (tok.type == tokenize.NAME and tok.string == "except"):
+            i += 1
+            continue
+        j = i + 1
+        if j < len(toks) and toks[j].type == tokenize.OP and toks[j].string == "*":
+            j += 1
+        start, depth, comma, end, has_as = j, 0, False, None, False
+        while j < len(toks):
+            t = toks[j]
+            if t.type == tokenize.OP and t.string in "([{":
+                depth += 1
+            elif t.type == tokenize.OP and t.string in ")]}":
+                depth -= 1
+            elif depth == 0 and t.type == tokenize.OP and t.string == ",":
+                comma = True
+            elif depth == 0 and t.type == tokenize.NAME and t.string == "as":
+                has_as = True
+            elif depth == 0 and t.type == tokenize.OP and t.string == ":":
+                end = j
+                break
+            elif t.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                break
+            j += 1
+        if comma and not has_as and end is not None and start < end:
+            inserts.append((toks[start].start, "("))
+            inserts.append((toks[end].start, ")"))
+        i = j + 1
+    if not inserts:
+        return None
+    lines = source.splitlines(keepends=True)
+    # Back to front, so an insertion never moves a position still to be used.
+    for (row, col), text in sorted(inserts, reverse=True):
+        line = lines[row - 1]
+        lines[row - 1] = line[:col] + text + line[col:]
+    return "".join(lines)
+
+
+def _parse_python(source: str) -> ast.Module:
+    """`ast.parse`, but a file is not unreadable merely for being newer than this interpreter.
+
+    The one newer spelling that is known to stop a whole real file — PEP 758's unparenthesized
+    `except` list — is read as what it means. Anything else this interpreter cannot parse raises
+    as before, and the caller says WHICH Python failed to read it (`_unparsable_reason`)."""
+    try:
+        return ast.parse(source)
+    except SyntaxError as exc:
+        rewritten = _parenthesize_except_lists(source) if sys.version_info < (3, 14) else None
+        if rewritten is None:
+            raise
+        try:
+            return ast.parse(rewritten)
+        except _PARSE_ERRORS:
+            raise exc from None
+
+
+def _unparsable_reason(exc: BaseException) -> str:
+    reason = f"line {exc.lineno}: {exc.msg}" if isinstance(exc, SyntaxError) else (
+        f"{type(exc).__name__}: {exc}")
+    # The interpreter is named because "does not parse" is otherwise read as "this file is broken",
+    # and a file written for a newer Python than the tool runs on is not.
+    here = f"Python {sys.version_info.major}.{sys.version_info.minor}"
+    return f"does not parse as Python ({reason}; parsed with {here}, so newer syntax also fails)"
+
+
 def _python_definitions(source: str) -> tuple[dict[str, list[_One]], int]:
     try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
-        reason = f"line {exc.lineno}: {exc.msg}" if isinstance(exc, SyntaxError) else (
-            f"{type(exc).__name__}: {exc}")
-        raise _Unparsable(f"does not parse as Python ({reason})"[:200]) from exc
+        tree = _parse_python(source)
+    except _PARSE_ERRORS as exc:
+        raise _Unparsable(_unparsable_reason(exc)[:240]) from exc
     out: dict[str, list[_One]] = {}
 
     def visit(stmts: list[ast.stmt], prefix: str, in_class: bool) -> None:
@@ -353,7 +495,26 @@ def _ts_function_value(node):
     return node
 
 
-def _ts_one(node, is_method: bool) -> _One:
+def _ts_nested(body, is_nested, name_of, prefix: str = "") -> list[tuple[str, tuple]]:
+    """Every named function declared inside *body*, at any depth, named relative to the enclosing
+    one: `function f() {}` and `const f = () => {}` alike, the second being how React components
+    write their handlers."""
+    out: list[tuple[str, tuple]] = []
+    stack = list(reversed(body.children))
+    while stack:
+        n = stack.pop()
+        if is_nested(n) and (name := name_of(n)):
+            qn = prefix + name
+            out.append((qn, _tokens(n)))
+            inner = _ts_function_value(n).child_by_field_name("body")
+            if inner is not None:
+                out.extend(_ts_nested(inner, is_nested, name_of, qn + "."))
+            continue
+        stack.extend(reversed(n.children))
+    return out
+
+
+def _ts_one(node, is_method: bool, is_nested=None, name_of=None) -> _One:
     target = _ts_function_value(node)
     body = target.child_by_field_name("body")
     tail: tuple[str, ...] = ()
@@ -367,6 +528,8 @@ def _ts_one(node, is_method: bool) -> _One:
         body=tail,
         plain_body=tail,
         line=node.start_point[0] + 1,
+        nested=tuple(_ts_nested(body, is_nested, name_of))
+        if body is not None and is_nested is not None else (),
     )
 
 
@@ -427,6 +590,14 @@ def _treesitter_definitions(source: str, lang: str) -> tuple[dict[str, list[_One
     cont_types = _TS_CONTAINER_TYPES.get(lang, set())
     arrow_ok = lang in _TS_ARROW_LANGS
     name_of = Indexer._ts_node_name
+    # What counts as a function NESTED in another: a declaration of one, never a method (an object
+    # literal's method is not a closure the graph files as a caller of its own).
+    nested_types = {t for t in func_types if t in _TS_NESTED_FUNC_TYPES}
+
+    def is_nested(n) -> bool:
+        return n.type in nested_types or (
+            arrow_ok and n.type in _TS_DECL_TYPES and _ts_decl_is_function(n))
+
     out: dict[str, list[_One]] = {}
     unnamed = 0
     stack: list[tuple[Any, str]] = [(root, "")]
@@ -456,7 +627,8 @@ def _treesitter_definitions(source: str, lang: str) -> tuple[dict[str, list[_One
                 is_go_method = lang == "go" and child.type == "method_declaration"
                 recv = _go_receiver(child) if is_go_method else None
                 qn = f"{recv}.{name}" if recv else prefix + name
-                out.setdefault(qn, []).append(_ts_one(child, bool(prefix) or is_go_method))
+                out.setdefault(qn, []).append(
+                    _ts_one(child, bool(prefix) or is_go_method, is_nested, name_of))
             else:
                 stack.append((child, prefix))
     return out, unnamed
@@ -478,8 +650,8 @@ def classify_mentions(source: str, name: str, lines: Iterable[int]) -> dict[int,
     the line is code."""
     wanted = list(lines)
     try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        tree = _parse_python(source)
+    except _PARSE_ERRORS:
         return {}
     word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
     code: set[int] = set()

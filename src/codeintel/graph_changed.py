@@ -292,7 +292,11 @@ class ChangedSince(AnswerRendering):
         touched: dict[str, set[str]] = {}
         for e in entries:
             if e.change.change != REMOVED:
-                touched.setdefault(e.path, set()).add(e.qn)
+                # A closure the diff rewrote is a caller the diff touched: the graph files it as a
+                # caller of its own, under its enclosing function's name or directly under its
+                # module, and only its parent is a key of the diff.
+                touched.setdefault(e.path, set()).update(
+                    (e.qn, *e.change.nested_changed, *e.change.nested_bare))
         files_in_diff = {c.path for c, _ in diffs}
         added_at: dict[str, list[str]] = {}
         for e in entries:
@@ -468,7 +472,9 @@ class ChangedSince(AnswerRendering):
 
     @staticmethod
     def _caller_is_changed(row: dict, touched: dict[str, set[str]]) -> bool:
-        """Whether a caller is itself a definition this diff added, rewrote or re-signed.
+        """Whether a caller is itself a definition this diff added, rewrote or re-signed — or a
+        function nested in one whose OWN text the diff changed (`SymbolChange.nested_changed`); a
+        sibling closure the diff left alone stays untouched.
 
         A MODULE-SCOPE caller is never counted: the diff is compared definition by definition, so
         whether a file's top-level statements changed is not something it knows. It is left on the

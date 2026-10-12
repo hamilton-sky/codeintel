@@ -333,3 +333,111 @@ def test_code_wins_over_a_string_on_the_same_line():
 
 def test_an_unparsable_python_file_gets_no_labels_rather_than_a_guess():
     assert classify_mentions("def (:\n  foo\n", "foo", [2]) == {}
+
+
+# ------------------------------------------------- D1: Python newer than the tool's interpreter
+
+_PEP758_OLD = (
+    "def load(path):\n"
+    "    try:\n"
+    "        return open(path).read()\n"
+    "    except ValueError, OSError:\n"
+    "        return None\n"
+    "\n\n"
+    "def keep():\n"
+    "    return 1\n")
+_PEP758_NEW = _PEP758_OLD.replace("return None", "return ''")
+
+
+def test_an_unparenthesized_except_list_from_python_3_14_is_diffed_definition_by_definition():
+    """PEP 758 (Python 3.14) drops the parentheses from `except A, B:`. On a 3.13 interpreter
+    `ast.parse` rejects it, so every definition in such a file was invisible to `changed` and the
+    file was reported as "does not parse as Python" — which it does, just not on 3.13."""
+    out = diff_file("pkg/mod.py", _PEP758_OLD, _PEP758_NEW)
+    assert out.status == STATUS_OK, out
+    assert {c.qualified_name: c.change for c in out.changes} == {"load": BODY}
+
+
+def test_an_unparenthesized_except_star_list_is_read_too():
+    old = "def f():\n    try:\n        pass\n    except* ValueError, OSError:\n        pass\n"
+    new = old.replace("        pass\n    except*", "        g()\n    except*")
+    out = diff_file("pkg/mod.py", old, new)
+    assert out.status == STATUS_OK, out
+    assert [c.qualified_name for c in out.changes] == ["f"]
+
+
+def test_an_except_list_with_as_still_needs_parentheses_on_every_python():
+    """3.14 accepts `except A, B:` but not `except A, B as e:`; reading that would accept a file no
+    interpreter runs."""
+    src = "try:\n    pass\nexcept ValueError, OSError as e:\n    pass\n"
+    out = diff_file("pkg/mod.py", "x = 1\n", src)
+    assert out.status == STATUS_UNPARSABLE
+
+
+def test_a_file_that_does_not_parse_names_the_interpreter_that_tried():
+    """When the file may simply be newer than the parser, the message must not read as "this file
+    is broken": it names the Python version that parsed it, so a repo that targets a newer one can
+    be told apart from a syntax error."""
+    import sys
+    out = diff_file("pkg/mod.py", "def ok(): pass\n", "def broken(:\n")
+    assert f"Python {sys.version_info.major}.{sys.version_info.minor}" in out.detail, out.detail
+
+
+def test_mentions_in_a_python_3_14_file_are_still_labelled():
+    src = "try:\n    foo()\nexcept ValueError, OSError:\n    pass\n# foo\n"
+    assert classify_mentions(src, "foo", [2, 5]) == {2: "code", 5: "comment"}
+
+
+# ----------------------------------------- D2: a nested function the diff changed is named as such
+
+def _nested(old: str | None, new: str | None, path: str = "pkg/mod.py") -> dict[str, tuple]:
+    out = diff_file(path, old, new)
+    assert out.status == STATUS_OK, out
+    return {c.qualified_name: c.nested_changed for c in out.changes}
+
+
+def test_a_changed_nested_function_is_named_on_its_parents_change():
+    """The parent is still the one symbol (a closure is not something another module can name), but
+    the graph records the closure as a caller in its own right — so the diff has to say which of
+    the parent's inner functions it actually rewrote, or the caller split cannot place them."""
+    old = ("def outer():\n    def inner():\n        return f(1)\n"
+           "    def other():\n        return 0\n    return inner() + other()\n")
+    new = old.replace("f(1)", "f(1, 2)")
+    assert _nested(old, new) == {"outer": ("outer.inner",)}
+
+
+def test_a_nested_function_the_diff_did_not_touch_is_not_named():
+    old = ("def outer():\n    def inner():\n        return f(1)\n"
+           "    def other():\n        return 0\n    return inner() + other()\n")
+    new = old.replace("return 0", "return 1")
+    assert _nested(old, new) == {"outer": ("outer.other",)}
+
+
+def test_nested_functions_are_named_through_every_level_and_inside_methods():
+    old = ("class C:\n    def m(self):\n        def a():\n            def b():\n"
+           "                return 1\n            return b\n        return a\n")
+    new = old.replace("return 1", "return 2")
+    assert _nested(old, new) == {"C.m": ("C.m.a", "C.m.a.b")}
+
+
+def test_the_nested_functions_of_an_added_definition_are_all_named():
+    assert _nested(None, "def outer():\n    def inner():\n        return 1\n    return inner\n") == {
+        "outer": ("outer.inner",)}
+
+
+def test_a_typescript_component_names_the_inner_functions_the_diff_rewrote():
+    """The defect as it was found: `App` (a React component) holds `downloadPlan` and `exportPlan`,
+    both rewritten together with `runnerFile`'s signature, and both were then reported as callers
+    the diff did NOT touch."""
+    old = ("export function App() {\n"
+           "  function downloadPlan() { return runnerFile(plan) }\n"
+           "  const exportPlan = () => { return runnerFile(plan) }\n"
+           "  const untouched = () => 1\n"
+           "  return null\n}\n")
+    new = ("export function App() {\n"
+           "  async function downloadPlan() { return await runnerFile(plan, 2) }\n"
+           "  const exportPlan = async () => { return await runnerFile(plan, 2) }\n"
+           "  const untouched = () => 1\n"
+           "  return null\n}\n")
+    got = _nested(old, new, path="web/src/App.tsx")
+    assert got == {"App": ("App.downloadPlan", "App.exportPlan")}

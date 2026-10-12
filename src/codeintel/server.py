@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import threading
 import time
 from typing import Annotated, Literal
@@ -12,7 +14,7 @@ from pydantic import Field
 
 from codeintel.gateway import Gateway
 from codeintel.policy import TieringPolicy
-from codeintel.provider import Result, safe_null_result
+from codeintel.provider import Result, log_swallowed, safe_null_result
 from codeintel.providers.graph import GraphProvider
 from codeintel.providers.lsp import LspProvider
 from codeintel.providers.semantic import SemanticProvider
@@ -124,6 +126,59 @@ def _refresh_missing_engines(gw: Gateway) -> None:
         pass
 
 
+# The most an MCP `code.query` envelope may serialize to. Claude Code's client refuses a tool result
+# over its token limit (25,000 by default) and spills it to a file the agent never reads, and a
+# branch-wide `changed` came back at 113,352 bytes — its `rows` repeating, as structured data, every
+# finding the `result` text already states. 40,000 bytes is about 10,000 tokens: under the limit with
+# room for the agent's own context. The CLI (`codeintel query --json`) is not bound by it.
+MCP_ENVELOPE_BUDGET_BYTES = 40_000
+
+
+def _size(obj: object) -> int:
+    return len(json.dumps(obj, default=str).encode("utf-8"))
+
+
+def compact_for_mcp(env: dict, op: str, target: str) -> dict:
+    """*env* as an MCP client can take it: unchanged when it fits the byte budget; otherwise with
+    `rows` cut to the leading rows that fit, and the cut counted (`rows_total`, `rows_omitted`)
+    and explained (`rows_note`, with the command that prints them all).
+
+    Only `rows` is cut. `result` is the answer — every finding is stated there — and the rest of the
+    envelope (`gaps`, `evidence`, `confidence`) is what says how far to trust it, so neither is
+    trimmed: an answer cut mid-text, or stripped of its caveats, is worse than one that is long."""
+    try:
+        rows = env.get("rows")
+        if not isinstance(rows, list) or not rows or _size(env) <= MCP_ENVELOPE_BUDGET_BYTES:
+            return env
+        cmd = (f"codeintel query --op {shlex.quote(op)}"
+               + (f" --target {shlex.quote(target)}" if target else "") + " --json")
+        out = dict(env)
+        out["rows"] = []
+        out["rows_total"] = len(rows)
+        out["rows_omitted"] = len(rows)
+        out["rows_note"] = (
+            f"{len(rows)} of {len(rows)} rows left out to keep this answer under the MCP client's "
+            f"size limit. The answer text in `result` is not cut; for all rows as data run "
+            f"`{cmd}` in the project root.")
+        room = MCP_ENVELOPE_BUDGET_BYTES - _size(out) - 16      # the note's count can grow a digit
+        kept = 0
+        for row in rows:
+            cost = _size(row) + 2                               # ", " between rows
+            if cost > room:
+                break
+            room -= cost
+            kept += 1
+        omitted = len(rows) - kept
+        out["rows"] = rows[:kept]
+        out["rows_omitted"] = omitted
+        out["rows_note"] = out["rows_note"].replace(
+            f"{len(rows)} of {len(rows)} rows", f"{omitted} of {len(rows)} rows", 1)
+        return out
+    except Exception as exc:
+        log_swallowed("server.compact_for_mcp", exc)
+        return env
+
+
 def code_query_handler(args: dict) -> Result:
     try:
         op = args.get("op", "")
@@ -176,6 +231,7 @@ _STATUS_FALLBACK: dict = {
     "lsp": False,
     "semantic": False,
     "indexed": False,
+    "indexed_by": [],
     "model": None,
     "healthy": False,
     # `None`, not `[]`: this fallback means the status could not be produced, and `[]` is the report's
@@ -196,8 +252,10 @@ def _code_status_handler_inner(args: dict) -> dict:
     boolean per engine, so `lsp: true` could mean "uvx is on PATH" for an engine that in fact
     never boots — an agent reading that would reason from a readiness claim nothing verified.
 
-    The flat `graph`/`lsp`/`semantic`/`indexed`/`model` keys keep their original meaning for
-    existing callers; `readiness` and `healthy` carry the full picture. That meaning is
+    The flat `graph`/`lsp`/`semantic`/`model` keys keep their original meaning for existing
+    callers; `readiness` and `healthy` carry the full picture. `indexed` changed meaning in 0.28.0:
+    it is "some indexing engine has indexed this repo" (`indexed_by` names which), no longer the
+    semantic engine's word alone. That meaning is
     INSTALLED, not usable: `graph: true` is a binary on PATH, and was reported next to a backend
     that refused to start. `degraded` names the engines that are installed and failing — including
     the optional graph engine, which `healthy` deliberately ignores — so a caller reads that
@@ -253,12 +311,17 @@ def _code_status_handler_inner(args: dict) -> dict:
         if not engines:
             engines = ["none"]
 
-        # `indexed` stays semantic-scoped and back-compatible: for a given repo it means "this
-        # repo has chunks"; with no project_root it falls back to "any index exists on this box".
-        indexed = False
+        # `indexed`: SOME engine that indexes (graph, semantic) has indexed THIS repo, and
+        # `indexed_by` names which. It used to be the semantic engine's word alone, so a repo the
+        # graph had indexed read `indexed: false` — "this repo is not indexed" — and with no
+        # project_root it was "any semantic*.db exists in the per-machine cache", which made every
+        # repo on the machine indexed once one was. Both now come from the probes of the root
+        # doctor resolved (the server's cwd when none is given), like every other field here.
+        indexed_by = [n for n in ("graph", "semantic") if readiness[n]["repo_indexed"] is True]
+        indexed = bool(indexed_by)
         model = None
         try:
-            from codeintel.semantic_db import DEFAULT_MODEL, default_db_path
+            from codeintel.semantic_db import DEFAULT_MODEL
             if semantic_available:
                 model = DEFAULT_MODEL
                 if project_root:
@@ -267,13 +330,6 @@ def _code_status_handler_inner(args: dict) -> dict:
                         model = str(load_config(project_root).get("model") or DEFAULT_MODEL)
                     except Exception:
                         pass
-                    indexed = readiness["semantic"]["repo_indexed"] is True
-                else:
-                    import glob
-                    import os
-                    # any per-model cache file (semantic.db / semantic-<hash>.db) counts as "indexed"
-                    base = os.path.dirname(default_db_path())
-                    indexed = bool(glob.glob(os.path.join(base, "semantic*.db")))
         except Exception:
             pass
 
@@ -285,6 +341,7 @@ def _code_status_handler_inner(args: dict) -> dict:
             "lsp": lsp_available,
             "semantic": semantic_available,
             "indexed": indexed,
+            "indexed_by": indexed_by,
             "model": model,
             "healthy": bool(summary.get("healthy")),
             # Derived from the probes read above rather than copied from `report`, so a report that
@@ -429,7 +486,10 @@ _MCP_INSTRUCTIONS = (
     "argument, a factory call, an alias) reaches the method without ever writing the class's name, "
     "as does an interface-typed field, a subclass or a renaming re-export — so false is not proof, "
     "and you should not filter on it before a delete or a rename. No class-qualified Python target "
-    "has been measured."
+    "has been measured.\n\n"
+    "An answer too large for this client keeps its whole `result` text but cuts `rows[]` to the "
+    "leading rows that fit: `rows_total` and `rows_omitted` count the cut, and `rows_note` gives the "
+    "`codeintel query ... --json` command that prints every row."
 )
 
 
@@ -513,9 +573,10 @@ def run() -> None:
         # annotation, and it validates a TypedDict's NotRequired keys (`reason`, `hint`) as
         # REQUIRED — so every successful query, which carries neither, comes back to the agent as
         # `isError: true`. Guarded by test_mcp_server.py::test_no_tool_advertises_the_optional_*.
-        return dict(code_query_handler(
+        # Bounded for the MCP client (`compact_for_mcp`); the CLI's `--json` keeps every row.
+        return compact_for_mcp(dict(code_query_handler(
             {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
-        ))
+        )), op, target)
 
     async def _code_status(
         project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
@@ -574,7 +635,9 @@ def run() -> None:
         annotations=ToolAnnotations(read_only_hint=True),
         description=(
             "Read-only. Which engines (graph/LSP/semantic) are available and whether this repo is "
-            "indexed. Check this first if code.query keeps returning nothing. The top-level "
+            "indexed. Check this first if code.query keeps returning nothing. `indexed` is true "
+            "when ANY indexing engine (graph or semantic) has indexed this repo, and `indexed_by` "
+            "names which — per-engine detail is `readiness.<engine>.repo_indexed`. The top-level "
             "`graph`/`lsp`/`semantic` flags mean INSTALLED, not usable — read `readiness` for "
             "that, and `degraded` for engines that are installed but failing (`healthy` ignores "
             "the optional graph engine)."
