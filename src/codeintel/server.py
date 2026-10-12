@@ -138,7 +138,7 @@ def _size(obj: object) -> int:
     return len(json.dumps(obj, default=str).encode("utf-8"))
 
 
-def compact_for_mcp(env: dict, op: str, target: str) -> dict:
+def compact_for_mcp(env: dict, op: str, target: str, offset: int = 0) -> dict:
     """*env* as an MCP client can take it: unchanged when it fits the byte budget; otherwise with
     `rows` cut to the leading rows that fit, and the cut counted (`rows_total`, `rows_omitted`)
     and explained (`rows_note`, with the command that prints them all).
@@ -151,7 +151,8 @@ def compact_for_mcp(env: dict, op: str, target: str) -> dict:
         if not isinstance(rows, list) or not rows or _size(env) <= MCP_ENVELOPE_BUDGET_BYTES:
             return env
         cmd = (f"codeintel query --op {shlex.quote(op)}"
-               + (f" --target {shlex.quote(target)}" if target else "") + " --json")
+               + (f" --target {shlex.quote(target)}" if target else "")
+               + (f" --offset {int(offset)}" if offset else "") + " --json")
         out = dict(env)
         out["rows"] = []
         out["rows_total"] = len(rows)
@@ -219,7 +220,12 @@ def code_query_handler(args: dict) -> Result:
                 and bool(args.get("allow_cwd_default", True))
                 and gw.allows_root(role, project_root)):
             project_root = os.getcwd()
-        return gw.query(op=op, target=target, engine=engine, role=role, project_root=project_root)
+        try:
+            offset = max(0, int(args.get("offset", 0) or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        return gw.query(op=op, target=target, engine=engine, role=role, project_root=project_root,
+                        offset=offset)
     except Exception:
         return safe_null_result("", "", reason="handler-error")
 
@@ -548,6 +554,12 @@ _PROJECT_ROOT_FIELD_DESCRIPTION = (
     "role-based access control a blank value is rejected rather than defaulted — so pass it "
     "explicitly whenever you know it."
 )
+_OFFSET_FIELD_DESCRIPTION = (
+    "Page cursor for `changed` with a base ref as `target`, ignored by every other op. Such an "
+    "answer looks up at most 40 changed symbols, most severe first; when there are more, its "
+    "`page.next_offset` (and the `symbols-truncated` gap) names the offset that looks up the next "
+    "40. Leave it 0 for the first page."
+)
 _ENGINE_FIELD_DESCRIPTION = "Which engine answers. Leave as `auto` — it already picks the right engine per op."
 _ROLE_FIELD_DESCRIPTION = (
     "Reserved for the HTTP transport, which sets it server-side from the caller's auth token and "
@@ -568,6 +580,7 @@ def run() -> None:
         project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",
         engine: Annotated[_QueryEngine, Field(description=_ENGINE_FIELD_DESCRIPTION)] = "auto",
         role: Annotated[str, Field(description=_ROLE_FIELD_DESCRIPTION)] = "",
+        offset: Annotated[int, Field(description=_OFFSET_FIELD_DESCRIPTION)] = 0,
     ) -> dict:
         # MUST stay `dict`, not `Result`. FastMCP derives this tool's output schema from the return
         # annotation, and it validates a TypedDict's NotRequired keys (`reason`, `hint`) as
@@ -575,8 +588,9 @@ def run() -> None:
         # `isError: true`. Guarded by test_mcp_server.py::test_no_tool_advertises_the_optional_*.
         # Bounded for the MCP client (`compact_for_mcp`); the CLI's `--json` keeps every row.
         return compact_for_mcp(dict(code_query_handler(
-            {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role}
-        )), op, target)
+            {"op": op, "target": target, "project_root": project_root, "engine": engine, "role": role,
+             "offset": offset}
+        )), op, target, offset)
 
     async def _code_status(
         project_root: Annotated[str, Field(description=_PROJECT_ROOT_FIELD_DESCRIPTION)] = "",

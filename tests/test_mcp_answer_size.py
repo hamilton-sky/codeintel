@@ -92,3 +92,23 @@ def test_compacting_never_raises_and_falls_back_to_the_envelope_as_it_was():
     loop["self"] = loop                                  # json.dumps raises ValueError on a cycle
     env = {"ok": True, "result": "x", "rows": [loop]}
     assert srv.compact_for_mcp(env, "changed", "main") is env
+
+
+def test_code_query_takes_an_offset_and_passes_it_through(monkeypatch):
+    """D5: the page cursor reaches the handler from MCP, and its description says which op reads it."""
+    from mcp.server.mcpserver.tools import Tool
+
+    seen: dict = {}
+    monkeypatch.setattr(srv, "code_query_handler", lambda args: seen.update(args) or {"ok": True})
+    tool = _registered_tools(monkeypatch)["code.query"]
+    asyncio.run(tool(op="changed", target="main", project_root="/repo", offset=40))
+    assert seen["offset"] == 40
+    schema = Tool.from_function(tool, name="code.query").parameters
+    assert "changed" in schema["properties"]["offset"]["description"]
+
+
+def test_the_cli_takes_an_offset(monkeypatch):
+    from codeintel.__main__ import build_parser
+
+    args = build_parser().parse_args(["query", "--op", "changed", "--target", "main", "--offset", "40"])
+    assert args.offset == 40

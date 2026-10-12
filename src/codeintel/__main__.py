@@ -449,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
              "safe to omit) by `overview`/`hotspots`.",
     )
     query_parser.add_argument(
+        "--offset", type=int, default=0,
+        help="For `changed` with a base ref: skip this many changed symbols (most severe first) — "
+             "the page cursor a capped answer names as `page.next_offset`. Default 0.",
+    )
+    query_parser.add_argument(
         "--engine", choices=QUERY_ENGINES, default="auto",
         help="Which engine answers (default: auto — picks the right engine per op)",
     )

@@ -4,6 +4,19 @@ All notable changes to codeintel are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`changed <ref>` can be paged past its 40-symbol cap.** A branch with more changed symbols
+  said "103 of 143 changed symbols were not looked up" and `code.query` had no way to ask for the
+  rest. `code.query` takes `offset` (CLI `--offset`): `offset=40` looks up symbols 41–80 of the
+  same severity-ordered list. The answer publishes `page: {offset, limit, total, next_offset}`, and
+  the `symbols-truncated` gap names the offset of the next page, or says that one is past the end.
+  A page is never the whole answer, so it stays `partial`. Paging, rather than raising the cap,
+  keeps each answer inside the MCP size bound from 0.28.0. `offset` with no base ref (the
+  uncommitted answer, which is not paged) raises an `offset-not-applied` gap instead of being
+  silently ignored.
+
 ## [0.28.0] — 2026-10-12
 
 Four defects in the `changed` and `status` answers, each found on a real branch review on

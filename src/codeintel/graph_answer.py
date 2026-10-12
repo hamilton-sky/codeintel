@@ -88,6 +88,8 @@ class AnswerRendering:
         _pending_row_cap: bool
         _pending_withheld: int
         _pending_nonrow_lines: bool
+        _changed_offset: int
+        _pending_page: dict[str, Any] | None
 
         def _add_gap(self, section: str, kind: str, detail: str) -> None: ...
 

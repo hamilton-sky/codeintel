@@ -308,13 +308,37 @@ class ChangedSince(AnswerRendering):
             key=lambda e: (SEVERITY[e.change.change], _is_class_body(e.change),
                            self._looks_like_test(e.path, e.bare),
                            e.path, e.change.new_line or e.change.old_line or 0))
-        looked, skipped = candidates[: self._RANGE_SYMBOL_CAP], candidates[self._RANGE_SYMBOL_CAP:]
-        if skipped:
+        # One PAGE of the severity-ordered list is looked up: the cap keeps an answer one that an
+        # MCP client can take, and `offset` (D5) is how the rest is reached — a bigger cap would
+        # grow the `result` text, which is never cut, past the client's limit again.
+        cap, total = self._RANGE_SYMBOL_CAP, len(candidates)
+        start = min(self._changed_offset, total)
+        before, looked = candidates[:start], candidates[start: start + cap]
+        after = candidates[start + cap:]
+        skipped = before + after
+        next_offset = start + cap if after else None
+        self._pending_page = {"offset": start, "limit": cap, "total": total,
+                              "next_offset": next_offset}
+        more = (f" — re-ask with `offset={next_offset}` for the next {min(cap, len(after))}"
+                if next_offset is not None else "")
+        if self._changed_offset >= total and self._changed_offset > 0:
             gaps.append((
                 "symbols-truncated",
-                f"{len(skipped)} of {len(candidates)} changed symbols were not looked up — the "
-                f"lookup is capped at {self._RANGE_SYMBOL_CAP}, most severe first (removed, then "
-                f"signature, then body), so what was dropped is the least consequential tail"))
+                f"offset={self._changed_offset} is past the last of the {total} changed symbols, "
+                f"so none was looked up — pages start at 0 and step by {cap}"))
+        elif start:
+            gaps.append((
+                "symbols-truncated",
+                f"this page looked up symbols {start + 1} to {start + len(looked)} of {total} "
+                f"(offset={start}, {cap} per page, most severe first); the {len(before)} before it "
+                f"and {len(after)} after it were not looked up in this answer{more}"))
+        elif skipped:
+            gaps.append((
+                "symbols-truncated",
+                f"{len(skipped)} of {total} changed symbols were not looked up — the "
+                f"lookup is capped at {cap}, most severe first (removed, then "
+                f"signature, then body), so what was dropped is the least consequential tail"
+                f"{more}"))
 
         # --------------------------------------------------------------------- look them up
         deadline = time.monotonic() + self._RANGE_LOOKUP_BUDGET_S

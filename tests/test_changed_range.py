@@ -1625,3 +1625,74 @@ def test_a_react_components_inner_functions_rewritten_with_the_callee_land_under
     assert _status_of(env, "runnerFile") == {
         scope + "downloadPlan": "also-changed", scope + "exportPlan": "also-changed",
         scope + "printPlan": "untouched"}, env["result"]
+
+
+# ================================ D5: the symbol cap can be paged past, not only disclosed
+
+def _ask_page(p: GraphProvider, repo: Path, offset: int, target: str = "main") -> dict[str, Any]:
+    return p.build_result("changed", target, [], 30000, str(repo), offset=offset)
+
+
+def test_the_first_page_says_how_to_ask_for_the_next(monkeypatch, tmp_path, repo):
+    """"103 of 143 changed symbols were not looked up" and code.query had no way to ask for them.
+    The gap now names the offset that looks the next ones up, and `page` carries it as data."""
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    p._RANGE_SYMBOL_CAP = 2
+    env = _ask(p, repo)
+    gap = next(g for g in env["gaps"] if g["kind"] == "symbols-truncated")
+    assert "offset=2" in gap["detail"], gap
+    assert env["page"] == {"offset": 0, "limit": 2, "total": 4, "next_offset": 2}, env.get("page")
+
+
+def test_an_offset_looks_up_the_next_page_of_symbols(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    p._RANGE_SYMBOL_CAP = 2
+    env = _ask_page(p, repo, 2)
+    body = env["result"]
+    assert "#### `rewrite` — body" in body and "`use_resig`" in body.split("### Not looked up")[0], body
+    assert "#### `gone`" not in body and "#### `resig`" not in body, "page 1's symbols are not repeated"
+    assert env["page"] == {"offset": 2, "limit": 2, "total": 4, "next_offset": None}, env["page"]
+    gap = next(g for g in env["gaps"] if g["kind"] == "symbols-truncated")
+    assert "symbols 3 to 4 of 4" in gap["detail"] and "2 before" in gap["detail"], gap
+    assert env["confidence"] == "partial", "one page of several is never the whole answer"
+    assert env.get("evidence", {}).get("safe_for_destructive") is not True
+
+
+def test_an_offset_past_the_end_looks_up_nothing_and_says_so(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    env = _ask_page(p, repo, 99)
+    gap = next(g for g in env["gaps"] if g["kind"] == "symbols-truncated")
+    assert "past the last of the 4 changed symbols" in gap["detail"], gap
+    assert env["page"]["next_offset"] is None and env["confidence"] == "partial"
+
+
+def test_a_negative_offset_is_the_first_page(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    assert _ask_page(p, repo, -5)["page"]["offset"] == 0
+
+
+def test_an_offset_does_not_outlive_its_own_question(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    p._RANGE_SYMBOL_CAP = 2
+    _ask_page(p, repo, 2)
+    assert _ask(p, repo)["page"]["offset"] == 0
+
+
+def test_an_offset_on_uncommitted_changed_is_reported_as_not_applied(monkeypatch, tmp_path, repo):
+    """With no base ref `changed` lists files and impacted symbols, not a capped symbol lookup, so
+    there is nothing to page. Ignoring the parameter silently would read as "this is page 2"."""
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        {"projects": [{"name": PROJECT, "root_path": str(repo)}]} if method == "list_projects"
+        else {"changed_files": ["pkg/core.py"], "impacted_symbols": []}))
+    monkeypatch.setattr(p, "_query_rows", lambda cypher, project, timeout_ms: [])
+    env = _ask_page(p, repo, 40, target="")
+    assert "offset-not-applied" in _gap_kinds(env), env.get("gaps")
+
+
+def test_the_gateway_hands_the_offset_to_the_graph_engine(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
+    p._RANGE_SYMBOL_CAP = 2
+    gw = Gateway(graph=p, lsp=None, semantic=None, oneshot=True)
+    env = gw.query(op="changed", target="main", budget=30000, project_root=str(repo), offset=2)
+    assert env["page"]["offset"] == 2, env.get("page")

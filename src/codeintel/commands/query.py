@@ -105,6 +105,7 @@ def _query(args: Any) -> Result:
             role="",
             budget=_budget_ms(),
             project_root=project_root,
+            offset=max(0, int(getattr(args, "offset", 0) or 0)),
         )
 
     result = _run_query()
