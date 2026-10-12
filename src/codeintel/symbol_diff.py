@@ -44,10 +44,13 @@ THREE THINGS IT DECLINES TO DO, because the alternative is a classification nobo
 from __future__ import annotations
 
 import ast
+import io
 import os
 import re
+import sys
+import tokenize
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 REMOVED = "removed"
@@ -294,13 +297,95 @@ def _child_blocks(node: ast.AST) -> Iterable[list[ast.stmt]]:
                 yield v.body
 
 
+_PARSE_ERRORS = (SyntaxError, ValueError, RecursionError, MemoryError)
+
+
+def _parenthesize_except_lists(source: str) -> str | None:
+    """*source* with every PEP 758 `except A, B:` written as `except (A, B):`, or None if it has none.
+
+    Python 3.14 dropped the parentheses (PEP 758); an older interpreter's `ast.parse` rejects the
+    whole file for it, and every definition in it then went unseen. The two spellings are the same
+    tree on 3.14 — an `ExceptHandler` whose `type` is a `Tuple` — so rewriting them is a reading of
+    the file, not a guess at it. A list followed by `as` is left alone: that still needs the
+    parentheses on 3.14, and accepting it would read a file no interpreter runs. Only the clause's
+    own line(s) change, and only by inserting two characters, so line numbers survive."""
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    inserts: list[tuple[tuple[int, int], str]] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if not (tok.type == tokenize.NAME and tok.string == "except"):
+            i += 1
+            continue
+        j = i + 1
+        if j < len(toks) and toks[j].type == tokenize.OP and toks[j].string == "*":
+            j += 1
+        start, depth, comma, end, has_as = j, 0, False, None, False
+        while j < len(toks):
+            t = toks[j]
+            if t.type == tokenize.OP and t.string in "([{":
+                depth += 1
+            elif t.type == tokenize.OP and t.string in ")]}":
+                depth -= 1
+            elif depth == 0 and t.type == tokenize.OP and t.string == ",":
+                comma = True
+            elif depth == 0 and t.type == tokenize.NAME and t.string == "as":
+                has_as = True
+            elif depth == 0 and t.type == tokenize.OP and t.string == ":":
+                end = j
+                break
+            elif t.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                break
+            j += 1
+        if comma and not has_as and end is not None and start < end:
+            inserts.append((toks[start].start, "("))
+            inserts.append((toks[end].start, ")"))
+        i = j + 1
+    if not inserts:
+        return None
+    lines = source.splitlines(keepends=True)
+    # Back to front, so an insertion never moves a position still to be used.
+    for (row, col), text in sorted(inserts, reverse=True):
+        line = lines[row - 1]
+        lines[row - 1] = line[:col] + text + line[col:]
+    return "".join(lines)
+
+
+def _parse_python(source: str) -> ast.Module:
+    """`ast.parse`, but a file is not unreadable merely for being newer than this interpreter.
+
+    The one newer spelling that is known to stop a whole real file — PEP 758's unparenthesized
+    `except` list — is read as what it means. Anything else this interpreter cannot parse raises
+    as before, and the caller says WHICH Python failed to read it (`_unparsable_reason`)."""
+    try:
+        return ast.parse(source)
+    except SyntaxError as exc:
+        rewritten = _parenthesize_except_lists(source) if sys.version_info < (3, 14) else None
+        if rewritten is None:
+            raise
+        try:
+            return ast.parse(rewritten)
+        except _PARSE_ERRORS:
+            raise exc from None
+
+
+def _unparsable_reason(exc: BaseException) -> str:
+    reason = f"line {exc.lineno}: {exc.msg}" if isinstance(exc, SyntaxError) else (
+        f"{type(exc).__name__}: {exc}")
+    # The interpreter is named because "does not parse" is otherwise read as "this file is broken",
+    # and a file written for a newer Python than the tool runs on is not.
+    here = f"Python {sys.version_info.major}.{sys.version_info.minor}"
+    return f"does not parse as Python ({reason}; parsed with {here}, so newer syntax also fails)"
+
+
 def _python_definitions(source: str) -> tuple[dict[str, list[_One]], int]:
     try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
-        reason = f"line {exc.lineno}: {exc.msg}" if isinstance(exc, SyntaxError) else (
-            f"{type(exc).__name__}: {exc}")
-        raise _Unparsable(f"does not parse as Python ({reason})"[:200]) from exc
+        tree = _parse_python(source)
+    except _PARSE_ERRORS as exc:
+        raise _Unparsable(_unparsable_reason(exc)[:240]) from exc
     out: dict[str, list[_One]] = {}
 
     def visit(stmts: list[ast.stmt], prefix: str, in_class: bool) -> None:
@@ -478,8 +563,8 @@ def classify_mentions(source: str, name: str, lines: Iterable[int]) -> dict[int,
     the line is code."""
     wanted = list(lines)
     try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        tree = _parse_python(source)
+    except _PARSE_ERRORS:
         return {}
     word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
     code: set[int] = set()
