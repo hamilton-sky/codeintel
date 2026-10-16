@@ -155,3 +155,39 @@ def test_the_gate_still_reads_graph_verified_and_nothing_else():
 
     assert 'direct["graph_verified"]' in inspect.getsource(score.run)
     assert "graph_qualified" not in inspect.getsource(score._gate)
+
+
+def _ambiguous_then_narrowed(monkeypatch, *, def_file):
+    """Stub the engine the way it answered `_broadcast` on pathly-adapters: a bare name three
+    functions share comes back with every one's callers and a `target-ambiguous` gap, and the
+    narrowed `name@file` question comes back with only the asked-about symbol's callers."""
+    other = _row("scheduler_loop", evidence="resolved", seen=None, verified=True, file="src/other.ts")
+    mine = _row("tail_events", evidence="resolved", seen=None, verified=True)
+    asked: list[str] = []
+
+    def run(_root, _op, target, _engine, _exe):
+        asked.append(target)
+        if "@" in target:
+            return {"result": _body([mine]), "rows": [mine], "gaps": []}
+        return {"result": _body([other, mine]), "rows": [other, mine],
+                "gaps": [{"kind": "target-ambiguous", "section": "callers",
+                          "detail": "2 distinct symbols named `Chain.resolve` match this target"}]}
+
+    monkeypatch.setattr(score, "_run_codeintel", run)
+    return score.graph_answer("/root", "Chain.resolve", "codeintel", def_file=def_file), asked
+
+
+def test_an_ambiguous_target_is_asked_again_by_the_file_the_oracle_labelled(monkeypatch):
+    # The gap names the remedy (`name@<file>`), and the benchmark knows the file, so it follows
+    # the remedy the way an agent reading the gap would. Scoring the bare answer charged the engine
+    # a false positive for every verified caller of a DIFFERENT function sharing the name.
+    (graph, verified, qualified), asked = _ambiguous_then_narrowed(monkeypatch, def_file=FILE)
+    assert asked == ["Chain.resolve", f"Chain.resolve@{FILE}"]
+    for arm in (graph, verified, qualified):
+        assert _names(arm) == {"tail_events"}
+
+
+def test_without_a_definition_file_the_ambiguous_answer_is_scored_as_given(monkeypatch):
+    (_, verified, _), asked = _ambiguous_then_narrowed(monkeypatch, def_file=None)
+    assert asked == ["Chain.resolve"]
+    assert _names(verified) == {"scheduler_loop", "tail_events"}
