@@ -16,6 +16,15 @@ All notable changes to codeintel are documented here. The format is based on
   keeps each answer inside the MCP size bound from 0.28.0. `offset` with no base ref (the
   uncommitted answer, which is not paged) raises an `offset-not-applied` gap instead of being
   silently ignored.
+- **The call-edge benchmark's 95% gate runs nightly** (`bench-gate` in `corpus.yml`), on
+  `pathly-adapters` and `daycap` at pinned SHAs. It used to run only by hand.
+
+### Fixed
+- **The README said the LSP contract job was `continue-on-error` against serena's git HEAD.** Serena
+  has been pinned to a commit, and `lsp-contract` has gated CI, since 0.23.1, and an outside review
+  repeated the stale sentence as a weakness. `test_docs_ci_claims.py` now checks both directions,
+  plus the Python versions the README names against the test matrix (3.14 was missing). The test
+  count in Development is updated too.
 
 ## [0.28.0] — 2026-10-12
 

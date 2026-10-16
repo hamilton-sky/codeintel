@@ -56,11 +56,16 @@ In:
 - Structural implementer discovery for TypeScript interfaces and its use in
   the `callers` dispatch (`src/codeintel/graph_dispatch.py`), following the
   existing Python Protocol handling.
+- Index age on every graph-answered `callers` and `impact` answer (ticket
+  08), reusing the check `changed` already runs. Not a dogfood defect from
+  this round but the failure mode the README names as this project's
+  characteristic one, and the outside review's main worry.
 
 Not in scope:
-- Release hygiene from the same review round (tag 0.28.0, PyPI publish, the
-  three stale README sentences, benchmark gate in the nightly corpus job) —
-  human chores, minutes each, not ticket work.
+- Release hygiene from the same review round. The stale README sentences
+  and the nightly benchmark gate (`corpus.yml`'s `bench-gate` job) landed
+  with the review of this plan; tagging 0.28.0 (which publishes to PyPI) is
+  the maintainer's call and stays outside the tickets.
 - Python Protocol behavior — unchanged; it is the model the TS work follows.
 - Any change to the safe-null / never-raise contract.
 
@@ -95,10 +100,14 @@ that decision:
 [03 doctor warming state] ──────────┘         ▲
 [04 settle: link source] ──► [05 discover TS structural implementers]
                                  ──► [06 callers-through rendering] ──┘
+
+[08 index age on graph answers]   (independent; not part of 07's bar)
 ```
 
 Tickets 01–03 touch three different files and share nothing; 04–06 are the
-only chain. 07 is blocked by 01, 02, 03, 06.
+only chain. 07 is blocked by 01, 02, 03, 06. 08 shares no file with 01–03
+and touches `graph_dispatch.py` like 05–06, so run it before 05 or after 06
+rather than alongside them.
 
 ### Decisions
 
@@ -127,6 +136,8 @@ only chain. 07 is blocked by 01, 02, 03, 06.
   structural interfaces, with a new `via_kind` value; rows are candidates,
   never `verified`, and their presence keeps `safe_for_destructive: false`
   (same rules as the existing Protocol/base sections).
+- `callers` and `impact` answers can carry the `stale-index` and
+  `index-age-unknown` gaps `changed` already raises (ticket 08).
 - No CLI flag changes. No envelope field changes.
 
 ## Risks

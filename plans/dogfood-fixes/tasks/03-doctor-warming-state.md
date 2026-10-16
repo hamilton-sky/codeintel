@@ -25,7 +25,8 @@ not change; only the note under it does.
 ## Not in this ticket
 
 - Making the warm itself finish the downloads — ticket 02. This ticket is
-  the messaging for the residual case.
+  the messaging for the residual case, and it owns the "warming" wording:
+  define it once here so ticket 02's in-progress line reuses it.
 - The semantic engine's states — unchanged.
 
 ## Done when

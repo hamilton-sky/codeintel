@@ -17,7 +17,10 @@ an interface `StorePort` with two methods (`read(key: string): string`,
 explicit `implements StorePort` clause; one structural-only class
 `AtomicFileStore` with matching methods and no `implements` clause (this
 mirrors the real dogfood case); one unrelated class `ConsoleLogger` with a
-same-named `write(msg: string): void` but a different shape; and at least
+same-named `write(msg: string): void` but a different shape; one class
+`KeyCounter` that has BOTH `read` and `write`, with the wrong signatures
+(`read(): number`, `write(n: number): void`) — the hard negative, since it
+is the class name-only matching (option A) would wrongly accept; and at least
 one call site through a `StorePort`-typed reference. The fixture is
 asserted on by this ticket's tests and reused by 06 and 07 — do not
 hand-roll a second one.
@@ -38,12 +41,23 @@ a comment).
 - New tests fail before and pass after: discovery returns both the explicit
   and the structural implementer for the fixture interface, returns neither
   for the unrelated class, and returns empty for an interface with no
-  implementers.
+  implementers. `KeyCounter` is either rejected or, if 04 settled on
+  name-only matching that cannot see signatures, returned and the test
+  says so in its name: the weakness is pinned, not hidden.
+- A live test in `tests/test_graph_real.py` indexes the fixture with the real
+  `codebase-memory-mcp` and asserts the same discovery result. The unit
+  tests above run on hand-authored graph payloads, so they cannot show what
+  the real index records for TypeScript; this one runs in the
+  `graph-contract` CI job, which fails if its live tests skip. (Run the
+  check below with the backend on `PATH`; without it the live test skips.)
 - The full suite still passes: `pytest tests/ -q` exits 0.
 
 ```check
 # The conductor runs this block before review.
 $ pytest tests/test_graph_provider.py -q
+exit 0
+prints passed
+$ pytest tests/test_graph_real.py -q -rs -o addopts=
 exit 0
 prints passed
 $ pytest tests/ -q

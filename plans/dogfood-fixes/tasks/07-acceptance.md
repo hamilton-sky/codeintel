@@ -10,6 +10,14 @@ Run the spec's bar end to end. No new logic in this ticket — it proves the
 earlier tickets hold together on real commands. `Review: full` because it is
 the last line of defense for the whole feature.
 
+**Prerequisite.** The `callers` check needs the graph engine: the pinned
+`codebase-memory-mcp` on `PATH` (`pip install 'codebase-memory-mcp==0.9.*'`,
+as the `graph-contract` job installs it) and the fixture indexed first.
+Without either, the graph engine safe-nulls, "Callers through" never prints,
+and the check fails for a reason that says nothing about tickets 05–06.
+Run `codeintel doctor tests/fixtures/ts-structural` first; if the graph row
+is not green, stop and fix the environment, not the code.
+
 ## Not in this ticket
 
 - New behavior of any kind. A failure here reopens the ticket that owns it.
@@ -31,6 +39,10 @@ the last line of defense for the whole feature.
 
 ```check
 # The conductor runs this block before review.
+$ codebase-memory-mcp --version
+exit 0
+$ codeintel index tests/fixtures/ts-structural
+exit 0
 $ codeintel query --op callers --target AtomicFileStore.write --project-root tests/fixtures/ts-structural
 prints Callers through
 $ pytest tests/test_index_failure_reason.py tests/test_doctor.py tests/test_graph_provider.py -q
