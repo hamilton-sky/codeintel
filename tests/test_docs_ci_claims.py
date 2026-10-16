@@ -97,3 +97,42 @@ def test_readme_reflects_which_contract_jobs_actually_gate(ci_text, readme_text)
             f"contract job(s) {soft} are continue-on-error, so they do not gate a release — the "
             "README describes the contract coverage without saying which parts are non-gating"
         )
+
+
+def _sentences_naming(text: str, name: str) -> list[str]:
+    """Every sentence of `text` that names `name`, with line wrapping undone."""
+    flat = re.sub(r"\s+", " ", text)
+    return [s for s in re.split(r"(?<=[.!?])\s+", flat) if name in s]
+
+
+def test_readme_does_not_call_a_gating_contract_job_soft(ci_text, readme_text):
+    """The other direction of the check above, and the one that actually drifted.
+
+    `lsp-contract` became a blocking job when serena was pinned to a commit, but the README went on
+    telling readers it was `continue-on-error` against an upstream git HEAD, so an outside reviewer
+    repeated the stale claim as a weakness. Each sentence that names a gating contract job must not
+    also call it `continue-on-error`.
+    """
+    for name, body in _job_blocks(ci_text).items():
+        if "contract" not in name:
+            continue
+        if re.search(r"^\s*continue-on-error:\s*true\s*$", body, re.M):
+            continue
+        stale = [s for s in _sentences_naming(readme_text, f"`{name}`") if "continue-on-error" in s]
+        assert not stale, (
+            f"ci.yml runs `{name}` as a gating job, but the README calls it continue-on-error: "
+            f"{stale[0]!r}"
+        )
+
+
+def test_readme_names_the_python_versions_the_test_job_runs(ci_text, readme_text):
+    blocks = _job_blocks(ci_text)
+    assert "test" in blocks, "no `test` job in ci.yml — the parser or the workflow changed"
+    m = re.search(r"python-version:\s*\[([^\]]*)\]", blocks["test"])
+    assert m, "the `test` job has no python-version matrix — the parser or the workflow changed"
+    versions = re.findall(r"\"([0-9.]+)\"", m.group(1))
+    claimed = "Python " + "/".join(versions)
+    assert claimed in readme_text, (
+        f"ci.yml's test job runs {versions}, but the README does not say {claimed!r} — the "
+        "versions it names have drifted from the matrix"
+    )

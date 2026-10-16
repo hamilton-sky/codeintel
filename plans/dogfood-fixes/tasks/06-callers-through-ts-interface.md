@@ -35,11 +35,16 @@ callers you must not change this method blind to, and nothing stronger."
   site under "Callers through", carries the `via`/`via_kind` fields, is not
   `verified`, and the answer is `partial` with `safe_for_destructive:
   false`; the interface declaration file appears in no caller row.
+- A live test in `tests/test_graph_real.py` asserts the same on the fixture
+  indexed by the real backend (it runs in the `graph-contract` job).
 - The full suite still passes: `pytest tests/ -q` exits 0.
 
 ```check
 # The conductor runs this block before review.
 $ pytest tests/test_graph_provider.py -q
+exit 0
+prints passed
+$ pytest tests/test_graph_real.py -q -rs -o addopts=
 exit 0
 prints passed
 $ pytest tests/ -q

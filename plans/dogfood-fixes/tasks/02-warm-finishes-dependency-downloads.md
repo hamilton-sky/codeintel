@@ -18,7 +18,9 @@ Stage the warm so each download runs to completion: (1) uvx/serena fetch,
 (2) serena boot, (3) one language-server start per language named in the
 repo's `.serena/project.yml`, each with its own progress line and a budget
 that covers a cold download rather than a warm boot. While any stage is
-still running the warm reports "warming", not failure. Do not just raise
+still running the warm reports that stage as in progress, not failed. The
+user-facing "warming" wording is ticket 03's; this ticket reuses its
+constant rather than writing its own. Do not just raise
 the single timeout — that moves the cliff instead of removing it.
 
 The warm must stay idempotent and must not change what a warm repo does
@@ -34,7 +36,7 @@ fast).
 
 - New tests in `tests/test_onboarding.py` fail before and pass after: with
   the stage commands stubbed, the warm invokes all three stages in order and
-  reports "warming" (not failure) while a stage is still running; with
+  reports the stage as in progress (not failure) while it is still running; with
   everything present it skips each stage and finishes fast.
 - On a real cold repo the e2e holds: `codeintel setup --all <repo>` finishes
   with the language server installed, and the immediately following

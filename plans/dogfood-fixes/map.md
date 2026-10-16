@@ -21,11 +21,14 @@ three end to end.
 
 ## How to work this
 
-- See what is ready: `python3 scripts/flow-status.py dogfood-fixes`. Take the lowest numbered READY ticket.
+- See what is ready: a ticket is ready when its `Status:` is `open` and every ticket in its
+  `Blocked by:` line is `resolved`. Take the lowest numbered ready ticket.
+  (`grep -H '^Status:\|^Blocked by:' plans/dogfood-fixes/tasks/*.md` shows all of them at once.
+  feature-flow's `scripts/flow-status.py` is not vendored into this repository.)
 - Claim: set `Status: claimed` in the ticket and save before starting.
 - Resolve: write the result under `## Answer`, set `Status: resolved`, then add one line to
   Decisions so far below.
-- See the graph: `python3 scripts/flow-status.py dogfood-fixes --mermaid` (coloured by status, drawn on demand).
+- See the graph: the dependency diagram in `spec.md` § Design.
 - Commands live in `commands.md` (frozen). Lessons live in `learnings.md` (append only).
 - Status lives only in the ticket files. This map never repeats it.
 

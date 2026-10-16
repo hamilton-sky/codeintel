@@ -45,6 +45,9 @@ verified-caller precision gate: 97% vs 95% floor — PASS
 | 1 | `graph_verified` direct precision is below the floor, **or could not be measured at all** |
 | 2 | the harness could not run — a missing clone, an unlisted repo. Not an engine result |
 
+It runs nightly for `pathly-adapters` and `daycap`, each at a pinned SHA, in the `bench-gate` job of
+`.github/workflows/corpus.yml`. `snitch-simulator` is not in it because that repository is not public.
+
 The floor is `score.VERIFIED_PRECISION_FLOOR`, **95%, agreed 2026-09-18**. The readiness doc's Phase
 6 had asked for "an agreed threshold" and carried that phrase unagreed, which is a gate that cannot
 be failed and so cannot be passed either.

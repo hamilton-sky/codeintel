@@ -556,7 +556,7 @@ An honest picture, so you can decide what to trust this with.
 
 **What's solid.** The suite is large and real — more test code than source, a coverage floor
 enforced in CI, and fault-injection tests behind the never-raise contract. CI runs lint, `mypy`,
-and the full suite on Python 3.11/3.12/3.13, then builds the wheel, installs it into a clean
+and the full suite on Python 3.11/3.12/3.13/3.14, then builds the wheel, installs it into a clean
 environment, and runs a **release canary** that registers the build with Codex and Claude Code in a
 throwaway `HOME`, boots the server those configs name, and asserts on the answer text of a real
 `code.query`. A release that installs into a file no host reads, or that boots and answers nothing,
@@ -588,10 +588,10 @@ skip and those engines run against hand-authored mocks rather than the real wire
 jobs cover the contract itself: `graph-contract` installs the pinned `codebase-memory-mcp` and runs
 the live graph tests — and **fails if they skipped**, because a silently-skipped contract test is
 how a total backend outage stayed green here once — while the nightly corpus job runs that same
-real backend against pinned third-party repositories. `lsp-contract` runs the live serena tests but
-is **`continue-on-error`**: serena is fetched from an upstream git HEAD this project does not
-control, so a breakage there must be visible without blocking an unrelated release. Read that as
-the LSP wire contract being *watched* rather than *gated*. The release canary — the only check that
+real backend against pinned third-party repositories. `lsp-contract` runs the live serena tests
+against the exact serena commit the provider launches (`providers/lsp.py`'s `_SERENA_REV`), and it
+**gates**: a serena regression turns CI red, and moving to a newer serena means bumping that pin
+with the contract job green against it. The release canary — the only check that
 asserts on real answer text from a built wheel — still covers **the semantic engine only**.
 
 Line coverage measures how much of the intended behavior runs, not how much of reality it has met.
@@ -656,7 +656,7 @@ git clone https://github.com/hamilton-sky/codeintel.git
 cd codeintel
 pip install -e .[dev]
 
-pytest tests/ -q            # ~740 tests, ~30s; fails under 83% coverage
+pytest tests/ -q            # ~2,200 tests, a few minutes; fails under 83% coverage
 ruff check src tests bench  # lint
 mypy                        # types (src/ only)
 ```

@@ -56,3 +56,59 @@ jobs:
           # happened (`test_deadcode_precision_and_recall_are_measured_not_assumed`) and retired the
           # op, so the flag now enables nothing and exporting it would imply otherwise.
         run: pytest tests/test_corpus.py -v -rs -o addopts=
+
+  # The call-edge benchmark's release gate (`bench/run.py`, verified-caller direct precision >= 95%,
+  # per repository, never pooled). It used to run only when someone ran it by hand, so the floor
+  # was a number the README quoted rather than one anything checked. Nightly for the reason above:
+  # it clones and indexes real repositories.
+  #
+  # Each repository is pinned to a SHA so a night's verdict changes only when codeintel or the
+  # backend does: the oracle recomputes truth from the tree, but the target list in `bench/run.py`
+  # names files and symbols, and a moving HEAD would turn a renamed file into a harness failure.
+  # Bump a SHA deliberately, together with the targets. `snitch-simulator` is not here because its repository is not public; `corpus-ts` is a
+  # smoke fixture the gate exempts by design.
+  bench-gate:
+    name: Call-edge benchmark gate (${{ matrix.repo }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: pathly-adapters
+            url: https://github.com/hamilton-sky/pathly-adapters
+            sha: 98185757d6cba9819f1fe65bb8a0ebc67569465c
+          - repo: daycap
+            url: https://github.com/hamilton-sky/daycap
+            sha: 71502b896af0eb3057ff11ef55dfa1f7c45074b2
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      - name: Install the pinned graph backend
+        run: pip install 'codebase-memory-mcp==0.9.*'
+
+      - name: Warm the backend runtime
+        run: codebase-memory-mcp --version
+
+      - name: Check out ${{ matrix.repo }} at its pinned SHA
+        run: |
+          git init -q /tmp/bench/${{ matrix.repo }}
+          git -C /tmp/bench/${{ matrix.repo }} fetch -q --depth 1 ${{ matrix.url }} ${{ matrix.sha }}
+          git -C /tmp/bench/${{ matrix.repo }} checkout -q FETCH_HEAD
+
+      - name: Index it
+        run: codeintel index /tmp/bench/${{ matrix.repo }}
+
+      # Exit 1 is the gate failing (or the arm being unmeasurable); exit 2 is the harness not
+      # running at all. Both fail the job, and the full table is in the log either way.
+      - name: Run the benchmark (the exit code is the gate)
+        env:
+          CODEINTEL_BENCH_PATHLY: /tmp/bench/pathly-adapters
+          CODEINTEL_BENCH_DAYCAP: /tmp/bench/daycap
+        run: python bench/run.py ${{ matrix.repo }}
