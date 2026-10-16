@@ -20,6 +20,14 @@ All notable changes to codeintel are documented here. The format is based on
   `pathly-adapters` and `daycap` at pinned SHAs. It used to run only by hand.
 
 ### Fixed
+- **The call-edge benchmark scored an ambiguous target's other symbols as fabricated callers.**
+  A bare name that several functions share (`_broadcast` on `pathly-adapters`, three definitions)
+  comes back with every one's callers and a `target-ambiguous` gap telling the reader to ask again
+  as `name@<file>`. The harness scored that whole answer against the one function it had labelled,
+  so 5 correctly verified callers of the other two counted as spurious and the gate read 44%. It
+  now follows the gap's remedy with the file the oracle labelled, as an agent would: 100%, PASS.
+  Only the engine's own gap triggers the re-ask. The same run still shows `graph_verified` with 11%
+  recall and 3 of 10 symbols wrongly silent there, which the gate does not read.
 - **The README said the LSP contract job was `continue-on-error` against serena's git HEAD.** Serena
   has been pinned to a commit, and `lsp-contract` has gated CI, since 0.23.1, and an outside review
   repeated the stale sentence as a weakness. `test_docs_ci_claims.py` now checks both directions,
