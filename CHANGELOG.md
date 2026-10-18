@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-10-18
+
 ### Added
 - **`changed <ref>` can be paged past its 40-symbol cap.** A branch with more changed symbols
   said "103 of 143 changed symbols were not looked up" and `code.query` had no way to ask for the
