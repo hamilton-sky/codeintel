@@ -260,7 +260,8 @@ def _keys_from_rows(rows: list, *, keep) -> tuple[set, set]:
     return callers, others
 
 
-def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer, Answer]:
+def graph_answer(root: str, target_name: str, exe: str,
+                 def_file: str | None = None) -> tuple[Answer, Answer, Answer]:
     """`(graph, graph_verified, graph_qualified)` — every row, the proven ones, and the middle.
 
     The rendering is the product under test, so it is what gets parsed for the `graph` arm.
@@ -284,6 +285,17 @@ def graph_answer(root: str, target_name: str, exe: str) -> tuple[Answer, Answer,
     `verified`, so it cannot silence a symbol that `graph_verified` answers.
     """
     env = _run_codeintel(root, "callers", target_name, "graph", exe)
+    # A bare name several functions share comes back with ALL their callers, grouped per symbol in
+    # the prose but flat in `rows[]`, under a `target-ambiguous` gap whose remedy is to ask again as
+    # `name@<file>`. The oracle labelled exactly one of those functions, by its file, so follow the
+    # remedy the way an agent reading the gap would. Scoring the bare answer charged the engine a
+    # false positive for every correctly verified caller of a DIFFERENT function with the same name
+    # (`_broadcast` on pathly-adapters: 5 of 6 verified rows, the whole of a failing gate). Only the
+    # engine's own gap triggers this, so an engine that merged the symbols silently is still scored
+    # on what it said.
+    if def_file and any(isinstance(g, dict) and g.get("kind") == "target-ambiguous"
+                        for g in env.get("gaps") or []):
+        env = _run_codeintel(root, "callers", f"{target_name}@{def_file}", "graph", exe)
     ans, ver, qual = (Answer(reason=env.get("reason")), Answer(reason=env.get("reason")),
                       Answer(reason=env.get("reason")))
     if str(env.get("reason") or "") in (
@@ -640,7 +652,7 @@ def run(root: str, targets: list[tuple[str, str]], exe: str = "codeintel",
         true_calls = t.calls
         true_impact = t.calls | t.references        # an import alone does not break when a body moves
 
-        g, gv, gq = graph_answer(root, symbol, exe)
+        g, gv, gq = graph_answer(root, symbol, exe, def_file=def_file)
         lr, lc = lsp_answers(root, symbol, qn, exe, lang)
         got = {"graph": g, "graph_verified": gv, "graph_qualified": gq,
                "lsp_raw": lr, "lsp_classified": lc}
