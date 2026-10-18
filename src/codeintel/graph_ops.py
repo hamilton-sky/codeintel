@@ -44,6 +44,14 @@ from codeintel.graph_targets import _parse_symbol_target, _SymbolTarget
 from codeintel.source_kind import is_code_path
 
 
+def _is_name_guess(row: tuple[str, str, float | None, str, str]) -> bool:
+    """A ripple row whose only support is a name match (or a score below the confidence floor on a
+    backend that reports no strategy)."""
+    _, _, conf, _, evidence = row
+    return evidence == "name-guess" or (not evidence and conf is not None
+                                        and conf < _EDGE_CONFIDENCE_FLOOR)
+
+
 class GraphOps(DispatchCallers, ChangedSince):
     """One method per graph op. Mixed into `GraphProvider`.
 
@@ -696,11 +704,17 @@ class GraphOps(DispatchCallers, ChangedSince):
                     return ("## Changes impact\n(no source changes — the working tree's "
                             f"{dropped} uncommitted change(s) are all non-source files)")
                 return "## Changes impact\n(working tree clean — no uncommitted changes)"
-            ripple, ripple_truncated = self._changed_ripple(files, project, timeout_ms)
+            everyone, ripple_truncated = self._changed_ripple(files, project, timeout_ms)
+            # A caller found only by its name is a candidate, not a finding: the headline counts the
+            # resolved ones and says how many more there are, and the name matches are listed apart.
+            # Nothing is dropped — over-reporting a risk is the safer error, hiding one is not.
+            ripple = [r for r in everyone if not _is_name_guess(r)]
+            by_name = [r for r in everyone if _is_name_guess(r)]
             walked_hdr = any(h > 0 for _, _, h in syms)
             parts = [f"## Changes impact ({len(files)} files → {len(syms)} "
                      + ("symbols impacted" if walked_hdr else "symbols defined in them")
-                     + f" → {len(ripple)} callers elsewhere)"]
+                     + f" → {len(ripple)} callers elsewhere"
+                     + (f" (+{len(by_name)} matched by name only)" if by_name else "") + ")"]
             if files:
                 parts.append(f"### Changed files ({len(files)})")
                 parts.extend(f"- {f}" for f in files[:40])
@@ -724,11 +738,8 @@ class GraphOps(DispatchCallers, ChangedSince):
                     parts.append(f"- {label}{hop_s}{tail}")
                 if len(syms) > 40:
                     parts.append(f"… (+{len(syms) - 40} more)")
-            if ripple:
-                parts.append(f"### Callers elsewhere that reach into them ({len(ripple)})")
-                parts.append("_This is the blast radius: symbols outside the changed files whose "
-                             "behaviour can move because of this edit._")
-                for label, fp, conf, kind, evidence in ripple[:40]:
+            def _ripple_lines(rows: list[tuple[str, str, float | None, str, str]]) -> None:
+                for label, fp, conf, kind, evidence in rows[:40]:
                     tail = f"  ({fp})" if fp and fp != label else ""
                     # The relationship comes first: "registered" and "calls" are different things
                     # to check, and a reviewer triages on that before they weigh confidence.
@@ -745,28 +756,36 @@ class GraphOps(DispatchCallers, ChangedSince):
                     else:
                         mark = ""
                     parts.append(f"- {label or fp}{kind_s}{mark}{tail}")
-                if len(ripple) > 40:
-                    parts.append(f"… (+{len(ripple) - 40} more)")
-                guessed = sum(1 for r in ripple
-                              if r[4] == "name-guess"
-                              or (not r[4] and r[2] is not None and r[2] < _EDGE_CONFIDENCE_FLOOR))
+                if len(rows) > 40:
+                    parts.append(f"… (+{len(rows) - 40} more)")
+
+            if ripple:
+                parts.append(f"### Callers elsewhere that reach into them ({len(ripple)})")
+                parts.append("_This is the blast radius: symbols outside the changed files whose "
+                             "behaviour can move because of this edit._")
+                _ripple_lines(ripple)
                 indirect = sum(1 for r in ripple if r[3] != _DIRECT_KIND)
-                notes = []
                 if indirect:
-                    notes.append(f"{indirect} of {len(ripple)} reach this code without calling it "
-                                 f"(registered as a callback, or referenced) — they can still break")
-                if guessed:
-                    notes.append(f"{guessed} were resolved by name matching and may not reach this "
-                                 f"code at all")
-                if notes:
-                    parts.append("\n_" + "; ".join(notes) + "._")
-            elif files:
+                    parts.append(f"\n_{indirect} of {len(ripple)} reach this code without calling "
+                                 "it (registered as a callback, or referenced) — they can still "
+                                 "break._")
+            elif files and not by_name:
                 # An empty ripple is a real and useful answer — but only if it cannot be confused
                 # with one that was never computed.
                 parts.append("### Callers elsewhere that reach into them (0)")
                 parts.append("_No symbol outside the changed files calls into them, by the graph's "
                              "CALLS edges. Framework dispatch and calls through a value are not "
                              "edges, so this is not proof that nothing else is affected._")
+            elif files:
+                parts.append("### Callers elsewhere that reach into them (0)")
+                parts.append("_No caller was RESOLVED to the changed code; the candidates found "
+                             "only by name are below, and they are not proof either way._")
+            if by_name:
+                parts.append(f"### Matched by name only — may not reach this code ({len(by_name)})")
+                parts.append(f"_{len(by_name)} were resolved by name matching and may not reach "
+                             "this code at all (a same-named symbol elsewhere is a hit). Check "
+                             "before relying on or ignoring them._")
+                _ripple_lines(by_name)
             if ripple_truncated:
                 self._add_gap(
                     "changed", "ripple-truncated",

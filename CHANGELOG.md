@@ -19,6 +19,14 @@ All notable changes to codeintel are documented here. The format is based on
 - **The call-edge benchmark's 95% gate runs nightly** (`bench-gate` in `corpus.yml`), on
   `pathly-adapters` and `daycap` at pinned SHAs. It used to run only by hand.
 
+### Changed
+- **The uncommitted `changed` headline counts resolved callers only.** It said "38 callers
+  elsewhere" while its own footnote admitted 14 of them were name matches that "may not reach this
+  code at all". The headline now reads `24 callers elsewhere (+14 matched by name only)`, and the
+  name matches are listed under their own heading, `Matched by name only — may not reach this code`,
+  with their `[?0.38]` marks. Nothing is dropped. A diff whose only callers are name matches says
+  `0 callers elsewhere (+N matched by name only)` and no longer claims that nothing calls into it.
+
 ### Fixed
 - **The call-edge benchmark scored an ambiguous target's other symbols as fabricated callers.**
   A bare name that several functions share (`_broadcast` on `pathly-adapters`, three definitions)
