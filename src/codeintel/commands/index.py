@@ -182,13 +182,18 @@ def run(args: Any) -> int:
 
     lock.close()
 
-    # best-effort map refresh after index (fast, kept silent — not worth a checklist row)
+    # best-effort map refresh after index (fast, kept silent — not worth a checklist row). REFRESH
+    # only: `index` keeps a CODE_INTEL.md that `codeintel map` already wrote current, and never
+    # creates one. Creating it put an uncommitted file into every repo on the first `index` —
+    # including one whose index had just failed — when writing into the repo is `map`'s job, asked
+    # for by name.
     try:
-        from codeintel.mapper import MapGenerator
-        from codeintel.providers.graph import GraphProvider
+        if os.path.isfile(os.path.join(project_root, "CODE_INTEL.md")):
+            from codeintel.mapper import MapGenerator
+            from codeintel.providers.graph import GraphProvider
 
-        gen = MapGenerator(GraphProvider())
-        gen.write(project_root, gen.generate(project_root))
+            gen = MapGenerator(GraphProvider())
+            gen.write(project_root, gen.generate(project_root))
     except Exception:
         pass
 

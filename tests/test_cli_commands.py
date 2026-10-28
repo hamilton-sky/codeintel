@@ -698,9 +698,14 @@ class _FakeDb:
         self.closed = True
 
 
-def _stub_index(monkeypatch, tmp_path, *, count=3, indexer_exc=None, has_graph_backend=False):
-    """Stand in for the whole semantic pass. Returns the recorder the assertions read."""
+def _stub_index(monkeypatch, tmp_path, *, count=3, indexer_exc=None, has_graph_backend=False,
+                has_map=True):
+    """Stand in for the whole semantic pass. Returns the recorder the assertions read.
+
+    *has_map* seeds a CODE_INTEL.md, since `index` only refreshes a map that already exists."""
     seen: dict = {"db": None, "reindexed": False, "mapped": False}
+    if has_map:
+        (tmp_path / "CODE_INTEL.md").write_text("# existing map\n")
 
     def _make_db(path):
         seen["db"] = _FakeDb(path)
@@ -785,6 +790,15 @@ def test_index_still_refreshes_the_map_after_a_semantic_failure(monkeypatch, tmp
     seen = _stub_index(monkeypatch, tmp_path, indexer_exc=RuntimeError("boom"))
     import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
     assert seen["mapped"] is True
+
+
+def test_index_never_creates_a_map_the_repo_does_not_have(monkeypatch, tmp_path):
+    """Writing a file into the user's repo is `codeintel map`'s job, asked for by name. `index`
+    created CODE_INTEL.md on first run in every repo it touched — even when the index failed."""
+    seen = _stub_index(monkeypatch, tmp_path, has_map=False)
+    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert seen["mapped"] is False
+    assert not (tmp_path / "CODE_INTEL.md").exists()
 
 
 def test_index_skips_the_graph_reindex_when_the_backend_is_absent(monkeypatch, tmp_path):

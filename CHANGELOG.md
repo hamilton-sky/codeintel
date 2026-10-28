@@ -6,6 +6,18 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A failed embedding-model download is reported as a download failure.** fastembed 0.9 raises
+  `ValueError("Could not load model … from any source.")` once its download retries run out, the
+  same type it raises for a model it does not ship, so a blocked `huggingface.co` was reported as
+  "that is not a model fastembed ships — check the `model` key". `load_embedder` now checks the
+  name against `TextEmbedding.list_supported_models()`: a shipped model gets the network/proxy and
+  `FASTEMBED_CACHE_PATH` remedy, an unknown one keeps the config remedy, and a list that cannot be
+  read falls back to the config remedy as before.
+- **`codeintel index` no longer creates `CODE_INTEL.md`.** It wrote the file into every repo on
+  the first run, even when the index itself failed. `index` now only refreshes a `CODE_INTEL.md`
+  that already exists; run `codeintel map` to create one.
+
 ## [0.29.0] — 2026-10-18
 
 ### Added
