@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.29.1] — 2026-10-28
+
 ### Fixed
 - **A failed embedding-model download is reported as a download failure.** fastembed 0.9 raises
   `ValueError("Could not load model … from any source.")` once its download retries run out, the
