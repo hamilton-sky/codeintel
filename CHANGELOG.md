@@ -6,7 +6,10 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.29.1] — 2026-10-28
+## [0.29.2] — 2026-10-28
+
+_0.29.1 was never published: its tag landed on an older commit, the publish job refused it for not
+matching `__version__`, and `v*` tags cannot be moved. These are the changes prepared as 0.29.1._
 
 ### Fixed
 - **A failed embedding-model download is reported as a download failure.** fastembed 0.9 raises
