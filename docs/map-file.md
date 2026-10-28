@@ -47,7 +47,7 @@ flowchart LR
 
 ## Properties
 
-- **Deterministic** on an unchanged repo; **updates** on change (refreshed on `index`).
+- **Deterministic** on an unchanged repo; **updates** on change (`index` refreshes an existing `CODE_INTEL.md`; it never creates one).
 - **Committable** — check it in so teammates and agents get oriented with zero setup.
 - **Bounded** — never larger than the byte budget; truncation is by rank, so the highest-signal
   content survives.

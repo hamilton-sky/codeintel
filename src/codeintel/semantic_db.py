@@ -114,11 +114,19 @@ def load_embedder(model_name: str):
     try:
         return TextEmbedding(model_name=model_name)
     except ValueError as exc:
-        # fastembed's signal for a model it does not ship, raised from its own supported-model
-        # list before any network call (measured: 0.000s, no request attempted). This is a
-        # CONFIGURATION error — the `model` key names something that does not exist — and the
-        # download remedy is actively misleading for it: there is no proxy to fix and no cache to
-        # pre-seed, because nothing was ever going to be fetched.
+        # fastembed raises ValueError for TWO different causes. One is a model it does not ship,
+        # raised from its own supported-model list before any network call (measured: 0.000s, no
+        # request attempted). The other is `Could not load model <name> from any source.`, raised
+        # by fastembed 0.9 after its download retries are exhausted — for a name it DOES ship.
+        # Telling the second one to check the `model` key sent a blocked download off to debug a
+        # correct config. The type cannot separate them, so ask fastembed's own list (structural,
+        # not the message text): a name it ships failed to download.
+        if _fastembed_ships(TextEmbedding, model_name) is True:
+            raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
+        # This is a CONFIGURATION error — the `model` key names something that does not exist —
+        # and the download remedy is actively misleading for it: there is no proxy to fix and no
+        # cache to pre-seed, because nothing was ever going to be fetched. Also the fallback when
+        # the list cannot be read at all.
         raise EmbeddingModelUnavailable(
             model_name, exc,
             "that is not a model fastembed ships — check the `model` key in your codeintel "
@@ -147,6 +155,20 @@ def load_embedder(model_name: str):
         # What is left is the first-use fetch: this is the one with the network remedy, and the
         # one an external reviewer hit as a bare `403 Forbidden` naming neither model nor host.
         raise EmbeddingModelUnavailable(model_name, exc, _download_remedy()) from exc
+
+
+def _fastembed_ships(text_embedding, model_name: str) -> bool | None:
+    """Whether fastembed's supported-model list names *model_name*; None when it cannot be read.
+
+    Only consulted on the failure path, so the listing is paid once per failed load. Never raises:
+    a classifier that throws would replace the error it exists to explain.
+    """
+    try:
+        models = text_embedding.list_supported_models()
+        wanted = str(model_name).lower()
+        return any(str(m.get("model", "")).lower() == wanted for m in models)
+    except Exception:
+        return None
 
 
 def release_embedder(embedder) -> None:

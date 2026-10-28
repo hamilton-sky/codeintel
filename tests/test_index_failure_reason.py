@@ -50,8 +50,11 @@ _DOWNLOAD_REMEDY = (
 )
 
 
-def _load_with(cause: BaseException, model_name: str = DEFAULT_MODEL):
-    """`load_embedder` with fastembed's constructor forced to raise *cause* — the real path."""
+def _load_with(cause: BaseException, model_name: str = DEFAULT_MODEL, supported=None):
+    """`load_embedder` with fastembed's constructor forced to raise *cause* — the real path.
+
+    *supported*, when given, is the model-name list `list_supported_models()` reports; when left
+    out the fake has no such method, which is the "cannot read the list" fallback."""
     import builtins
 
     import codeintel.semantic_db as sdb
@@ -63,6 +66,9 @@ def _load_with(cause: BaseException, model_name: str = DEFAULT_MODEL):
             class _TE:
                 def __init__(self, *_a, **_k):
                     raise cause
+            if supported is not None:
+                _TE.list_supported_models = classmethod(  # type: ignore[attr-defined]
+                    lambda cls: [{"model": m} for m in supported])
             return type("_M", (), {"TextEmbedding": _TE})
         return real_import(name, *a, **k)
 
@@ -94,6 +100,42 @@ def test_an_unsupported_model_is_a_config_error_not_a_network_one():
     assert MODEL_HOST not in msg            # no invented network diagnosis
     assert "proxy" not in msg.lower()
     assert MODEL_CACHE_ENV not in msg       # nothing to pre-seed
+
+
+def test_a_shipped_model_that_failed_to_download_is_the_network_not_the_config():
+    """fastembed 0.9 raises the SAME ValueError type after its download retries run out, for a
+    model it does ship. Reproduced against huggingface.co behind a 403 proxy: the user was told to
+    check a `model` key that was correct. The supported-model list is what separates the two."""
+    cause = ValueError(f"Could not load model {DEFAULT_MODEL} from any source.")
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(cause, DEFAULT_MODEL, supported=["other/model", DEFAULT_MODEL.upper()])
+
+    msg = str(caught.value)
+    assert _DOWNLOAD_REMEDY in msg
+    assert "fastembed ships" not in msg
+    assert "check the `model` key" not in msg
+
+
+def test_an_unlisted_model_stays_a_config_error_when_the_list_is_readable():
+    cause = ValueError("Model nonsense/x is not supported in TextEmbedding.")
+    with pytest.raises(EmbeddingModelUnavailable) as caught:
+        _load_with(cause, "nonsense/x", supported=[DEFAULT_MODEL])
+
+    msg = str(caught.value)
+    assert "check the `model` key" in msg
+    assert MODEL_HOST not in msg
+
+
+def test_a_list_that_raises_falls_back_to_the_config_remedy():
+    """The classifier must never replace the error it explains with one of its own."""
+    import codeintel.semantic_db as sdb
+
+    class _Broken:
+        @classmethod
+        def list_supported_models(cls):
+            raise RuntimeError("registry import failed")
+
+    assert sdb._fastembed_ships(_Broken, DEFAULT_MODEL) is None
 
 
 @pytest.mark.parametrize(

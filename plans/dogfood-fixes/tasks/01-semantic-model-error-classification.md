@@ -1,7 +1,7 @@
 # Classify a failed embedding-model download as a download failure, not a config error
 
 Type: task
-Status: open
+Status: done
 Blocked by: —
 Test first: yes
 Review: auto
@@ -60,3 +60,5 @@ prints passed
 
 ## Answer
 
+
+`load_embedder` checks a ValueError against `TextEmbedding.list_supported_models()` (via `_fastembed_ships`); a shipped name gets the download remedy. Reproduced against a 403 proxy on huggingface.co with fastembed 0.9.1. Tests in `tests/test_index_failure_reason.py`.
