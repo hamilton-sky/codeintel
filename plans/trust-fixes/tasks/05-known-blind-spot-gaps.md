@@ -1,7 +1,7 @@
 # Add known-blind-spot gaps: aliased imports, nested shadowing, and `lsp_ts_local`
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: —
 Test first: yes
 Level: 2
@@ -89,3 +89,10 @@ Work started at 8ff5fc80591b2e05612407fcc49394cf00712c64. Test-only commit: a435
 - 06: `_known_blind_spots` in answer.py is the place to add `dispatch-sibling-unbound`. The Circle/Square/total_area (py) and Shape/totalArea (ts) fixtures are in `tests/fixtures/blindspots/`. Use a constant section (not a variable and not `callees`) or add a callees scenario, for the reason above.
 - 07: rows demoted here carry `_nested_shadow`. USAGE narrowing should leave them demoted.
 - 13: `test_blindspot_gaps.py` imports `blindspots` inside the pure-function tests, so on eb0902f those fail with ImportError and the provider tests fail on assertions.
+
+## Review findings (round 1, floor guard)
+
+floor guard: the diff weakens the bar instead of meeting it
+skip: tests/test_blindspot_gaps.py: @pytest.mark.skipif(
+skip: tests/test_blindspot_gaps.py: pytest.skip(f"the graph backend did not answer here: {answer.get('reason')}")
+if a finding is intended, the ticket needs a line like: Floor: allow <category>
