@@ -1,7 +1,7 @@
 # Make `changed` check index age in every mode, against HEAD's commit time, with no slack
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: —
 Test first: yes
 Level: 3
@@ -110,3 +110,41 @@ Work started at commit 23e7ab74dde64b646c0a861ff8bb6c0d210a5234. Test-only commi
 - Ticket 03: `core.paths.graph_db_stamp(root)` is ready for the cache key.
 - Docs (likely ticket 13, `docs/graph.md` is outside this ticket's Touches): `docs/graph.md` ~566 says "a plain commit does not count" for `stale-index`; that is now false (HEAD's commit time counts, no 2 s slack), and uncommitted `changed` now has `stale-index`/`index-age-unknown` and `not-a-git-repo`.
 - `tests/test_changed_range.py::test_a_plain_commit_after_the_index_does_not_make_it_stale` still passes (its index is dated in the future, after the commit) but its name and docstring describe the old rule; I left them as they were.
+
+## Review findings (round 1, pair review)
+
+I'm failing this ticket on one major finding. When `git status` fails inside a git work tree, uncommitted `changed` reports the index as fresh, which is the false freshness this ticket exists to remove. I reviewed `23e7ab7..db461c1`. `db461c1` is HEAD, so no later commits were left out. I read the ticket at the base commit and the diff with the tasks folder excluded. The `## Answer` never reached me.
+
+I ran the Done when command myself: 351 passed, 1 skipped. Every test that asserts `stale-index` or `index-age-unknown` requests `real_index_age`: the 6 in `tests/test_changed_range.py`, and all of `tests/test_index_age.py` through `pytestmark`. `setup.reset._graph_slug` can still be imported and its regex is unchanged, so reset deletes the same files.
+
+Inputs probed as a hostile caller:
+- root (missing, not a directory, not a repo, inside .git, bare repo): _git catches the OSError, in_work_tree returns False, answer is not-a-git-repo. No way through.
+- The repo's git config: _GIT already forces core.fsmonitor=false on the new git status.
+- project id in graph_db_mtime: only stats a file, same behaviour as old code.
+- Graph cache dir and db files (permission errors): see finding 2.
+- git status output (rename entries, size, failure): rename and copy entries parsed correctly. A failure leads to finding 1.
+
+QUALITY
+1. major /home/user/codeintel/src/codeintel/engines/graph/changed_range.py: `uncommitted_paths` returns `([], [])` whenever `git status` (or `--show-toplevel`) fails. Likeliest cause is the 30s `_GIT_TIMEOUT_S` on a large repo, made more likely by `--untracked-files=all`. `graph_index_age` then compares only HEAD's commit time and the reflog against the db, and returns `fresh` whenever those are older. So the uncommitted answer stays `complete` with no gap, even with edits on disk. The untracked-file check also gets an empty list and stays silent. Reproduced: a repo with an edit newer than the db gives `stale`; with `git status` forced to fail, the same tree gives `IndexAge(state='fresh')`. Breaks the module's own rule that "cannot-tell is unknown, never fresh"; range mode already reports the matching failure (`untracked_error`). Fix: have `uncommitted_paths` report the failure (an error string or flag), have `_op_changed` emit `index-age-unknown` naming the failed git call, and add a test that makes `status` fail and asserts that gap.
+2. minor /home/user/codeintel/src/codeintel/core/paths.py: `graph_db_stamp` documents "0 when unknown", but lets PermissionError and other OSErrors escape from `os.scandir(directory)` and from `_db_stamps_ns`, which catches only FileNotFoundError. Ticket 03 will call it from the gateway cache key, which must never raise (CONTRIBUTING never-raise rule). Fix: catch OSError and return 0, or the partial maximum.
+3. minor /home/user/codeintel/tests/test_changed_range.py: `test_a_plain_commit_after_the_index_does_not_make_it_stale` keeps its name and docstring ("Counting it flagged every query after every commit"), but the code now counts a commit after the index as stale on purpose. It only passes because its db mtime is 600s in the future. Fix: rename it and update the docstring to say what it now pins (a commit older than the index is not stale), or delete it as superseded by tests/test_index_age.py.
+4. minor /home/user/codeintel/src/codeintel/engines/graph/changed_range.py: `uncommitted_paths` lists changes from the whole repository, not just the directory the query ran from. In a subdirectory, an edit outside it still marks its index stale. Safe but noisy. Fix: filter to `root`, or say so in the gap text.
+
+codeintel: changed 23e7ab74dde64b646c0a861ff8bb6c0d210a5234: helped (confirmed every remaining `_graph_slug` reference resolves through the re-export in reset.py)
+
+REVIEW: FAIL
+
+I checked ticket 01 (`changed` index age) against its own last commit, which is HEAD (db461c19). There were no later commits to leave out. The `## Answer` never reached me: I read the ticket at 23e7ab74 and viewed the diff with the ticket folder held back.
+
+SPEC
+- New tests/test_index_age.py, each finding test fails on main eb0902f: MET. Unpacked eb0902f's src with git archive into the scratchpad and ran the new test file against it with PYTHONPATH: 11 failed, 2 passed. All five finding tests fail on main: uncommitted edit (stale + partial), untracked file, non-git dir (not-a-git-repo), commit after the index, edit 0.1 s after. The 2 that pass are negative controls (edit older than the index; clean tree prints "working tree clean"). Real git init in tmp_path, db file set with os.utime, fake _run.
+- test_changed_range uncommitted tests updated, test_graph_failure_population assertions unchanged, listed pytest command passes: MET (conductor). test_an_empty_target_is_still_the_original_uncommitted_op now allows only rev-parse --is-inside-work-tree / --show-toplevel and status, still pins "working tree clean". test_graph_failure_population only adds the in_work_tree monkeypatch.
+- test_graph_real passes with uncommitted changed assertions unchanged: MET (adds only in_a_work_tree fixture and usefixtures decorators).
+- test_reset slug tests unchanged, every stale-index/index-age-unknown assertion in a test requesting real_index_age: MET (test_changed_range.py 602, 812, 820, 828, 849, 1347; test_index_age.py via pytestmark).
+- All existing tests still pass: MET. pytest tests -q -o addopts=: 2181 passed, 31 skipped, 1 xfailed, 1 failed (test_doctor root-only, fails the same on eb0902f). Acceptance test_tf_freshness.py: all 5 changed tests pass; 9 failing are tickets 02/03.
+- scope: OK. Every changed source/test file is in Touches; others are plans/trust-fixes/learnings.md, map.md and the ticket file.
+- test first: OK.
+
+codeintel: none run
+
+REVIEW: PASS
