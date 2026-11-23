@@ -1,7 +1,7 @@
 # Harden the transports: /code/status 403, root-not-found, redact leading boundary, and the MCP wire-byte bound
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 08
 Test first: yes
 Level: 3
@@ -50,3 +50,35 @@ prints passed
 - redblue-fixplan.md § T7, and § T10 first bullet
 
 ## Answer
+
+Work started at 3b515e2fef18b7da1255d690499c015a94bd4675. Test-only commit: f23cf3d (`test(trust-fixes): 09 failing test`); at it the new tests failed for the right reason (10 failed: status 200 not 403 x2, reason `''` not `root-not-found` x3, `https://example.com~/api`, `/srv~/app`, `/proc/self~/x`, `scratchpad~/app`, wire text 44,366 > 40,000 bytes).
+
+**Built**
+- `src/codeintel/transports/mcp.py`: `_code_status_handler_inner` returns `{**_STATUS_FALLBACK, "reason": "root-not-allowed-for-role"}` when `gw.allows_root` denies (`_STATUS_FALLBACK` itself unchanged). `code_query_handler`, after the cwd fallback: `if project_root and gw.allows_root(role, project_root) and not os.path.isdir(project_root)` returns `redact(safe_null_result(op, target, reason="root-not-found", hint="<root> does not exist; pass the absolute repo root, or omit it to use the server cwd"))` before `gw.query`. `_size` is `len(pydantic_core.to_json(obj, fallback=str, indent=2))`; the per-row cost in `compact_for_mcp` is `_size([[row]]) - 8` (the row at its wire depth). `import json` dropped (unused now).
+- `src/codeintel/transports/http.py`: `do_GET /code/status` sends 403 when `reason` is in `_RBAC_DENIED_REASONS`.
+- `src/codeintel/core/redact.py`: `_SLASHED_HEAD = (?<![\w.~/-])`; `_bounded(needle, tail, head="")`; both slashed calls (redact_text, contains_home_path) pass it. Flattened form unchanged. Boundary comment and `redact_text` docstring rewritten to state the head guard and its cost.
+- `src/codeintel/core/provider.py`: `root-not-found` in `unavailable_reasons`.
+- Tests: `tests/test_rbac.py` (`scoped_server` fixture with stubbed `run_doctor`; status outside root 403, bare status 403, allowed root 200 with real readiness, missing root outside the role still 403 `root-not-allowed-for-role`), `tests/test_mcp_server.py` (missing root for callers and search, a file as root, an existing root still reaches the gateway, hint redacted), `tests/test_redaction_boundary.py` (3 mid-path cases, 9 token-start cases still redacted, asymmetric test flipped), `tests/test_mcp_answer_size.py` (wire text via `_convert_to_content` <= 40,000).
+
+**Proof**
+- 403 bullet: `tests/test_rbac.py::test_status_for_a_root_outside_the_role_is_403` and `test_a_bare_status_under_a_role_with_restricted_roots_is_403` failed at f23cf3d (`assert 200 == 403`), pass now; the allowed-root test passes in both.
+- root-not-found bullet: `tests/test_mcp_server.py::test_a_root_that_does_not_exist_is_root_not_found_before_any_query` failed at f23cf3d (`'' == 'root-not-found'`, the fake gateway was queried), passes now with `outcome == "unavailable"` and `gw.queries == []`.
+- Redaction bullet: the three mid-path cases and the flipped asymmetric test failed at f23cf3d, pass now; every other case in the file unchanged and passing. `test_incompleteness.py`, `test_backend_failure_detail.py`, `test_missing_target.py` unchanged and pass (in the check block below; `git diff 3b515e2 --stat` on them is empty).
+- Wire bytes bullet: `test_the_text_fastmcp_sends_stays_under_the_byte_budget` failed at f23cf3d (44,366 bytes), passes now.
+- Check block, run after the last code edit: `396 passed, 1 deselected, 1 xfailed` (the xfail is the pre-existing strict c4-coverage one in test_summary_integrity). test_doctor, test_summary_integrity, test_never_raise unchanged and pass.
+- Wider: every test file that references redact / compact_for_mcp / code_status_handler / safe_null_result / transports (28 files): `854 passed, 3 skipped, 1 deselected, 1 xfailed`, exit 0. Whole Test command: left to the conductor's gate.
+- `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 files. compileall exit 0. `codeintel c4 . --check --out /tmp/codeintel-c4-check`: 0 gating findings, exit 0.
+- Acceptance `test_tf_http.py` + `test_tf_small_fixes.py`: 8 passed; the 7 failing are other tickets' stories (backend-error ids live test, which failed here on `index_repository` exiting 1; prompt, rows, reset x3, ctrl-c).
+
+**Decisions**
+- root-not-found is gated on `gw.allows_root` only, not on `gw.allows(role, op)`: a role naming a missing path outside its roots still gets `root-not-allowed-for-role` (pinned over HTTP), so existence is not leaked across tenants. An op-denied role naming a missing path inside its own roots gets `root-not-found` rather than `op-not-allowed-for-role`; that leaks nothing beyond its roots. Calling `gw.allows` too would have broken the existing `_Gw` stub in `test_rbac.py::test_the_cwd_default_survives_on_the_stdio_path` (it has no `allows`).
+- The root-not-found envelope is passed through `redact`, since it never reaches `Gateway.query` where envelopes are redacted (the hint echoes the root).
+- The head guard is a separate `head` argument to `_bounded` (default empty) so the flattened form keeps its rules untouched.
+- Per-row cost `_size([[row]]) - 8` is an upper bound on what a row adds at its wire depth (first row +8, later +6), so no re-check loop is needed.
+
+**Shortcuts taken**: none.
+
+**For later tickets**
+- Ticket 13 (CHANGELOG): T7 `status-root-denied-200-fake-fallback` (GET /code/status now 403, and its body carries `reason`), `nonexistent-root-says-not-indexed` (new reason `root-not-found`, outcome `unavailable`), `redact-mid-path` (the home string in the middle of a path or URL is no longer redacted: say so), T10 `mcp-budget-measured-on-wrong-bytes`.
+- The agent-facing hints ticket: over stdio, `code_query_handler` now answers `root-not-found` for a missing root before the engine, so its "project not found -> project-not-indexed" mapping applies only to roots that exist.
+

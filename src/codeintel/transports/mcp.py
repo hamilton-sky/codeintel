@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import threading
@@ -8,6 +7,7 @@ import time
 from typing import Annotated, Literal
 
 import anyio
+import pydantic_core
 from mcp.server.mcpserver.server import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
@@ -98,7 +98,10 @@ MCP_ENVELOPE_BUDGET_BYTES = 40_000
 
 
 def _size(obj: object) -> int:
-    return len(json.dumps(obj, default=str).encode("utf-8"))
+    """Bytes of *obj* as FastMCP puts it on the wire: a dict tool result becomes `TextContent` text
+    serialized by this exact call (the installed `mcp` package's `_convert_to_content`), which is
+    pretty-printed. A one-line `json.dumps` undercounted it by the indentation of every row field."""
+    return len(pydantic_core.to_json(obj, fallback=str, indent=2))
 
 
 def compact_for_mcp(env: dict, op: str, target: str, offset: int = 0) -> dict:
@@ -127,7 +130,10 @@ def compact_for_mcp(env: dict, op: str, target: str, offset: int = 0) -> dict:
         room = MCP_ENVELOPE_BUDGET_BYTES - _size(out) - 16      # the note's count can grow a digit
         kept = 0
         for row in rows:
-            cost = _size(row) + 2                               # ", " between rows
+            # Measured at the depth the row sits on the wire (in `rows`, in the envelope): `[[row]]`
+            # is the row plus 16 bytes of wrapper, and a row adds at most 8 around itself (the
+            # first opens `[]`, each later one adds `,` and a newline and indent).
+            cost = _size([[row]]) - 8
             if cost > room:
                 break
             room -= cost
@@ -183,6 +189,16 @@ def code_query_handler(args: dict) -> Result:
                 and bool(args.get("allow_cwd_default", True))
                 and gw.allows_root(role, project_root)):
             project_root = os.getcwd()
+        # A root that is not a directory is reported as missing before any engine is asked: it used to
+        # come back `project-not-indexed` (index a path that is not there) and `search` claimed
+        # "first-time indexing started". Only once the role may name this root, so a role still
+        # cannot learn which paths exist outside its roots. Redacted here because this answer never
+        # reaches `Gateway.query`, where every other envelope is redacted.
+        if project_root and gw.allows_root(role, project_root) and not os.path.isdir(project_root):
+            return redact(safe_null_result(  # type: ignore[return-value]
+                op, target, reason="root-not-found",
+                hint=(f"{project_root} does not exist; pass the absolute repo root, or omit it to "
+                      f"use the server cwd")))
         try:
             offset = max(0, int(args.get("offset", 0) or 0))
         except (TypeError, ValueError):
@@ -244,7 +260,9 @@ def _code_status_handler_inner(args: dict) -> dict:
         # cross-tenant disclosure through the door next to the one that got closed.
         role = str(args.get("role", "") or "")
         if not gw.allows_root(role, project_root):
-            return dict(_STATUS_FALLBACK)
+            # The reason is what the HTTP transport maps to 403, as it does for a denied query;
+            # without it a denied root read as a 200 "nothing is indexed there".
+            return {**_STATUS_FALLBACK, "reason": "root-not-allowed-for-role"}
         deep = bool(args.get("deep", False))
         report = _doctor.run_doctor(
             project_root, deep=deep, graph=gw.graph, lsp=gw.lsp, semantic=gw.semantic,

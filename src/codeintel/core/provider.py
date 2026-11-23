@@ -109,7 +109,8 @@ def safe_null_result(
         "backend-unreachable", "engine-unavailable", "engines-unavailable", "indexing-in-progress",
         "index-stale", "no-engine", "no-project-root", "no-target",
         "op-not-allowed-for-role", "op-not-supported", "op-withdrawn", "project-not-indexed",
-        "project-not-indexed-standalone", "root-not-allowed-for-role", "source-unreadable",
+        "project-not-indexed-standalone", "root-not-allowed-for-role", "root-not-found",
+        "source-unreadable",
         "unknown-engine", "unsupported-op", "warming",
         # `changed <ref>`: the question cannot be put to this repository right now (git missing, not
         # a repository, no common ancestor, a range this op does not take) — not a finding about it.
