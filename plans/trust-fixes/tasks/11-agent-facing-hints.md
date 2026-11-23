@@ -1,7 +1,7 @@
 # Make graph hints name only tools the agent has, suggest close names, and stop leaking project ids
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 02, 04, 07
 Test first: yes
 Level: 3
@@ -56,3 +56,64 @@ prints passed
 - redblue-fixplan.md § T9 and § T7, first bullet
 
 ## Answer
+
+Work started at commit dcbb275f0061ce993d1db4c54acaf636a58b07be. Test-only commit: f0edf31.
+
+**Built**
+- `src/codeintel/engines/graph/backend.py`: `_agent_facing(text)` is applied in `_stderr_tail` before the 400-character cap, so every `BackendRefused` message and detail ("the graph backend refused to run …") is cleaned. That covers the doctor row and every hint that quotes it. It does three things:
+  - removes the `"available_projects":[...],"count":N` list. It also catches the cut-off form `…x","y"],"count":N` that has no opening `[`.
+  - replaces any quoted flattened path (`"a-b-c"`, two or more hyphens) with `"<project>"`.
+  - rewrites `search_graph(name_pattern="<.*>name<.*>")` to `code.query op=pattern target=name`. Any other `search_graph` becomes `code.query op=pattern`, `trace_path` becomes `code.query op=chain`, and `index_repository` becomes `codeintel index`.
+  New public helper `is_project_not_found(message)`.
+- `src/codeintel/engines/graph/provider.py`:
+  - not-in-graph hint: "`X` is not in the graph index for this project. Did you mean: `a`, `b`? If you just added or renamed it, refresh with: `codeintel index <root>` (or ask the user to run it)." The `index_repository` advice and its comment block are gone. The new `_did_you_mean` makes one `_search_symbols` call with `name_pattern` = the two halves of the name OR-ed together (escaped) and `limit` 200. `_close_names` (`difflib.get_close_matches`, cutoff 0.75, then names where one is a prefix of the other) picks up to 5. When the search fails or comes back empty, the hint has no names, and the reason never changes.
+  - A backend failure whose message says "project not found" gives `project-not-indexed` with `run: codeintel index <root>  (or: codeintel doctor)`.
+  - `_dependency_kinds` keeps only kinds in `_EDGE_KINDS` that are not structural (`CONTAINS` was added to `_STRUCTURAL_EDGES`). When nothing is left, the "Other relationships" sentence is not printed (that path already existed).
+  - no-edges hint: `callers` keeps the dead-code caveat. Every other op (callees, impact, context, chain) says "no outgoing calls resolved; aliased imports and dynamic calls are invisible to the graph, so this is not proof that it calls nothing."
+  - New `_ALIAS_OPS = {"changes"}`, `_known_ops()` and `_OTHER_ENGINE_OPS`. `_suggest_op` leaves out the op that was asked, withdrawn ops and aliases. The "ops:" list leaves out `changes`. For `symbol`: "`symbol` is answered by engine=lsp, not the graph; with LSP down use op=context or op=pattern." For `search`: engine=semantic, "use op=pattern for a name search".
+- Tests:
+  - new `tests/test_agent_hints.py` (15 tests; the stderr tests drive a real `#!/bin/sh` fake backend).
+  - `tests/test_missing_target.py`: the two `index_repository` tests are rewritten. They now check `codeintel index <root>` plus "ask the user to run it", no `index_repository`, and no `~` after the MCP-facing remedy.
+  - `tests/test_null_reason_and_ripple.py::test_no_edges_names_the_relationships_that_do_point_at_the_symbol` now uses `callees` and expects `4 CALLS`, with no DECORATES/TESTS/DEFINES/`1 1`.
+
+**Proof**
+- Fails on main, passes here. At f0edf31 (tests only), `.venv/bin/pytest tests/test_agent_hints.py tests/test_missing_target.py tests/test_null_reason_and_ripple.py -q -o addopts=` gave 17 failed, 52 passed. Every failure was the old behaviour:
+  - the hint named `index_repository` and offered no `compact_for_mcp`.
+  - `a-b-c`/`d-e-f` appeared in the hint.
+  - `backend-error` where `project-not-indexed` was expected.
+  - `search_graph(` was passed through.
+  - "did you mean symbol? ops: … changes …".
+  - "dead code" and "1 1"/"2 CONTAINS" appeared in callees/impact/context hints.
+  After the change: 69 passed. Done-when sub-bullets, each a test in `tests/test_agent_hints.py`:
+  - `compact_for_mcpp` lists `compact_for_mcp` with no `index_repository`/`search_graph`/`trace_path` (`test_a_typo_lists_the_close_name_and_names_no_backend_tool`).
+  - stderr `["a-b-c","d-e-f"],"count":17`, whole and cut off: neither id appears (`test_a_backend_error_never_carries_other_projects_ids`, 2 cases).
+  - "project not found" gives `project-not-indexed` (`test_a_backend_project_not_found_is_project_not_indexed`).
+  - `symbol`: no "did you mean symbol", no `changes`, names engine=lsp/op=context/op=pattern (`test_graph_symbol_points_at_lsp_not_at_itself`).
+  - no-edges `callees`/`impact`/`context`: no "dead code" and no `1 1`; `callers` keeps the caveat (`test_a_no_edges_hint_off_callers_…`, `test_a_no_edges_callers_hint_keeps_the_dead_code_caveat`).
+- Check block (the exact `$` command): `405 passed, 1 deselected, 1 xfailed`, exit 0. `test_graph_provider.py`'s `_suggest_op` tests pass, and the five files off Touches are unchanged.
+- `grep -rn "index_repository" src/codeintel/engines/graph/provider.py`: no output, exit 1.
+- Existing tests: the whole Test command is left to the conductor's gate. I also ran 22 neighbouring files (test_changed_range, test_cli_commands, test_cold_process, test_corpus, test_edge_confidence, test_gateway, test_graph_real, test_incompleteness, test_lsp_provider, test_mcp_server, test_search_fallback, test_semantic_provider, test_chain_destination, test_edge_staleness, test_caller_counts, test_never_raise, test_architecture, test_docs_trust_claims, test_wire_text, test_redaction_boundary, test_rbac, test_graph_stdin): 745 passed, 28 skipped, exit 0.
+- `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 files. compileall: ok. `codeintel c4 . --check --out /tmp/codeintel-c4-check`: 0 gating findings.
+- Live on this repo (codebase-memory-mcp 0.10.8):
+  - `codeintel query --op callers --target compact_for_mcpp --engine graph` gave "… Did you mean: `compact_for_mcp`? If you just added or renamed it, refresh with: `codeintel index /home/user/codeintel` (or ask the user to run it)."
+  - `--op symbol --engine graph` gave the engine=lsp hint, and its ops list has no `changes`.
+  - `BackendClient._run('query_graph', {project: 'nope-zz'})` detail: `{"error":"project not found or not indexed",…,<project list withheld>}`.
+  - `trace_path` of `other to helper2`: "Use code.query op=pattern target=other to helper2 to find the exact name, then pass it to code.query op=chain."
+- Acceptance `test_tf_hints.py` and the `test_tf_http.py` project-deleted test cannot run here. Their fixtures index into a private HOME, and the running backend daemon refuses that ("the active account daemon uses a different cache directory", learnings 05). The fakegraph case `test_graph_engine_symbol_hint_points_at_lsp_and_context_or_pattern` failed before this change on "did you mean symbol"; this change targets exactly that.
+
+**Decisions**
+- The strip runs in `_stderr_tail`, before the cap, not on the capped message in `_refused`. On a machine with many projects, cutting first kept only the tail of the list and lost the "project not found" words at the front. That is why the redblue repro read `backend-error`, not `project-not-indexed`. The cut-off-list regex stays as a second line of defence.
+- "Flattened absolute path" means a quoted token with two or more hyphens. Unquoted absolute paths are not stripped: `test_backend_failure_detail.py::test_a_home_directory_in_the_backends_stderr_is_redacted` requires `~/.cache/codebase-memory-mcp/graph.db` to stay in the doctor detail.
+- `_dependency_kinds` follows the ticket literally: only `_EDGE_KINDS` (CALLS, USAGE, CALL_REFERENCE, IMPORT). DECORATES/TESTS/INHERITS are no longer named. The existing test that pinned "3 DECORATES" was changed to match.
+- `chain` and `context` get the outgoing-calls wording, because `chain` traces outbound. Only `callers` keeps the dead-code caveat.
+- Did-you-mean search pattern: the two halves of the name OR-ed, so one typo in either half still finds the name. Names of 3 characters or fewer are searched whole.
+
+**Shortcuts taken**
+- Flattened-path detection is a heuristic (quoted, at least two hyphens). It misses a one-hyphen slug such as `"home-x"` and would also hide a quoted hyphenated non-path. It is worth replacing with an exact check against the known project list if a leak shows up in another shape.
+- A name with typos in both halves (edit distance 2 split across the halves) is not found by the one search. The ticket allows one search, and this is best effort.
+- The did-you-mean search uses the answer's full `timeout_ms`, so a not-in-graph answer on a slow backend can take one extra round trip.
+- "project not found" maps to `project-not-indexed` only on the null-answer path. If one half of `impact` hits it while the other answers, it stays a `backend` gap. Its text is already stripped.
+
+**For later tickets**
+- `src/codeintel/engines/graph/ops.py:518` (ticket 04's `chain` `target-not-found` hint) still names `index_repository`. ops.py is not on this ticket's Touches. Ticket 15 finding 3 already covers it, and the fix is "`codeintel index <root>` (or ask the user to run it)". After that, the spec line "No hint names `index_repository`" holds everywhere.
+- Ticket 13 (CHANGELOG): did-you-mean on not-in-graph; backend stderr stripped of project lists and flattened paths, and its tool names rewritten; "project not found" now gives `project-not-indexed`; op-specific no-edges hint; `_dependency_kinds` limited to `_EDGE_KINDS`; `symbol`/`search` on the graph engine name their own engine; `changes` dropped from the ops list.

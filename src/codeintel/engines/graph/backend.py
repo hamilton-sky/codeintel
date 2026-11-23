@@ -99,6 +99,45 @@ _LOG_NOISE = re.compile(r"^\s*(?:\w+=\S+\s+)*level=(?:info|debug)\b", re.IGNOREC
 _STDERR_CAP = 400
 
 
+# What the backend's stderr may say that its reader must not get, or cannot act on. The reader of
+# a hint is an agent whose only tools are `code.query`/`code.status`/`code.doctor`/`code.map`
+# (`codeintel install` registers nothing else), and on the HTTP transport a caller scoped to one
+# root. So:
+#   * its "project not found" reply lists EVERY indexed project (`"available_projects":[...],
+#     "count":N`), and each id is a flattened absolute path — another tenant's directory layout.
+#     The list is removed whole, and also its tail when an earlier cut lost the opening `[`;
+#   * any other quoted flattened path (`"home-alice-work-repo"`) is withheld the same way;
+#   * its advice names its own MCP tools, which the agent does not have; they are rewritten to the
+#     `code.query` op that does the same job.
+_PROJECT_LIST = re.compile(
+    r'(?:"available_projects"\s*:\s*)?(?:\[|^…?)[^\[\]]*\]\s*,\s*"count"\s*:\s*\d+')
+_FLATTENED_PATH = re.compile(r'"[\w.]+(?:-[\w.]+){2,}"')
+_SEARCH_ADVICE = re.compile(
+    r'search_graph\(\s*name_pattern\s*=\s*\\?"(?:\.\*)?(.*?)(?:\.\*)?\\?"\s*\)')
+_TOOL_NAMES = (
+    (re.compile(r"search_graph\([^)]*\)"), "code.query op=pattern target=<name>"),
+    (re.compile(r"\bsearch_graph\b"), "code.query op=pattern"),
+    (re.compile(r"\btrace_path\b"), "code.query op=chain"),
+    (re.compile(r"\bindex_repository\b"), "codeintel index"),
+)
+_PROJECT_NOT_FOUND = re.compile(r"project not found", re.IGNORECASE)
+
+
+def is_project_not_found(message: str) -> bool:
+    """Whether *message* is the backend saying the project it was asked about is not indexed."""
+    return bool(_PROJECT_NOT_FOUND.search(message or ""))
+
+
+def _agent_facing(text: str) -> str:
+    """Backend text as a hint may carry it: no project list, no flattened path, no backend tool."""
+    text = _PROJECT_LIST.sub("<project list withheld>", text)
+    text = _FLATTENED_PATH.sub('"<project>"', text)
+    text = _SEARCH_ADVICE.sub(lambda m: f"code.query op=pattern target={m.group(1)}", text)
+    for pattern, replacement in _TOOL_NAMES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _stderr_tail(raw: Any) -> str:
     """The backend's stderr as one short line a person can read, with the home directory removed.
 
@@ -111,7 +150,7 @@ def _stderr_tail(raw: Any) -> str:
         return ""
     text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
     kept = [line for line in text.splitlines() if not _LOG_NOISE.match(line)]
-    flat = redact_text(" ".join(" ".join(kept).split()))
+    flat = _agent_facing(redact_text(" ".join(" ".join(kept).split())))
     if len(flat) > _STDERR_CAP:
         flat = "…" + flat[-(_STDERR_CAP - 1):]
     return flat

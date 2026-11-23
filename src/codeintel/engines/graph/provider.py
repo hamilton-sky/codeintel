@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 
 # `shutil`/`subprocess` are no longer called from this module — `BackendClient` (graph_backend.py)
 # owns the transport now — but many tests monkeypatch `codeintel.engines.graph.provider.shutil.which` /
@@ -26,9 +27,10 @@ from codeintel.engines.graph.backend import (
     _parse_search_results,
     coordination_remediation,
     is_coordination_refusal,
+    is_project_not_found,
 )
 from codeintel.engines.graph.confidence import _UNSTATED
-from codeintel.engines.graph.edges import _EdgeGroup, _Omitted
+from codeintel.engines.graph.edges import _EDGE_KINDS, _EdgeGroup, _Omitted
 from codeintel.engines.graph.ops import GraphOps
 from codeintel.engines.graph.qualifier_scan import Budget
 from codeintel.engines.graph.render import (
@@ -133,16 +135,48 @@ _WITHDRAWN_OPS: dict[str, str] = {
 # treatment as a typo of a graph op, not a hint that only lists half the real vocabulary.
 _NON_GRAPH_OPS: frozenset[str] = frozenset({"symbol", "search"})
 
+# Which engine answers an op the graph does not serve, and what the graph CAN do instead.
+_OTHER_ENGINE_OPS: dict[str, tuple[str, str]] = {
+    "symbol": ("lsp", "with LSP down use op=context or op=pattern"),
+    "search": ("semantic", "with it unavailable use op=pattern for a name search"),
+}
+
+# Second spellings of an op `_dispatch` routes, kept so an older caller still works. Not in the
+# `code.query` enum, so a hint never offers one.
+_ALIAS_OPS: frozenset[str] = frozenset({"changes"})
+
+
+def _known_ops() -> list[str]:
+    """The ops a hint may name: every `code.query` op, none retired, no alias."""
+    return sorted((_GRAPH_OPS | _NON_GRAPH_OPS) - set(_WITHDRAWN_OPS) - _ALIAS_OPS)
+
 
 def _suggest_op(unknown: str) -> list[str]:
     """Ops a typo probably meant. Close matches first, then prefix matches — mirrors
     `__main__.py`'s `_suggest` (same approach, not imported: that module is CLI-only and importing
     from it would pull argparse/CLI wiring into the query path). Retired ops are excluded on
-    purpose: suggesting `deadcode` for a typo would recommend a feature that fails by design."""
-    candidates = sorted((_GRAPH_OPS | _NON_GRAPH_OPS) - set(_WITHDRAWN_OPS))
+    purpose: suggesting `deadcode` for a typo would recommend a feature that fails by design. The op
+    asked is never suggested back, nor an alias the `code.query` enum rejects."""
+    candidates = [op for op in _known_ops() if op != unknown]
     close = difflib.get_close_matches(unknown, candidates, n=3, cutoff=0.5)
     prefix = [op for op in candidates if op.startswith(unknown) and op not in close]
     return (close + prefix)[:3]
+
+
+# How many close names a not-in-graph hint offers, and how many the one name search may return.
+_CLOSE_NAMES = 5
+_CLOSE_NAME_SEARCH_LIMIT = 200
+
+
+def _close_names(name: str, candidates: list[str]) -> list[str]:
+    """Up to five names a typo of *name* probably meant: close matches first, then names that
+    share a prefix with it (one is the start of the other). Never *name* itself."""
+    pool = sorted({c for c in candidates if c and c != name})
+    close = difflib.get_close_matches(name, pool, n=_CLOSE_NAMES, cutoff=0.75)
+    prefix = [c for c in pool
+              if c not in close and min(len(c), len(name)) >= 3
+              and (c.startswith(name) or name.startswith(c))]
+    return (close + prefix)[:_CLOSE_NAMES]
 
 
 def _name_files(files: list[str]) -> str:
@@ -730,17 +764,18 @@ class GraphProvider(GraphOps):
     # Structural edges say where a symbol LIVES, not what depends on it. Naming them in a
     # "nothing references this" message would answer a question nobody asked.
     _STRUCTURAL_EDGES = frozenset({
-        "DEFINES", "DEFINES_METHOD", "CONTAINS_FILE", "CONTAINS_FOLDER", "HAS_BRANCH",
+        "DEFINES", "DEFINES_METHOD", "CONTAINS", "CONTAINS_FILE", "CONTAINS_FOLDER", "HAS_BRANCH",
         "FILE_CHANGES_WITH", "SIMILAR_TO", "SEMANTICALLY_RELATED",
     })
 
     def _dependency_kinds(self, target: str, project: str, timeout_ms: int) -> dict[str, int]:
-        """Every non-structural relationship touching *target*, by kind.
+        """Every relationship of a kind this graph describes (`_EDGE_KINDS`) pointing at *target*.
 
-        The point is to stop "no callers" from being the end of the sentence. A symbol reached only
-        by `INHERITS`, `DECORATES`, `HANDLES` or `TESTS` is not unreferenced — it is referenced in a
-        way this op does not cover, and saying which way is the difference between a usable answer
-        and one that reads as "unused"."""
+        The point is to stop "no callees" from being the end of the sentence: a symbol other code
+        reaches is referenced in a way this op does not cover, and saying which way is the
+        difference between a usable answer and one that reads as "unused". Only a described kind
+        is named. Backend 0.9.0 answers `type(c) AS kind` with `["1","1"]`, and that printed as a
+        relationship called "1"; a structural kind says where the symbol lives, not what uses it."""
         wanted = _parse_symbol_target(target)
         if not wanted.name:
             return {}
@@ -755,7 +790,7 @@ class GraphProvider(GraphOps):
         out: dict[str, int] = {}
         for r in self._query_rows(cypher, project, timeout_ms):
             kind = str(r.get("kind") or "").strip()
-            if not kind or kind in self._STRUCTURAL_EDGES:
+            if kind not in _EDGE_KINDS or kind in self._STRUCTURAL_EDGES:
                 continue
             try:
                 count = int(str(r.get("n") or 0))
@@ -801,6 +836,25 @@ class GraphProvider(GraphOps):
             if label and label not in out:
                 out.append(label)
         return out
+
+    def _did_you_mean(self, target: str, project: str, timeout_ms: int) -> str:
+        """" Did you mean: `a`, `b`?" for a name the graph does not hold, or `""`.
+
+        One backend name search, for names containing either half of the name (a typo in one half
+        still matches the other), ranked by `_close_names`. Best effort: a failed or empty search
+        gives `""`, and the reason of the answer it decorates never changes."""
+        name = _parse_symbol_target(target).name
+        if not name:
+            return ""
+        half = len(name) // 2
+        parts = [name[:half], name[half:]] if half >= 2 else [name]
+        pattern = "|".join(re.escape(p) for p in parts)
+        found = self._search_symbols(
+            {"name_pattern": pattern, "limit": _CLOSE_NAME_SEARCH_LIMIT}, project, timeout_ms)
+        close = _close_names(name, [str(r.get("name") or "") for r in found or []])
+        if not close:
+            return ""
+        return " Did you mean: " + ", ".join(f"`{c}`" for c in close) + "?"
 
     def _query_rows(self, cypher: str, project: str, timeout_ms: int) -> list[dict]:
         raw = self._run("query_graph", {"project": project, "query": cypher}, timeout_ms)
@@ -865,11 +919,17 @@ class GraphProvider(GraphOps):
                 # a wrong op guess is easily misread as "found nothing". `deadcode` and other WITHDRAWN ops are
                 # handled separately below with their own `op-withdrawn` reason and rationale; this
                 # branch is reached only by a genuinely unrecognized op string.
-                matches = _suggest_op(op_str)
-                known = sorted((_GRAPH_OPS | _NON_GRAPH_OPS) - set(_WITHDRAWN_OPS))
-                hint = f"ops: {', '.join(known)}"
-                if matches:
-                    hint = f"did you mean {' or '.join(matches)}? {hint}"
+                hint = f"ops: {', '.join(_known_ops())}"
+                if op_str in _OTHER_ENGINE_OPS:
+                    # A real op of another engine, asked of this one: "did you mean symbol?" about
+                    # `symbol` suggests the call just made. Say which engine answers it.
+                    engine, instead = _OTHER_ENGINE_OPS[op_str]
+                    hint = (f"`{op_str}` is answered by engine={engine}, not the graph; {instead}. "
+                            f"{hint}")
+                else:
+                    matches = _suggest_op(op_str)
+                    if matches:
+                        hint = f"did you mean {' or '.join(matches)}? {hint}"
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="unsupported-op", hint=hint,
                 )
@@ -969,6 +1029,15 @@ class GraphProvider(GraphOps):
                 # exact misreading that makes "safe to delete" the wrong conclusion.
                 if self._last_failure is not None:
                     miss = self._last_failure
+                    if isinstance(miss, BackendRefused) and is_project_not_found(miss.message):
+                        # The backend no longer holds the project resolution found (its index was
+                        # removed under a running process). That is a fact about the index, with
+                        # the index's remedy — and the backend's own reply, which lists every other
+                        # project, is not repeated.
+                        return safe_null_result(
+                            op_str, target_str, engine="graph", reason="project-not-indexed",
+                            hint=f"run: codeintel index {root_str}  (or: codeintel doctor)",
+                        )
                     return safe_null_result(
                         op_str, target_str, engine="graph", reason=miss.kind,
                         hint=(self._refusal_hint(miss) if isinstance(miss, BackendRefused) else
@@ -988,18 +1057,25 @@ class GraphProvider(GraphOps):
                                              sorted(kinds.items(), key=lambda kv: -kv[1])[:5])
                                  + " — query those before concluding anything about it."
                                  ) if kinds else ""
+                        # The dead-code caveat is about INCOMING edges, so only `callers` gets it;
+                        # an empty callees/impact/context/chain is about what the symbol calls.
+                        if op_str == "callers":
+                            why = ("it has no callers edge in the graph, which is not the same as "
+                                   "being absent. Framework-dispatched handlers (routes, ASGI apps) "
+                                   "and symbols passed as a value rather than called look exactly "
+                                   "like this, so do NOT read it as dead code.")
+                        else:
+                            why = ("no outgoing calls resolved; aliased imports and dynamic calls "
+                                   "are invisible to the graph, so this is not proof that it calls "
+                                   "nothing.")
                         # The LSP engine has no `callers`/`callees`/`impact`/`chain` — it answers
                         # `symbol`, `context` and `overview` — so `--engine lsp` alone, on the op
                         # that just came back empty, answers `unsupported-op`. Name the op it CAN run.
                         return safe_null_result(
                             op_str, target_str, engine="graph", reason="no-edges",
-                            hint=f"`{target_str}` IS indexed ({'; '.join(where[:3])}) — it has no "
-                                 f"{op_str} edge in the graph, which is not the same as being "
-                                 f"absent. Framework-dispatched handlers (routes, ASGI apps) and "
-                                 f"symbols passed as a value rather than called look exactly like "
-                                 f"this, so do NOT read it as dead code. Re-indexing will not "
-                                 f"change it; confirm with `--op symbol --engine lsp` or "
-                                 f"`--op pattern`."
+                            hint=f"`{target_str}` IS indexed ({'; '.join(where[:3])}) — {why} "
+                                 f"Re-indexing will not change it; confirm with `--op symbol "
+                                 f"--engine lsp` or `--op pattern`."
                                  + other,
                         )
                 # Name the symbol only when there IS one. `Gateway._query` now rejects a blank
@@ -1009,26 +1085,18 @@ class GraphProvider(GraphOps):
                 # off to re-index an index that was never the problem. Cheap to make unreachable
                 # from both directions rather than only the one that was reported.
                 named = f"`{target_str}`" if target_str.strip() else "that symbol"
-                # Both remediations, because the reader is usually an agent with no shell.
-                # `codeintel index` is a CLI; an agent connected over MCP has the graph backend's
-                # own `index_repository` in its toolset already, and one call does the same job.
-                # Which of the two it can actually reach is not something this process can see —
-                # it knows its own transport, not the caller's tool list — so it names both rather
-                # than guessing and offering the one that isn't there.
-                #
-                # The MCP form deliberately does NOT repeat the path. `redact` rewrites this
-                # process's home directory to `~` on the way out, and its docstring gives the
-                # reason: hints carry runnable commands, and a shell expands `~` back. A JSON tool
-                # argument has no shell, so `repo_path="~/Documents/..."` is a remediation that
-                # does not run — worse than the CLI-only hint it was meant to improve. The caller
-                # passed `project_root` to get here, so it is holding the absolute path already;
-                # pointing at it beats printing a redacted copy that would not work.
+                # The reader is usually an agent, and its only tools are `code.*` (`codeintel
+                # install` registers nothing else), so the remedy is the CLI or the user who has
+                # one. The second remedy deliberately does NOT repeat the path: `redact` rewrites
+                # this process's home to `~`, and an agent passing that on as a tool argument has
+                # no shell to expand it. A typo is the likelier cause than a stale index, so the
+                # close names come first.
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",
-                    hint=f"{named} is not in the graph index for this project — if you just "
-                         f"added or renamed it, refresh with: codeintel index {root_str} — or, "
-                         f"over MCP, call `index_repository` with `incremental=true` and the same "
-                         f"root you passed here, which needs no shell.",
+                    hint=f"{named} is not in the graph index for this project."
+                         f"{self._did_you_mean(target_str, project, timeout_ms)} If you just "
+                         f"added or renamed it, refresh with: `codeintel index {root_str}` (or "
+                         f"ask the user to run it).",
                 )
 
             # A symbol-scoped answer served from a containing project is usually right (a real
