@@ -126,3 +126,47 @@ def test_an_untouched_index_still_serves_from_cache(graph_cache, root, monkeypat
     assert _callers(gw, root)["cached"] is True
     assert _callers(gw, root)["cached"] is True
     assert graph.calls == 1
+
+
+def test_repeated_queries_do_not_reread_the_config(graph_cache, root, monkeypatch):
+    """The semantic db path depends on the configured model; finding it must not parse the global
+    and project TOML again on every query while neither file changed."""
+    import codeintel.core.config as config_mod
+
+    _db(graph_cache, root)
+    gw, _graph = _gateway(monkeypatch)
+    reads: list[object] = []
+    real = config_mod.load_config
+    monkeypatch.setattr(config_mod, "load_config", lambda r=None: reads.append(r) or real(r))
+
+    for _ in range(4):
+        _callers(gw, root)
+
+    assert len(reads) <= 1, reads
+
+
+def test_a_model_change_in_the_project_config_is_followed(graph_cache, root, monkeypatch,
+                                                          tmp_path):
+    """The remembered semantic db path is dropped when `.codeintel.toml` changes, so the key then
+    reads the new model's file."""
+    from codeintel.engines.semantic.db import default_db_path
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CODEINTEL_HOME", str(home))
+    _db(graph_cache, root)
+    gw, graph = _gateway(monkeypatch)
+    _callers(gw, root)
+    assert _callers(gw, root)["cached"] is True
+
+    config = pathlib.Path(root) / ".codeintel.toml"
+    config.write_text('model = "sentence-transformers/all-MiniLM-L6-v2"\n')
+    other = pathlib.Path(default_db_path("sentence-transformers/all-MiniLM-L6-v2"))
+    other.write_bytes(b"vectors")
+    os.utime(other, (1_700_000_000, 1_700_000_000))
+    _callers(gw, root)
+    assert _callers(gw, root)["cached"] is True
+
+    os.utime(other, (1_700_000_100, 1_700_000_100))
+    assert _callers(gw, root)["cached"] is False
+    assert graph.calls == 3

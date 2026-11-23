@@ -387,6 +387,77 @@ def test_a_new_untracked_file_submits_a_pass(tmp_path, monkeypatch):
     assert passes == [root, root]
 
 
+def test_a_staged_edit_submits_a_pass(tmp_path, monkeypatch):
+    """`edit` then `git add` leaves nothing for `ls-files -m` to list; the worktree still moved."""
+    import subprocess
+
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=0)
+    passes = _counting_passes(r, monkeypatch)
+    r.maybe_reindex(root)
+    _drain(r)
+
+    edited = os.path.join(root, "core.py")
+    with open(edited, "w") as fh:
+        fh.write("def helper():\n    return 2\n")
+    os.utime(edited, (os.stat(edited).st_atime, os.stat(edited).st_mtime + 5))
+    subprocess.run(["git", "add", "core.py"], cwd=root, check=True, capture_output=True)
+
+    assert r.maybe_reindex(root) is True
+    _drain(r)
+    assert passes == [root, root]
+
+
+def test_the_fingerprint_never_runs_the_repositorys_own_clean_filter(tmp_path, monkeypatch):
+    """A repository is untrusted input. `git ls-files -m` compares the content of a tracked file
+    whose stat moved but whose size did not, and that comparison runs the `filter.<x>.clean`
+    command the repository's own config and `.gitattributes` name, on every query."""
+    import subprocess
+
+    root = _git_repo(tmp_path / "repo")
+    marker = tmp_path / "filter-ran"
+    with open(os.path.join(root, ".gitattributes"), "w") as fh:
+        fh.write("*.py filter=evil\n")
+    subprocess.run(["git", "config", "filter.evil.clean", f"touch {marker}; cat"], cwd=root,
+                   check=True, capture_output=True)
+    edited = os.path.join(root, "core.py")
+    with open(edited, "w") as fh:
+        fh.write("def helper():\n    return 2\n")          # same size as the committed text
+    os.utime(edited, (os.stat(edited).st_atime, os.stat(edited).st_mtime + 5))
+
+    r = Reindexer(debounce_seconds=0)
+    _counting_passes(r, monkeypatch)
+    r.maybe_reindex(root)
+    _drain(r)
+
+    assert not marker.exists(), "the fingerprint ran the repository's clean filter"
+
+
+def test_an_unchanged_tree_is_fingerprinted_at_most_once_per_debounce_window(tmp_path,
+                                                                             monkeypatch):
+    """Past the window, an unchanged tree must not cost git calls on every query."""
+    import codeintel.gateway.reindexer as reindexer_mod
+
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=1000)
+    passes = _counting_passes(r, monkeypatch)
+    assert r.maybe_reindex(root) is True
+    _drain(r)
+    r._last_fired[root] -= 2000                         # the window has passed
+
+    checks: list[str] = []
+    real = reindexer_mod._tree_fingerprint
+    monkeypatch.setattr(reindexer_mod, "_tree_fingerprint",
+                        lambda root: checks.append(root) or real(root))
+
+    assert r.maybe_reindex(root) is False
+    assert r.maybe_reindex(root) is False
+    assert r.maybe_reindex(root) is False
+
+    assert checks == [root], checks
+    assert passes == [root]
+
+
 def test_do_reindex_runs_the_graph_pass_before_the_semantic_pass(monkeypatch):
     """A blocked model download must not delay graph freshness."""
     r = Reindexer()
