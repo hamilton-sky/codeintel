@@ -126,21 +126,51 @@ def test_invariant_nothing_outside_the_home_is_touched(home, h):
 
 
 def test_the_boundary_is_deliberately_asymmetric(home):
-    """Guarded on the TAIL, not the head — and that asymmetry is the safe direction.
+    """Guarded on BOTH ends now, and the head guard is a trade, stated here so it is not mistaken
+    for an oversight.
 
-    A tail guard cannot cause a miss: if the home string is followed by more name characters, the
+    The tail guard cannot cause a miss: if the home string is followed by more name characters, the
     text names a *different* directory and never the home, so declining to match is always right.
-    A head guard could: the home path legitimately follows all sorts of characters, and every
-    character we refuse to match after is a way for a real leak to survive.
 
-    In a module whose entire purpose is preventing disclosure, a missed redaction is the worse
-    failure, so the home embedded inside a longer token is still redacted. The visible cost is a
-    URL that happens to contain the home path getting rewritten — and note that for a normal home
-    that URL contained the account name, so redacting it was right anyway. It only looks wrong for
-    a short home like `/root`, where nothing was disclosed to begin with.
+    The head guard can. The home string is now matched only where it STARTS a path token (start of
+    text, or after whitespace, a quote, a backtick, `(`, `=`, `:` or `,`), so the home embedded in
+    the middle of a longer path or URL is no longer redacted: `https://example.com/root/api` stays
+    as it is. Under a normal home that URL carries the account name, and it now ships. The price was
+    judged worth paying (`redact-mid-path`): without the head guard, a real path such as
+    `/srv/root/app` in an actionable hint was rewritten to `/srv~/app`, a path that does not exist,
+    in the field an agent acts on, with nothing marking it as damaged. Corrupting a real path was
+    judged the worse failure. The home path as a path in its own right, which is how this tool's
+    answers carry it, is still redacted.
     """
     home("/root")
-    assert redact_text("https://example.com/root/api") == "https://example.com~/api"
+    assert redact_text("https://example.com/root/api") == "https://example.com/root/api"
+
+
+# The home string in the MIDDLE of a longer path names a different directory: a container's
+# `/srv/root`, procfs's per-process `root` link, a relative `scratchpad/root`. Each was rewritten
+# into a path that does not exist (`/srv~/app`) under HOME=/root.
+@pytest.mark.parametrize("text", ["/srv/root/app", "/proc/self/root/x", "scratchpad/root/app"])
+def test_a_home_string_in_the_middle_of_a_path_is_left_alone(home, text):
+    home("/root")
+    assert redact_text(text) == text
+    assert redact_text(f"run: codeintel index {text}") == f"run: codeintel index {text}"
+    assert not contains_home_path(text), "the detector must agree with the redactor"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("/root/x", "~/x"),
+    ('"/root/x"', '"~/x"'),
+    ("`/root/x`", "`~/x`"),
+    ("see /root/x", "see ~/x"),
+    ("(/root/x)", "(~/x)"),
+    ("root=/root/x", "root=~/x"),
+    ("a.py:/root/x", "a.py:~/x"),
+    ("/a,/root/x", "/a,~/x"),
+    ("/private/root/x/y", "~/x/y"),
+])
+def test_a_home_path_that_starts_a_token_is_still_redacted(home, text, expected):
+    home("/root")
+    assert redact_text(text) == expected
 
 
 @pytest.mark.parametrize("h", HOMES)
