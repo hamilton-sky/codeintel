@@ -290,6 +290,43 @@ def test_reset_with_yes_skips_the_prompt_entirely(monkeypatch):
     assert import_module("codeintel.cli.reset").run(_reset_args(yes=True)) == 0
 
 
+def test_reset_passes_semantic_only_through(monkeypatch):
+    seen = []
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
+                        lambda root, **kw: seen.append(kw.get("semantic_only")) or {"count": 1})
+    assert import_module("codeintel.cli.reset").run(_reset_args(yes=True, semantic_only=True)) == 0
+    assert seen == [True, True]          # the preview and the real run both keep the graph
+
+
+def test_reset_without_the_flag_still_clears_both(monkeypatch):
+    seen = []
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
+                        lambda root, **kw: seen.append(kw.get("semantic_only")) or {"count": 1})
+    assert import_module("codeintel.cli.reset").run(_reset_args(yes=True)) == 0
+    assert seen == [False, False]
+
+
+# --------------------------------------------------------------------------- Ctrl-C
+
+def test_ctrl_c_in_a_command_exits_130_with_one_line_and_no_traceback(monkeypatch, capsys):
+    """A Ctrl-C used to end every command with a KeyboardInterrupt traceback. It is one line,
+    `interrupted`, on stderr, and exit 130."""
+    import codeintel.__main__ as entry
+
+    def _interrupted(args):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("codeintel.cli.doctor.run", _interrupted)
+    monkeypatch.setattr(sys, "argv", ["codeintel", "doctor"])
+    with pytest.raises(SystemExit) as exited:
+        entry.main()
+    assert exited.value.code == 130
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == ["interrupted"]
+    assert captured.out == ""
+    assert "Traceback" not in captured.err and "KeyboardInterrupt" not in captured.err
+
+
 # --------------------------------------------------------------------------- query
 
 class _Gateway:

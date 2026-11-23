@@ -84,3 +84,37 @@ def test_the_command_never_raises_and_fresh_needs_no_backend():
     # --fresh takes no probe, so it must succeed with no backend and print a non-empty prompt.
     args = SimpleNamespace(project_root=None, agent="claude", fresh=True, deep=False)
     assert prompt_cmd.run(args) == 0
+
+
+def _model_failed_report() -> dict:
+    """What doctor reports when the package is installed and only the model download failed."""
+    rep = _report(semantic="fail", registered_agent="claude", healthy=False)
+    rep["engines"]["semantic"].update({
+        "installed": True, "runnable": False, "repo_indexed": False,
+        "reason": "model-load-failed",
+        "remediation": ("check network/proxy access to huggingface.co, or set FASTEMBED_CACHE_PATH "
+                        "to a directory pre-seeded with the model; then: codeintel index /repo"),
+    })
+    return rep
+
+
+def test_a_failed_model_download_is_not_fixed_by_reinstalling():
+    p = build_prompt("/repo", "claude", _model_failed_report())
+    assert "pip install" not in p
+    assert "FASTEMBED_CACHE_PATH" in p
+    assert "network" in p
+
+
+def test_an_unverified_lsp_row_is_not_reported_missing():
+    rep = _report(lsp="warn", registered_agent="claude", healthy=True)
+    rep["engines"]["lsp"].update({"installed": True, "runnable": None, "repo_indexed": None})
+    p = build_prompt("/repo", "claude", rep)
+    assert "pip install" not in p
+    assert "installs uv" not in p
+    assert "unverified" in p
+
+
+def test_the_prompt_lists_code_status():
+    assert "code.status" in build_prompt("/repo", "claude", _report(registered_agent="claude"))
+    assert "code.status" in build_prompt("/repo", "claude", _model_failed_report())
+    assert "code.status" in build_prompt(".", "claude", {}, fresh=True)
