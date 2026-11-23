@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -53,8 +54,11 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
                     "completed pass; re-ask shortly if you have just changed this code"}
 
 
-# root -> (the config files' stamps, the semantic db path they gave). One entry per project root.
-_SEMANTIC_DB_PATHS: dict[str, tuple[tuple, str]] = {}
+# root -> (the config files' stamps, the semantic db path they gave), for the
+# `_SEMANTIC_DB_PATHS_MAX` most recently used roots. Queries run on several threads, hence the lock.
+_SEMANTIC_DB_PATHS: OrderedDict[str, tuple[tuple, str]] = OrderedDict()
+_SEMANTIC_DB_PATHS_MAX = 256
+_SEMANTIC_DB_PATHS_LOCK = threading.Lock()
 
 
 def _file_stamp(path: str) -> tuple[int, int]:
@@ -78,11 +82,17 @@ def _semantic_db_path(project_root: str) -> str:
     home = str(codeintel_home())
     key = (home, _file_stamp(os.path.join(home, "config.toml")),
            _file_stamp(os.path.join(project_root, ".codeintel.toml")))
-    remembered = _SEMANTIC_DB_PATHS.get(project_root)
-    if remembered is not None and remembered[0] == key:
-        return remembered[1]
+    with _SEMANTIC_DB_PATHS_LOCK:
+        remembered = _SEMANTIC_DB_PATHS.get(project_root)
+        if remembered is not None and remembered[0] == key:
+            _SEMANTIC_DB_PATHS.move_to_end(project_root)
+            return remembered[1]
     path = default_db_path(str(load_config(project_root).get("model") or ""))
-    _SEMANTIC_DB_PATHS[project_root] = (key, path)
+    with _SEMANTIC_DB_PATHS_LOCK:
+        _SEMANTIC_DB_PATHS[project_root] = (key, path)
+        _SEMANTIC_DB_PATHS.move_to_end(project_root)
+        while len(_SEMANTIC_DB_PATHS) > _SEMANTIC_DB_PATHS_MAX:
+            _SEMANTIC_DB_PATHS.popitem(last=False)
     return path
 
 

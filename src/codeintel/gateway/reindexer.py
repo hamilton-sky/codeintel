@@ -6,12 +6,19 @@ import os
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
 # The fingerprint's git calls run on the query path, so they are bounded hard. A slow or broken git
 # never turns into a pass: the caller falls back to the time debounce (see `maybe_reindex`).
 _FINGERPRINT_TIMEOUT_S = 5
+# The stat walk over the listing runs on the query path too, and git's timeout does not bound it. A
+# tree listing more files than this is not fingerprinted (``None``): it keeps the time debounce.
+_FINGERPRINT_MAX_FILES = 50_000
+# Roots whose last fingerprint is remembered, newest use kept. A forgotten root only costs one
+# extra pass the next time it is queried, still bounded by the debounce.
+_FINGERPRINT_ROOTS_MAX = 256
 
 
 def _git_out(root: str, *args: str) -> bytes | None:
@@ -41,12 +48,14 @@ def _tree_fingerprint(root: str) -> str | None:
     (staged or not), a new file, a deletion or a restore all move it, while the index file itself
     does not: the graph indexes the work tree, and a ``git status`` refreshing the index is no edit.
     ``None`` for a root git cannot fingerprint: not a work tree, no commit yet, git missing, a
-    failure or a timeout."""
+    failure, a timeout, or a listing longer than ``_FINGERPRINT_MAX_FILES``."""
     head = _git_out(root, "rev-parse", "--verify", "--quiet", "HEAD")
     if head is None:
         return None
     listed = _git_out(root, "ls-files", "-z", "-c", "-o", "--exclude-standard")
     if listed is None:
+        return None
+    if listed.count(b"\0") > _FINGERPRINT_MAX_FILES:
         return None
     paths = sorted({p for p in listed.decode("utf-8", "surrogateescape").split("\0") if p})
     digest = hashlib.sha256()
@@ -103,8 +112,10 @@ class Reindexer:
         )
         self._lock = threading.Lock()
         self._last_fired: dict[str, float] = {}
-        # The tree fingerprint each git root had when its last pass was submitted.
-        self._last_fingerprint: dict[str, str] = {}
+        # The tree fingerprint each git root had when its last pass was submitted, for at most
+        # `_FINGERPRINT_ROOTS_MAX` roots. Dropped again when that pass is skipped or raises, so the
+        # same tree is retried rather than counted as indexed.
+        self._last_fingerprint: OrderedDict[str, str] = OrderedDict()
         # Per-project index generation — bumped when a reindex completes. The gateway
         # folds it into the cache key so a structural answer is invalidated once the
         # index actually moves (a symbol/free-text target has no file content to hash).
@@ -185,6 +196,9 @@ class Reindexer:
             self._last_fired[project_root] = now
             if fingerprint is not None:
                 self._last_fingerprint[project_root] = fingerprint
+                self._last_fingerprint.move_to_end(project_root)
+                while len(self._last_fingerprint) > _FINGERPRINT_ROOTS_MAX:
+                    self._last_fingerprint.popitem(last=False)
 
         # Passed the debounce gate — honor a per-project `reindex = "never"` opt-out before doing
         # expensive work, so that config key actually disables background reindexing (not only the
@@ -221,6 +235,7 @@ class Reindexer:
         freshness, never the cache's correctness."""
         from codeintel.core.filelock import exclusive, lock_path
 
+        completed = False
         try:
             # One pass per repository across the whole machine. Measured 2026-09-18: two passes
             # started together each embedded all 600 chunks of a 600-file repo and each reported
@@ -240,14 +255,24 @@ class Reindexer:
                 # graph's freshness must not wait behind it.
                 try:
                     self._graph_reindex(project_root)
+                    graph_ok = True
                 except Exception as exc:
+                    graph_ok = False
                     logger.warning("graph reindex failed for %s: %s", project_root, exc)
                 try:
                     self._semantic_reindex(project_root)
+                    semantic_ok = True
                 except Exception as exc:
+                    semantic_ok = False
                     logger.warning("semantic reindex failed for %s: %s", project_root, exc)
+                completed = graph_ok and semantic_ok
         finally:
             with self._lock:
+                if not completed:
+                    # Skipped (another process held the lock) or a pass raised: this tree is not
+                    # indexed, so forget its fingerprint and let the next query past the debounce
+                    # submit again instead of reading the unchanged tree as done.
+                    self._last_fingerprint.pop(project_root, None)
                 self._generation[project_root] = self._generation.get(project_root, 0) + 1
                 self._in_flight.discard(project_root)
 

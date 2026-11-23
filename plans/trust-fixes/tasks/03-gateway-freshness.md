@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 14
 Test first: yes
 Level: 3
@@ -119,6 +119,25 @@ Round 2 proof: check block `325 passed`, exit 0; `ruff check src tests bench` al
 - Check block re-run on a48f90f: `.venv/bin/pytest tests/test_gateway_freshness.py ... tests/test_cli_commands.py -q -o addopts=` -> `325 passed`, exit 0.
 - Lint: `ruff check src tests bench` -> All checks passed; `codeintel c4 . --check --out /tmp/codeintel-c4-check` -> `0 gating finding(s) — exit 0`.
 - Whole Test command: left to the conductor's gate.
+
+**Round 5 (pair review: retry, bounds, c4 reason)**: started at 20cb0b28c603682f7c11d71a841b7a2649683dbf. Failing tests committed alone in ef827b7 (6 failed for the right reasons: the two retry tests returned False on the second call, the two cap knobs and the gateway cap did not exist, the c4 breaker quoted the unrelated reason).
+
+Built (this round): `src/codeintel/gateway/reindexer.py`, `src/codeintel/gateway/gateway.py`, `src/codeintel/c4/check.py`, `docs/c4.md`; tests in `tests/test_reindexer.py` (4 new), `tests/test_gateway_freshness.py` (1 new), `tests/test_c4_check.py` (2 new).
+
+Review fixes (round 1, pair review, after the c4 repair):
+1. Skipped or failed pass never retried: `_do_reindex` sets `completed` only when it held the lock and both passes returned without raising; otherwise its `finally` pops `_last_fingerprint[root]` under `self._lock`, so the next query past the debounce submits again. The "persistent failure retries every debounce window" docstring is true again. Tests: `test_a_lock_skipped_pass_is_retried_while_the_tree_stays_the_same` (hold the real lock, pass skipped, released: next call True, graph ran twice, the call after False) and `test_a_pass_that_raised_is_retried_while_the_tree_stays_the_same`. A pass whose engine reports failure without raising (`_graph_reindex` logs and returns, `Indexer.index() < 0`) still counts as completed: those paths log by design and changing their contract is out of this finding.
+2. Fingerprint work unbounded: `_tree_fingerprint` returns None (fall back to the debounce) when the listing has more than `_FINGERPRINT_MAX_FILES` = 50,000 entries, counted on the raw bytes before any decode, sort or `os.stat`. Test `test_a_tree_listing_too_many_files_falls_back_to_the_debounce` (cap 1, two files: None and zero stat calls). The git stdout itself is still read whole (bounded in time by the 5 s timeout).
+3. Unbounded per-root maps: `_SEMANTIC_DB_PATHS` is an `OrderedDict` LRU capped at `_SEMANTIC_DB_PATHS_MAX` = 256 under a lock (queries run on several threads); `Reindexer._last_fingerprint` likewise, `_FINGERPRINT_ROOTS_MAX` = 256. An evicted root costs one extra pass (still debounced) or one config read. Tests `test_the_remembered_semantic_db_paths_are_bounded`, `test_the_remembered_fingerprints_are_bounded`. `_generation` is deliberately not bounded: forgetting it resets a root to 0 and could make an old cached key match again.
+4. c4 cycle reason: when no allowed relation lies between a truncated cycle's listed members, `_allowed_cycle_breaker` returns `{"reason": _TRUNCATED_CYCLE_REASON, "index": None}` ("only allowlisted edges hold this cycle together (between members not listed here)") instead of the first entry; an entry inside the listed members is still named. docs/c4.md says so. Tests `test_a_truncated_cycle_with_no_allowed_edge_among_its_listed_members_names_no_unrelated_reason`, `test_a_truncated_cycle_names_the_entry_that_lies_inside_its_listed_members`.
+- The map.md stray "03 — ..." line the spec review noted: map.md is append only for builders, so it stays; this round's line is appended as a bullet.
+
+Proof (this round, all run after the last edit):
+- Check block: `.venv/bin/pytest tests/test_gateway_freshness.py ... tests/test_cli_commands.py -q -o addopts=` -> `330 passed`, exit 0.
+- `pytest tests/test_reindexer.py tests/test_gateway_freshness.py tests/test_c4_check.py tests/test_c4.py -q -o addopts=` -> 146 passed; `tests/test_c4*.py` + acceptance `test_tf_freshness.py` -> 187 passed.
+- `ruff check src tests bench` All checks passed; `mypy` no issues in 87 files; `compileall` exit 0; `codeintel c4 . --check --out /tmp/codeintel-c4-check` -> `0 gating finding(s) — exit 0`.
+- `tests/test_reindex_lock.py` unchanged this round. Whole Test command: left to the conductor's gate.
+
+Shortcuts taken (this round): the 50,000-file cap means a larger repo keeps the plain time debounce (today's behaviour), not change detection; worth moving the fingerprint off the request thread if large repos need it.
 
 ## Review findings (round 1, pair review)
 

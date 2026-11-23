@@ -157,6 +157,10 @@ def _cycle_record(cycle: dict[str, Any], depth: int) -> dict[str, Any]:
         edge_source="cycle", confirmed_by=["imports"], depth=depth)
 
 
+_TRUNCATED_CYCLE_REASON = ("only allowlisted edges hold this cycle together (between members "
+                           "not listed here)")
+
+
 def _allowed_cycle_breaker(cycle: dict[str, Any], cycles: list[dict[str, Any]],
                            remaining: list[dict[str, Any]],
                            allowed: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any] | None:
@@ -177,11 +181,14 @@ def _allowed_cycle_breaker(cycle: dict[str, Any], cycles: list[dict[str, Any]],
         listed = [set(c.get("members") or []) for c in cycles]
         if any(not any(set(r.get("members") or []) & m for m in listed) for r in remaining):
             return None
-    # The cycle vanished, so an allowed relation lies inside it; with `members` capped it may join
-    # two unlisted members, and then the first allowed relation stands in for it.
+    # The cycle vanished, so an allowed relation lies inside it. With `members` capped it may join
+    # two unlisted members: then no one entry can be named, and quoting some other entry's reason
+    # would misattribute it, so the cycle is allowed under a generic reason and no index.
     ordered = sorted(allowed.items())
     inside = [entry for (a, b), entry in ordered if a in members and b in members]
-    return (inside or [entry for _pair, entry in ordered])[0]
+    if inside:
+        return inside[0]
+    return {"reason": _TRUNCATED_CYCLE_REASON, "index": None}
 
 
 def check_layers(payload: dict, parsed: dict[str, Any]) -> dict[str, Any]:
