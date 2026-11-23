@@ -27,3 +27,10 @@ What the run left for later: minor findings of passing reviews, the findings a l
 ## 10-semantic-failure-handling (left for later)
 
 - 1. minor src/codeintel/engines/semantic/provider.py: `_is_model_load_failure` matches the text "could not load embedding model " that `EmbeddingModelUnavailable` builds in src/codeintel/engines/semantic/db.py:102; rewording that message silently stops the record and no test would catch it. Fix: keep the exception type on the indexer, or define the prefix once in db.py and import it. (pair review)
+
+## 11-agent-facing-hints (left for later)
+
+- 1. minor src/codeintel/engines/graph/backend.py: `_SEARCH_ADVICE` is quadratic on repeated unclosed `search_graph(name_pattern="` text and `_agent_facing` runs on the whole stderr before the 400-char cap (1.2s at 40 KB, 28.6s at 200 KB, ~594s at 1 MB). No caller path found to trigger it on 0.10.8. Fix: cut the text to a bounded length (e.g. last 4x`_STDERR_CAP`) before the rewrites, or bound the lazy group (`[^"]{0,200}?`). (pair review)
+- 2. minor src/codeintel/engines/graph/backend.py: an unquoted id in a list with no `project` keyword before it (`available: Users-alice-repo, home-bob-x`) and two-part ids (`"home-bob"`) pass through. Not a live leak on 0.10.8. Fix: when `is_project_not_found` matches, drop everything after the error phrase. (pair review)
+- 3. minor src/codeintel/engines/graph/backend.py: the `_TOOL_NAMES` rewrite also hits the backend's deprecation warning, producing `cli code.query op=pattern --help`, which does not exist. Fix: drop `warning: passing raw JSON ...` lines with `_LOG_NOISE`, or leave `cli <tool>` forms alone. (pair review)
+- 4. minor src/codeintel/engines/graph/provider.py: did-you-mean lists symbol names to any role that may run `callers`, even without `pattern` (own project only). Fix: skip suggestions when the role lacks `pattern`, or document it. (pair review)
