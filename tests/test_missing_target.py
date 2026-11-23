@@ -206,15 +206,17 @@ def test_the_graph_hint_never_prints_empty_backticks(monkeypatch):
     assert "that symbol" in env["hint"], env["hint"]
 
 
-def test_the_reindex_hint_names_the_mcp_tool_as_well_as_the_cli(monkeypatch):
-    """The reader is usually an agent with no shell. `codeintel index` is a CLI; an agent connected
-    over MCP has `index_repository` in its own toolset and one call does the same job. Which of the
-    two is available is not something this process can see, so it prints both."""
+def test_the_reindex_hint_names_the_cli_and_no_backend_tool(monkeypatch):
+    """The reader is usually an agent with no shell. `codeintel install` registers only
+    `codeintel serve` (code.query/status/doctor/map), so the graph backend's own `index_repository`
+    is never in the agent's toolset: naming it sent the agent to a tool it does not have. The hint
+    names the CLI, and asking the user to run it for an agent that cannot."""
     env = _graph_provider(monkeypatch).build_result("callers", "nope", [], 30000, ROOT)
 
-    assert "codeintel index" in env["hint"], env["hint"]
-    assert "index_repository" in env["hint"], env["hint"]
-    assert "incremental=true" in env["hint"], env["hint"]
+    assert f"codeintel index {ROOT}" in env["hint"], env["hint"]
+    assert "ask the user to run it" in env["hint"], env["hint"]
+    assert "index_repository" not in env["hint"], env["hint"]
+    assert "incremental=true" not in env["hint"], env["hint"]
 
 
 def test_the_mcp_remediation_does_not_hand_back_a_path_no_shell_will_expand(monkeypatch):
@@ -222,20 +224,20 @@ def test_the_mcp_remediation_does_not_hand_back_a_path_no_shell_will_expand(monk
 
     `redact` rewrites this process's home directory to `~` in every field that reaches a caller,
     and its docstring gives the reason: the hints carry runnable commands and a shell expands `~`
-    back. A JSON tool argument has no shell. So spelling the MCP form as
-    `index_repository(repo_path="~/Documents/project/app")` ships a remediation that cannot run —
-    strictly worse than the CLI-only hint it was added to improve. The MCP form points at the root
-    the caller already passed instead of printing a redacted copy of it."""
+    back. An agent over MCP has no shell, so the remedy meant for it — asking the user to run the
+    command — must not carry a `~` path of its own; it points at the command printed before it."""
     from codeintel.gateway.gateway import Gateway
 
     gw = Gateway(graph=_graph_provider(monkeypatch))
     hint = gw.query(op="callers", target="nope", project_root=ROOT)["hint"]
 
-    mcp_form = hint.split("index_repository", 1)[1]
+    assert "ask the user to run it" in hint, hint
+    mcp_form = hint.split("ask the user to run it", 1)[1]
     assert "~" not in mcp_form, (
         "the MCP remediation must not carry a `~` path — nothing expands it on that transport: "
         + mcp_form
     )
+    assert "index_repository" not in hint, hint
 
 
 # ---------------------------------------------------------------------------

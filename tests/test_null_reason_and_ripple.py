@@ -511,8 +511,11 @@ def test_an_all_calls_answer_keeps_its_plain_count(monkeypatch):
 
 
 def test_no_edges_names_the_relationships_that_do_point_at_the_symbol(monkeypatch):
-    """"No callers" plus silence reads as "unused". Naming what DOES reference it is the difference
-    between an answer and a dead end."""
+    """"No callees" plus silence reads as "it does nothing". Naming what DOES reference it is the
+    difference between an answer and a dead end — but only a real edge kind of this graph
+    (`_EDGE_KINDS`) is named. Backend 0.9.0 answers `type(c) AS kind` with `["1","1"]`, which
+    printed "1 1" as a relationship, and a kind the edge vocabulary does not describe is not one
+    a reader can act on."""
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
@@ -521,16 +524,18 @@ def test_no_edges_names_the_relationships_that_do_point_at_the_symbol(monkeypatc
     def rows(cypher, project, timeout_ms):
         if "type(c) AS kind" in cypher:                       # the dependency census
             return [{"kind": "DECORATES", "n": "3"}, {"kind": "DEFINES", "n": "1"},
-                    {"kind": "TESTS", "n": "2"}]
+                    {"kind": "TESTS", "n": "2"}, {"kind": "CALLS", "n": "4"},
+                    {"kind": "1", "n": "1"}]
         if "-[" not in cypher:                                # the node-existence probe
             return [{"n.qualified_name": "pkg.route", "n.file_path": "src/api.py"}]
         return []                                             # no CALLS/USAGE/CALL_REFERENCE
     monkeypatch.setattr(p, "_query_rows", rows)
 
-    env = p.build_result("callers", "route", [], 30000, ROOT)
+    env = p.build_result("callees", "route", [], 30000, ROOT)
     assert env["reason"] == "no-edges"
     hint = env["hint"]
-    assert "3 DECORATES" in hint and "2 TESTS" in hint, hint
+    assert "4 CALLS" in hint, hint
+    assert "DECORATES" not in hint and "TESTS" not in hint and "1 1" not in hint, hint
     # Structural edges say where a symbol lives, not what depends on it.
     assert "DEFINES" not in hint, hint
 
