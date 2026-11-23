@@ -310,9 +310,11 @@ ROOT = "/Users/x/Documents/project/codeintel"
 @pytest.fixture
 def in_a_work_tree(monkeypatch):
     """`ROOT` is not a real directory, let alone a git work tree. The uncommitted `changed` tests
-    here are about rendering the backend's answer, not about the git check in front of it, so
-    that one check is answered "yes"."""
+    here are about rendering the backend's answer, not about the git checks in front of it, so
+    those are answered "yes, a work tree" and "git status lists nothing"."""
     monkeypatch.setattr("codeintel.engines.graph.changed_range.in_work_tree", lambda root: True)
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.uncommitted_paths",
+                        lambda root, within="": ([], [], ""))
 
 
 def _capturing_provider(monkeypatch, method_response):

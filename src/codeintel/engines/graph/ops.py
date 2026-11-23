@@ -721,6 +721,27 @@ class GraphOps(DispatchCallers, ChangedSince):
                     hop = 0
                 syms.append((label, fp, hop))
             if not files and not syms:
+                # The backend's "nothing" is only "clean" when git agrees. Git unasked, or git
+                # listing source edits the backend did not report, means the index has not seen
+                # the working tree, and "clean" would be the false freshness this check removes.
+                if status_error:
+                    self._uncommitted_age_gap(age, [], syms, root)
+                    return ("## Changes impact\n(the graph backend reports no uncommitted source "
+                            "changes; git could not list the working tree to confirm it)")
+                listed = changed_paths + untracked
+                unreported = [p for p in listed if is_code_path(p)]
+                if unreported:
+                    base = os.path.realpath(self._answered_root or root)
+                    first = os.path.relpath(unreported[0], base)
+                    more = f" (and {len(unreported) - 1} more)" if len(unreported) > 1 else ""
+                    self._add_gap(
+                        "changed", "stale-index",
+                        f"git lists `{first}`{more} as changed but the graph backend reported no "
+                        "change, so the index has not caught up with the working tree — the "
+                        "symbols the edit touches, and their callers, are missing")
+                    return ("## Changes impact\n(the graph backend reports no uncommitted source "
+                            f"changes, but git lists {len(unreported)} changed source file(s))")
+                dropped = dropped or len(listed)
                 if dropped:
                     return ("## Changes impact\n(no source changes — the working tree's "
                             f"{dropped} uncommitted change(s) are all non-source files)")

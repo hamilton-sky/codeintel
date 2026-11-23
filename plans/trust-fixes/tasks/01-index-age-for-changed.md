@@ -1,7 +1,7 @@
 # Make `changed` check index age in every mode, against HEAD's commit time, with no slack
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 3
@@ -123,6 +123,18 @@ Work for this round started at commit 390732d. Test-only commit: 3a03d20 (5 new 
 Proof (round 1): `.venv/bin/pytest tests/test_index_age.py tests/test_changed_range.py tests/test_reset.py tests/test_graph_real.py tests/test_null_reason_and_ripple.py tests/test_graph_failure_population.py tests/test_dispatch_callers.py tests/test_mcp_answer_size.py tests/test_gateway.py -q -o addopts=` -> 356 passed, 1 skipped. `tests/test_qualifier_scan.py test_graph_provider.py test_mcp_server.py test_cli_commands.py` -> 207 passed. `ruff check src tests bench` clean, `mypy` no issues (87 files), c4 check 0 gating findings, compileall OK. Acceptance `test_tf_freshness.py`: 5 passed, 9 failed (the same tickets 02/03 tests as before). `grep -rn "stale-index\|index-age-unknown" tests/` outside `test_index_age.py`/`test_changed_range.py` finds only comments in `conftest.py`. Whole Test command: left to the conductor's gate.
 
 For later tickets (round 1): `uncommitted_paths` returns a 3-tuple now; an `error` must be read as "cannot tell".
+
+**Review fixes (round 2)**
+
+Work for this round started at commit 063830f. Test-only commit: 4b9c47c (6 new tests in `tests/test_index_age.py`; 5 failed before the fix for the right reasons, the 6th, `test_a_repo_with_no_commit_yet_still_dates_its_files`, is the control that the fix must not turn "no commit yet" into `unknown`).
+
+1. blocker, `git log -1 --format=%ct` under `log.showSignature`: fixed. `graph_index_age` now runs `git log -1 --no-show-signature --format=%ct`, so neither verification text on stdout nor the verifier program. When HEAD exists and its time does not parse or git fails, the answer is `unknown` ("HEAD's commit time could not be read (... printed '...' / stderr), so a commit after the index cannot be ruled out"), never a silent skip. Only a repo with no commit yet (`rev-parse --verify --quiet HEAD^{commit}` fails) skips it. Tests: `test_a_signed_commit_after_the_index_is_stale_under_log_show_signature` is a real reproduction: a hand-made commit with a `gpgsig` header (via `hash-object`), the repo's own `.git/config` sets `log.showSignature=true` and a `gpg.program` script that leaves a marker file. Before the fix: no `stale-index` and the marker existed (git ran the repo's program). After: `stale-index` naming "HEAD (a commit)", no marker. `test_an_unreadable_head_commit_time_is_unknown_never_skipped` stubs `log` output to garbage and asserts `index-age-unknown` naming HEAD.
+2. minor, "working tree clean" before the gap: fixed in `GraphOps._op_changed`. When the backend reports no source file or symbol: a `git status` failure gives `index-age-unknown` and the text "the graph backend reports no uncommitted source changes; git could not list the working tree to confirm it"; git listing source files (in the answered project) the backend missed gives `stale-index` naming the first file and "... but git lists N changed source file(s)"; git listing only non-source files gives the existing "all non-source files" line with git's count. "working tree clean" now prints only when git status succeeded and listed nothing. Tests: `test_a_failed_git_status_never_says_working_tree_clean`, `test_a_source_edit_git_lists_but_the_backend_misses_is_stale_not_clean`, `test_a_non_source_edit_the_backend_misses_is_not_called_clean`.
+   Consequence: `tests/test_graph_real.py` and `tests/test_null_reason_and_ripple.py` run on a `ROOT` that does not exist, so `git status` there now fails and `test_changed_clean_tree_is_informative_not_null` stopped saying "clean". Their `in_a_work_tree` fixtures now also stub `changed_range.uncommitted_paths` to `([], [], "")` (a clean work tree), docstring updated. No assertion changed; both files are in Touches.
+
+Proof (round 2): check block `.venv/bin/pytest tests/test_index_age.py tests/test_changed_range.py tests/test_reset.py tests/test_graph_real.py tests/test_null_reason_and_ripple.py tests/test_graph_failure_population.py tests/test_dispatch_callers.py tests/test_mcp_answer_size.py tests/test_gateway.py -q -o addopts=` -> 362 passed, 1 skipped. `tests/test_qualifier_scan.py test_graph_provider.py test_mcp_server.py test_cli_commands.py test_architecture.py` -> 213 passed. `ruff check src tests bench` all checks passed; c4 check 0 gating findings; `mypy` no issues in 87 files; compileall OK. Acceptance `test_tf_freshness.py`: 5 passed (all `changed`), 9 failed (the same tickets 02/03 tests). `grep -rn "stale-index\|index-age-unknown" tests/` outside `test_index_age.py`/`test_changed_range.py` finds only `conftest.py` comments. Whole Test command: left to the conductor's gate.
+
+For later tickets (round 2): uncommitted `changed` tests on a fake `ROOT` need `changed_range.uncommitted_paths` stubbed as well as `in_work_tree`, or the answer is not "clean". Any new `git log`/`show` call must pass `--no-show-signature`.
 
 ## Review findings (round 1, pair review)
 

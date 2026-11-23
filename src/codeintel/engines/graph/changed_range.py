@@ -431,11 +431,21 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
                 continue
             if m > newest:
                 newest, newest_what = m, rel
-        code, out, _ = _git(root, "log", "-1", "--format=%ct")
+        # `--no-show-signature`: `log.showSignature`, from any config including the repository's
+        # own, would put verification text before the time and run the verifier program it names.
+        code, out, err = _git(root, "log", "-1", "--no-show-signature", "--format=%ct")
         if code == 0 and out.strip().isdigit():
             committed = float(out.strip())
             if committed > newest:
                 newest, newest_what = committed, "HEAD (a commit)"
+        elif code == 0 or _git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")[0] == 0:
+            # HEAD exists and its time could not be read. Skipping it would let a commit made after
+            # the index read as fresh. Only a repository with no commit yet has no time to read.
+            why = (f"printed {out.strip()[:80]!r}" if code == 0
+                   else err or f"exit {code}")
+            return IndexAge(
+                "unknown", f"HEAD's commit time could not be read (`git log -1 --format=%ct` "
+                           f"{why}), so a commit after the index cannot be ruled out")
         code, out, _ = _git(root, "rev-parse", "--git-path", "logs/HEAD")
         if code == 0 and out.strip():
             reflog = out.decode().strip()
