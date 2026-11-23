@@ -6,7 +6,7 @@ Blocked by: 01, 14
 Test first: yes
 Level: 3
 Builder: backend
-Touches: src/codeintel/gateway/gateway.py, src/codeintel/gateway/cache.py, src/codeintel/gateway/reindexer.py, README.md, tests/test_cache.py, tests/test_reindexer.py, tests/test_reindex_lock.py, tests/test_gateway.py, tests/test_gateway_freshness.py
+Touches: src/codeintel/gateway/gateway.py, src/codeintel/gateway/cache.py, src/codeintel/gateway/reindexer.py, README.md, tests/test_cache.py, tests/test_reindexer.py, tests/test_reindex_lock.py, tests/test_gateway.py, tests/test_gateway_freshness.py, src/codeintel/c4/check.py, src/codeintel/c4/model.py, docs/c4.md, tests/test_c4.py, tests/test_c4_check.py
 
 This ticket fixes T4 (`server-cache-survives-external-reindex`) and the reindexer half of T8 (`reindexing-flag-self-triggered`).
 
@@ -33,7 +33,7 @@ It is level 3 because it decides when `Reindexer.maybe_reindex` submits a minute
 
 - The semantic failure record and the search fallback are ticket 10.
 - `stale-index` inside answers is tickets 01 and 02.
-- The c4 allowlist fix this ticket's gate needs (the Lint command's `codeintel c4 . --check`) is ticket 14.
+- The c4 allowlist fix this ticket's gate needs (the Lint command's `codeintel c4 . --check`) is ticket 14. The c4 paths in Touches are there only because resuming this ticket after the repair counts ticket 14's commits (eb217d8, 474ee7f) in its range; this ticket does not change them, and its review covers them as ticket 14's code.
 
 ## Done when
 
