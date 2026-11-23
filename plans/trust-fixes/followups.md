@@ -13,3 +13,8 @@ What the run left for later: minor findings of passing reviews, the findings a l
 - 1. minor src/codeintel/gateway/reindexer.py: a root that cannot be fingerprinted (not a git repo, over 50,000 listed files, git failing) still submits a pass every debounce window, and the gateway flags `reindexing` on an unchanged tree. Fix: document it in the README "Keeping answers fresh" section, or skip the flag when the submit came from the fallback path. (pair review)
 - 2. minor src/codeintel/gateway/reindexer.py: in `_tree_fingerprint`, `os.stat` follows symlinks; a tracked symlink into a hung network mount can block the request thread. Fix: use `os.lstat`. (pair review)
 - 3. minor src/codeintel/gateway/reindexer.py: a semantic pass that fails with a -1 return counts as completed and is not retried on an unchanged tree. Fix: say so in the `_do_reindex` docstring, which still reads "A persistent failure retries every debounce window". (pair review)
+
+## 08-no-writes-through-symlinks (left for later)
+
+- 1. minor src/codeintel/core/containment.py: `_why_not_a_dir` (and the Windows branch of `_write_walk`) reports `dangling` when a directory on the resolved path is a regular file (e.g. `AGENTS.md -> README.md/x`, ENOTDIR). Refusal correct, reason wrong. Fix: return `not-a-file` when the component exists and is not a directory. (pair review)
+- 2. minor src/codeintel/core/containment.py: in `_write_walk`, if `os.fdopen(fd, ...)` raises, the descriptor from `os.open(tmp, ...)` is never closed. Fix: close `fd` in the except path when `fdopen` was not reached. (pair review)
