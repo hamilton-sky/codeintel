@@ -259,6 +259,10 @@ def test_chain_parses_trace_path(monkeypatch):
     assert "Callees (downstream)" in r["result"]
     assert "builtins.str [hop 1]" in r["result"]
     assert "GraphProvider._op_callers [hop 1]" in r["result"]
+    # 0.9.0 hops carry no `strategy`: each says so, and the answer is capped at partial.
+    assert "builtins.str [hop 1] [unstated]" in r["result"]
+    assert [g["kind"] for g in r["gaps"]].count("hop-resolution-unstated") == 1
+    assert r["confidence"] == "partial"
 
 
 def test_chain_handles_ambiguous_suggestions(monkeypatch):
@@ -468,6 +472,8 @@ def test_chain_carries_risk_labels(monkeypatch):
     r = p.build_result("chain", "code_status_handler", [], 0, ROOT)
     assert r["result"] is not None
     assert "[risk: CRITICAL]" in r["result"] and "[risk: HIGH]" in r["result"]
+    assert "[unstated] [risk: CRITICAL]" in r["result"]
+    assert "hop-resolution-unstated" in [g["kind"] for g in r["gaps"]]
 
 
 def test_chain_requests_evidence_and_the_registration_edge(monkeypatch):
