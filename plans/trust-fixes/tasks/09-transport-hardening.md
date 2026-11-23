@@ -1,7 +1,7 @@
 # Harden the transports: /code/status 403, root-not-found, redact leading boundary, and the MCP wire-byte bound
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 08
 Test first: yes
 Level: 3
@@ -77,6 +77,9 @@ Work started at 3b515e2fef18b7da1255d690499c015a94bd4675. Test-only commit: f23c
 - Per-row cost `_size([[row]]) - 8` is an upper bound on what a row adds at its wire depth (first row +8, later +6), so no re-check loop is needed.
 
 **Shortcuts taken**: none.
+
+**Review fixes**
+- Round 1, floor guard (`suppress: ... # type: ignore[return-value]` on the root-not-found return in `src/codeintel/transports/mcp.py`): the suppression is removed. The return is now `cast(Result, redact(safe_null_result(...)))` (`cast` imported from `typing`). The cast is honest: `redact` is typed `object -> object` but, for a dict, returns a new dict with the same keys and only string values rewritten, so the value is still a `Result`. Proof after the change: `.venv/bin/mypy` no issues in 88 source files; `ruff check src tests bench` all checks passed; check block `396 passed, 1 deselected, 1 xfailed`. The three older `# type: ignore[return-value]` lines on the `code.status`/`code.doctor`/`code.map` wrappers predate this ticket (present at 3b515e2) and are left alone.
 
 **For later tickets**
 - Ticket 13 (CHANGELOG): T7 `status-root-denied-200-fake-fallback` (GET /code/status now 403, and its body carries `reason`), `nonexistent-root-says-not-indexed` (new reason `root-not-found`, outcome `unavailable`), `redact-mid-path` (the home string in the middle of a path or URL is no longer redacted: say so), T10 `mcp-budget-measured-on-wrong-bytes`.

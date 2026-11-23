@@ -4,7 +4,7 @@ import os
 import shlex
 import threading
 import time
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import anyio
 import pydantic_core
@@ -195,10 +195,10 @@ def code_query_handler(args: dict) -> Result:
         # cannot learn which paths exist outside its roots. Redacted here because this answer never
         # reaches `Gateway.query`, where every other envelope is redacted.
         if project_root and gw.allows_root(role, project_root) and not os.path.isdir(project_root):
-            return redact(safe_null_result(  # type: ignore[return-value]
+            return cast(Result, redact(safe_null_result(
                 op, target, reason="root-not-found",
                 hint=(f"{project_root} does not exist; pass the absolute repo root, or omit it to "
-                      f"use the server cwd")))
+                      f"use the server cwd"))))
         try:
             offset = max(0, int(args.get("offset", 0) or 0))
         except (TypeError, ValueError):
