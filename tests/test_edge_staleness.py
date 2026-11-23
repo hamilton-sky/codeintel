@@ -85,7 +85,6 @@ def _stamp_index(cache: Path, when: float) -> None:
 def _graph() -> _Graph:
     g = _Graph()
     helper = f"{PROJECT}.pkg.core.helper"
-    compute = f"{PROJECT}.pkg.core.compute"
     leaf = f"{PROJECT}.pkg.util.leaf"
     g.call("pkg.app.main", "pkg/app.py", helper, "pkg/core.py", callee_label="Function",
            strategy="import_map")

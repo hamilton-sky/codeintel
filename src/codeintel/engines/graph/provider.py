@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 
 # `shutil`/`subprocess` are no longer called from this module — `BackendClient` (graph_backend.py)
 # owns the transport now — but many tests monkeypatch `codeintel.engines.graph.provider.shutil.which` /
@@ -14,8 +15,10 @@ import threading
 from typing import Any
 
 from codeintel.core.outcome import Missing
+from codeintel.core.paths import graph_db_mtime
 from codeintel.core.per_thread import PerThread
 from codeintel.core.provider import Result, attach_confidence, log_swallowed, safe_null_result
+from codeintel.engines.graph import changed_range
 from codeintel.engines.graph.backend import (
     BackendClient,
     BackendRefused,
@@ -24,6 +27,8 @@ from codeintel.engines.graph.backend import (
     coordination_remediation,
     is_coordination_refusal,
 )
+from codeintel.engines.graph.confidence import _UNSTATED
+from codeintel.engines.graph.edges import _EdgeGroup, _Omitted
 from codeintel.engines.graph.ops import GraphOps
 from codeintel.engines.graph.qualifier_scan import Budget
 from codeintel.engines.graph.render import (
@@ -40,6 +45,7 @@ from codeintel.engines.graph.targets import (
     _has_own_git_dir,
     _parse_symbol_target,
     _same_path,
+    _SymbolTarget,
 )
 
 # Every op _dispatch recognizes. Kept beside it so "unsupported op" and "op found nothing" stay
@@ -62,6 +68,10 @@ _GRAPH_OPS = frozenset({
 # for a genuine subdirectory of a monorepo, an ancestor index is the CORRECT place to find a
 # symbol's callers, so those answer and carry a caveat instead.
 _ROOT_SCOPED_OPS = frozenset({"overview", "changed", "changes", "deadcode", "hotspots"})
+
+# Ops whose rows cite files the index read, and so can describe a tree older than the one on disk.
+# `changed` checks the index's age itself; `chain` hops carry no row files.
+_STALENESS_OPS = frozenset({"callers", "callees", "impact", "context"})
 
 # Ops withdrawn from the product because they were measured wrong, not merely imprecise.
 #
@@ -133,6 +143,12 @@ def _suggest_op(unknown: str) -> list[str]:
     close = difflib.get_close_matches(unknown, candidates, n=3, cutoff=0.5)
     prefix = [op for op in candidates if op.startswith(unknown) and op not in close]
     return (close + prefix)[:3]
+
+
+def _name_files(files: list[str]) -> str:
+    """Files named for a gap, not counted: the first three in backticks, then "and others"."""
+    shown = ", ".join(f"`{f}`" for f in files[:3])
+    return shown + (" and others" if len(files) > 3 else "")
 
 
 # The supported backend range. `codebase-memory-mcp` 0.9.x answers `query_graph`/`search_graph`
@@ -567,6 +583,97 @@ class GraphProvider(GraphOps):
     # The page this answer covered — `{offset, limit, total, next_offset}` — published as the
     # envelope's `page` so a caller can ask for the next one without parsing the gap's prose.
     _pending_page: PerThread[dict[str, Any] | None] = PerThread(None)
+    # The files of the symbols an edge op answered ABOUT (each rendered group's own file), which no
+    # row carries: the age check stats them beside the rows' files.
+    _pending_target_files: PerThread[tuple[str, ...]] = PerThread(())
+
+    def _render_edge_answer(
+        self, op: str, unit: str, target: str, wanted: _SymbolTarget,
+        groups: list[_EdgeGroup], row_keys: tuple[str, str, str], truncated: bool,
+        extra_notes: str = "", omitted: _Omitted | None = None,
+    ) -> str:
+        self._pending_target_files += tuple(g.file for g in groups if g.file)
+        return super()._render_edge_answer(
+            op, unit, target, wanted, groups, row_keys, truncated, extra_notes, omitted)
+
+    def _empty_edge_answer(
+        self, op: str, unit: str, target: str, wanted: _SymbolTarget,
+        selected: list[_EdgeGroup], notes: str, truncated: bool, dropped: int,
+    ) -> str:
+        self._pending_target_files += tuple(g.file for g in selected if g.file)
+        return super()._empty_edge_answer(
+            op, unit, target, wanted, selected, notes, truncated, dropped)
+
+    def _stamp_staleness(self, op: str, project: str, root: str, written: float | None) -> str:
+        """Check this edge answer's files against the index's age; return the note for its body.
+
+        The files are every row's and every answered symbol's own. A file that no longer exists
+        cannot be dated, so its nearest existing directory stands in for it: deleting or renaming a
+        file moves its directory's mtime. `graph_index_age` is reached through the module so the
+        suite's fresh stub covers it.
+
+        Stale: a `stale-index` gap naming the files, and each row in a file that is missing or newer
+        than the index becomes `unstated`. Unknown: an `index-age-unknown` gap. Fresh: nothing, and
+        `""`. Both gaps are in the `index` section: one gap for the whole answer, `impact` included.
+        `written` is the db's mtime read before the backend round trip, as `changed` reads it.
+        """
+        base = self._answered_root or root
+        files = sorted(({str(r.get("file") or "") for r in self._pending_rows}
+                        | set(self._pending_target_files)) - {""})
+        present = [f for f in files if os.path.exists(os.path.join(base, f))]
+        missing = [f for f in files if f not in present]
+        stand_ins = []
+        for f in missing:
+            parent = os.path.dirname(f)
+            while parent and not os.path.isdir(os.path.join(base, parent)):
+                parent = os.path.dirname(parent)
+            stand_ins.append(parent or ".")
+        age = changed_range.graph_index_age(project, base, present + sorted(set(stand_ins)))
+        rerun = f"re-run `codeintel index {root}`"
+        if age.state == "unknown":
+            detail = f"{age.detail}, so these {op} rows cannot be called current; {rerun}"
+            self._add_gap("index", "index-age-unknown", detail)
+            return f"\n\n> Index age unknown: {detail}."
+        if age.state != "stale":
+            return ""
+
+        if written is None:
+            try:
+                written = graph_db_mtime(project)
+            except OSError:
+                written = None
+        newer = []
+        if written is not None:
+            for f in present:
+                try:
+                    if os.stat(os.path.join(base, f)).st_mtime > written:
+                        newer.append(f)
+                except OSError:
+                    continue
+        what = []
+        if newer:
+            what.append(f"{_name_files(newer)} changed after the index was written")
+        if missing:
+            what.append(f"{_name_files(missing)} no longer exists (deleted or renamed since the "
+                        f"index)")
+        cause = "; ".join(what) or age.detail
+        detail = (f"{cause}, so these {op} rows describe an older tree than the one on disk and "
+                  f"may cite edges that no longer exist or miss new ones; {rerun}")
+        self._add_gap("index", "stale-index", detail)
+
+        changed = set(newer) | set(missing)
+        stamped = []
+        for row in self._pending_rows:
+            if row.get("file") in changed:
+                row = dict(row)
+                row["evidence"] = _UNSTATED
+                row["verified"] = False
+                row["why"] = ("its file changed after the index was written (edited, "
+                              "deleted or renamed), so the index's record of this edge may no "
+                              "longer hold")
+            stamped.append(row)
+        self._pending_rows = tuple(stamped)
+        return f"\n\n> Stale index: {detail}."
 
     def _page_published(self) -> dict[str, Any] | None:
         """The page this answer covered, read through a call so the reset at the top of
@@ -804,7 +911,16 @@ class GraphProvider(GraphOps):
             self._pending_row_cap = False
             self._pending_withheld = 0
             self._pending_nonrow_lines = False
+            self._pending_target_files = ()
             self._clear_failure()
+            # The index's age is read BEFORE the backend round trip, as `changed` reads it: a stamp
+            # taken after the backend opened the db could read "just now" for any index.
+            index_written: float | None = None
+            if op_str in _STALENESS_OPS:
+                try:
+                    index_written = graph_db_mtime(project)
+                except OSError:
+                    index_written = None
             result_text = self._dispatch(op_str, target_str, project, timeout_ms, root_str)
             if result_text is None and self._pending_null is not None:
                 reason, why = self._pending_null
@@ -927,6 +1043,11 @@ class GraphProvider(GraphOps):
                     f"callers or callees from outside this repository. Index it standalone with "
                     f"`codeintel index {root_str}` for an answer scoped to it."
                 )
+
+            # Before the evidence is settled, so a row this demotes to `unstated` is counted as one
+            # and the gap it adds is in the list `safe_for_destructive` reads.
+            if op_str in _STALENESS_OPS:
+                result_text += self._stamp_staleness(op_str, project, root_str, index_written)
 
             # Settled HERE, and not in the renderer that produced the rows, because this is the
             # first point at which the answer is whole: `impact` has rendered both its halves, and
