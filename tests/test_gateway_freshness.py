@@ -170,3 +170,19 @@ def test_a_model_change_in_the_project_config_is_followed(graph_cache, root, mon
     os.utime(other, (1_700_000_100, 1_700_000_100))
     assert _callers(gw, root)["cached"] is False
     assert graph.calls == 3
+
+
+def test_the_remembered_semantic_db_paths_are_bounded(tmp_path, monkeypatch):
+    import codeintel.gateway.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "_SEMANTIC_DB_PATHS_MAX", 2)
+    monkeypatch.setattr(gateway_mod, "_SEMANTIC_DB_PATHS", type(gateway_mod._SEMANTIC_DB_PATHS)())
+    roots = []
+    for i in range(4):
+        root = tmp_path / f"p{i}"
+        root.mkdir()
+        roots.append(str(root))
+        gateway_mod._semantic_db_path(str(root))
+
+    assert len(gateway_mod._SEMANTIC_DB_PATHS) <= 2
+    assert roots[-1] in gateway_mod._SEMANTIC_DB_PATHS

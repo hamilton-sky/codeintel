@@ -550,3 +550,29 @@ def test_the_report_states_coverage_because_it_measures_how_much_of_the_check_is
     payload = _payload([_el("a", "src/a.py"), _el("z", "other/z.py")], [])
     text = render_report(payload, check_layers(payload, parsed))
     assert "coverage: 1 of 2 elements assigned; 1 unassigned" in text
+
+
+def test_a_truncated_cycle_with_no_allowed_edge_among_its_listed_members_names_no_unrelated_reason():
+    """With `members` capped, the edge that broke the cycle may join two unlisted members. Then no
+    single entry can be named, and quoting the first entry's reason would misattribute it."""
+    from codeintel.c4.check import _allowed_cycle_breaker
+
+    cycle = {"members": ["a", "b"], "members_omitted": 3}
+    allowed = {("x", "y"): {"reason": "an unrelated exception", "index": 0}}
+    breaker = _allowed_cycle_breaker(cycle, [cycle], [], allowed)
+
+    assert breaker is not None
+    assert breaker.get("reason") != "an unrelated exception"
+    assert breaker.get("reason")
+    assert breaker.get("index") is None
+
+
+def test_a_truncated_cycle_names_the_entry_that_lies_inside_its_listed_members():
+    from codeintel.c4.check import _allowed_cycle_breaker
+
+    cycle = {"members": ["a", "b"], "members_omitted": 3}
+    allowed = {("a", "b"): {"reason": "inside", "index": 1},
+               ("x", "y"): {"reason": "unrelated", "index": 0}}
+    breaker = _allowed_cycle_breaker(cycle, [cycle], [], allowed)
+
+    assert breaker == {"reason": "inside", "index": 1}

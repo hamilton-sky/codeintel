@@ -520,6 +520,90 @@ def test_the_fingerprint_git_calls_are_bounded_and_shell_free(tmp_path, monkeypa
         assert not kwargs.get("shell")
 
 
+
+def _edit(root: str) -> None:
+    edited = os.path.join(root, "core.py")
+    with open(edited, "w") as fh:
+        fh.write("def helper():\n    return 2\n")
+    os.utime(edited, (os.stat(edited).st_atime, os.stat(edited).st_mtime + 5))
+
+
+def test_a_lock_skipped_pass_is_retried_while_the_tree_stays_the_same(tmp_path, monkeypatch):
+    """A pass that never ran (another process held the lock) indexed nothing, so its fingerprint
+    must not count as indexed: the next query on the same tree submits again."""
+    from codeintel.core.filelock import exclusive, lock_path
+
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=0)
+    passes = _counting_passes(r, monkeypatch)
+    r.maybe_reindex(root)
+    _drain(r)
+    _edit(root)
+
+    with exclusive(lock_path(os.path.realpath(root))) as held:
+        assert held
+        assert r.maybe_reindex(root) is True
+        _drain(r)
+    assert passes == [root], "the pass ran although the lock was held"
+
+    assert r.maybe_reindex(root) is True, "a skipped pass was never retried"
+    _drain(r)
+    assert passes == [root, root]
+    assert r.maybe_reindex(root) is False
+    _drain(r)
+    assert passes == [root, root]
+
+
+def test_a_pass_that_raised_is_retried_while_the_tree_stays_the_same(tmp_path, monkeypatch):
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=0)
+    calls: list[str] = []
+
+    def _failing_graph(project_root):
+        calls.append(project_root)
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(r, "_graph_reindex", _failing_graph)
+    monkeypatch.setattr(r, "_semantic_reindex", lambda project_root: None)
+
+    assert r.maybe_reindex(root) is True
+    _drain(r)
+    assert r.maybe_reindex(root) is True, "a failed pass was never retried"
+    _drain(r)
+    assert calls == [root, root]
+
+
+def test_a_tree_listing_too_many_files_falls_back_to_the_debounce(tmp_path, monkeypatch):
+    """The stat walk runs on the request thread, so a huge listing is not fingerprinted."""
+    import codeintel.gateway.reindexer as reindexer_mod
+
+    root = _git_repo(tmp_path / "repo")
+    with open(os.path.join(root, "b.py"), "w") as fh:
+        fh.write("x = 1\n")
+    monkeypatch.setattr(reindexer_mod, "_FINGERPRINT_MAX_FILES", 1)
+    stats: list[str] = []
+    real_stat = os.stat
+    monkeypatch.setattr(reindexer_mod.os, "stat",
+                        lambda path, *a, **k: stats.append(path) or real_stat(path, *a, **k))
+
+    assert reindexer_mod._tree_fingerprint(root) is None
+    assert stats == [], "the files were stat'ed although the listing was over the cap"
+
+
+def test_the_remembered_fingerprints_are_bounded(tmp_path, monkeypatch):
+    import codeintel.gateway.reindexer as reindexer_mod
+
+    monkeypatch.setattr(reindexer_mod, "_FINGERPRINT_ROOTS_MAX", 2)
+    r = Reindexer(debounce_seconds=0)
+    _counting_passes(r, monkeypatch)
+    roots = [_git_repo(tmp_path / f"repo{i}") for i in range(4)]
+    for root in roots:
+        assert r.maybe_reindex(root) is True
+        _drain(r)
+
+    assert len(r._last_fingerprint) <= 2
+    assert roots[-1] in r._last_fingerprint      # the newest root is kept
+
 # --------------------------------------------------------------------------- #
 # Lifecycle truth: what `status` and `doctor` report about an index
 #
