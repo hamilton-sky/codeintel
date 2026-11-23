@@ -148,7 +148,7 @@ def test_a_pass_runs_when_the_lock_is_free(home, monkeypatch):
 
     r._do_reindex(str(home))
 
-    assert ran == ["semantic", "graph"]
+    assert ran == ["graph", "semantic"]
 
 
 def test_a_pass_skips_entirely_when_another_process_holds_the_lock(home, monkeypatch):
@@ -201,7 +201,7 @@ def test_an_unusable_lock_directory_never_stops_indexing(home, monkeypatch, tmp_
 
     r._do_reindex(str(home))
 
-    assert ran == ["semantic", "graph"], "a lock failure stopped the indexing it was meant to guard"
+    assert ran == ["graph", "semantic"], "a lock failure stopped the indexing it was meant to guard"
 
 
 def test_a_probe_that_fails_does_not_claim_a_reindex_is_running(home, monkeypatch):

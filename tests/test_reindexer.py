@@ -31,28 +31,30 @@ def _drain(r: Reindexer) -> None:
 # Test 1: background thread fires and calls Indexer.index
 # ---------------------------------------------------------------------------
 
-def test_maybe_reindex_fires_background_thread():
+def test_maybe_reindex_fires_background_thread(tmp_path):
+    root = str(tmp_path)
     with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
          patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         r = Reindexer(debounce_seconds=0)
-        r.maybe_reindex("/tmp/test")
+        r.maybe_reindex(root)
         _drain(r)
 
-        MockIndexer.return_value.index.assert_called_once_with("/tmp/test")
+        MockIndexer.return_value.index.assert_called_once_with(root)
 
 
 # ---------------------------------------------------------------------------
 # Test 2: second call within debounce window is a no-op
 # ---------------------------------------------------------------------------
 
-def test_debounce_suppresses_second_call():
+def test_debounce_suppresses_second_call(tmp_path):
+    root = str(tmp_path)
     with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
          patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         r = Reindexer(debounce_seconds=1000)
-        r.maybe_reindex("/tmp/test")
-        r.maybe_reindex("/tmp/test")
+        r.maybe_reindex(root)
+        r.maybe_reindex(root)
         _drain(r)
 
         assert MockIndexer.return_value.index.call_count <= 1
@@ -87,21 +89,22 @@ def test_never_raises_on_bad_path():
         result = r.maybe_reindex("/nonexistent/path/xyz")
         _drain(r)
 
-        assert result is None
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
 # Test 5: Indexer.index raising does not propagate
 # ---------------------------------------------------------------------------
 
-def test_never_raises_on_indexer_exception():
+def test_never_raises_on_indexer_exception(tmp_path):
+    root = str(tmp_path)
     with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
          patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         MockIndexer.return_value.index.side_effect = RuntimeError("boom")
 
         r = Reindexer(debounce_seconds=0)
-        r.maybe_reindex("/tmp/test")
+        r.maybe_reindex(root)
         _drain(r)
         # reaching here without exception confirms the never-raise contract
 
@@ -111,7 +114,8 @@ def test_never_raises_on_indexer_exception():
 # exit waiting for a repo-wide reindex to finish.
 # ---------------------------------------------------------------------------
 
-def test_reindex_runs_on_daemon_threads():
+def test_reindex_runs_on_daemon_threads(tmp_path):
+    root = str(tmp_path)
     import threading as _threading
 
     slow_started = _threading.Event()
@@ -126,7 +130,7 @@ def test_reindex_runs_on_daemon_threads():
          patch("shutil.which", return_value=None):
         MockIndexer.return_value.index.side_effect = _slow_index
         r = Reindexer(debounce_seconds=0)
-        r.maybe_reindex("/tmp/test")
+        r.maybe_reindex(root)
         assert slow_started.wait(2), "reindex thread did not start"
         with r._executor._lock:
             live = [t for t in r._executor._threads if t.is_alive()]
@@ -272,24 +276,177 @@ def test_repeated_failures_keep_advancing_rather_than_pinning_at_zero(monkeypatc
     assert r.generation("/repo") == 3
 
 
-def test_a_reindex_already_running_is_not_submitted_again(monkeypatch):
+def test_a_reindex_already_running_is_not_submitted_again(monkeypatch, tmp_path):
     """The debounce timestamp is set when a pass is SUBMITTED, not when it finishes, so on a repo
     whose reindex outlasts the window every later query stacked another concurrent pass —
     overlapping writers against one SQLite file and one graph subprocess, for no benefit."""
+    root = str(tmp_path)
     r = Reindexer(debounce_seconds=0)
     submitted = []
     monkeypatch.setattr(r._executor, "submit", lambda fn, root: submitted.append(root))
 
-    r.maybe_reindex("/repo")
-    assert submitted == ["/repo"]
+    r.maybe_reindex(root)
+    assert submitted == [root]
 
-    r.maybe_reindex("/repo")          # still in flight (nothing cleared it)
-    r.maybe_reindex("/repo")
-    assert submitted == ["/repo"], "a second pass was stacked on a running one"
+    r.maybe_reindex(root)          # still in flight (nothing cleared it)
+    r.maybe_reindex(root)
+    assert submitted == [root], "a second pass was stacked on a running one"
 
-    r._in_flight.discard("/repo")     # the running pass completes
-    r.maybe_reindex("/repo")
-    assert submitted == ["/repo", "/repo"]
+    r._in_flight.discard(root)     # the running pass completes
+    r.maybe_reindex(root)
+    assert submitted == [root, root]
+
+
+# --------------------------------------------------------------------------- change detection
+#
+# Finding `reindexing-flag-self-triggered`: the debounce was on time alone, so every query on an
+# unchanged tree submitted a pass once the window had passed, and the gateway then read
+# `reindex_pending` and flagged its own pass as "a reindex is in progress". A git root now submits
+# only when its tree fingerprint (HEAD plus the newest modified/untracked file) moved.
+
+def _git_repo(path) -> str:
+    import subprocess
+
+    path.mkdir()
+    (path / "core.py").write_text("def helper():\n    return 1\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "--no-gpg-sign", "-m", "init")):
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=path, env=env,
+                       check=True, capture_output=True)
+    return str(path)
+
+
+def _counting_passes(r: Reindexer, monkeypatch) -> list[str]:
+    passes: list[str] = []
+    monkeypatch.setattr(r, "_graph_reindex", lambda root: passes.append(root))
+    monkeypatch.setattr(r, "_semantic_reindex", lambda root: None)
+    return passes
+
+
+class _AnsweringGraph:
+    available = True
+
+    def build_result(self, op, target, files, budget, project_root):
+        return {"ok": True, "op": op, "target": target, "engine": "graph", "cached": False,
+                "result": f"Callers of {target} (1)"}
+
+
+def test_an_unchanged_git_tree_submits_nothing_and_flags_nothing(tmp_path, monkeypatch):
+    from codeintel.gateway.gateway import Gateway
+
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=0)
+    passes = _counting_passes(r, monkeypatch)
+
+    assert r.maybe_reindex(root) is True          # nothing recorded yet for this root
+    _drain(r)
+    assert passes == [root]
+
+    assert r.maybe_reindex(root) is False
+    _drain(r)
+    assert passes == [root], "an unchanged tree submitted a pass"
+
+    answer = Gateway(graph=_AnsweringGraph(), reindexer=r).query(
+        op="callers", target="helper", engine="graph", role="", project_root=root)
+    _drain(r)
+    assert answer["result"] is not None
+    assert "reindexing" not in answer, answer
+    assert passes == [root]
+
+
+def test_an_edited_file_submits_a_pass_and_returns_true(tmp_path, monkeypatch):
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=0)
+    passes = _counting_passes(r, monkeypatch)
+    r.maybe_reindex(root)
+    _drain(r)
+
+    edited = os.path.join(root, "core.py")
+    with open(edited, "w") as fh:
+        fh.write("def helper():\n    return 2\n")
+    os.utime(edited, (os.stat(edited).st_atime, os.stat(edited).st_mtime + 5))
+
+    assert r.maybe_reindex(root) is True
+    _drain(r)
+    assert passes == [root, root]
+
+
+def test_a_new_untracked_file_submits_a_pass(tmp_path, monkeypatch):
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=0)
+    passes = _counting_passes(r, monkeypatch)
+    r.maybe_reindex(root)
+    _drain(r)
+
+    with open(os.path.join(root, "b.py"), "w") as fh:
+        fh.write("def c2():\n    return 0\n")
+
+    assert r.maybe_reindex(root) is True
+    _drain(r)
+    assert passes == [root, root]
+
+
+def test_do_reindex_runs_the_graph_pass_before_the_semantic_pass(monkeypatch):
+    """A blocked model download must not delay graph freshness."""
+    r = Reindexer()
+    ran: list[str] = []
+    monkeypatch.setattr(r, "_semantic_reindex", lambda root: ran.append("semantic"))
+    monkeypatch.setattr(r, "_graph_reindex", lambda root: ran.append("graph"))
+
+    r._do_reindex("/repo")
+
+    assert ran == ["graph", "semantic"]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "nonzero"])
+def test_a_git_failure_in_the_fingerprint_submits_no_more_than_the_debounce(
+        tmp_path, monkeypatch, failure):
+    """A fingerprint git could not compute counts as unchanged and falls back to the time
+    debounce: two calls inside the window submit once, never once per call."""
+    import subprocess
+
+    root = _git_repo(tmp_path / "repo")
+
+    def _broken_git(argv, *a, **k):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, k.get("timeout") or 5)
+        return subprocess.CompletedProcess(argv, 128, b"", b"fatal: broken")
+
+    monkeypatch.setattr("codeintel.gateway.reindexer.subprocess.run", _broken_git)
+    r = Reindexer(debounce_seconds=5)
+    submitted: list[str] = []
+    monkeypatch.setattr(r._executor, "submit", lambda fn, root: submitted.append(root))
+
+    r.maybe_reindex(root)
+    r._in_flight.discard(root)          # the first pass finished: only the debounce may stop it
+    r.maybe_reindex(root)
+
+    assert submitted == [root]
+
+
+def test_the_fingerprint_git_calls_are_bounded_and_shell_free(tmp_path, monkeypatch):
+    import subprocess
+
+    root = _git_repo(tmp_path / "repo")
+    seen: list[tuple] = []
+    real_run = subprocess.run
+
+    def _spy(argv, *a, **k):
+        seen.append((argv, k))
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr("codeintel.gateway.reindexer.subprocess.run", _spy)
+    r = Reindexer(debounce_seconds=0)
+    monkeypatch.setattr(r._executor, "submit", lambda fn, root: None)
+    r.maybe_reindex(root)
+
+    assert seen, "no git call was made for a git root"
+    for argv, kwargs in seen:
+        assert isinstance(argv, list) and argv[0] == "git"
+        assert kwargs.get("cwd") == root
+        assert 0 < kwargs.get("timeout", 0) <= 5
+        assert not kwargs.get("shell")
 
 
 # --------------------------------------------------------------------------- #
