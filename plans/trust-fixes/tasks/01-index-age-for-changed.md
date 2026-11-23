@@ -1,7 +1,7 @@
 # Make `changed` check index age in every mode, against HEAD's commit time, with no slack
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: —
 Test first: yes
 Level: 3
@@ -159,5 +159,38 @@ SPEC
 - test first: OK.
 
 codeintel: none run
+
+REVIEW: PASS
+
+## Review findings (round 2, pair review)
+
+Reviewed trust-fixes 01 over 23e7ab74..4b4d000. 4b4d000 is HEAD and the ticket's last commit, so no later commits were left out. I read the ticket at the base commit and its round-1 Review findings, and read the diff with the tasks folder held back. The `## Answer` did not reach me. The Done when command passed when I ran it (356 passed, 1 skipped). The round-1 findings are fixed: a failed `git status` now gives index-age-unknown, `graph_db_stamp` catches OSError, the misleading test is gone, and status is scoped to the answered root. I found one new hole in the HEAD commit-time read, which fails this review.
+
+Inputs probed as a hostile caller:
+- root (missing, not a repo, subdirectory): in_work_tree returns not-a-git-repo; uncommitted_paths keeps only paths under the answered root. Nothing gets through.
+- git status output (renames, -z, failure): parsed correctly; a failure gives index-age-unknown.
+- project id and cache dir (graph_db_mtime, graph_db_stamp): they only stat files; OSError gives 0 or unknown.
+- The repository's own git config, and the user's global git config, as seen by the new `git log -1 --format=%ct`: this is the way through (finding 1).
+
+QUALITY
+1. blocker /home/user/codeintel/src/codeintel/engines/graph/changed_range.py: `_git(root, "log", "-1", "--format=%ct")` (line 434) does not pass `--no-show-signature`. If `log.showSignature=true` is set (often in a global config when someone signs commits, or in the repo's own .git/config) and HEAD is signed, git puts the verification output on stdout before the timestamp. I ran it on this repo, whose HEAD carries an SSH signature: `git -c log.showSignature=true log -1 --format=%ct` printed "No signature\n1795445052". `out.strip().isdigit()` then fails and the commit time is skipped without any signal. A commit made after the index reads as `fresh` again, which is the index-age-misses-out-of-diff-commits finding coming back. The same setting also makes git run the verifier program (gpg.program or gpg.ssh.program). That program can be set from the repository's .git/config, which is the threat this module already guards against with `-c core.fsmonitor=false` and `--no-ext-diff`. Fix: pass `--no-show-signature`, or read the time with a command that never verifies, such as `git show -s --no-show-signature --format=%ct HEAD`. Return `unknown` instead of skipping when the output does not parse or git fails. Add a test that sets `log.showSignature=true` on a signed commit, or stubs `_git` to return that output.
+2. minor /home/user/codeintel/src/codeintel/engines/graph/ops.py: the "working tree clean" and "all non-source files" early returns come before `_uncommitted_age_gap`. So when `git status` failed (status_error) or listed changes but the backend returned none, the answer still says "working tree clean" with no gap. Fix: when status_error is set, or `changed_paths + untracked` is non-empty, do not print "clean"; add the gap or return a safe null.
+
+codeintel: changed 23e7ab74dde64b646c0a861ff8bb6c0d210a5234: helped (listed the moved `_graph_slug` and its surviving references, all served by the re-export in reset.py)
+
+REVIEW: FAIL
+
+Range reviewed: 23e7ab74..4b4d000 (END is HEAD, so no later commits were left out). I read the ticket at 23e7ab74 and the round 1 `## Review findings` section (lines 127 onward of the working copy). I viewed the diff with plans/trust-fixes/tasks/ held back. The `## Answer` never reached me. Status hunk: open -> resolved. Leftover files: I unpacked eb0902f's src into the scratchpad at /tmp/claude-0/-home-user/fc27bcdd-2fe9-52ef-a24c-4ab097c86ef0/scratchpad/main to check the "fails on main" claim. pytest also wrote its usual tmp/cache/coverage files. I left all of them in place.
+
+SPEC
+- New tests/test_index_age.py reproduces each finding (real git init repo, db mtime set with os.utime, fake _run), each failing on main eb0902f: MET. I ran /home/user/codeintel/tests/test_index_age.py against eb0902f's src (PYTHONPATH): 15 failed, 3 passed. All five finding tests fail on their staleness or reason assertion (lines 161, 176, 226, 249, 266), not on an import error. These are: uncommitted edit (stale-index + partial), untracked file, non-git dir (not-a-git-repo), commit after the index, and edit 0.1 s after. The 3 that pass are negative controls.
+- test_changed_range uncommitted tests updated, test_graph_failure_population assertions unchanged, listed pytest command passes: MET (conductor). The diff confirms test_an_empty_target_is_still_the_original_uncommitted_op now allows only rev-parse --is-inside-work-tree/--show-toplevel and status, and still pins "working tree clean". test_graph_failure_population only adds the in_work_tree monkeypatch.
+- tests/test_graph_real.py passes, uncommitted changed assertions unchanged: MET. Running pytest tests/test_graph_real.py tests/test_reset.py printed 59 passed, 1 skipped. The diff only adds the in_a_work_tree fixture and usefixtures decorators.
+- test_reset slug tests unchanged, and no stale-index/index-age-unknown assertion sits in a test without real_index_age: MET. tests/test_reset.py is not in the diff, and setup.reset._graph_slug is re-exported from core.paths with the same regex. Every grep hit is covered: in test_changed_range.py, lines 602, 812, 820, 828, 850 and 1348 each sit in a test that requests real_index_age, and test_index_age.py requests it through pytestmark.
+- All existing tests still pass: MET. The Test command (.venv/bin/pytest tests/ -q --deselect ...) printed 2186 passed, 31 skipped, 1 deselected, 1 xfailed. In the acceptance file test_tf_freshness.py, all 5 `changed` tests pass. The 9 that fail are callers/callees/impact, MCP cache and the reindexing flag, which belong to tickets 02/03 or later.
+- scope: OK. Every changed source and test file is listed in Touches. Apart from those, only plans/trust-fixes/learnings.md, map.md and the ticket file changed.
+- test first: OK. 7912bed/3a03d20 added the failing tests first, and they fail without the production change (shown above).
+
+codeintel: changed 23e7ab74dde64b646c0a861ff8bb6c0d210a5234: helped (all remaining _graph_slug mentions resolve through the reset.py re-export)
 
 REVIEW: PASS
