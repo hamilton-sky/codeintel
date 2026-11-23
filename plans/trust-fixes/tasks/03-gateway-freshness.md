@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 14
 Test first: yes
 Level: 3
@@ -107,6 +107,12 @@ Work started at commit 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f. Test-only commi
 3. Unchanged fingerprint did not advance the window: `maybe_reindex` now sets `_last_fired[root] = now` when it checked and found the tree unchanged, so git runs at most once per debounce window per root. Test `test_an_unchanged_tree_is_fingerprinted_at_most_once_per_debounce_window` (three calls past the window, one fingerprint) passes.
 4. `load_config` on every query: `_query` loads no config itself (grep: only `_semantic_db_stamp` called `load_config` in gateway.py), so there was nothing to reuse; instead `_semantic_db_path` remembers the path per root keyed on the stats of the two config files. Test `test_repeated_queries_do_not_reread_the_config` (4 queries, <= 1 read) and `test_a_model_change_in_the_project_config_is_followed` pass. Cross-project invalidation is now documented in `_semantic_db_stamp`'s docstring and in README's cache bullet.
 Round 2 proof: check block `325 passed`, exit 0; `ruff check src tests bench` all passed; `mypy` no issues in 87 files; compileall OK; acceptance `test_tf_freshness.py` 14 passed. Every test file mentioning Gateway/Reindexer/code_query_handler/cached: 1116 passed, 29 skipped, 1 xfailed, 1 failed (`test_doctor.py::test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read`, the root-only failure commands.md's Test command deselects). Whole Test command: left to the conductor's gate.
+
+**Round 3 (re-handout after ticket 14)**: started at 474ee7fd40a414b331c0d1db096931d63726c087. No code changed: the only failure in round 2 was the gate's Lint `codeintel c4 . --check` (an engines -> transports layer violation), which ticket 14 (474ee7f) fixed. Re-proved on current HEAD:
+- Check block: `.venv/bin/pytest tests/test_gateway_freshness.py ... tests/test_cli_commands.py -q -o addopts=` -> `325 passed`, exit 0.
+- Done when tests, each PASSED (`-rA`): test_gateway_freshness.py db-touch / db-delete / semantic-db miss; test_reindexer.py unchanged-tree, edited-file, graph-before-semantic, git-failure[timeout|nonzero], `test_never_raises_on_bad_path`; test_cache.py `test_a_different_freshness_string_misses`; test_reindex_lock.py both order tests. `git diff 03957a6 -- tests/test_reindex_lock.py` shows only the two `ran ==` lines. `CODEBASE_MEMORY_CACHE_DIR` set to tmp_path in test_gateway_freshness.py (lines 42-43).
+- Lint: `ruff check src tests bench` all passed; `codeintel c4 . --check --out /tmp/codeintel-c4-check` -> `0 gating finding(s) — exit 0`.
+- Whole Test command: left to the conductor's gate.
 
 ## Review findings (round 1, pair review)
 
