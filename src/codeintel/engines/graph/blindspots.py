@@ -223,6 +223,32 @@ def alias_calls(text: str, span: tuple[int, int], aliases: dict[str, str]) -> di
             if _call_of(alias).search(body)}
 
 
+def interface_declares(text: str, interface: str, member: str) -> bool:
+    """Whether the TypeScript `interface <interface>` in this file declares a member `member`.
+
+    Read by text: the interface's header (`interface Shape`, with any generics or `extends`), the
+    braces of its body, and in that body a member written `member(`, `member:`, `member?` or
+    `member<`, optionally `readonly`. A type alias (`type Shape = { … }`) is not read."""
+    if not interface or not member:
+        return False
+    header = re.compile(rf"\binterface\s+{re.escape(interface)}\b[^{{;]*\{{")
+    declared = re.compile(
+        rf"(?:^|[;{{,\s])(?:readonly\s+)?{re.escape(member)}\s*\??\s*[(:<]")
+    for match in header.finditer(text):
+        depth = 0
+        for i in range(match.end() - 1, len(text)):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    if declared.search(text[match.end():i]):
+                        return True
+                    break
+    return False
+
+
 class SourceReader:
     """One answer's reads of source files, through `qualifier_scan`'s budgeted reader.
 

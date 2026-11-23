@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 from codeintel.core.per_thread import PerThread
 from codeintel.core.provider import log_swallowed
+from codeintel.engines.graph import blindspots, qualifier_scan
 from codeintel.engines.graph.answer import AnswerRendering
 from codeintel.engines.graph.confidence import _NAME_MATCHED, _OWN_RECEIVERS, _edge_confidence, _evidence_class
 from codeintel.engines.graph.edges import _CALLER_KINDS, _DIRECT_KIND, _EdgeFetch, _EdgeGroup, _group_edges
@@ -108,6 +109,14 @@ _CONSTRUCTORS = frozenset({"__init__", "__new__"})
 # At most this many distinct methods are looked up for the `self.m()` rule in one answer; a row past
 # it simply stays name-matched, which is exactly what it was before the rule existed.
 _SELF_CALL_CAP = 200
+
+# The strategies by which the backend binds a call to a method by its NAME alone. A call written
+# through a receiver and bound this way to one class's method is as much a call of a sibling class's
+# method of that name: the backend picked one of the namesakes, and the receiver's class decides.
+_SIBLING_GUESSES = ("suffix_match", "unique_name")
+
+# The interfaces one answer lists to find those that declare the target's method.
+_INTERFACE_ROWS = _LOOKUP_ROWS
 
 # The clock the overall deadline reads. A name of its own so a test can drive it without patching
 # `time.monotonic` for everything else that runs in the process.
@@ -321,6 +330,7 @@ class _Dispatch:
     bases: list[_DispatchBase] = field(default_factory=list)
     shortfalls: list[str] = field(default_factory=list)
     unknown: bool = False
+    definers: list[_Definer] = field(default_factory=list)
 
 
 @dataclass
@@ -383,6 +393,22 @@ def _names_the_base(row: dict, base: _DispatchBase) -> bool:
     """Whether the recorded call text is the unbound `Base.m` form, as in `Base.m(self)`."""
     callee = str(row.get("callee") or "").strip()
     return callee == base.short or callee.endswith("." + base.short)
+
+
+def _guessed_receiver_call(row: dict, method: str) -> bool:
+    """Whether this row is a call written `recv.method(...)` that the backend bound by name alone.
+
+    Positive evidence only: the recorded call text must name a receiver, and that receiver may not be
+    the enclosing object (`self`, `cls`, `this`, `super`), whose class is the caller's own."""
+    strategy = str(row.get("strategy") or "").strip().lower()
+    if not strategy.startswith(_SIBLING_GUESSES):
+        return False
+    receiver, dot, leaf = str(row.get("callee") or "").strip().rpartition(".")
+    receiver = receiver.strip()
+    if not dot or not receiver or leaf.strip() != method:
+        return False
+    own = _OWN_RECEIVERS.get(_lang_family(str(row.get("a.file_path") or "")), frozenset())
+    return receiver not in own and not receiver.startswith("super")
 
 
 def _pick_class(candidates: list[_ClassNode], written: str, child: _ClassNode) -> _ClassNode | None:
@@ -674,6 +700,7 @@ class DispatchCallers(AnswerRendering):
         if direct.count > 1 or not direct.is_method:
             return out
         definers, short = self._classes_defining(wanted.name, project, timeout_ms)
+        out.definers = definers
         if short:
             out.shortfalls.append(short)
             out.unknown = True
@@ -820,7 +847,10 @@ class DispatchCallers(AnswerRendering):
         looked up" is exactly the silence this module exists to end."""
         try:
             with self._lookup_scope(timeout_ms):
-                return self._through_bases(target, wanted, direct, project, timeout_ms)
+                dispatch = self._dispatch_bases(wanted, direct, project, timeout_ms)
+                text, rows = self._through_bases(wanted, direct, dispatch, project, timeout_ms)
+                more, extra = self._through_siblings(wanted, direct, dispatch, project, timeout_ms)
+                return text + more, rows + extra
         except Exception as exc:
             log_swallowed("DispatchCallers._callers_through_bases", exc)
             if not direct.count:
@@ -832,9 +862,9 @@ class DispatchCallers(AnswerRendering):
             return f"\n\n_{detail}._", 0
 
     def _through_bases(
-        self, target: str, wanted: _SymbolTarget, direct: _DirectTarget, project: str, timeout_ms: int
+        self, wanted: _SymbolTarget, direct: _DirectTarget, dispatch: _Dispatch, project: str,
+        timeout_ms: int
     ) -> tuple[str, int]:
-        dispatch = self._dispatch_bases(wanted, direct, project, timeout_ms)
         shortfalls = list(dispatch.shortfalls)
         unknown = dispatch.unknown
         if not dispatch.bases and (not shortfalls or not direct.count):
@@ -931,6 +961,193 @@ class DispatchCallers(AnswerRendering):
         if not parts and not shortfalls and not notes:
             return "", 0
         return "".join(parts) + notes, total
+
+    # ------------------------------------------------------- callers bound to a sibling by name
+
+    def _through_siblings(
+        self, wanted: _SymbolTarget, direct: _DirectTarget, dispatch: _Dispatch, project: str,
+        timeout_ms: int
+    ) -> tuple[str, int]:
+        """`(text, rows)`: the receiver calls the backend bound by NAME to a sibling class's method
+        of the target's name, and the interfaces (TypeScript) that declare it — each a way a caller
+        reaches the target with no edge to it. `("", 0)` when there is no such evidence.
+
+        A sibling is another class that defines a method of the same name and is not one of the
+        target's bases (whose callers `_through_bases` lists). Its callers are fetched with the same
+        machinery as the target's; a row that is a receiver call bound by `suffix_match` or
+        `unique_name`, and whose caller is not already in this answer, is listed here as name-matched.
+        The `dispatch-sibling-unbound` gap is raised only on evidence: such a row, an interface that
+        declares the method, or a lookup the budget or the backend cut off before it was done."""
+        if direct.count != 1 or not direct.is_method or not wanted.name or wanted.name in _CONSTRUCTORS:
+            return "", 0
+        target = dispatch.target
+        details: list[str] = []
+        if target is None:
+            if dispatch.unknown:
+                details.append(
+                    f"could not check for another class defining `{wanted.name}` whose callers the "
+                    "backend bound by name: the lookup of the classes that define it fell short, so a "
+                    "call written against a sibling class that reaches this symbol may be missing")
+            return self._sibling_gaps(details), 0
+
+        in_bases = {b.method for b in dispatch.bases}
+        siblings = sorted(
+            {d.method: d for d in dispatch.definers
+             if d.method != target.method and d.cls.qualified != target.cls.qualified
+             and d.method not in in_bases and not d.cls.is_protocol}.values(),
+            key=lambda d: d.method)
+        unchecked = [d.short for d in siblings[_MAX_BASES:]]
+        reason = f"the lookup stops at {_MAX_BASES} sibling methods" if unchecked else ""
+        siblings = siblings[:_MAX_BASES]
+
+        listed = {str(r.get("qualified_name") or "") for r in self._pending_rows
+                  if r.get("relation") == "caller"}
+        seen: set[str] = set()
+        groups: list[_EdgeGroup] = []
+        bound_to: dict[str, tuple[_Definer, str]] = {}
+        for i, sib in enumerate(siblings):
+            asked = _SymbolTarget(name=wanted.name, qualified=sib.method, file_hint=sib.method_file)
+            got, why = self._guarded(
+                partial(self._fetch_edges, _CALLER_KINDS, "b", "a", asked, project), timeout_ms,
+                surface=False)
+            if why or not isinstance(got, _EdgeFetch):
+                unchecked = [d.short for d in siblings[i:]] + unchecked
+                reason = why or "the backend gave no answer"
+                break
+            if got.cut_short:
+                details.append(
+                    f"could not check every caller of `{sib.short}`: the backend's reply was cut at "
+                    f"its row limit, so a call bound to it by name that may reach `{target.short}` "
+                    "may be missing")
+            rows: list[dict] = []
+            for g in _group_edges(got.rows, "b.name", "b.qualified_name", "b.file_path"):
+                if not asked.matches(g.qn_raw, g.file):
+                    continue
+                for r in g.rows:
+                    caller = str(r.get("a.qualified_name") or "")
+                    shown = _strip_project_prefix(caller, may_be_filename=False)
+                    if (not caller or caller == target.method or shown in listed or caller in seen
+                            or not _guessed_receiver_call(r, wanted.name)):
+                        continue
+                    seen.add(caller)
+                    rows.append(r)
+                    bound_to[caller] = (sib, str(r.get("callee") or "").strip())
+            if rows:
+                groups.append(_EdgeGroup(sib.short, sib.method, sib.method_file, rows))
+        if unchecked:
+            details.append(
+                f"could not check the callers of {', '.join(f'`{u}`' for u in unchecked)} (another "
+                f"class's method named `{wanted.name}`) for a call the backend bound to it by name "
+                f"that may reach `{target.short}`: {reason}")
+
+        self._collapse_module_scope(groups, "labels(a)", "a.file_path")
+        self._collapse_repeat_edges(groups, "a.name", "a.qualified_name", "a.file_path")
+        omitted = self._cap_distinct_edges(
+            groups, "a.name", "a.qualified_name", "a.file_path", tests_last=True)
+        shown_rows: list[dict] = []
+        for g in groups:
+            g.rows = [self._mark_sibling(r, *bound_to[str(r.get("a.qualified_name") or "")])
+                      for r in g.rows]
+            shown_rows.extend(g.rows)
+            if g.rows:
+                callers = ", ".join(f"`{r.get('a.name')}`" for r in g.rows)
+                details.append(
+                    f"`{target.short}` has a sibling, `{g.label}` ({g.file}), and the backend bound "
+                    f"{callers} to it by name through a receiver whose class it does not know; at run "
+                    f"time such a call may reach `{target.short}`, so it is listed here as name-matched")
+
+        if _lang_family(target.cls.file) == "ts-js":
+            details.extend(self._interfaces_declaring(wanted.name, target, project, timeout_ms))
+
+        body = ""
+        if shown_rows:
+            body = (f"\n\n## Callers bound by name to a sibling of `{target.short}`\n"
+                    f"_The backend bound each call below to another class's method named "
+                    f"`{wanted.name}`, by name and not through the receiver's type. Which class the "
+                    f"receiver is decides at run time, so each may reach `{target.short}`._\n"
+                    + "\n".join(self._display(r, "a.name", "a.qualified_name", "a.file_path")
+                                for r in shown_rows))
+            self._record_rows(shown_rows, ("a.name", "a.qualified_name", "a.file_path"), "caller",
+                              row_cap_hit=False, withheld=omitted.rows)
+            if omitted.endpoints:
+                body += self._distinct_cap_note(
+                    "callers", "caller", ", ".join(g.label for g in groups), omitted, tests_last=True)
+        return body + self._sibling_gaps(details), len(shown_rows)
+
+    def _sibling_gaps(self, details: list[str]) -> str:
+        """Raise one `dispatch-sibling-unbound` gap per finding, and say each in the body too."""
+        notes = []
+        for detail in details:
+            self._add_gap("callers", "dispatch-sibling-unbound", detail)
+            notes.append(f"\n\n_Known blind spot (`dispatch-sibling-unbound`): {detail}._")
+        return "".join(notes)
+
+    @staticmethod
+    def _mark_sibling(row: dict, sib: _Definer, written: str) -> dict:
+        """A copy of `row` counted as name-matched, whose `why` names the sibling it was bound to."""
+        marked = dict(row)
+        marked["_bucket"] = _NAME_MATCHED
+        marked["_low_confidence"] = _edge_confidence(row)
+        marked["_hierarchy_note"] = (
+            f"the backend bound the call `{written}` to `{sib.short}` "
+            f"(`{_strip_project_prefix(sib.method, may_be_filename=False)}`), a method of the same name "
+            "on a sibling class, and not to this symbol; the receiver's class is not known, so at run "
+            "time the call may reach this symbol instead")
+        return marked
+
+    def _interfaces_declaring(
+        self, name: str, target: _Definer, project: str, timeout_ms: int
+    ) -> list[str]:
+        """The TypeScript interfaces that declare `name`, read from each interface's file.
+
+        A call written against an interface (`s.area()` with `s: Shape`) reaches every class that
+        implements it, nominally (`implements Shape`) or by structure, and the graph binds it to
+        none of them. The target's class defines `name`, so an interface that declares it is one the
+        class may satisfy. The files are read through the answer's read budget; one it refused is
+        named as not checked."""
+        rows, why = self._lookup(
+            f"MATCH (i:Interface) RETURN i.name, i.qualified_name, i.file_path LIMIT {_INTERFACE_ROWS}",
+            project, timeout_ms, surface=False)
+        if why:
+            return [f"could not check which interfaces declare `{name}`, which a call reaching "
+                    f"`{target.short}` may have been written against: the lookup of the interfaces "
+                    f"did not complete ({why})"]
+        out: list[str] = []
+        if len(rows) >= _INTERFACE_ROWS:
+            out.append(f"could not check every interface for one that declares `{name}`: the listing "
+                       "of interfaces reached its row limit")
+        root = getattr(self, "_answered_root", None) or ""
+        if not root:
+            return out
+        budget = getattr(self, "_scan_budget", None)
+        if budget is None:
+            budget = qualifier_scan.Budget()
+            self._scan_budget = budget
+        reader = blindspots.SourceReader(root, budget)
+        implemented = {_leaf(b) for b in target.cls.bases}
+        found = sorted(
+            {(str(r.get("i.name") or ""), str(r.get("i.file_path") or "")) for r in rows},
+            key=lambda nf: (nf[0] not in implemented, nf[1] != target.cls.file, nf[1], nf[0]))
+        for iface, file in found:
+            if not iface or not file:
+                continue
+            text = reader.read(file)
+            if text is None or not blindspots.interface_declares(text, iface, name):
+                continue
+            how = (f"`{target.cls.name}` implements it" if iface in implemented
+                   else f"`{target.cls.name}` defines `{name}` too, so it may satisfy it by structure")
+            out.append(
+                f"the interface `{iface}` ({file}) declares `{name}` and {how}: a call written "
+                f"against `{iface}` may reach `{target.short}` at run time, and the graph binds no "
+                f"such call to it, so its callers through `{iface}` may be missing from this answer")
+        if reader.unchecked:
+            listed_files = reader.unchecked[:5]
+            more = " and others" if len(reader.unchecked) > len(listed_files) else ""
+            out.append(
+                "could not check " + ", ".join(f"`{f}`" for f in listed_files) + more
+                + f" for an interface that declares `{name}`: the answer's file-read budget was spent "
+                f"before they were read, so callers through such an interface may be missing")
+        return out
 
     def _prune_unreachable(
         self, target: _Definer, wanted: _SymbolTarget, fetched: list[tuple[_DispatchBase, list[dict]]],
