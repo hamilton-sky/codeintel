@@ -515,10 +515,13 @@ class GraphOps(DispatchCallers, ChangedSince):
                     "target-not-found",
                     f"`{end}` is not in the graph index for this project, so no path to or from it "
                     f"can be traced. Check the spelling; if you just added or renamed it, refresh "
-                    f"the index with `codeintel index`, or over MCP call `index_repository` with "
-                    f"`incremental=true`.")
+                    f"the index with `codeintel index <root>` (or ask the user to run it).")
                 return None
             if len(found) > 1:
+                self._add_gap(
+                    "chain", "target-ambiguous",
+                    f"`{end}` matches several symbols, so no path is claimed; name one with "
+                    f"`name@file` or its qualified name")
                 body = "\n".join(
                     f"- {_label_of(r)}" + (f" ({r['file_path']})" if r.get("file_path") else "")
                     for r in found)

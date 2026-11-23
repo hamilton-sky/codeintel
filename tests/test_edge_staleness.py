@@ -209,3 +209,97 @@ def test_an_index_whose_age_cannot_be_read_is_index_age_unknown(monkeypatch, rep
     assert "stale-index" not in _gap_kinds(env)
     assert env["confidence"] == "partial"
     assert env["evidence"]["safe_for_destructive"] is False
+
+
+# ------------------------------------------------------------------------ the gateway's answer cache
+
+def _gateway(monkeypatch, repo: Path):
+    from codeintel.gateway.gateway import Gateway
+    return Gateway(graph=_provider(monkeypatch, _graph(), str(repo)))
+
+
+def _query(gw, repo: Path, op: str, target: str, engine: str = "auto") -> dict[str, Any]:
+    return gw.query(op=op, target=target, engine=engine, project_root=str(repo))
+
+
+@pytest.mark.parametrize("op, target, edited", [
+    ("callers", "helper", "pkg/app.py"),     # a row's file
+    ("callers", "helper", "pkg/core.py"),    # the target's own file
+    ("callees", "compute", "pkg/util.py"),   # a callee row's file
+    ("impact", "helper", "pkg/app.py"),
+])
+def test_a_cached_answer_is_asked_again_once_a_file_it_cites_is_edited(
+        monkeypatch, repo, cache, op, target, edited):
+    """Finding: the cache key moves only with the db stamps, so after an edit a hit served the
+    fresh-index answer (`cached: true`, no `stale-index`, safe) for a tree the index no longer
+    describes."""
+    _stamp_index(cache, time.time() - 60)
+    gw = _gateway(monkeypatch, repo)
+    first = _query(gw, repo, op, target)
+    assert first["confidence"] == "complete", _gap_kinds(first)
+    assert _query(gw, repo, op, target)["cached"] is True     # an unchanged tree is still served
+
+    now = time.time()
+    os.utime(repo / edited, (now, now))                        # edited after the index, no reindex
+
+    again = _query(gw, repo, op, target)
+    assert again["cached"] is False
+    assert f"`{edited}`" in _stale(again)["detail"]
+    assert again["evidence"]["safe_for_destructive"] is False
+
+
+def test_a_cached_answer_is_asked_again_once_a_file_it_cites_is_deleted(monkeypatch, repo, cache):
+    written = time.time() - 60
+    _stamp_index(cache, written)
+    gw = _gateway(monkeypatch, repo)
+    _query(gw, repo, "callers", "helper")
+    assert _query(gw, repo, "callers", "helper")["cached"] is True
+
+    os.remove(repo / "pkg/app.py")       # no longer among the paths the cached answer checked
+
+    again = _query(gw, repo, "callers", "helper")
+    assert again["cached"] is False
+    assert "`pkg/app.py`" in _stale(again)["detail"]
+
+
+def test_a_cached_answer_is_asked_again_after_a_commit(monkeypatch, repo, cache):
+    _stamp_index(cache, time.time() - 60)
+    gw = _gateway(monkeypatch, repo)
+    _query(gw, repo, "callers", "helper")
+    assert _query(gw, repo, "callers", "helper")["cached"] is True
+
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "later", when=time.time())
+
+    again = _query(gw, repo, "callers", "helper")
+    assert again["cached"] is False
+    assert "stale-index" in _gap_kinds(again)
+
+
+def test_an_edit_outside_the_answer_keeps_it_cached(monkeypatch, repo, cache):
+    _stamp_index(cache, time.time() - 60)
+    _write(repo, "pkg/other.py", "def unrelated():\n    return 2\n", mtime=time.time() - 120)
+    gw = _gateway(monkeypatch, repo)
+    _query(gw, repo, "callees", "helper")
+
+    now = time.time()
+    os.utime(repo / "pkg/other.py", (now, now))
+
+    hit = _query(gw, repo, "callees", "helper")
+    assert hit["cached"] is True
+    assert "stale-index" not in _gap_kinds(hit)
+
+
+def test_a_cached_fan_out_answer_is_asked_again_once_a_file_it_cites_is_edited(
+        monkeypatch, repo, cache):
+    _stamp_index(cache, time.time() - 60)
+    gw = _gateway(monkeypatch, repo)
+    _query(gw, repo, "context", "helper", engine="both")
+    assert _query(gw, repo, "context", "helper", engine="both")["cached"] is True
+
+    now = time.time()
+    os.utime(repo / "pkg/app.py", (now, now))
+
+    again = _query(gw, repo, "context", "helper", engine="both")
+    assert again["cached"] is False
+    assert "pkg/app.py" in again["result"]
+    assert "Stale index" in again["result"]

@@ -196,6 +196,10 @@ def test_an_ambiguous_destination_lists_its_candidates_and_claims_no_path(monkey
     assert "src.app.validate" in text and "src.lib.validate" in text
     assert "## Path" not in text
     assert "trace_path" not in [m for m, _ in calls]
+    # A candidate list is not an answer to "how does A reach B": it says which end matched several.
+    assert res["confidence"] == "partial"
+    gap = next(g for g in res["gaps"] if g["kind"] == "target-ambiguous")
+    assert "`validate`" in gap["detail"], gap
 
 
 def test_hops_without_a_strategy_print_unstated_and_add_one_gap(monkeypatch):

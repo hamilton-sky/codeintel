@@ -218,6 +218,30 @@ def _states_live_file_contents(result: Result | dict[str, Result]) -> bool:
     return walk(result, 0)
 
 
+def _index_moved(item: tuple[Any, Any]) -> bool:
+    """Whether what a cached answer's index-age check read has moved since: `item` is the
+    provider's own `index_behind` and the inputs its answer recorded. A check that fails counts as
+    moved, so a cached answer is never served on a check that did not run."""
+    behind, inputs = item
+    try:
+        return bool(behind(inputs))
+    except Exception as exc:
+        log_swallowed("gateway._index_moved", exc)
+        return True
+
+
+def _note_index_inputs(provider: Any, inputs: list[tuple[Any, Any]] | None) -> None:
+    """Keep what the provider's answer just checked the index's age against, read on the thread
+    that ran `build_result` (the provider holds it per thread). The cache stores it with the answer
+    so a hit is re-checked: the db stamps in the key do not move when a source file is edited."""
+    if inputs is None:
+        return
+    got = getattr(provider, "index_inputs", None)
+    behind = getattr(provider, "index_behind", None)
+    if isinstance(got, tuple) and len(got) == 3 and callable(behind):
+        inputs.append((behind, got))
+
+
 class Gateway:
     def __init__(self, graph=None, lsp=None, semantic=None, policy: TieringPolicy | None = None,
                  reindexer: Reindexer | None = None, oneshot: bool = False):
@@ -307,11 +331,12 @@ class Gateway:
         target_str: str,
         budget: Any,
         project_root: Any,
+        inputs: list[tuple[Any, Any]] | None = None,
     ) -> dict[str, Result]:
         def _call(engine_str: str) -> tuple[str, Result]:
             provider = self._provider_for(engine_str)
             return engine_str, self._dispatch_single(
-                provider, op_str, target_str, budget, project_root, engine_str
+                provider, op_str, target_str, budget, project_root, engine_str, inputs=inputs
             )
 
         results: dict[str, Result] = {}
@@ -602,6 +627,7 @@ class Gateway:
         project_root,
         engine_str: str,
         offset: int = 0,
+        inputs: list[tuple[Any, Any]] | None = None,
     ) -> Result:
         # Both arms short-circuit BEFORE `build_result`, so the provider's own unavailable-hint is
         # never reached from here — which is exactly how the documented contract ("safe-nulls with
@@ -628,6 +654,7 @@ class Gateway:
             r = (provider.build_result(op_str, target_str, [], budget or 0, project_root or "",
                                        offset=offset) if paged
                  else provider.build_result(op_str, target_str, [], budget or 0, project_root or ""))
+            _note_index_inputs(provider, inputs)
             if r is not None:
                 return r
             return safe_null_result(op_str, target_str, engine=engine_str, reason="no-result")
@@ -837,30 +864,38 @@ class Gateway:
             # content-hash cache — it can't see uncommitted edits. Computed ONCE here so it covers
             # BOTH the fan-out and the single-engine paths below (a miss on either serves a stale diff).
             uncacheable = op_str in _UNCACHED_OPS
+            # What each answer's index-age check read (its row and target files, HEAD), kept with
+            # the cached answer and re-checked on a hit: an edit moves no db stamp in `freshness`,
+            # so without it a hit served the pre-edit answer with no `stale-index` gap.
+            index_inputs: list[tuple[Any, Any]] = []
 
             # Fan-out: dispatch to multiple engines concurrently and merge
             if engine_str in _FANOUT_ENGINES:
                 cached_result = (
                     None if uncacheable
-                    else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
+                    else self._cache.get(op_str, target_str, cache_engine, root_str, freshness,
+                                         moved=_index_moved)
                 )
                 if cached_result is not None:
                     return _mark_reindexing({**cached_result, "cached": True}, reindexing)
                 # "both" is graph+lsp; "all" adds semantic.
                 engines = ["graph", "lsp"] if engine_str == "both" else ["graph", "lsp", "semantic"]
-                fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
+                fan_results = self._fan_out(engines, op_str, target_str, budget, project_root,
+                                            inputs=index_inputs)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
                 # The merged answer drops each engine's `rows` and `evidence` but keeps their prose,
                 # so whether it states what the files hold now is read from the engines' own answers.
                 if (not uncacheable and not _is_retryable(result)
                         and not _states_live_file_contents(fan_results)):
-                    self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
+                    self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness,
+                                    inputs=tuple(index_inputs))
                 return _mark_reindexing(result, reindexing)
 
             # Single-engine dispatch (`uncacheable`, computed above, also guards this path).
             cached_result = (
                 None if uncacheable
-                else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
+                else self._cache.get(op_str, target_str, cache_engine, root_str, freshness,
+                                     moved=_index_moved)
             )
             if cached_result is not None:
                 # The staleness marker belongs on EVERY exit, and a cache hit is the exit that
@@ -872,7 +907,8 @@ class Gateway:
                 return _mark_reindexing({**cached_result, "cached": True}, reindexing)
             provider = self._provider_for(engine_str)
             result = self._dispatch_single(
-                provider, op_str, target_str, budget, project_root, engine_str, offset)
+                provider, op_str, target_str, budget, project_root, engine_str, offset,
+                inputs=index_inputs)
 
             # overview auto-fallback (F4 Story 2): when auto-routed to graph but graph can't serve
             # it — the backend is unavailable, OR this repo simply isn't in the graph — try lsp,
@@ -917,7 +953,8 @@ class Gateway:
             # it may have recovered, and the db stamp in the key does not move until it does.
             if (not uncacheable and not fallback and not _is_retryable(result)
                     and not _states_live_file_contents(result)):
-                self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
+                self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness,
+                                inputs=tuple(index_inputs))
             return _mark_reindexing(result, reindexing)
 
         except Exception as exc:

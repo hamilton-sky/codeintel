@@ -625,6 +625,24 @@ class GraphProvider(GraphOps):
     # The files of the symbols an edge op answered ABOUT (each rendered group's own file), which no
     # row carries: the age check stats them beside the rows' files.
     _pending_target_files: PerThread[tuple[str, ...]] = PerThread(())
+    # What this thread's last answer was checked against for the index's age: `(project, root,
+    # paths)`, the paths relative to root. The gateway reads it right after `build_result` and keeps
+    # it with a cached answer, so a hit can ask `index_behind` before serving it. None when the
+    # answer had no age check.
+    index_inputs: PerThread[tuple[str, str, tuple[str, ...]] | None] = PerThread(None)
+
+    @staticmethod
+    def index_behind(inputs: tuple[str, str, tuple[str, ...]]) -> bool:
+        """Whether an answer checked against `inputs` would no longer pass that check as fresh.
+
+        True when one of its paths is gone (deleted or renamed since the answer) or when
+        `graph_index_age` over them is not `fresh`: a file edited, a commit or a checkout after the
+        index was written. A cached answer for which this is True must be asked again, so its
+        `stale-index` gap and demoted rows are computed rather than served from before the edit."""
+        project, base, paths = inputs
+        if any(not os.path.exists(os.path.join(base, p)) for p in paths):
+            return True
+        return changed_range.graph_index_age(project, base, list(paths)).state != "fresh"
 
     def _render_edge_answer(
         self, op: str, unit: str, target: str, wanted: _SymbolTarget,
@@ -667,7 +685,9 @@ class GraphProvider(GraphOps):
             while parent and not os.path.isdir(os.path.join(base, parent)):
                 parent = os.path.dirname(parent)
             stand_ins.append(parent or ".")
-        age = changed_range.graph_index_age(project, base, present + sorted(set(stand_ins)))
+        checked = present + sorted(set(stand_ins))
+        self.index_inputs = (project, base, tuple(checked))
+        age = changed_range.graph_index_age(project, base, checked)
         rerun = f"re-run `codeintel index {root}`"
         if age.state == "unknown":
             detail = f"{age.detail}, so these {op} rows cannot be called current; {rerun}"
@@ -891,6 +911,7 @@ class GraphProvider(GraphOps):
             except (TypeError, ValueError):
                 self._changed_offset = 0
             self._pending_page = None
+            self.index_inputs = None
 
             if not self.available:
                 return safe_null_result(

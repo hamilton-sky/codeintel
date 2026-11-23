@@ -1,7 +1,7 @@
 # Fix the findings of the feature review, round 1
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: no
 Level: 2
@@ -34,3 +34,24 @@ The review of the whole feature (from commit 23e7ab74dde64b646c0a861ff8bb6c0d210
 > REVIEW: FAIL
 
 ## Answer
+
+Work started at c7debb07b7dc2fa51bd82e4f1634167b897e0f64.
+
+- **Built**:
+  - `src/codeintel/engines/graph/provider.py`: per-thread `index_inputs` = `(project, root, paths)` that `_stamp_staleness` checked (row files, target files, stand-in directories), reset at the top of `build_result`; static `index_behind(inputs)` = a checked path is gone, or `changed_range.graph_index_age` over them is not `fresh`.
+  - `src/codeintel/gateway/cache.py`: an entry carries `inputs`; `put(..., inputs=)`, `get(..., moved=)` misses when `moved(item)` is true for any stored input.
+  - `src/codeintel/gateway/gateway.py`: `_dispatch_single`/`_fan_out` collect the provider's `index_inputs` on the thread that ran `build_result` (`_note_index_inputs`); `_query` stores them with the cached answer (single and fan-out paths) and passes `moved=_index_moved` on every lookup; a check that raises counts as moved.
+  - `src/codeintel/engines/graph/ops.py`: `_chain_between` adds a `target-ambiguous` gap (section `chain`) when an end matched several symbols (finding 2); the `target-not-found` hint names only `codeintel index <root>` (or ask the user), no `index_repository` (finding 3).
+  - Tests: `tests/test_edge_staleness.py` (8 new gateway cache tests), `tests/test_chain_destination.py` (ambiguous-end test now asserts partial + the gap).
+- **Proof**:
+  - Finding 1 (major): `.venv/bin/pytest tests/test_edge_staleness.py -q -o addopts=` → `16 passed`. With `src/` stashed (fix removed) the same run → `7 failed, 9 passed`: the 4 parametrised "row file / target file / callee file / impact" edit cases, the deleted-file case, the after-a-commit case and the fan-out (`engine=both`, `context`) case all got `cached: true` with no `stale-index`. With the fix each comes back `cached: false` with a `stale-index` gap naming the edited file and `safe_for_destructive: false`; an edit to a file outside the answer still gets `cached: true`.
+  - Finding 2 (minor, fixed): `tests/test_chain_destination.py::test_an_ambiguous_destination_lists_its_candidates_and_claims_no_path` asserts `confidence == "partial"` and a `target-ambiguous` gap naming `` `validate` ``; the run of `test_chain_destination.py test_missing_target.py test_agent_hints.py test_summary_integrity.py test_graph_failure_population.py` → `156 passed, 1 xfailed`.
+  - Finding 3 (minor, fixed): `grep -n index_repository src/codeintel/engines/graph/*.py` now finds only `backend.py:124` (the stderr rewrite rule). provider.py:1026 no longer names it (ticket 11 already removed it).
+  - Touched-module tests: `pytest tests/test_gateway.py tests/test_cache.py tests/test_edge_staleness.py tests/test_dispatch_callers.py tests/test_graph_provider.py tests/test_index_age.py tests/test_incompleteness.py tests/test_rbac.py tests/test_search_fallback.py tests/test_architecture.py -q -o addopts=` → `355 passed`. `ruff check src tests bench` → All checks passed. `mypy` → no issues in 88 files. `python -m compileall -q src/codeintel` → exit 0. `codeintel c4 . --check --out /tmp/codeintel-c4-check` → 0 gating findings, exit 0.
+  - commands.md's Test command passes: left to the conductor's gate.
+- **Decisions**:
+  - Finding 1, option (c)/(a) hybrid: the cache entry stores what the answer's age check read (its row and target files plus stand-in directories, with the project and root), and a hit re-runs the same check the provider runs (`graph_index_age`: newest of those files, HEAD's commit time, the last reflog tree move, against the db's mtime) and recomputes when it is not `fresh` or a checked file is gone. Caching stays: an unchanged tree, or an edit to a file the answer does not cite, is still a hit. I did not store a single "newest mtime" number: stat-ing the files when storing happens after the dispatch, so an edit landing between the provider's check and the put would be recorded as already seen and the stale answer served without its gap; comparing against the db on every hit has no such window. Going through `changed_range.graph_index_age` (and the provider's own `index_behind`) keeps one definition of "stale" and keeps the suite's `fresh` stub in force for tests that do not ask for `real_index_age`.
+  - The inputs travel from provider to gateway through a per-thread provider attribute read right after `build_result` on the same thread (fan-out runs each engine in a pool thread, so `_call` reads it there), not through the envelope: no new agent-facing key, and providers without the attribute (lsp, semantic, test fakes) cache exactly as before.
+  - Finding 4 (minor) stays: making the verdict use the pre-dispatch `written` means passing it to `graph_index_age`, whose suite-wide stub in `tests/conftest.py` takes exactly `(project, root, paths)`; any new argument breaks every graph test that relies on the stub, and conftest is test config I may not edit. The verdict still compares against a db mtime read after the round trip; the demoted-row choice uses the pre-dispatch one.
+- **Shortcuts taken**: a cache hit for callers/callees/impact/context now costs the age check's git calls (`git log -1`, `git rev-parse --git-path`, a reflog read; a few ms). While the index is stale for an answer, every ask of it is recomputed (no hit until a reindex). Worth upgrading only if hits on a stale index become hot: store the newest input time with the entry and serve a hit whose cached answer already carries `stale-index` while nothing moved past it.
+- **For later tickets**: `ContentHashCache` entries are now 3-tuples `(hash, result, inputs)`. A new graph op that stamps staleness gets cache re-checking for free if it goes through `_stamp_staleness`.

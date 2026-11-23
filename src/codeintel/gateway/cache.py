@@ -4,6 +4,8 @@ import hashlib
 import os
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
+from typing import Any
 
 from codeintel.core.provider import Result
 
@@ -40,8 +42,10 @@ class ContentHashCache:
     def __init__(self, max_entries: int = 1024) -> None:
         self._lock = threading.Lock()
         self._max_entries = max(1, int(max_entries))
-        # key → (content_hash, Result); OrderedDict preserves insertion/access order for LRU.
-        self._store: OrderedDict[tuple[str, str, str, str], tuple[str, Result]] = OrderedDict()
+        # key → (content_hash, Result, inputs); OrderedDict preserves insertion/access order for LRU.
+        # `inputs` is whatever the caller stored to re-check the answer on a hit (see `get`).
+        self._store: OrderedDict[
+            tuple[str, str, str, str], tuple[str, Result, tuple[Any, ...]]] = OrderedDict()
 
     def get(
         self,
@@ -50,16 +54,21 @@ class ContentHashCache:
         engine: str,
         project_root: str,
         freshness: int | str = 0,
+        moved: Callable[[Any], bool] | None = None,
     ) -> Result | None:
+        """The stored answer, or None. With `moved`, an entry stored with `inputs` is a miss when
+        `moved` is True for any of them: what the answer was checked against changed since."""
         key = (op, target, engine, project_root)
         with self._lock:
             entry = self._store.get(key)
         if entry is None:
             return None
-        stored_hash, result = entry
+        stored_hash, result, inputs = entry
         # _compute_hash may read the target file — keep it OUTSIDE the lock (original intent).
         current_hash = f"{_compute_hash(target, project_root)}:{freshness}"
         if current_hash != stored_hash:
+            return None
+        if moved is not None and any(moved(item) for item in inputs):
             return None
         with self._lock:
             if key in self._store:  # may have been evicted between the two locked sections
@@ -74,6 +83,7 @@ class ContentHashCache:
         project_root: str,
         result: Result | None,
         freshness: int | str = 0,
+        inputs: tuple[Any, ...] = (),
     ) -> None:
         if result is None or result.get("result") is None:
             return
@@ -83,7 +93,7 @@ class ContentHashCache:
         # content hash would change — i.e. every symbol/free-text query.
         content_hash = f"{_compute_hash(target, project_root)}:{freshness}"
         with self._lock:
-            self._store[key] = (content_hash, result)
+            self._store[key] = (content_hash, result, tuple(inputs))
             self._store.move_to_end(key)  # most-recently-used
             while len(self._store) > self._max_entries:
                 self._store.popitem(last=False)  # evict least-recently-used
