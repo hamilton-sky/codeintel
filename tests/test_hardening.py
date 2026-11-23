@@ -426,3 +426,79 @@ def test_mcp_code_map_reports_a_symlinked_code_intel_md(tmp_path, monkeypatch):
     assert out["inject"]["refused"] == [
         f"Refused to write {repo / 'AGENTS.md'}: it resolves outside the repo"]
     assert victim.read_bytes() == _VICTIM and rules.read_bytes() == _VICTIM
+
+
+def _respell_under(real_realpath, prefix: str, respelled: str):
+    """A `realpath` that spells paths under *prefix* as *respelled*: what a case-insensitive
+    filesystem (macOS APFS) does for `AGENTS.md -> .GIT/config`, whose realpath keeps `.GIT`."""
+    def fake(p, *a, **k):
+        out = real_realpath(p, *a, **k)
+        return respelled + out[len(prefix):] if out.startswith(prefix) else out
+    return fake
+
+
+@pytest.mark.parametrize("git_file", ["config", "hooks/pre-commit", "hooks/post-checkout"])
+def test_inject_refuses_the_git_dir_reached_by_another_spelling(tmp_path, monkeypatch, git_file):
+    from codeintel.setup.injector import Injector
+
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    config = repo / ".git" / "config"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    config.write_bytes(b"[core]\n\tbare = false\n")
+    hook.write_bytes(b"#!/bin/sh\nexit 0\n")
+    before = {config: config.read_bytes(), hook: hook.read_bytes()}
+    (repo / "AGENTS.md").symlink_to(os.path.join(".git", git_file))
+    git = os.path.realpath(repo / ".git")
+    monkeypatch.setattr(os.path, "realpath", _respell_under(
+        os.path.realpath, git + os.sep, os.path.join(os.path.dirname(git), ".", ".git") + os.sep))
+
+    inj = Injector()
+    assert inj.inject(str(repo), create=True) == (None, "refused")
+
+    assert {p: p.read_bytes() for p in before} == before
+    assert not (repo / ".git" / "hooks" / "post-checkout").exists()
+    assert inj.refusals == [f"Refused to write {repo / 'AGENTS.md'}: "
+                            "it resolves inside the repo's .git directory"]
+
+
+def test_write_contained_refuses_a_parent_swapped_for_a_link_after_the_check(tmp_path, monkeypatch):
+    # The check resolved `sub/AGENTS.md` while `sub` was a directory; by the write, `sub` is a link
+    # out of the repo. The write walks the parents without following links, so it cannot land there.
+    from codeintel.core.containment import write_contained
+
+    repo, victim = _hostile_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "AGENTS.md").write_bytes(_VICTIM)
+    (repo / "sub").symlink_to(outside, target_is_directory=True)
+    (repo / "AGENTS.md").symlink_to(os.path.join("sub", "AGENTS.md"))
+    real = os.path.realpath
+    monkeypatch.setattr(os.path, "realpath", lambda p, *a, **k: (
+        os.path.join(real(repo), "sub", "AGENTS.md") if str(p) == str(repo / "AGENTS.md")
+        else real(p, *a, **k)))
+
+    assert write_contained(str(repo), "AGENTS.md", "pwned\n", follow_links=True) == "symlink"
+    assert (outside / "AGENTS.md").read_bytes() == _VICTIM
+    assert sorted(os.listdir(outside)) == ["AGENTS.md"], "a temp file was left outside the repo"
+
+
+@pytest.mark.parametrize("make, reason", [
+    (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to("gone.md"), "dangling"),
+    (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to(".git"), "inside-git-dir"),
+    (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to("docs"), "not-a-file"),
+    (lambda repo: os.link(repo / "docs" / "rules.md", repo / "USING_CODEINTEL.md"), "hard-link"),
+])
+def test_write_contained_names_why_an_in_tree_target_is_refused(tmp_path, make, reason):
+    from codeintel.core.containment import REFUSAL_TEXT, write_contained
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "rules.md").write_bytes(_VICTIM)
+    make(repo)
+
+    assert write_contained(str(repo), "USING_CODEINTEL.md", "x\n", follow_links=True) == reason
+    assert reason in REFUSAL_TEXT
+    assert (repo / "docs" / "rules.md").read_bytes() == _VICTIM
+    assert not (repo / "gone.md").exists()
