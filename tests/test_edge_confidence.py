@@ -1385,7 +1385,8 @@ def test_a_bare_target_is_never_scanned_because_a_re_export_defeats_the_stem(mon
 
     bare = _scanned_callers(monkeypatch, tmp_path, rows, target="resolve")
     assert _seen(bare) == [None] * 4, bare["rows"]
-    assert "Checked:" not in bare["result"] and "_Settle it:" in bare["result"], bare["result"]
+    # And nothing is offered in its place: the caller wrote no qualifier, so there is none to grep.
+    assert "Checked:" not in bare["result"] and "Settle it" not in bare["result"], bare["result"]
 
 
 def test_a_dotted_target_that_names_a_module_and_not_a_class_is_never_scanned(monkeypatch, tmp_path):
