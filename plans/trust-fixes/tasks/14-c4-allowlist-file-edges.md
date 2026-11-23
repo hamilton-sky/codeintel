@@ -1,7 +1,7 @@
 # Match `[[layers.allow]]` against a violation's file-level import edges, whatever depth auto-fit picks
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 2
@@ -63,3 +63,20 @@ prints 0 gating finding(s)
 - docs/layers-design.md §3.3 and §5.4
 
 ## Answer
+
+Start commit: 0414d32 (failing tests: eb217d8).
+
+- **Built**: `src/codeintel/c4/model.py` (each relation gains `import_files`, sorted `[from_path, to_path, n]` from the IMPORTS rows already in the roll-up loop; `[]` on a `calls_usage`-only relation), `src/codeintel/c4/check.py` (`_match_allow_file`, `_file_edges`, per-file-edge allowlist matching in `check_layers`, allowlisted cycles via `_allowed_cycle_breaker`, `ALLOWED:` on cycle lines in `render_report`), `docs/c4.md` (allowlist paragraph after "Membership matches file paths", `import_files` next to `n_imports`/`n_calls_usage`), `tests/test_c4_check.py` (3 tests), `tests/test_c4.py` (1 test).
+- **Proof**:
+  - New tests failed at eb217d8 for the right reasons (depth 3 violation not allowlisted; witness was the directory pair `src/codeintel/engines/ -> src/codeintel/transports/`; cycle not allowlisted; `KeyError: 'import_files'`), 4 failed / 100 passed. After the fix: `test_an_allowlisted_file_edge_stays_allowed_at_every_auto_fit_depth`, `test_one_file_edge_no_entry_matches_keeps_the_violation_gating_and_is_its_witness`, `test_a_cycle_that_exists_only_through_an_allowlisted_edge_is_allowed_not_gating`, `test_each_relation_carries_its_import_file_pairs_whatever_the_edge_source` pass.
+  - `.venv/bin/pytest tests/test_c4_check.py tests/test_c4.py tests/test_c4_layers.py tests/test_c4_model.py tests/test_c4_output.py tests/test_summary_integrity.py tests/test_architecture.py -q -o addopts=`: `243 passed, 1 xfailed`. Existing allowlist tests and the `witness == {"from": "src/bot.py", "to": "src/top.py", "n": 3}` assertion unchanged and passing.
+  - `.venv/bin/ruff check src tests bench`: `All checks passed!`. `mypy` on both changed modules: no issues.
+  - `.venv/bin/codeintel c4 . --check --out /tmp/codeintel-c4-check`: exit 0, `0 gating finding(s) — exit 0`, depth 3 (auto-fit), backend `codebase-memory-mcp 0.10.8`. The `src.codeintel.engines -> src.codeintel.transports` violation is `ALLOWED` (witness `src/codeintel/engines/graph/targets.py -> src/codeintel/transports/metrics.py (x1)`), the 3-element engines/gateway/transports cycle is `ALLOWED`, no STALE ALLOWLIST section. `--json --depth 3` shows that relation's only file edge is `targets.py -> metrics.py` (targets.py does `from codeintel.engines.graph.render import ...`), so no engines -> transports edge outside entry 0 exists.
+  - `git diff --stat -- .codeintel.toml` is empty.
+- **Decisions**:
+  - `allow_reason`/`allow_index` of an allowed violation come from the lowest-index entry among those that allowed its file edges. Every entry matching any file edge (or both element ids) is marked used, even if the violation stays gating, as step 3 says.
+  - Relations with an empty or missing `import_files` keep the old element-path matching (the model never emits an `imports` relation with `[]`).
+  - A cycle is allowed when no cycle remaining after removing the fully allowlisted violations shares a member with it. Only relations whose violation was allowed are removed (a downward relation is never an exception). Its reason comes from the first allowed relation inside its members. Because `members` is capped at 12, a truncated cycle is excused only when every remaining cycle can be located in a listed one; otherwise it stays gating.
+- **Shortcuts taken**: none.
+- **For later tickets**: ticket 13's CHANGELOG line for this fix: `--check` matches `[[layers.allow]]` against file-level import edges (new `import_files` on each relation), so allowlist entries survive auto-fit depth changes; cycles made only of allowlisted edges are reported as allowed.
+

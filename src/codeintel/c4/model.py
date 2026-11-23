@@ -597,6 +597,9 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
         # references to a single fabricated import edge.
         rel_weights: dict[tuple, dict[str, int]] = {}
         rel_sources: dict[tuple, set] = {}
+        # The IMPORTS file pairs behind each element pair, so `--check` can match `[[layers.allow]]`
+        # against files rather than against element paths that move with the auto-fit depth.
+        rel_import_files: dict[tuple, dict[tuple[str, str], int]] = {}
         dropped: list[dict] = []
         internal_by_elem: dict[str, int] = {}
         edges_internal = 0
@@ -634,6 +637,9 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
                 per_source = rel_weights.setdefault(pair, {})
                 per_source[source] = per_source.get(source, 0) + n
                 rel_sources.setdefault(pair, set()).add(source)
+                if source == "imports":
+                    files = rel_import_files.setdefault(pair, {})
+                    files[(a_fp, b_fp)] = files.get((a_fp, b_fp), 0) + n
 
         # `imports` when an IMPORTS edge contributed at all (literally true even if CALLS|USAGE also
         # confirmed it); `calls_usage` only when IMPORTS never saw this pair — never the reverse, so
@@ -652,7 +658,9 @@ def build_c4_payload(project_root: Any, *, depth: int | None = None, scope: tupl
              "n": sum(w.get(src, 0) for src in counted),
              "n_imports": w.get("imports", 0),
              "n_calls_usage": w.get("calls_usage", 0),
-             "kind": "imports" if "imports" in rel_sources[(a, b)] else "calls_usage"}
+             "kind": "imports" if "imports" in rel_sources[(a, b)] else "calls_usage",
+             "import_files": [[fa, fb, k] for (fa, fb), k
+                              in sorted(rel_import_files.get((a, b), {}).items())]}
             for (a, b), w in rel_weights.items()
         ]
         edges_from_imports_only = sum(1 for s in rel_sources.values() if s == {"imports"})

@@ -116,6 +116,28 @@ def _match_allow(entry: dict[str, Any], from_paths: list[str], to_paths: list[st
     return hits(src, from_paths, from_element) and hits(dst, to_paths, to_element)
 
 
+def _match_allow_file(entry: dict[str, Any], from_file: str, to_file: str) -> bool:
+    """Does an allowlist entry cover one file-level import edge?
+
+    The file pair is what the depth cannot move: the same import rolls up to a different element pair
+    at every `--depth`, and an element's own paths become a directory once it is rolled up, so an
+    entry naming a file matches here at every depth auto-fit picks.
+    """
+    src, dst = entry.get("from") or "", entry.get("to") or ""
+    if not src or not dst:
+        return False
+    return ((src == from_file or glob_match(src, from_file))
+            and (dst == to_file or glob_match(dst, to_file)))
+
+
+def _file_edges(rel: dict[str, Any]) -> list[tuple[str, str, int]]:
+    """The relation's IMPORTS file pairs, or ``[]`` when the payload carries none (a hand-built
+    payload or an older `--json`), which keeps the element-path matching."""
+    return [(str(item[0]), str(item[1]), item[2] if isinstance(item[2], int) else 0)
+            for item in rel.get("import_files") or []
+            if isinstance(item, (list, tuple)) and len(item) >= 3]
+
+
 def _cycle_record(cycle: dict[str, Any], depth: int) -> dict[str, Any]:
     """A `cycle` finding. Gating, because unlike an advisory up-edge an import cycle is a
     source-confirmed structural fact — and no declared order can be satisfied until it is broken.
@@ -133,6 +155,33 @@ def _cycle_record(cycle: dict[str, Any], depth: int) -> dict[str, Any]:
         cycle_members=members, weight=cycle.get("size"),
         witnesses_total=cycle.get("size"),
         edge_source="cycle", confirmed_by=["imports"], depth=depth)
+
+
+def _allowed_cycle_breaker(cycle: dict[str, Any], cycles: list[dict[str, Any]],
+                           remaining: list[dict[str, Any]],
+                           allowed: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any] | None:
+    """The allowlist entry whose edge breaks this cycle, or ``None`` when the cycle stays gating.
+
+    Removing edges only splits a strongly connected component, so every cycle left after removing the
+    allowlisted relations lies inside one of the original cycles. This one is allowed when none of
+    the remaining cycles shares a member with it. `members` is capped, so a remaining cycle that
+    shares a member with no original cycle's listed members could lie in any truncated one: then
+    every truncated cycle stays gating rather than being excused on a guess.
+    """
+    if not allowed:
+        return None
+    members = set(cycle.get("members") or [])
+    if any(members & set(r.get("members") or []) for r in remaining):
+        return None
+    if cycle.get("members_omitted"):
+        listed = [set(c.get("members") or []) for c in cycles]
+        if any(not any(set(r.get("members") or []) & m for m in listed) for r in remaining):
+            return None
+    # The cycle vanished, so an allowed relation lies inside it; with `members` capped it may join
+    # two unlisted members, and then the first allowed relation stands in for it.
+    ordered = sorted(allowed.items())
+    inside = [entry for (a, b), entry in ordered if a in members and b in members]
+    return (inside or [entry for _pair, entry in ordered])[0]
 
 
 def check_layers(payload: dict, parsed: dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +230,8 @@ def check_layers(payload: dict, parsed: dict[str, Any]) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     allow_entries: list[dict[str, Any]] = list(parsed.get("allow") or [])
     allow_used: set[int] = set()
+    # Element pairs whose violation the allowlist fully excused, with the entry that did it.
+    allowed_relations: dict[tuple[str, str], dict[str, Any]] = {}
 
     # ── allowlist hygiene: an entry with no reason is a GATING finding ─────────────────────────────
     # The single rule that separates an allowlist from a mute button. Reported before any violation so
@@ -249,11 +300,36 @@ def check_layers(payload: dict, parsed: dict[str, Any]) -> dict[str, Any]:
 
         from_paths = paths_of.get(a, [])
         to_paths = paths_of.get(b, [])
-        allowed_by = next((e for e in allow_entries
-                           if e.get("reason")
-                           and _match_allow(e, from_paths, to_paths, a, b)), None)
+        reasoned = [e for e in allow_entries if e.get("reason")]
+        file_edges = _file_edges(rel)
+        if file_edges:
+            # Matched per file edge, so the result does not depend on the depth (ticket 14). An entry
+            # naming both element ids still allows the whole relation. The violation is allowed only
+            # when every file edge is; one unmatched edge keeps it gating and becomes its witness.
+            by_ids = [e for e in reasoned if e.get("from") == a and e.get("to") == b]
+            allow_used.update(e["index"] for e in by_ids)
+            first_allow: list[dict[str, Any] | None] = []
+            for from_file, to_file, _n in file_edges:
+                hits = by_ids + [e for e in reasoned if e not in by_ids
+                                 and _match_allow_file(e, from_file, to_file)]
+                allow_used.update(e["index"] for e in hits)
+                first_allow.append(min(hits, key=lambda e: e["index"]) if hits else None)
+            unmatched = [edge for edge, hit in zip(file_edges, first_allow, strict=True) if hit is None]
+            allowed_by = (None if unmatched
+                          else min((h for h in first_allow if h is not None),
+                                   key=lambda e: e["index"]))
+            shown = (unmatched or file_edges)[0]
+            witness = {"from": shown[0], "to": shown[1], "n": shown[2]}
+            witnesses_total = len(file_edges)
+        else:
+            allowed_by = next((e for e in reasoned
+                               if _match_allow(e, from_paths, to_paths, a, b)), None)
+            if allowed_by is not None:
+                allow_used.add(allowed_by["index"])
+            witness = _witness(from_paths, to_paths, weight)
+            witnesses_total = max(1, len(from_paths) * len(to_paths))
         if allowed_by is not None:
-            allow_used.add(allowed_by["index"])
+            allowed_relations[(a, b)] = allowed_by
 
         findings.append(_record(
             rule=RULE_ORDER, kind="violation",
@@ -261,8 +337,7 @@ def check_layers(payload: dict, parsed: dict[str, Any]) -> dict[str, Any]:
             message=message,
             from_element=a, to_element=b,
             from_paths=from_paths[:PATHS_REPORT_CAP], to_paths=to_paths[:PATHS_REPORT_CAP],
-            witness=_witness(from_paths, to_paths, weight),
-            witnesses_total=max(1, len(from_paths) * len(to_paths)), weight=weight,
+            witness=witness, witnesses_total=witnesses_total, weight=weight,
             from_layer=layer_of[a], from_layer_index=from_index,
             to_layer=layer_of[b], to_layer_index=to_index,
             direction=direction, layers_skipped=skipped,
@@ -272,7 +347,21 @@ def check_layers(payload: dict, parsed: dict[str, Any]) -> dict[str, Any]:
             allow_index=(allowed_by or {}).get("index"), depth=depth))
 
     # ── cycles: source-confirmed structural facts, so they gate (§5.2) ─────────────────────────────
-    findings += [_cycle_record(cycle, depth) for cycle in (inferred.get("cycles") or [])]
+    # A cycle that disappears once the fully allowlisted relations are removed exists only through
+    # allowlisted edges: it stays visible, demoted to info like the violation that allowed it.
+    cycles = list(inferred.get("cycles") or [])
+    remaining: list[dict[str, Any]] = []
+    if cycles and allowed_relations:
+        kept = [r for r in relations
+                if (str(r.get("from") or ""), str(r.get("to") or "")) not in allowed_relations]
+        remaining = list(compute_layers(elements, kept).get("cycles") or [])
+    for cycle in cycles:
+        record = _cycle_record(cycle, depth)
+        breaker = _allowed_cycle_breaker(cycle, cycles, remaining, allowed_relations)
+        if breaker is not None:
+            record.update(severity="info", allowlisted=True,
+                          allow_reason=breaker.get("reason"), allow_index=breaker.get("index"))
+        findings.append(record)
 
     # ── unassigned: gating only under require_all (§3.5) ──────────────────────────────────────────
     require_all = switches.get("require_all", False)
@@ -403,6 +492,7 @@ def render_report(payload: dict, check: dict[str, Any]) -> str:
     lines.append(f"CYCLES ({len(cycles)})")
     lines += [f"  {finding['rule']}  {finding['weight']} elements: "
               f"{', '.join(finding['cycle_members'] or [])}"
+              + (f"    ALLOWED: {finding['allow_reason']}" if finding["allowlisted"] else "")
               for finding in cycles]
 
     for kind, heading in (("unassigned", "UNASSIGNED"), ("split", "SPLIT"),
