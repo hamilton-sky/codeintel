@@ -693,7 +693,7 @@ def test_model_files_that_appear_let_an_index_be_tried_again(blocked_host, monke
     assert _BlockedEmbedding.built == 2
 
 
-@pytest.mark.parametrize("damage", ["older-than-10-minutes", "future-at", "not-json",
+@pytest.mark.parametrize("damage", ["older-than-10-minutes", "future-at", "nan-at", "not-json",
                                     "not-an-object", "at-not-a-number", "cause-not-text"])
 def test_a_record_that_cannot_be_trusted_lets_an_index_be_tried_again(blocked_host, damage):
     import json
@@ -707,6 +707,12 @@ def test_a_record_that_cannot_be_trusted_lets_an_index_be_tried_again(blocked_ho
     elif damage == "future-at":
         record["at"] = time.time() + 3600
         text = json.dumps(record)
+    elif damage == "nan-at":
+        # `json.loads` reads `NaN` as float('nan'): every age comparison with it is False, so a
+        # record dated NaN must not be read as forever recent.
+        record["at"] = float("nan")
+        text = json.dumps(record)
+        assert '"at": NaN' in text
     elif damage == "not-json":
         text = "{not json"
     elif damage == "not-an-object":
@@ -790,3 +796,37 @@ def test_an_unwritable_codeintel_home_costs_only_the_record(blocked_host, tmp_pa
 
     assert r["reason"] == "index-failed"
     assert "could not load embedding model" in r["hint"]
+
+
+def _fail_without_touching_the_model(monkeypatch) -> None:
+    """Make every index pass fail for a reason that is not the model: an unwritable database."""
+    def _broken(self, project_root):
+        raise PermissionError("attempt to write a readonly database")
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer._index", _broken)
+
+
+def test_a_failure_that_is_not_a_model_load_writes_no_record(blocked_host, monkeypatch):
+    """The record blocks a model download for 10 minutes; only a failed model load may set it."""
+    _fail_without_touching_the_model(monkeypatch)
+
+    r = SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert r["reason"] == "index-failed"
+    assert "PermissionError" in r["hint"]
+    assert not _record_path().exists()
+    _as_a_new_process()
+    SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+    assert not _record_path().exists()
+
+
+def test_a_background_failure_that_is_not_a_model_load_writes_no_record(blocked_host, monkeypatch):
+    _fail_without_touching_the_model(monkeypatch)
+    captured: list = []
+    monkeypatch.setattr(sem.threading, "Thread",
+                        lambda target, **kw: type("_T", (), {"start": lambda self: captured.append(target)})())
+
+    SemanticProvider(blocking_index=False).build_result("search", "helper", [], 0, blocked_host)
+    captured[0]()                                    # run the thread body inline
+
+    assert sem._background_index_failure(blocked_host) is not None   # the pass did fail
+    assert not _record_path().exists()

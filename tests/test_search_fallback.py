@@ -162,6 +162,27 @@ def test_a_role_allowed_search_but_not_pattern_gets_no_fallback(tmp_path):
     assert graph.calls == [("pattern", "helper")]
 
 
+def test_a_policy_that_raises_on_pattern_gets_no_fallback(tmp_path):
+    """The fallback's op gate fails closed: a policy that cannot answer for `pattern` denies it."""
+    class _RaisingPolicy:
+        def is_allowed(self, role, op):
+            if op == "pattern":
+                raise RuntimeError("policy store unreadable")
+            return True
+
+        def is_root_allowed(self, role, project_root):
+            return True
+
+    gw, _sem, graph = _gateway("index-failed", policy=_RaisingPolicy())
+
+    env = gw.query(op="search", target="helper", project_root=str(tmp_path), role="searcher")
+
+    assert graph.calls == []
+    assert "fallback" not in env
+    assert env["reason"] == "index-failed"
+    assert env["result"] is None
+
+
 def test_the_fallback_does_not_run_a_second_reindex_check(tmp_path):
     rx = _CountingReindexer()
     sem = _Semantic("index-failed")
