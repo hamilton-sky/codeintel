@@ -53,6 +53,30 @@ Two consequences worth stating on their own:
 
 On that real repository the true answer is **two**. Both are in the list, and both are `resolved`.
 
+A row that reads `module scope of <file>` is not a direct call. The backend has no node for code at a
+file's module level, so it hangs that file's reference (usually its import line) off the file, and which
+function inside the file calls the symbol is not resolved. Those rows are counted as files that import
+it, and the answer carries an `import-only-callers` gap, so it is `partial`:
+
+```text
+## Callers of safe_null_result (4 direct calls, 10 files import it — call sites inside not resolved)
+```
+
+Open those files to find the calls. Under a narrowed target (`Gateway.query`), a `USAGE` row whose file
+neither writes the qualifier nor imports the target's module is dropped, because the name it shares is a
+parameter or a local, and the answer says how many it dropped. When its file cannot be read, the row
+stays, as `name-matched`.
+
+**Several symbols with one name.** A bare target such as `run` answers every symbol of that name that has
+edges, each under its own heading, and says how many more the index holds:
+
+```text
+**5 symbols named `run` have caller edges; 13 more named `run` exist with none** — these are that many separate answers, not one.
+```
+
+The second count comes from the index. When it cannot be had, the banner says others may exist. The
+first count is not every `run` in the repository; ask with `run@<file>` or a qualified name for one.
+
 **When name-matched rows dominate and you asked about a method by its class, the answer runs the check
 that settles them and tells you what it found:**
 
@@ -99,8 +123,9 @@ And nothing is scanned at all for a bare target (`resolve` rather than `Strategy
 function or a module-dotted name rather than a method, or for a method the index does not record as
 defined by a class named the way you wrote it: there is no class qualifier to look for, and the file
 stem a bare target falls back to is exactly what a re-export never writes. In those cases, and whenever
-the tool cannot read the root, the answer prints `Settle it:` and the command and leaves the check to
-you.
+the tool cannot read the root, a target qualified by a module or a class prints `Settle it:` and the
+command and leaves the check to you. A bare target prints neither: you named no qualifier, so there is
+none to grep for.
 
 Read it as narrowing, not as a verdict, and note that the tool does not drop these rows for you.
 A file can reach a method without ever naming its class:

@@ -554,6 +554,9 @@ class GraphProvider(GraphOps):
     # The root the ANSWERING project is registered under, recorded per query so a renderer can
     # check what it is about to attribute.
     _answered_root: PerThread[str | None] = PerThread(None)
+    # The project and per-call timeout of this answer, for the one extra count a renderer may ask
+    # (`AnswerRendering._namesakes_total`). `None` on a thread that never set it, which asks nothing.
+    _answered_lookup: PerThread[tuple[str, int] | None] = PerThread(None)
     # The seconds the qualifier scan may still spend reading files — set by an op that asks `callers`
     # many times in one answer (`changed`), so the scans draw on one allowance instead of each taking
     # all of it. `None` means the scan starts its own.
@@ -904,6 +907,7 @@ class GraphProvider(GraphOps):
             # Record what the answer will actually be about, so renderers can check before they
             # attribute it to the caller's repo.
             self._answered_root = resolution.matched_root
+            self._answered_lookup = (project, timeout_ms)
             self._scan_budget = None
             self._qualifier_attempted = False
             self._pending_gaps = ()

@@ -278,6 +278,24 @@ Every row is badged with its kind, direct calls sort first, and the heading spli
 answer mixes kinds (`Callers of X (0 direct, 2 other reference(s))`). An answer made entirely of
 `CALLS` keeps its plain count, so the common case is unchanged.
 
+A `module scope of <file>` row is counted under none of those. The backend has no node for code at a
+file's module level, so the edge (from the import line, or a module-level use) hangs off the file, and
+which function in it calls the symbol is not resolved. It is counted as a file that imports the symbol
+(kind `IMPORT` in the `Not calls` arithmetic), never as a direct call, and the answer carries an
+`import-only-callers` gap: `Callers of X (4 direct calls, 10 files import it — call sites inside not
+resolved)`. With other references as well, they come between: `(1 direct call, 1 other reference(s), 1
+file imports it — call sites inside not resolved)`. The row itself still reads `module scope of <file>`.
+
+Under a narrowed target (`Gateway.query`, `impl.process`, `query@gateway.py`), a `USAGE` row whose file
+neither writes the qualifier nor has an import statement naming the target's module is dropped and
+counted in a note: the name it shares is a parameter, a local or an attribute. A row whose file cannot
+be read, or is the file that defines the target, stays and is badged name-matched.
+
+A bare name that several symbols carry is answered for each of them, under its own heading, beneath
+the banner "**N symbols named `X` have caller edges; M more named `X` exist with none**". M is one count query
+(`MATCH (n) WHERE n.name = "X"`) less N; when that query fails, the banner says others may exist and
+gives no M.
+
 Why it matters: `set_forward_fn(app.forward_released_item)` registers a method at two real sites. The
 backend stored both correctly as `CALL_REFERENCE`; codeintel queried only `CALLS|USAGE` and answered
 *"no callers"* — the reading that deletes a live method. No confidence threshold could have recovered
@@ -333,7 +351,8 @@ measurement in that table speaks to the case this section describes.
 A `callers StrategyChain.resolve` answer binds most of its rows by the **leaf** name, `resolve`, which in
 TypeScript is also what every `new Promise((resolve, reject) => …)` binds. The part of the target the
 match did *not* use — `StrategyChain` — is what separates them, and the answer used to print the command
-that checks it (`Settle it: rg -n --fixed-strings 'StrategyChain' <root>`). It now **runs** that check and
+that checks it (`Settle it: rg -n --fixed-strings 'StrategyChain' <root>`; never for a bare target, which
+names no qualifier to grep for). It now **runs** that check and
 states the result, and the command it prints to re-run it names the files the scan judged, so `rg`
 reproduces each verdict — a dot-directory, an ignored path or an in-root symlink included — without
 searching anything outside the project:

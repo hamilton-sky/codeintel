@@ -19,6 +19,8 @@ answer emptied by our own filter never reads as an answer about the code.
 """
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from codeintel.engines.graph import blindspots, qualifier_scan
@@ -47,11 +49,13 @@ from codeintel.engines.graph.edges import (
     _EDGE_ENDPOINT_CAP,
     _EDGE_KINDS,
     _EDGE_ROW_LIMIT,
+    _IMPORT_KIND,
     _EdgeGroup,
     _Omitted,
 )
 from codeintel.engines.graph.render import (
     _collapse_repeats,
+    _cypher_literal,
     _is_archived_path,
     _is_module_scope_node,
     _is_non_code,
@@ -67,6 +71,39 @@ from codeintel.engines.graph.targets import _SymbolTarget
 # `_scan_for_qualifier`.
 _WHY_QUALIFIED = "the name it is qualified by"
 _WHY_MODULE = "the module it is defined in"
+
+# An import statement, in Python or JS/TS, with a parenthesised or braced list allowed to run over
+# several lines; and a CommonJS `require("…")`. What `_imports_module` looks for the module's name in.
+_IMPORT_STATEMENT = re.compile(
+    r"^[ \t]*(?:from[ \t]+[\w.]+[ \t]+)?import\b(?:\s*\{[^}]*\}[^\n]*|[ \t]*\([^)]*\)|[^\n]*)"
+    r"|^[ \t]*export\b[^\n]*\bfrom\b[^\n]*"
+    r"|\brequire\(\s*['\"][^'\"]*['\"]\s*\)",
+    re.MULTILINE)
+
+
+def _qualifier_token(wanted: _SymbolTarget) -> str:
+    """The segment of a qualified target in front of its leaf (`Gateway` of `Gateway.query`), or `""`."""
+    parts = [p for p in wanted.qualified.replace("/", ".").split(".") if p]
+    return parts[-2] if len(parts) >= 2 and parts[-1] == wanted.name else ""
+
+
+def _module_stem(path: str) -> str:
+    """The name a file is imported by: its stem, or its directory's for an `__init__`/`index` file."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if not parts:
+        return ""
+    stem = parts[-1].rsplit(".", 1)[0]
+    if stem in ("__init__", "index") and len(parts) >= 2:
+        return parts[-2]
+    return stem
+
+
+def _imports_module(text: str, stem: str) -> bool:
+    """Whether *text* has an import statement that names the module *stem* as a whole word."""
+    if not stem:
+        return False
+    word = re.compile(rf"(?<![\w$]){re.escape(stem)}(?![\w$])")
+    return any(word.search(m.group(0)) for m in _IMPORT_STATEMENT.finditer(text))
 
 
 class AnswerRendering:
@@ -90,6 +127,11 @@ class AnswerRendering:
         _pending_nonrow_lines: bool
         _changed_offset: int
         _pending_page: dict[str, Any] | None
+        # The project and the per-call timeout of the answer in progress (`build_result`), for the
+        # one count the ambiguity banner asks; and the guarded lookup it asks through
+        # (`DispatchCallers._lookup`), so a count that fails is not a failure of the answer.
+        _answered_lookup: tuple[str, int] | None
+        _lookup: Callable[..., tuple[list[dict], str]]
 
         def _add_gap(self, section: str, kind: str, detail: str) -> None: ...
 
@@ -546,18 +588,27 @@ class AnswerRendering:
                 f"{omitted.endpoints} are not{split}.{order}_")
 
     @staticmethod
-    def _kind_counts(groups: list[_EdgeGroup]) -> dict[str, int]:
+    def _row_kind(row: dict) -> str:
+        """The relationship kind a row is counted under.
+
+        A module-scope row's CALLS/USAGE label is an artifact of which node kind carried the edge
+        (see `_display`), and the row says the FILE references the symbol — usually its import line —
+        not which function in it calls it. It is counted as `IMPORT`, never as a direct call: folded
+        into the direct count, `callers safe_null_result` read "14 direct" over four real calls.
+        Anything else — notably CALL_REFERENCE — is a real claim about the code and is counted as
+        itself."""
+        kind = str(row.get("type(c)") or "").strip() or "?"
+        if row.get("_module_scope") is not None and kind in ("CALLS", "USAGE"):
+            return _IMPORT_KIND
+        return kind
+
+    @classmethod
+    def _kind_counts(cls, groups: list[_EdgeGroup]) -> dict[str, int]:
         """How many rows of each relationship kind this answer holds."""
         out: dict[str, int] = {}
         for g in groups:
             for r in g.rows:
-                kind = str(r.get("type(c)") or "").strip() or "?"
-                # A module-scope row's CALLS/USAGE label is an artifact of which node kind carried
-                # the edge (see `_display`), so it is counted as a direct row rather than split out
-                # as a distinct KIND of fact. Anything else — notably CALL_REFERENCE — is a real
-                # claim about the code and is counted as itself.
-                if r.get("_module_scope") is not None and kind in ("CALLS", "USAGE"):
-                    kind = _DIRECT_KIND
+                kind = cls._row_kind(r)
                 out[kind] = out.get(kind, 0) + 1
         return out
 
@@ -566,10 +617,26 @@ class AnswerRendering:
 
         The count in the heading is the direct calls. Everything else is real — the edges exist and
         an agent asking "what depends on this" needs them — but it is not a call, and printing it
-        under a caller count is the category error that made a registered callback look unused."""
-        others = {k: n for k, n in counts.items() if k != _DIRECT_KIND}
+        under a caller count is the category error that made a registered callback look unused.
+
+        Module-scope rows (`IMPORT`) have their own gap, `import-only-callers`, and their own
+        sentence: the heading already counts them as files that import the symbol, and what a reader
+        needs to know is that the call sites inside those files were not resolved."""
+        imports = counts.get(_IMPORT_KIND, 0)
+        note = ""
+        if imports:
+            self._add_gap(
+                "callers", "import-only-callers",
+                f"{imports} row(s) are a file's module scope (an import or a module-level reference): "
+                f"the function inside that file which calls the symbol is not resolved, so they are "
+                f"counted as files that import it, not as direct calls",
+            )
+            note = ("\n\n_`module scope of <file>` rows are imports, not calls: that file references "
+                    "the symbol from module scope (usually its import line), and which function in it "
+                    "calls the symbol is not resolved. Open the file to find the call sites._")
+        others = {k: n for k, n in counts.items() if k not in (_DIRECT_KIND, _IMPORT_KIND)}
         if not others:
-            return ""
+            return note
         total = sum(others.values())
         parts = [f"{n} `{k}` row(s) ({_EDGE_KINDS.get(k, 'relationship kind not described here')})"
                  for k, n in sorted(others.items(), key=lambda kv: -kv[1])]
@@ -578,7 +645,7 @@ class AnswerRendering:
             f"{total} of the rows are not direct calls: " + "; ".join(
                 f"{n} {k}" for k, n in sorted(others.items(), key=lambda kv: -kv[1])),
         )
-        return ("\n\n_Not calls — " + "; ".join(parts) + ". Each row is badged with its kind. "
+        return (note + "\n\n_Not calls — " + "; ".join(parts) + ". Each row is badged with its kind. "
                 "For \"what would break if this changed\" you want all of them; for \"what calls "
                 "this\" you want only the `CALLS` rows._")
 
@@ -854,8 +921,12 @@ class AnswerRendering:
 
         Returns ``None`` rather than guessing when neither is available, because a command that
         cannot settle anything is worse than no command: it looks like diligence.
+
+        Only the qualifier the CALLER wrote is used. An unqualified target used to borrow the first
+        group's backend name, so `callers run` printed "`release_canary` is the name it is qualified
+        by" about a target that named no qualifier.
         """
-        qualified = wanted.qualified or (groups[0].qn_raw if groups else "")
+        qualified = wanted.qualified
         parts = [p for p in str(qualified).replace("/", ".").split(".") if p]
         # The segment before the leaf, when it is not the leaf itself.
         if len(parts) >= 2 and parts[-1] == wanted.name and parts[-2] != wanted.name:
@@ -1078,8 +1149,11 @@ class AnswerRendering:
         never writes the qualifier can still reach the method — `_QUALIFIER_BYPASSES` — and a file
         that does write it may not call it. Overstating what a grep proves would be the same defect
         this file is full of fixes for.
+
+        Silent for an unqualified target (`run`, `run@file`): the caller named no qualifier, so there
+        is none to grep for, and naming one would invent a fact about the question.
         """
-        if not self._guesses_dominate(groups):
+        if not wanted.qualified or not self._guesses_dominate(groups):
             return ""
         matched = [r for g in groups for r in g.rows if r.get("_bucket") == _NAME_MATCHED]
         found = self._discriminator(wanted, groups)
@@ -1347,7 +1421,17 @@ class AnswerRendering:
         one silent. Each group's heading names the matched TARGET symbol and its rows are the other
         end of the edge, which is the same shape in both directions."""
         name_key, qn_key, file_key = row_keys
+        # First, so every count below is over the rows that survive it: a USAGE row under a narrowed
+        # target whose file neither writes the qualifier nor imports the target's module is a
+        # namesake, and the "Narrowed by" sentence at the end is only true without it.
+        narrowing = self._narrow_usage_rows(op, groups, wanted, row_keys)
         answered = [g for g in groups if g.rows]
+        if not answered:
+            # Every row was a namesake. Said as what it is — rows found, and all set aside by this
+            # check — not as an answer about the code.
+            return (f"## {op.capitalize()} of {target} (0)\n(no {unit} survived the check of its "
+                    f"file against the narrowed target)" + extra_notes + narrowing
+                    + self._name_resolution_note(wanted, groups, truncated))
         kept = sum(len(g.rows) for g in answered)
         # What the answer prints, which is what the scan and the note about it are over: `answered`
         # less the symbols past the candidate cap, whose rows nobody is shown.
@@ -1372,17 +1456,29 @@ class AnswerRendering:
         _ORDER = {_RESOLVED: 0, _UNSTATED: 1, _NAME_MATCHED: 2}
         _SCAN_ORDER = {True: 0, None: 1, False: 2}
         for g in answered:
-            g.rows.sort(key=lambda r: (str(r.get("type(c)") or "") != _DIRECT_KIND,
+            g.rows.sort(key=lambda r: (self._row_kind(r) != _DIRECT_KIND,
                                        _ORDER.get(str(r.get("_bucket") or ""), 1),
                                        op == "callers" and self._is_test_row(r, name_key, file_key),
                                        _SCAN_ORDER[r.get("_qualifier_seen")]))
         counts = self._kind_counts(answered)
         direct = counts.get(_DIRECT_KIND, 0)
-        others = kept - direct
-        # A single count is honest only when every row is the same kind of fact.
-        head = (f"## {op.capitalize()} of {target} ({kept})\n" if not others
-                else f"## {op.capitalize()} of {target} "
-                     f"({direct} direct, {others} other reference(s))\n")
+        imports = counts.get(_IMPORT_KIND, 0)
+        others = kept - direct - imports
+        # A single count is honest only when every row is the same kind of fact. A module-scope row
+        # is a file that imports the symbol, with the call site inside it unresolved, so it is
+        # counted as that and never as a direct call.
+        if imports:
+            split = [f"{direct} direct call{'' if direct == 1 else 's'}"]
+            if others:
+                split.append(f"{others} other reference(s)")
+            split.append(f"{imports} file{' imports' if imports == 1 else 's import'} it — call sites "
+                         f"inside not resolved")
+            head = f"## {op.capitalize()} of {target} ({', '.join(split)})\n"
+        elif others:
+            head = (f"## {op.capitalize()} of {target} "
+                    f"({direct} direct, {others} other reference(s))\n")
+        else:
+            head = f"## {op.capitalize()} of {target} ({kept})\n"
         head += self._evidence_headline(answered, unit)
         # Disclosure says the answer may be wrong; this says how to find out — or, when the scan
         # ran, what finding out came to. Placed with the headline because that is the number it is
@@ -1400,10 +1496,17 @@ class AnswerRendering:
             # need to prevent, since they feed "is this safe to change?".
             self._add_gap(
                 op, "target-ambiguous",
-                f"{len(answered)} distinct symbols named `{wanted.name}` match this target; their "
+                f"{len(answered)} symbols named `{wanted.name}` have {unit} edges; their "
                 f"{unit}s are grouped separately rather than merged into one list. Narrow the target "
                 f"with a qualified name or `{wanted.name}@<file>` to answer about one of them",
             )
+            # The symbols listed are the ones with edges of this kind, not every symbol of the name:
+            # the index is asked how many there are, so the banner can say how many more exist.
+            total = self._namesakes_total(wanted.name)
+            rest = (f"{max(total - len(answered), 0)} more named `{wanted.name}` exist with none"
+                    if total is not None else
+                    "others may exist with none (the index did not answer how many symbols carry "
+                    "the name)")
             shown = shown_groups
             rendered = [r for g in shown for r in g.rows]
             # Rows past the candidate cap are printed by nobody, so they are published by nobody
@@ -1419,7 +1522,7 @@ class AnswerRendering:
                 sections.append(f"… (+{len(answered) - _CANDIDATE_CAP} more symbol(s) with this "
                                 f"name, not shown)")
             body = (head
-                    + f"**{len(answered)} distinct symbols in this index are named `{wanted.name}`** "
+                    + f"**{len(answered)} symbols named `{wanted.name}` have {unit} edges; {rest}** "
                       f"— these are that many separate answers, not one. Ask again as "
                       f"`{answered[0].label or wanted.name}` or "
                       f"`{wanted.name}@{answered[0].file or '<file>'}` for a single symbol.\n"
@@ -1431,8 +1534,99 @@ class AnswerRendering:
         if omitted is not None:
             withheld += omitted.rows
         self._record_rows(rendered, row_keys, unit, row_cap_hit=truncated, withheld=withheld)
-        return (body + self._kind_note(op, counts) + extra_notes + blind_spots
+        return (body + self._kind_note(op, counts) + extra_notes + narrowing + blind_spots
                 + self._name_resolution_note(wanted, answered, truncated))
+
+    def _namesakes_total(self, name: str) -> int | None:
+        """How many symbols in the index are named *name*, from one count query — `None` when it
+        could not be asked or did not answer with exactly one count.
+
+        Asked through the guarded lookup with `surface=False`: the count only words the banner, so a
+        count that times out leaves the answer's own failure state as it was, and the banner says
+        others may exist instead of a number."""
+        where = getattr(self, "_answered_lookup", None)
+        lookup = getattr(self, "_lookup", None)
+        if not where or lookup is None:
+            return None
+        project, timeout_ms = where
+        rows, why = lookup(
+            f'MATCH (n) WHERE n.name="{_cypher_literal(name)}" RETURN count(n) AS symbols',
+            project, timeout_ms, surface=False)
+        if why or len(rows) != 1 or len(rows[0]) != 1:
+            return None
+        try:
+            total = int(str(next(iter(rows[0].values()))).strip())
+        except ValueError:
+            return None
+        return total if total >= 0 else None
+
+    def _narrow_usage_rows(
+        self, op: str, groups: list[_EdgeGroup], wanted: _SymbolTarget, row_keys: tuple[str, str, str],
+    ) -> str:
+        """Under a narrowed target, drop each USAGE row whose file neither writes the qualifier nor
+        imports the target's module, in place; the note that says so, or `""`.
+
+        A USAGE edge is the backend binding a bare NAME, and a function whose only `query` is its own
+        parameter gets one to `Gateway.query` (`usage-rows-from-shadowing-names`). The caller who
+        wrote `Gateway.query` asked about one symbol, and the answer said "Narrowed by …; other
+        symbols named `query` are not included" over rows that were exactly those. A file that
+        never writes `Gateway` and imports no module named for the target's file has no way to name
+        that symbol, so its row is dropped and the drop is stated.
+
+        Where the file cannot be read (no root, missing, past the read budget) or is the file that
+        defines the target — it writes the qualifier because it declares it — there is no verdict:
+        the row stays, badged name-matched, so it is neither verified nor a direct call. A row that
+        followed a real binding (`resolved`) is not second-guessed by a text search, and module-scope
+        rows are imports, counted as such (`_row_kind`). The qualifier is matched as a substring, the
+        lenient direction `qualifier_scan` uses, so the check can only keep a doubtful row, never
+        drop one a looser reading would keep."""
+        if op != "callers" or not wanted.narrowed:
+            return ""
+        file_key = row_keys[2]
+        token = _qualifier_token(wanted)
+        budget = getattr(self, "_scan_budget", None)
+        if budget is None:
+            budget = qualifier_scan.Budget()
+            self._scan_budget = budget
+        reader = blindspots.SourceReader(getattr(self, "_answered_root", None) or "", budget)
+        dropped = unjudged = 0
+        for g in groups:
+            stem = _module_stem(g.file)
+            kept: list[dict] = []
+            for r in g.rows:
+                if (str(r.get("type(c)") or "").strip() != "USAGE" or r.get("_module_scope") is not None
+                        or r.get("_via") or r.get("_bucket") == _RESOLVED):
+                    kept.append(r)
+                    continue
+                f = str(r.get(file_key) or "")
+                text = reader.read(f) if f and f != g.file else None
+                if text is None:
+                    demoted = dict(r, _bucket=_NAME_MATCHED)   # the backend's row is shared
+                    if "_low_confidence" not in demoted:
+                        demoted["_low_confidence"] = _edge_confidence(r)
+                    kept.append(demoted)
+                    unjudged += 1
+                    continue
+                if (token and token in text) or _imports_module(text, stem):
+                    kept.append(r)
+                    continue
+                dropped += 1
+            g.rows = kept
+        notes = ""
+        if dropped:
+            # Counted, not named: a row that is not a reference to the target has no place in an
+            # answer about it, even as a line saying so.
+            wrote = f"neither writes `{token}` nor imports" if token else "does not import"
+            notes += (f"\n\n_{dropped} `USAGE` row(s) dropped under the narrowed target: each one's "
+                      f"file {wrote} the module that defines `{wanted.name}`, so the "
+                      f"`{wanted.name}` it mentions is another symbol of that name (a parameter, a "
+                      f"local or an attribute). Any row count in a note above this one was taken "
+                      f"before they were dropped._")
+        if unjudged:
+            notes += (f"\n\n_{unjudged} `USAGE` row(s) could not be checked against the narrowed "
+                      f"target (the file could not be read, or is the one that defines it), so they "
+                      f"are kept as name-matched and are not counted as references to it._")
+        return notes
 
     def _known_blind_spots(
         self, op: str, groups: list[_EdgeGroup], wanted: _SymbolTarget, row_keys: tuple[str, str, str],

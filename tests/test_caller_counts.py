@@ -177,8 +177,9 @@ def test_a_parameter_that_shadows_the_name_is_not_a_reference_under_a_narrowed_t
     assert names == ["main.run", "uses.via_module"], names
     assert "(1 direct, 1 other reference(s))" in body, body
     assert not _headline_disagreements(body), body
-    # The drop is said in the body, naming what was dropped and why.
-    assert "hier.param_shadow" in body and "1 `USAGE` row" in body, body
+    # The drop is counted in the body, and the dropped row is named nowhere in it.
+    assert "1 `USAGE` row(s) dropped" in body, body
+    assert "param_shadow" not in body, body
     # The "Narrowed by" sentence is now true of every row listed.
     assert "Narrowed by the qualified name `impl.process`" in body, body
 
@@ -195,8 +196,8 @@ def test_the_same_row_under_a_bare_target_is_left_alone(tmp_path):
 def test_a_usage_row_whose_file_cannot_be_read_is_name_matched_and_not_a_direct_call(tmp_path):
     """No file to read means no verdict: the row stays, badged name-matched, out of the direct count."""
     _shadow_tree(tmp_path)
-    rows = _shadow_rows() + [
-        _process_row("gone.missing", "gone.py", kind="USAGE", strategy=None, conf=None)]
+    rows = [*_shadow_rows(),
+            _process_row("gone.missing", "gone.py", kind="USAGE", strategy=None, conf=None)]
     env = _ask("callers", "impl.process", rows, str(tmp_path))
     body = str(env["result"])
     by_name = {r["qualified_name"]: r for r in env["rows"]}
@@ -214,7 +215,8 @@ def test_the_usage_note_counts_the_rows_it_dropped_and_the_rows_it_could_not_jud
     `rows[]`, and N unchecked is exactly the USAGE rows still there and now name-matched."""
     _shadow_tree(tmp_path)
     (tmp_path / "hier2.py").write_text("def other(process):\n    return process\n")
-    rows = _shadow_rows() + [
+    rows = [
+        *_shadow_rows(),
         _process_row("hier2.other", "hier2.py", kind="USAGE", strategy=None, conf=None),
         _process_row("gone.a", "gone_a.py", kind="USAGE", strategy=None, conf=None),
         _process_row("gone.b", "gone_b.py", kind="USAGE", strategy=None, conf=None),
@@ -237,13 +239,10 @@ def test_the_usage_note_counts_the_rows_it_dropped_and_the_rows_it_could_not_jud
 # ============================================================================ the ambiguity banner
 
 def _runs(n: int, *, strategy: str = "import_map", conf: str = "0.95", per: int = 1) -> list[dict]:
-    rows = []
-    for i in range(n):
-        for j in range(per):
-            rows.append(_call_row(f"main{i}.caller{j}", f"main{i}.py", "run",
-                                  target_qn=f"proj.mod{i}.run", target_file=f"mod{i}.py",
-                                  strategy=strategy, conf=conf))
-    return rows
+    return [_call_row(f"main{i}.caller{j}", f"main{i}.py", "run",
+                      target_qn=f"proj.mod{i}.run", target_file=f"mod{i}.py",
+                      strategy=strategy, conf=conf)
+            for i in range(n) for j in range(per)]
 
 
 def test_the_banner_counts_the_symbols_with_edges_and_the_ones_without():
