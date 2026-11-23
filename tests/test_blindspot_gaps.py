@@ -233,6 +233,169 @@ def test_lsp_ts_local_is_name_matched_wherever_it_is_fake_rooted(monkeypatch):
     assert env["evidence"]["safe_for_destructive"] is False
 
 
+# ---- sibling and interface dispatch ----------------------------------------------------------
+#
+# `dynamic-dispatch-asymmetric`: the backend binds the duck-typed `s.area()` in `total_area` to
+# `Circle.area` by suffix match, so `callers Square.area` used to answer complete and safe without it.
+# `ts-safe-for-destructive-wrong-half`: in TypeScript `Square implements Shape`, and a call written
+# against `Shape` reaches `Square.area` with no edge to it at all.
+
+def _method_row(caller: str, caller_file: str, callee: str, callee_file: str, *, strategy: str,
+                written: str, conf: str | None = None, caller_labels: str = "Function") -> dict:
+    row = _row(caller, caller_file, callee, callee_file, strategy=strategy, conf=conf,
+               labels=caller_labels)
+    row["labels(b)"] = "Method"
+    row["callee"] = written
+    return row
+
+
+def _definer(cls: str, file: str, method: str, *, bases: str = "[]") -> dict:
+    return {"c.qualified_name": f"{PROJECT}.{cls}", "c.name": cls.rsplit(".", 1)[-1],
+            "c.file_path": file, "c.base_classes": bases,
+            "m.qualified_name": f"{PROJECT}.{cls}.{method}", "m.file_path": file}
+
+
+def _interface(qn: str, file: str) -> dict:
+    return {"i.name": qn.rsplit(".", 1)[-1], "i.qualified_name": f"{PROJECT}.{qn}",
+            "i.file_path": file, "labels(i)": '["Interface"]'}
+
+
+def _ask_dispatch(monkeypatch, root: str, target: str, edges: list[dict], definers: list[dict],
+                  interfaces: list[dict] | None = None, *, fail_edge_call: int = 0) -> dict:
+    """Like `_ask`, with a router that answers the way the backend does for a method: every edge row
+    of the bare name for an edge query, the classes defining the name, and the interfaces."""
+    monkeypatch.setattr(
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    p = GraphProvider()
+    listing = {"projects": [{"name": PROJECT, "root_path": root}]}
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        listing if method == "list_projects" else None))
+    edge_calls = [0]
+
+    def route(cypher: str, project: str, timeout_ms: int) -> list[dict]:
+        if "count(*)" in cypher:
+            return []
+        if "-[c:" in cypher:
+            edge_calls[0] += 1
+            if fail_edge_call and edge_calls[0] >= fail_edge_call:
+                raise RuntimeError("backend went away")
+            return list(edges)
+        if ":Interface" in cypher:
+            return list(interfaces or [])
+        if "DEFINES_METHOD" in cypher and "m.name=" in cypher:
+            return list(definers)
+        return []
+
+    monkeypatch.setattr(p, "_query_rows", route)
+    return p.build_result("callers", target, [], 30000, root)
+
+
+PY_AREA_EDGES = [
+    _method_row("pkg.shapes.Square.describe", "pkg/shapes.py", "pkg.shapes.Square.area",
+                "pkg/shapes.py", strategy="lsp_method", written="self.area", conf="0.90",
+                caller_labels="Method"),
+    _method_row("pkg.shapes.only_square", "pkg/shapes.py", "pkg.shapes.Square.area",
+                "pkg/shapes.py", strategy="lsp_method", written="sq.area", conf="0.90"),
+    _method_row("pkg.shapes.total_area", "pkg/shapes.py", "pkg.shapes.Circle.area",
+                "pkg/shapes.py", strategy="suffix_match", written="s.area", conf="0.55"),
+]
+PY_AREA_DEFINERS = [_definer("pkg.shapes.Circle", "pkg/shapes.py", "area"),
+                    _definer("pkg.shapes.Square", "pkg/shapes.py", "area")]
+
+TS_AREA_EDGES = [
+    _method_row("src.shapes.Square.describe", "src/shapes.ts", "src.shapes.Square.area",
+                "src/shapes.ts", strategy="lsp_ts_method", written="this.area", conf="0.90",
+                caller_labels="Method"),
+    _method_row("src.shapes.onlySquare", "src/shapes.ts", "src.shapes.Square.area",
+                "src/shapes.ts", strategy="lsp_ts_method", written="sq.area", conf="0.90"),
+]
+TS_AREA_DEFINERS = [_definer("src.shapes.Circle", "src/shapes.ts", "area", bases='["Shape"]'),
+                    _definer("src.shapes.Square", "src/shapes.ts", "area", bases='["Shape"]')]
+TS_INTERFACES = [_interface("src.shapes.Shape", "src/shapes.ts")]
+
+
+def test_callers_of_a_method_lists_the_call_a_sibling_was_bound_to_by_name(monkeypatch):
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", PY_AREA_EDGES, PY_AREA_DEFINERS)
+
+    total = _row_named(env, "total_area")
+    assert total["evidence"] == "name-matched" and total["verified"] is False, total
+    assert "Circle.area" in total["why"], total["why"]
+    gaps = _gaps(env, "dispatch-sibling-unbound")
+    assert gaps, env.get("gaps")
+    assert "Circle.area" in gaps[0]["detail"] and "total_area" in gaps[0]["detail"], gaps
+    assert gaps[0]["section"] != "callees", gaps
+    assert env["confidence"] == "partial"
+    assert env["evidence"]["safe_for_destructive"] is False
+    assert "total_area" in env["result"] and "dispatch-sibling-unbound" in env["result"]
+    # The two callers the backend did bind to `Square.area` are still there, as they were.
+    assert _row_named(env, "only_square")["verified"] is True
+
+
+def test_callers_of_the_method_the_call_was_bound_to_is_unchanged(monkeypatch):
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Circle.area", PY_AREA_EDGES, PY_AREA_DEFINERS)
+
+    assert [r["name"] for r in env["rows"]] == ["total_area"], env["rows"]
+    assert env["confidence"] == "partial"
+    assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_a_sibling_lookup_that_finds_only_the_target_adds_nothing(monkeypatch):
+    edges = [r for r in PY_AREA_EDGES if r["a.name"] != "total_area"]
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", edges, PY_AREA_DEFINERS[1:])
+    assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
+    assert env["confidence"] == "complete", env.get("gaps")
+    assert env["evidence"]["safe_for_destructive"] is True
+
+
+def test_a_sibling_with_only_bound_callers_adds_nothing(monkeypatch):
+    """`Circle.area`'s callers here are all language-server bindings: no call was guessed by name."""
+    edges = [dict(r, strategy="lsp_method") if r["a.name"] == "total_area" else r
+             for r in PY_AREA_EDGES]
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", edges, PY_AREA_DEFINERS)
+    assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
+    assert env["evidence"]["safe_for_destructive"] is True
+
+
+def test_a_sibling_whose_callers_could_not_be_fetched_says_could_not_check(monkeypatch):
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", PY_AREA_EDGES, PY_AREA_DEFINERS,
+                        fail_edge_call=2)
+    gaps = _gaps(env, "dispatch-sibling-unbound")
+    assert gaps, env.get("gaps")
+    assert "could not check" in gaps[0]["detail"] and "Circle.area" in gaps[0]["detail"], gaps
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_ts_callers_of_a_method_an_interface_declares_has_the_gap(monkeypatch):
+    env = _ask_dispatch(monkeypatch, TS_ROOT, "Square.area", TS_AREA_EDGES, TS_AREA_DEFINERS,
+                        TS_INTERFACES)
+
+    gaps = _gaps(env, "dispatch-sibling-unbound")
+    assert gaps, env.get("gaps")
+    assert "`Shape`" in gaps[0]["detail"] and "area" in gaps[0]["detail"], gaps
+    assert env["confidence"] == "partial"
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_ts_an_interface_that_does_not_declare_the_method_adds_nothing(monkeypatch):
+    edges = [dict(r, **{"b.name": "describe",
+                        "b.qualified_name": f"{PROJECT}.src.shapes.Square.describe"})
+             for r in TS_AREA_EDGES if r["a.name"] == "onlySquare"]
+    definers = [_definer("src.shapes.Square", "src/shapes.ts", "describe", bases='["Shape"]')]
+    env = _ask_dispatch(monkeypatch, TS_ROOT, "Square.describe", edges, definers, TS_INTERFACES)
+    assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
+
+
+def test_ts_an_interface_file_the_budget_could_not_read_says_could_not_check(monkeypatch):
+    monkeypatch.setattr(qualifier_scan, "_MAX_FILES", 0)
+    env = _ask_dispatch(monkeypatch, TS_ROOT, "Square.area", TS_AREA_EDGES, TS_AREA_DEFINERS,
+                        TS_INTERFACES)
+    gaps = _gaps(env, "dispatch-sibling-unbound")
+    assert gaps, env.get("gaps")
+    assert "could not check" in " ".join(g["detail"] for g in gaps), gaps
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
 # ---- the pure functions ---------------------------------------------------------------------
 
 def test_alias_imports_finds_every_alias_form():
@@ -296,6 +459,18 @@ def test_a_call_before_the_nested_definition_is_not_shadowed():
     span = function_span(text, "outer", "x.py")
     assert span is not None
     assert nested_shadow(text, span, "inner") is False
+
+
+def test_interface_declares_reads_the_interface_body():
+    from codeintel.engines.graph.blindspots import interface_declares
+
+    with open(os.path.join(TS_ROOT, "src", "shapes.ts"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert interface_declares(text, "Shape", "area") is True
+    assert interface_declares(text, "Shape", "describe") is False
+    assert interface_declares(text, "Missing", "area") is False
+    assert interface_declares("interface A<T> extends B {\n  readonly area?: () => T;\n}\n",
+                              "A", "area") is True
 
 
 # ---- live -----------------------------------------------------------------------------------
