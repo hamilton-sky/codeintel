@@ -302,7 +302,7 @@ def test_a_reindex_already_running_is_not_submitted_again(monkeypatch, tmp_path)
 # Finding `reindexing-flag-self-triggered`: the debounce was on time alone, so every query on an
 # unchanged tree submitted a pass once the window had passed, and the gateway then read
 # `reindex_pending` and flagged its own pass as "a reindex is in progress". A git root now submits
-# only when its tree fingerprint (HEAD plus the newest modified/untracked file) moved.
+# only when its tree fingerprint (HEAD plus the stat of every tracked and untracked file) moved.
 
 def _git_repo(path) -> str:
     import subprocess

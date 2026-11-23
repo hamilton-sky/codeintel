@@ -31,26 +31,36 @@ def _git_out(root: str, *args: str) -> bytes | None:
 
 
 def _tree_fingerprint(root: str) -> str | None:
-    """HEAD's sha plus the newest mtime over ``git ls-files -m -o --exclude-standard``.
+    """HEAD's sha plus the newest mtime and a digest over every file git lists for the work tree.
 
-    The listed paths are folded in too, so a deletion (no mtime left to read) still moves it.
+    The listing is ``git ls-files -c -o --exclude-standard``: the tracked files and the untracked,
+    not ignored ones, read from the index and a directory walk alone. NOT ``-m``: that flag compares
+    the content of a tracked file whose stat moved, and the comparison runs the clean filter the
+    repository's own config and ``.gitattributes`` name, so any repository could run a program on
+    every query. Each listed file's ``(path, mtime_ns, size)`` goes into the digest, so an edit
+    (staged or not), a new file, a deletion or a restore all move it, while the index file itself
+    does not: the graph indexes the work tree, and a ``git status`` refreshing the index is no edit.
     ``None`` for a root git cannot fingerprint: not a work tree, no commit yet, git missing, a
     failure or a timeout."""
     head = _git_out(root, "rev-parse", "--verify", "--quiet", "HEAD")
     if head is None:
         return None
-    listed = _git_out(root, "ls-files", "-z", "-m", "-o", "--exclude-standard")
+    listed = _git_out(root, "ls-files", "-z", "-c", "-o", "--exclude-standard")
     if listed is None:
         return None
     paths = sorted({p for p in listed.decode("utf-8", "surrogateescape").split("\0") if p})
+    digest = hashlib.sha256()
     newest = 0
     for rel in paths:
         try:
-            newest = max(newest, os.stat(os.path.join(root, rel)).st_mtime_ns)
+            st = os.stat(os.path.join(root, rel))
         except OSError:
-            continue  # deleted since; its name is still in the fingerprint below
-    listing = hashlib.sha256("\0".join(paths).encode("utf-8", "surrogateescape")).hexdigest()
-    return f"{head.decode('ascii', 'replace').strip()}:{newest}:{listing}"
+            stamp = "-"  # deleted since it was listed or committed; its name still counts
+        else:
+            newest = max(newest, st.st_mtime_ns)
+            stamp = f"{st.st_mtime_ns}:{st.st_size}"
+        digest.update(rel.encode("utf-8", "surrogateescape") + b"\0" + stamp.encode() + b"\0")
+    return f"{head.decode('ascii', 'replace').strip()}:{newest}:{digest.hexdigest()}"
 
 
 class _DaemonPool:
@@ -168,6 +178,9 @@ class Reindexer:
             if now - last < self._debounce_seconds:
                 return False
             if fingerprint is not None and fingerprint == self._last_fingerprint.get(project_root):
+                # Checked and unchanged: the window restarts, so an unchanged tree costs its git
+                # calls once per window rather than on every query once the window has passed.
+                self._last_fired[project_root] = now
                 return False
             self._last_fired[project_root] = now
             if fingerprint is not None:

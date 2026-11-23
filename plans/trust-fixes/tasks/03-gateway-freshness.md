@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01
 Test first: yes
 Level: 3
@@ -62,12 +62,12 @@ prints passed
 
 ## Answer
 
-Work started at commit 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f. Test-only commit: e2e7d8e.
+Work started at commit 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f. Test-only commit: e2e7d8e (round 2's failing tests: 2cdfcf0).
 
 **Built**
-- `src/codeintel/gateway/reindexer.py`: `_git_out` (argv list, `cwd=root`, `timeout=_FINGERPRINT_TIMEOUT_S` = 5, no shell, reusing `changed_range._GIT` with `core.fsmonitor=false` and its scrubbed `_env()`), `_tree_fingerprint(root)` = HEAD sha + newest `st_mtime_ns` over `git ls-files -z -m -o --exclude-standard` + a hash of the listed paths; `None` when git cannot answer. `maybe_reindex` now returns `bool`: False for disabled, empty or non-directory roots, in flight, inside the debounce window, an unchanged fingerprint, or `reindex = "never"`; True only when it submitted. `_do_reindex` runs `_graph_reindex` before `_semantic_reindex`, each in its own try; the `finally` is unchanged.
+- `src/codeintel/gateway/reindexer.py`: `_git_out` (argv list, `cwd=root`, `timeout=_FINGERPRINT_TIMEOUT_S` = 5, no shell, reusing `changed_range._GIT` with `core.fsmonitor=false` and its scrubbed `_env()`), `_tree_fingerprint(root)` = HEAD sha + newest `st_mtime_ns` + a sha256 over `(path, mtime_ns, size)` of every file `git ls-files -z -c -o --exclude-standard` lists (round 2: `-c` replaced `-m`, see Review fixes); `None` when git cannot answer. `maybe_reindex` now returns `bool`: False for disabled, empty or non-directory roots, in flight, inside the debounce window, an unchanged fingerprint, or `reindex = "never"`; True only when it submitted. `_do_reindex` runs `_graph_reindex` before `_semantic_reindex`, each in its own try; the `finally` is unchanged.
 - `src/codeintel/gateway/cache.py`: `freshness: int | str` on `get`/`put`.
-- `src/codeintel/gateway/gateway.py`: `_query` reads `reindex_pending` before `maybe_reindex`; `reindexing` = pending or `maybe_reindex(...)` returned True. Freshness = `f"{generation}:{graph_db_stamp(root)}:{_semantic_db_stamp(root)}"` (`"{generation}:0:0"` when no root). New `_semantic_db_stamp(root)`: `default_db_path(load_config(root)["model"])`, max mtime_ns of the db and its `-wal`, 0 when missing, never raises.
+- `src/codeintel/gateway/gateway.py`: `_query` reads `reindex_pending` before `maybe_reindex`; `reindexing` = pending or `maybe_reindex(...)` returned True. Freshness = `f"{generation}:{graph_db_stamp(root)}:{_semantic_db_stamp(root)}"` (`"{generation}:0:0"` when no root). New `_semantic_db_stamp(root)`: max mtime_ns of the semantic db and its `-wal`, 0 when missing, never raises; the path comes from `_semantic_db_path(root)`, which remembers `default_db_path(load_config(root)["model"])` per root and re-reads it only when the global `config.toml` or the project `.codeintel.toml` stat changes.
 - `README.md`: the "cache never lies" bullet now says the cache is invalidated by a reindex from any process; the `CODEINTEL_REINDEX=off` row says graph answers are not indexed inline, run `codeintel index`, and the cache notices; the "honest caveat" paragraph's "only when a background reindex completes" now also names `codeintel index`.
 - Tests: new `tests/test_gateway_freshness.py` (4 tests); `tests/test_reindexer.py` (6 new tests, `result is False`); `tests/test_cache.py` (1 new test); `tests/test_reindex_lock.py` (only the two order lists).
 
@@ -91,14 +91,21 @@ Work started at commit 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f. Test-only commi
 - git hygiene for the fingerprint reuses `changed_range._GIT` (`core.fsmonitor=false`) and `_env()` so a hostile repo config cannot run a program on every query.
 
 **Shortcuts taken**
-- `_semantic_db_stamp` calls `load_config(root)` on every non-empty-root query (two small TOML reads). Worth caching per root if query latency ever shows it.
+- `_semantic_db_path` still stats the two config files on every query (no TOML parse). The memo `_SEMANTIC_DB_PATHS` is module-level, one entry per root ever queried; unbounded only in the number of distinct roots.
 - A semantic search that indexes inline writes the semantic db, so the next identical query is a cache miss. Correct (the index moved) but costs caching for semantic answers on a churning repo.
-- The fingerprint stats every modified/untracked file on each check past the debounce; a repo with tens of thousands of un-ignored untracked files would pay for that. Bounded by the 5 s git timeouts for the listing itself, not for the stats.
+- The fingerprint stats every tracked and untracked file, at most once per debounce window per root (round 2). On a 100k-file repo that is roughly 100k `stat` calls on the request thread once per 30 s; the 5 s git timeouts bound the listing, not the stats. Worth moving off the request thread if that latency shows up.
 
 **For later tickets**
 - `Reindexer.maybe_reindex` returns `bool`; fakes returning None are read as "no pass". Tests driving the real one on a path must use an existing directory.
 - `_do_reindex` order is now graph then semantic (ticket 10 builds on that).
 - Docs outside Touches still describe the old cache rule / REINDEX=off behaviour: `docs/architecture.md` (~151, ~161), `docs/query-flow.md` (~36, ~90-92), `docs/semantic.md` (~61), `docs/deploy.md` (~27). Likely ticket 13.
+
+**Review fixes** (round 1; failing tests committed alone in 2cdfcf0, all four seen failing first: staged edit returned False, the filter marker existed, 3 fingerprint checks instead of 1, 4 config reads instead of <= 1)
+1. Clean filter run by `ls-files -m`: reproduced by hand in a scratch repo (a `filter.evil.clean` that touches a marker; a same-size edit; `git -c core.fsmonitor=false ls-files -m -o` created the marker, `ls-files -c -o` did not). Fix: the fingerprint now lists with `-z -c -o --exclude-standard` (index read and directory walk only, no content compare) and hashes each file's `(path, mtime_ns, size)`. Test `test_the_fingerprint_never_runs_the_repositorys_own_clean_filter` (hostile clean filter, same-size edit) passes.
+2. Staged-only changes invisible: fixed by the same change, since every tracked file's stat is in the digest whether or not it is staged. Test `test_a_staged_edit_submits_a_pass` (edit + `git add` after a pass returns True) passes. I did NOT fold in `.git/index`'s mtime as the finding suggested: the graph and semantic passes index the work tree, which the per-file stats already cover; the index file is rewritten by a plain `git status` (stat refresh) or by any git call the backend makes during its pass, which would submit an extra pass with no source change. `git restore --staged --worktree` rewrites the file, so its mtime moves the digest.
+3. Unchanged fingerprint did not advance the window: `maybe_reindex` now sets `_last_fired[root] = now` when it checked and found the tree unchanged, so git runs at most once per debounce window per root. Test `test_an_unchanged_tree_is_fingerprinted_at_most_once_per_debounce_window` (three calls past the window, one fingerprint) passes.
+4. `load_config` on every query: `_query` loads no config itself (grep: only `_semantic_db_stamp` called `load_config` in gateway.py), so there was nothing to reuse; instead `_semantic_db_path` remembers the path per root keyed on the stats of the two config files. Test `test_repeated_queries_do_not_reread_the_config` (4 queries, <= 1 read) and `test_a_model_change_in_the_project_config_is_followed` pass. Cross-project invalidation is now documented in `_semantic_db_stamp`'s docstring and in README's cache bullet.
+Round 2 proof: check block `325 passed`, exit 0; `ruff check src tests bench` all passed; `mypy` no issues in 87 files; compileall OK; acceptance `test_tf_freshness.py` 14 passed. Every test file mentioning Gateway/Reindexer/code_query_handler/cached: 1116 passed, 29 skipped, 1 xfailed, 1 failed (`test_doctor.py::test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read`, the root-only failure commands.md's Test command deselects). Whole Test command: left to the conductor's gate.
 
 ## Review findings (round 1, pair review)
 

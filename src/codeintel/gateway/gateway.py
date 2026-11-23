@@ -53,17 +53,50 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
                     "completed pass; re-ask shortly if you have just changed this code"}
 
 
+# root -> (the config files' stamps, the semantic db path they gave). One entry per project root.
+_SEMANTIC_DB_PATHS: dict[str, tuple[tuple, str]] = {}
+
+
+def _file_stamp(path: str) -> tuple[int, int]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (0, -1)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _semantic_db_path(project_root: str) -> str:
+    """The semantic db ``default_db_path`` names for this root's configured model.
+
+    Remembered per root and read again only when the global ``config.toml`` or the project's
+    ``.codeintel.toml`` changes (two ``stat`` calls), so a query does not parse both TOML files
+    just to build its cache key. May raise; the caller handles it."""
+    from codeintel.core.config import load_config
+    from codeintel.core.paths import codeintel_home
+    from codeintel.engines.semantic.db import default_db_path
+
+    home = str(codeintel_home())
+    key = (home, _file_stamp(os.path.join(home, "config.toml")),
+           _file_stamp(os.path.join(project_root, ".codeintel.toml")))
+    remembered = _SEMANTIC_DB_PATHS.get(project_root)
+    if remembered is not None and remembered[0] == key:
+        return remembered[1]
+    path = default_db_path(str(load_config(project_root).get("model") or ""))
+    _SEMANTIC_DB_PATHS[project_root] = (key, path)
+    return path
+
+
 def _semantic_db_stamp(project_root: str) -> int:
     """The semantic index file's mtime in nanoseconds (its ``-wal`` included); 0 when missing.
 
     The file is the one ``default_db_path`` names for this root's configured model, the same one
     the semantic provider and the reindexer write. The db runs in WAL mode, so a pass's writes land
-    in ``-wal`` until a checkpoint, which is why that sibling is read too. Never raises: a cache
-    key must not fail a query."""
+    in ``-wal`` until a checkpoint, which is why that sibling is read too. The file is shared by
+    every project on the machine that uses the same model, so indexing any one of them invalidates
+    every project's cached answers: that errs toward a miss, never toward a stale hit. Never
+    raises: a cache key must not fail a query."""
     try:
-        from codeintel.core.config import load_config
-        from codeintel.engines.semantic.db import default_db_path
-        path = default_db_path(str(load_config(project_root).get("model") or ""))
+        path = _semantic_db_path(project_root)
     except Exception as exc:
         log_swallowed("gateway._semantic_db_stamp", exc)
         return 0

@@ -54,3 +54,4 @@ Also, every regression test added for a finding fails on main eb0902f and passes
   - Its 08 (staleness on callers/impact) is superseded by ticket 02 here.
   - Its 04-06 ("Callers through" for TS structural interfaces) are the full version of the gap that ticket 06 here adds; they can build on 06's `dispatch-sibling-unbound` rows.
 - Live fixtures run against codebase-memory-mcp 0.9.x, which is in this container. 0.10.x behaviour, such as hops that carry `strategy`, is covered by unit fakes only.
+- 03 (round 2) — fingerprint lists `git ls-files -c -o --exclude-standard` and hashes each file's (path, mtime_ns, size), never `-m` (it runs repo clean filters); an unchanged check restarts the debounce window; semantic db path memoised per root on the config files' stats.
