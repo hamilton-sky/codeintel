@@ -1,7 +1,7 @@
 # Persist semantic model failures, report them in doctor and status, and fall back to graph name search
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 03
 Test first: yes
 Level: 3
