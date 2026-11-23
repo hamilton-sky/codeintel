@@ -416,3 +416,156 @@ def test_an_unreadable_db_file_does_not_raise_from_the_stamp(monkeypatch, tmp_pa
 
     monkeypatch.setattr(paths.os, "stat", stat)
     assert paths.graph_db_stamp(str(root)) == 0
+
+
+# ============================================== HEAD's commit time is read safely (review round 2)
+
+def _signed_commit_after_the_index(repo: Path, when: float, marker: Path) -> None:
+    """Make HEAD a commit carrying a (fake) PGP signature, dated *when*, and give the repository's
+    own config `log.showSignature=true` and a `gpg.program` that leaves *marker* when git runs it.
+    The commit is hand-made with `hash-object`, so no real signing key is needed."""
+    tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    parent = _git(repo, "rev-parse", "HEAD").strip()
+    body = (f"tree {tree}\nparent {parent}\nauthor t <t@t> {int(when)} +0000\n"
+            f"committer t <t@t> {int(when)} +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEE\n -----END PGP SIGNATURE-----\n"
+            "\nsigned after the index\n")
+    obj = repo.parent / "signed-commit.txt"
+    obj.write_text(body)
+    sha = _git(repo, "hash-object", "-t", "commit", "-w", str(obj)).strip()
+    _git(repo, "update-ref", "-m", "commit: signed after the index", "HEAD", sha)
+    gpg = repo.parent / "fake-gpg"
+    gpg.write_text(f"#!/bin/sh\ntouch '{marker}'\necho 'gpg: Signature made by nobody' >&2\nexit 1\n")
+    gpg.chmod(0o755)
+    _git(repo, "config", "gpg.program", str(gpg))
+    _git(repo, "config", "log.showSignature", "true")
+
+
+def test_a_signed_commit_after_the_index_is_stale_under_log_show_signature(
+        monkeypatch, tmp_path, repo):
+    """`log.showSignature=true` puts verification output before `%ct` on stdout. Read without
+    `--no-show-signature`, the time did not parse and was skipped, so a commit after the index read
+    as fresh; and git ran the verifier the repository's own config names."""
+    marker = tmp_path / "verifier-ran"
+    now = time.time()
+    _signed_commit_after_the_index(repo, now - 10, marker)
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n",
+           mtime=now - 90)
+    p = _provider(monkeypatch, tmp_path, repo)
+
+    env = _ask(p, repo)
+
+    assert "Changes impact" in env["result"], env
+    assert "stale-index" in _gap_kinds(env), env.get("gaps")
+    assert "HEAD (a commit)" in next(g["detail"] for g in env["gaps"] if g["kind"] == "stale-index")
+    assert not marker.exists(), "git ran the repository's gpg.program to read HEAD's commit time"
+
+
+def test_an_unreadable_head_commit_time_is_unknown_never_skipped(monkeypatch, tmp_path, repo):
+    from codeintel.engines.graph import changed_range
+    real_git = changed_range._git
+
+    def git(root, *args):
+        if args and args[0] == "log":
+            return 0, b"something that is not a timestamp\n", ""
+        return real_git(root, *args)
+
+    now = time.time()
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n",
+           mtime=now - 90)
+    p = _provider(monkeypatch, tmp_path, repo)
+    monkeypatch.setattr(changed_range, "_git", git)
+
+    env = _ask(p, repo)
+
+    assert "index-age-unknown" in _gap_kinds(env), env.get("gaps")
+    assert "HEAD" in next(g["detail"] for g in env["gaps"] if g["kind"] == "index-age-unknown")
+    assert env["confidence"] == "partial"
+
+
+def test_a_repo_with_no_commit_yet_still_dates_its_files(monkeypatch, tmp_path):
+    """No HEAD is not a failure to read HEAD: the staged files alone date the tree."""
+    root = tmp_path / "unborn"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _files(root)
+    _git(root, "add", "-A")
+    now = time.time()
+    _age_all(root, now - 120)
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    p = _provider(monkeypatch, tmp_path, root)
+
+    env = _ask(p, root)
+
+    assert "Changes impact" in env["result"], env
+    kinds = _gap_kinds(env)
+    assert "stale-index" not in kinds and "index-age-unknown" not in kinds, env.get("gaps")
+
+
+# ===================================== "working tree clean" only when git agrees (review round 2)
+
+def _backend_reports_nothing(monkeypatch, p: GraphProvider) -> None:
+    run = p._run
+
+    def quiet(method, payload, timeout_ms):
+        if method == "detect_changes":
+            return {"changed_files": [], "changed_count": 0, "impacted_symbols": []}
+        return run(method, payload, timeout_ms)
+
+    monkeypatch.setattr(p, "_run", quiet)
+
+
+def test_a_failed_git_status_never_says_working_tree_clean(monkeypatch, tmp_path, repo):
+    from codeintel.engines.graph import changed_range
+    real_git = changed_range._git
+
+    def git(root, *args):
+        if args and args[0] == "status":
+            return 1, b"", "fatal: simulated status failure"
+        return real_git(root, *args)
+
+    _stamp_index(tmp_path / "graph-cache", time.time() - 60)
+    p = _provider(monkeypatch, tmp_path, repo)
+    monkeypatch.setattr(changed_range, "_git", git)
+
+    env = _ask(p, repo)
+
+    assert env["result"] is not None, env
+    assert "working tree clean" not in env["result"], env["result"]
+    assert "index-age-unknown" in _gap_kinds(env), env.get("gaps")
+    assert env["confidence"] == "partial"
+
+
+def test_a_source_edit_git_lists_but_the_backend_misses_is_stale_not_clean(
+        monkeypatch, tmp_path, repo):
+    now = time.time()
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n",
+           mtime=now - 90)
+    p = _provider(monkeypatch, tmp_path, repo)
+    _backend_reports_nothing(monkeypatch, p)
+
+    env = _ask(p, repo)
+
+    assert env["result"] is not None, env
+    assert "working tree clean" not in env["result"], env["result"]
+    assert "stale-index" in _gap_kinds(env), env.get("gaps")
+    assert "pkg/core.py" in next(g["detail"] for g in env["gaps"] if g["kind"] == "stale-index")
+    assert env["confidence"] == "partial"
+
+
+def test_a_non_source_edit_the_backend_misses_is_not_called_clean(monkeypatch, tmp_path, repo):
+    now = time.time()
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    _write(repo, "NOTES.txt", "a note\n", mtime=now - 90)
+    p = _provider(monkeypatch, tmp_path, repo)
+    _backend_reports_nothing(monkeypatch, p)
+
+    env = _ask(p, repo)
+
+    assert "working tree clean" not in env["result"], env["result"]
+    assert "non-source" in env["result"], env["result"]
+    kinds = _gap_kinds(env)
+    assert "stale-index" not in kinds and "index-age-unknown" not in kinds, env.get("gaps")
