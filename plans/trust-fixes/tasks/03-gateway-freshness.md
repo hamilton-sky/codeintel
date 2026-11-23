@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 14
 Test first: yes
 Level: 3
@@ -112,6 +112,12 @@ Round 2 proof: check block `325 passed`, exit 0; `ruff check src tests bench` al
 - Check block: `.venv/bin/pytest tests/test_gateway_freshness.py ... tests/test_cli_commands.py -q -o addopts=` -> `325 passed`, exit 0.
 - Done when tests, each PASSED (`-rA`): test_gateway_freshness.py db-touch / db-delete / semantic-db miss; test_reindexer.py unchanged-tree, edited-file, graph-before-semantic, git-failure[timeout|nonzero], `test_never_raises_on_bad_path`; test_cache.py `test_a_different_freshness_string_misses`; test_reindex_lock.py both order tests. `git diff 03957a6 -- tests/test_reindex_lock.py` shows only the two `ran ==` lines. `CODEBASE_MEMORY_CACHE_DIR` set to tmp_path in test_gateway_freshness.py (lines 42-43).
 - Lint: `ruff check src tests bench` all passed; `codeintel c4 . --check --out /tmp/codeintel-c4-check` -> `0 gating finding(s) — exit 0`.
+- Whole Test command: left to the conductor's gate.
+
+**Round 4 (footprint finding)**: started at a48f90fc11a1e8fdb04e9c5520091bee3d721c03. No code changed.
+- Review fixes (round 1, footprint check): the flagged paths (docs/c4.md, src/codeintel/c4/check.py, src/codeintel/c4/model.py, tests/test_c4.py, tests/test_c4_check.py) are ticket 14's commits eb217d8 and 474ee7f, which the round-3 resume folded into this ticket's range; this ticket never edited them. The plan repair a48f90f added them to Touches with a note under "Not in this ticket", so the finding is answered by the plan, not by a code change. I did not change or revert any c4 code. `git diff --name-only 03957a6 HEAD -- src tests README.md docs` now lists only paths on Touches (README.md, docs/c4.md, the two c4 src files, the three gateway src files, test_c4, test_c4_check, test_cache, test_gateway_freshness, test_reindex_lock, test_reindexer).
+- Check block re-run on a48f90f: `.venv/bin/pytest tests/test_gateway_freshness.py ... tests/test_cli_commands.py -q -o addopts=` -> `325 passed`, exit 0.
+- Lint: `ruff check src tests bench` -> All checks passed; `codeintel c4 . --check --out /tmp/codeintel-c4-check` -> `0 gating finding(s) — exit 0`.
 - Whole Test command: left to the conductor's gate.
 
 ## Review findings (round 1, pair review)
