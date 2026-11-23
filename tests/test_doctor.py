@@ -849,3 +849,74 @@ def test_codeintel_doctor_says_healthy_but_graph_degraded_and_exits_zero(monkeyp
     args.project_root = "/repo"
     assert import_module("codeintel.cli.doctor").run(args) == 0
     assert "healthy, but graph degraded" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# a recorded model-load failure (codeintel_home()/semantic_failure.json)
+# --------------------------------------------------------------------------- #
+
+class _BlockedEmbedding:
+    """fastembed's model class on a host where the weights cannot be fetched."""
+
+    def __init__(self, *args, **kwargs):
+        raise ValueError("Could not load model BAAI/bge-small-en-v1.5 from any source.")
+
+    @classmethod
+    def list_supported_models(cls):
+        return [{"model": "BAAI/bge-small-en-v1.5"}]
+
+
+class _AbsentEngine:
+    """A graph/lsp slot that answers instantly, so the semantic row is the subject."""
+
+    available = False
+
+    def probe(self, project_root, **_kw):
+        return {"installed": False, "runnable": False, "repo_indexed": None,
+                "detail": "absent", "remediation": None}
+
+
+def test_doctor_reports_semantic_not_runnable_after_a_recorded_model_failure(
+        tmp_path, monkeypatch):
+    import codeintel.engines.semantic.provider as sem
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "core.py").write_text("def helper():\n    return 1\n")
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.setattr(sem, "_DEPS_OK", True)
+    monkeypatch.setattr("fastembed.TextEmbedding", _BlockedEmbedding)
+    failed = SemanticProvider(blocking_index=True).build_result(
+        "search", "helper", [], 0, str(repo))
+    assert failed["reason"] == "index-failed"
+    sem._BG_INDEX_FAILED.clear()                    # doctor runs in a later process
+
+    report = doctor.run_doctor(str(repo), graph=_AbsentEngine(), lsp=_AbsentEngine())
+    row = report["engines"]["semantic"]
+
+    assert row["runnable"] is False
+    assert row["status"] == "fail"
+    assert "last index could not load model: could not load embedding model" in row["detail"]
+    assert "FASTEMBED_CACHE_PATH" in row["remediation"]
+    assert "network" in row["remediation"]
+    # The cause replaces the "a download has not happened yet" story; it does not sit beside it.
+    assert "the next index downloads" not in row["detail"]
+    assert report["summary"]["healthy"] is False
+
+
+def test_doctor_maps_a_model_load_failure_reason_to_a_failing_row():
+    """Whatever the probe's own remediation said, the row names the cache variable and network."""
+    class _Probe:
+        def probe(self, root, **_kw):
+            return {"installed": True, "runnable": True, "repo_indexed": False,
+                    "reason": "model-load-failed",
+                    "detail": "last index could not load model: boom", "remediation": "retry"}
+
+    row = doctor._probe_engine("semantic", _Probe(), lambda: None, lambda p: p.probe("/r"))
+
+    assert row["runnable"] is False
+    assert row["status"] == "fail"
+    assert "FASTEMBED_CACHE_PATH" in row["remediation"]
+    assert "network" in row["remediation"]
