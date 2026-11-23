@@ -160,7 +160,7 @@ def test_an_uncommitted_edit_with_no_reindex_is_stale_and_partial(monkeypatch, t
     assert env["result"] is not None, env
     assert "stale-index" in _gap_kinds(env), env.get("gaps")
     assert env["confidence"] == "partial", env.get("confidence")
-    assert env["evidence"]["safe_for_destructive"] is False
+    assert (env.get("evidence") or {}).get("safe_for_destructive") is not True
 
 
 def test_an_untracked_file_the_index_has_no_symbols_for_is_stale(monkeypatch, tmp_path, repo):

@@ -307,6 +307,14 @@ def test_run_raising_is_caught(monkeypatch):
 ROOT = "/Users/x/Documents/project/codeintel"
 
 
+@pytest.fixture
+def in_a_work_tree(monkeypatch):
+    """`ROOT` is not a real directory, let alone a git work tree. The uncommitted `changed` tests
+    here are about rendering the backend's answer, not about the git check in front of it, so
+    that one check is answered "yes"."""
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.in_work_tree", lambda root: True)
+
+
 def _capturing_provider(monkeypatch, method_response):
     """Provider that records the (method, payload, timeout) of the non-list_projects call."""
     seen: dict = {}
@@ -326,6 +334,7 @@ def _capturing_provider(monkeypatch, method_response):
     return p, seen
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_renders_files_and_impacted_symbols(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES})
     r = p.build_result("changed", "", [], 0, ROOT)
@@ -335,6 +344,7 @@ def test_changed_renders_files_and_impacted_symbols(monkeypatch):
     assert "GraphProvider._dispatch" in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_clean_tree_is_informative_not_null(monkeypatch):
     # A clean tree is a TRUE answer, not a lookup miss — a string, NOT safe-null (else the op looks broken).
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": CAP_DETECT_CHANGES_CLEAN})
@@ -342,6 +352,7 @@ def test_changed_clean_tree_is_informative_not_null(monkeypatch):
     assert r["result"] is not None and "working tree clean" in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_dedupes_files_and_drops_module_markers(monkeypatch):
     # Regression for the dogfood finding: 3→2 files (gateway dedup'd); 3→1 symbols (path-marker
     # dropped, Gateway dedup'd). The header count encodes both fixes.
@@ -351,12 +362,14 @@ def test_changed_dedupes_files_and_drops_module_markers(monkeypatch):
     assert "Gateway" in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_backend_failure_is_safe_null(monkeypatch):
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": None})
     r = p.build_result("changed", "", [], 0, ROOT)
     assert r["ok"] is True and r["result"] is None
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_malformed_dict_is_safe_null(monkeypatch):
     # A dict that isn't a detect_changes shape (e.g. a backend error object) must degrade to
     # safe-null, NOT render a false "working tree clean". (reviewer warning)
@@ -365,6 +378,7 @@ def test_changed_malformed_dict_is_safe_null(monkeypatch):
     assert r["ok"] is True and r["result"] is None
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_drops_root_level_file_markers(monkeypatch):
     # A changed file at the project ROOT yields a marker whose label has no "/". The structural
     # label==file_path filter drops it (a "/"-in-label check would leak it as a fake symbol).
@@ -378,6 +392,7 @@ def test_changed_drops_root_level_file_markers(monkeypatch):
     assert "main.run" in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_keeps_symbol_with_slash_in_qualified_name(monkeypatch):
     # Go-style qualified names contain "/". The old "/"-in-label filter would wrongly drop them;
     # label != file_path so the structural filter keeps them. (reviewer inverse-direction finding)
@@ -390,6 +405,7 @@ def test_changed_keeps_symbol_with_slash_in_qualified_name(monkeypatch):
     assert "Changes impact (1 files → 1 symbols defined in them" in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_payload_has_no_target_and_raises_timeout_floor(monkeypatch):
     # `target` used to be IGNORED by `changed`, and this test passed one to prove it never leaked
     # into the payload. It is now a git base (see tests/test_changed_range.py), so a non-empty
@@ -522,6 +538,7 @@ def test_live_callers_of_safe_null_result():
 # `.DS_Store`. A change-impact answer is about code; the indexer's corpus policy cannot be the
 # filter here because `.md` is in the corpus DELIBERATELY, for semantic search.
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_drops_non_source_files_and_the_tools_own_artifact(monkeypatch):
     # The exact observed F5 payload: nothing here is source, and the "symbols" are md headings.
     resp = {"changed_files": [".gitignore", "plans/01-plan.json", "plans/02-plan.json",
@@ -543,6 +560,7 @@ def test_changed_drops_non_source_files_and_the_tools_own_artifact(monkeypatch):
     assert "working tree clean" not in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_drops_ds_store(monkeypatch):
     resp = {"changed_files": [".DS_Store"], "impacted_symbols": []}
     p = _provider(monkeypatch, {"list_projects": CAP_LIST_PROJECTS, "detect_changes": resp})
@@ -550,6 +568,7 @@ def test_changed_drops_ds_store(monkeypatch):
     assert ".DS_Store" not in r["result"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_counts_only_source_when_mixed(monkeypatch):
     # Real source alongside junk: the header count must reflect the source only.
     resp = {"changed_files": ["CODE_INTEL.md", ".gitignore", "src/app.py"],

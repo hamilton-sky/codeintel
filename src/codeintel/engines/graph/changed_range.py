@@ -408,19 +408,21 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
     `reset` already knows how to find — and takes its mtime (WAL included, since a write lands there
     first).
 
-    "Inputs" are the newest of: the changed files present in the working tree, and the last time HEAD
-    moved by something other than a plain commit (see `_last_tree_move`) — which is what catches a
-    branch switch that left every file with an old mtime. Cannot-tell is `unknown`, never `fresh`:
-    the one thing this must not do is imply freshness it did not measure."""
+    "Inputs" are the newest of: the changed files present in the working tree, HEAD's commit time
+    (`git log -1 --format=%ct`, which catches a caller committed after the index in a file no diff
+    mentions), and the last time HEAD moved by something other than a plain commit (see
+    `_last_tree_move`) — which is what catches a branch switch that left every file with an old
+    mtime. There is no slack: an edit even a moment after the index was written is not in it.
+    Cannot-tell is `unknown`, never `fresh`: the one thing this must not do is imply freshness it
+    did not measure."""
     try:
         from codeintel.core.paths import graph_cache_dir as _graph_cache_dir
-        base = os.path.join(_graph_cache_dir(), f"{project}.db")
-        stamps = [os.stat(p).st_mtime for p in (base, base + "-wal") if os.path.exists(p)]
-        if not stamps:
+        from codeintel.core.paths import graph_db_mtime
+        written = graph_db_mtime(project)
+        if written is None:
             return IndexAge(
                 "unknown", f"the graph index file for `{project}` was not found under "
                            f"{_graph_cache_dir()}, so its age cannot be read")
-        written = max(stamps)
         newest, newest_what = 0.0, ""
         for rel in paths:
             try:
@@ -429,6 +431,11 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
                 continue
             if m > newest:
                 newest, newest_what = m, rel
+        code, out, _ = _git(root, "log", "-1", "--format=%ct")
+        if code == 0 and out.strip().isdigit():
+            committed = float(out.strip())
+            if committed > newest:
+                newest, newest_what = committed, "HEAD (a commit)"
         code, out, _ = _git(root, "rev-parse", "--git-path", "logs/HEAD")
         if code == 0 and out.strip():
             reflog = out.decode().strip()
@@ -437,10 +444,9 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
                 newest, newest_what = moved, "HEAD (a checkout, merge, reset or rebase)"
         if not newest:
             return IndexAge(
-                "unknown", "neither the changed files nor the HEAD reflog could be dated, so "
-                           "there is nothing to compare the index's age against")
-        # A little slack: a file written during the same second as the index pass it triggered.
-        if written + 2.0 < newest:
+                "unknown", "neither the changed files nor HEAD could be dated, so there is "
+                           "nothing to compare the index's age against")
+        if written < newest:
             return IndexAge("stale", f"the graph index was last written "
                                      f"{_ago(newest - written)} before {newest_what} last changed")
         return IndexAge("fresh", "")
@@ -451,12 +457,13 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
 def _last_tree_move(reflog_path: str) -> float | None:
     """When HEAD last moved by something other than a plain commit, from its reflog.
 
-    A commit records content that was already in the working tree, so it says nothing about whether
-    the files the index saw are still the files on disk — treating it as "the tree moved" flagged
-    every query after every commit as stale. A checkout, merge, reset, rebase or pull is the
-    opposite: it rewrites files, including callers in files the diff never mentions, which is
-    exactly the population a stale graph under-reports. Reflog lines are
-    `old new Name <email> <epoch> <tz>` TAB `<message>`."""
+    A commit does not move the tree: it records content that was already in the working tree, so
+    it rewrites no file. It does prove that files were written after any index pass that happened
+    before it, and `graph_index_age` reads that from HEAD's commit time on its own, not from here.
+    A checkout, merge, reset, rebase or pull is different: it rewrites files, including callers in
+    files the diff never mentions, often leaving them with mtimes older than the index and a
+    commit time older still. That is the move only the reflog dates, so commits are skipped here.
+    Reflog lines are `old new Name <email> <epoch> <tz>` TAB `<message>`."""
     try:
         with open(reflog_path, encoding="utf-8", errors="replace") as fh:
             lines = fh.read().splitlines()[-200:]
@@ -472,6 +479,41 @@ def _last_tree_move(reflog_path: str) -> float | None:
         except (IndexError, ValueError):
             continue
     return None
+
+
+def in_work_tree(root: str) -> bool:
+    """Whether *root* is inside a git work tree — the one check uncommitted `changed` makes before
+    it may say anything about uncommitted changes. False when git cannot be run at all."""
+    code, out, _ = _git(root, "rev-parse", "--is-inside-work-tree")
+    return code == 0 and out.strip() == b"true"
+
+
+def uncommitted_paths(root: str) -> tuple[list[str], list[str]]:
+    """`(changed, untracked)` paths of the working tree, as absolute paths, from
+    `git status --porcelain`. Porcelain paths are relative to the repository's top level, not to
+    *root*, which can be a subdirectory, so they are joined to that. Both lists are empty when git
+    cannot answer, which the index-age check then reads as "nothing to date"."""
+    code, top, _ = _git(root, "rev-parse", "--show-toplevel")
+    if code != 0 or not top.strip():
+        return [], []
+    base = os.fsdecode(top.strip())
+    code, out, _ = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if code != 0:
+        return [], []
+    changed: list[str] = []
+    untracked: list[str] = []
+    entries = out.split(b"\0")
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], os.path.join(base, os.fsdecode(entry[3:]))
+        if status[:1] in (b"R", b"C"):
+            i += 1                     # the next entry is the rename's source path
+        (untracked if status == b"??" else changed).append(path)
+    return changed, untracked
 
 
 def _ago(seconds: float) -> str:

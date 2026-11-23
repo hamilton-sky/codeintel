@@ -8,12 +8,12 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import re
 import sqlite3
 
 import sqlite_vec
 
 from codeintel.core.paths import graph_cache_dir as _graph_cache_dir
+from codeintel.core.paths import graph_slug as _graph_slug
 from codeintel.engines.semantic.db import default_db_path
 
 _logger = logging.getLogger("codeintel")
@@ -147,17 +147,6 @@ def _reset_graph_cache(apply: bool) -> dict:
         else:
             count += 1
     return {"count": count, "corrupt": corrupt}
-
-
-def _graph_slug(canonical_root: str) -> str:
-    """The stem the graph backend gives a project's cache file: every run of non-alphanumeric
-    characters collapses to a single ``-``, with the ends trimmed. So ``/Users/me/aws-resource-tools``
-    → ``Users-me-aws-resource-tools`` and ``/tmp/-Weird/repo`` → ``tmp-Weird-repo`` (NOT
-    ``tmp--Weird-repo`` — a naive ``/``→``-`` replace leaves a double dash and misses the file,
-    silently leaking the graph index a scoped reset was meant to remove). Verified against real
-    on-disk caches. The collapse also flattens away every path separator, so the target can never
-    escape the cache directory."""
-    return re.sub(r"[^A-Za-z0-9]+", "-", canonical_root).strip("-")
 
 
 def _reset_graph_project(project_root: str, apply: bool) -> dict:

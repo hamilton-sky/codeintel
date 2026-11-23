@@ -1,7 +1,7 @@
 # Make `changed` check index age in every mode, against HEAD's commit time, with no slack
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 3
@@ -74,3 +74,39 @@ prints passed
 - src/codeintel/engines/graph/changed.py: the range path's `graph_index_age` call and its gap wording (read-only here)
 
 ## Answer
+
+Work started at commit 23e7ab74dde64b646c0a861ff8bb6c0d210a5234. Test-only commit: 7912bed.
+
+**Built**
+- `src/codeintel/core/paths.py`: `graph_slug(canonical_root)` (moved from `setup/reset.py`), `graph_db_stamp(project_root) -> int` (max `st_mtime_ns` of `<slug>.db`/`-wal`; else the newest `*.db`/`*.db-wal` in the cache dir; 0 when the dir is missing), `graph_db_mtime(project) -> float | None`.
+- `src/codeintel/setup/reset.py`: `_graph_slug` is now `from codeintel.core.paths import graph_slug as _graph_slug`; the unused `import re` went with it.
+- `src/codeintel/engines/graph/changed_range.py`: `graph_index_age` reads the db time through `graph_db_mtime`, also dates HEAD with `_git(root, "log", "-1", "--format=%ct")` ("HEAD (a commit)"), compares `written < newest` (no slack). `_last_tree_move` docstring rewritten. New `in_work_tree(root) -> bool` and `uncommitted_paths(root) -> (changed, untracked)` (absolute paths from `git rev-parse --show-toplevel` + `git status --porcelain=v1 -z --untracked-files=all`).
+- `src/codeintel/engines/graph/ops.py`: `_op_changed` with no target refuses `not-a-git-repo` outside a work tree; otherwise reads `changed_range.graph_index_age(project, root, changed + untracked)` before `detect_changes`, and `_uncommitted_age_gap` adds `stale-index` / `index-age-unknown` (section `changed`) on an answer that has source files or symbols. An untracked source file with no symbol in the answer is `stale-index` regardless of mtime.
+- `tests/conftest.py`: autouse `_index_age_is_fresh` stub (patches `changed_range.graph_index_age` and `changed.graph_index_age`) and opt-in `real_index_age`.
+- `tests/test_index_age.py` (new), `tests/test_changed_range.py` (6 staleness tests request `real_index_age`; `test_an_empty_target_is_still_the_original_uncommitted_op` now allows only git `rev-parse --is-inside-work-tree|--show-toplevel` and `status`), `tests/test_graph_real.py` and `tests/test_null_reason_and_ripple.py` (an `in_a_work_tree` fixture on the uncommitted `changed` tests), `tests/test_graph_failure_population.py` (patches `in_work_tree` to True; assertions unchanged).
+
+**Proof**
+- New tests fail on main: at the test-only commit 7912bed (src identical to eb0902f, checked with `git diff eb0902f 23e7ab7 -- src tests`, empty), `.venv/bin/pytest tests/test_index_age.py tests/test_changed_range.py -q -o addopts=` gave 11 failed, 99 passed. The five finding tests failed on assertions: uncommitted edit `'stale-index' in []`; untracked file `'stale-index' in []`; non-git `None == 'not-a-git-repo'` (result was "working tree clean"); commit after index `'stale-index' in []`; 0.1 s edit `'stale-index' in []`. The paths-helper tests failed with ImportError (helpers did not exist).
+- Check block: `.venv/bin/pytest tests/test_index_age.py tests/test_changed_range.py tests/test_reset.py tests/test_graph_real.py tests/test_null_reason_and_ripple.py tests/test_graph_failure_population.py tests/test_dispatch_callers.py tests/test_mcp_answer_size.py tests/test_gateway.py -q -o addopts=` -> `351 passed, 1 skipped` (the skip is `test_reset.py:706`, root-only, pre-existing).
+- `test_graph_real.py` passes with only `@pytest.mark.usefixtures("in_a_work_tree")` added (git diff shows no assertion line changed). "working tree clean" still pinned for a clean git tree in `test_changed_range.py` and `test_index_age.py::test_a_clean_git_tree_still_says_working_tree_clean`.
+- `tests/test_reset.py` is unchanged (not in `git status`) and passes, including `test_graph_slug_matches_the_backends_real_file_names` and the test after it. `grep -rn --include=*.py "stale-index\|index-age-unknown" tests/`: every assertion is in `test_index_age.py` (module-level `pytestmark = usefixtures("real_index_age")`) or in the six `test_changed_range.py` tests that now take `real_index_age`; the rest are docstrings/comments.
+- All existing tests: the whole Test command is left to the conductor's gate. I also ran `tests/test_cold_process.py test_corpus.py test_graph_provider.py test_mapper.py test_mcp_server.py test_qualifier_scan.py test_cli_commands.py test_reindexer.py test_architecture.py test_summary_integrity.py` -> 342 passed, 28 skipped, 1 xfailed. `ruff check src tests bench` clean, `mypy` clean, `codeintel c4 . --check --out /tmp/codeintel-c4-check` 0 gating findings, compileall OK.
+- Acceptance `plans/trust-fixes/acceptance/test_tf_freshness.py`: the five `changed` tests pass; the 9 that fail are callers/callees/impact and the MCP cache (tickets 02, 03).
+
+**Decisions**
+- The uncommitted age gap is added only when the answer has source files or symbols. A clean tree (or non-source-only changes) has no graph content to be stale, so it stays "working tree clean" with no gap, matching range mode's "only when a graph lookup answered".
+- One `stale-index` gap at most: the untracked-file wording wins when it applies (it names the file), otherwise the age detail.
+- `git status` paths are relative to the repo top level, not `root`, so `uncommitted_paths` joins them to `--show-toplevel` and returns absolute paths (`graph_index_age`'s `os.path.join(root, abs)` keeps them absolute).
+- The `not-a-git-repo` hint mirrors range mode's wording, with "no uncommitted changes to report" instead of a ref.
+- `graph_db_mtime` returns seconds from `st_mtime_ns / 1e9`, so both helpers read the same stat field.
+
+**Shortcuts taken**
+- `%ct` has 1 s resolution: a commit landing in the same second after the index is not caught by the commit check (its files' own mtimes still are, if they are in the diff). Worth upgrading only if index-then-commit within a second shows up in practice.
+- Deleted files in the uncommitted path set are skipped by `graph_index_age` (it cannot stat them); a deletion alone with an old commit gives `fresh`. Ticket 02's "missing file" rule is the natural place if that matters.
+- `in_work_tree("")` (no project root) answers `not-a-git-repo` rather than range mode's `no-project-root`.
+
+**For later tickets**
+- Ticket 02: use `changed_range.graph_index_age(...)` through the module (the conftest stub reaches it). Tests asserting `stale-index` must request `real_index_age`. Uncommitted `changed` tests on a fake `ROOT` need `changed_range.in_work_tree` patched to True.
+- Ticket 03: `core.paths.graph_db_stamp(root)` is ready for the cache key.
+- Docs (likely ticket 13, `docs/graph.md` is outside this ticket's Touches): `docs/graph.md` ~566 says "a plain commit does not count" for `stale-index`; that is now false (HEAD's commit time counts, no 2 s slack), and uncommitted `changed` now has `stale-index`/`index-age-unknown` and `not-a-git-repo`.
+- `tests/test_changed_range.py::test_a_plain_commit_after_the_index_does_not_make_it_stale` still passes (its index is dated in the future, after the commit) but its name and docstring describe the old rule; I left them as they were.

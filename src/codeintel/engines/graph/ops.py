@@ -18,9 +18,11 @@ replace by assignment. Inheritance leaves every stub intercepting the same call 
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from codeintel.core.source_kind import is_code_path
+from codeintel.engines.graph import changed_range
 from codeintel.engines.graph.changed import ChangedSince
 from codeintel.engines.graph.confidence import _EDGE_CONFIDENCE_FLOOR, _edge_confidence, _evidence_class
 from codeintel.engines.graph.dispatch import DispatchCallers, _direct_target, _DirectTarget
@@ -645,6 +647,18 @@ class GraphOps(DispatchCallers, ChangedSince):
                 "changed", "offset-not-applied",
                 f"offset={self._changed_offset} was ignored: only `changed` with a base ref as "
                 "`target` pages its symbol lookup; this is the uncommitted-edits answer, whole")
+        # Only a git work tree HAS uncommitted changes. Outside one, the backend reports nothing,
+        # and "working tree clean" would be a claim about a tree git cannot see.
+        if not changed_range.in_work_tree(root):
+            return self._refuse(
+                "not-a-git-repo",
+                f"`{root}` is not inside a git work tree, so there are no uncommitted changes to "
+                f"report. Run it from a git checkout of this project (`git init` or `git clone`), "
+                f"or ask `callers` about specific symbols instead.")
+        changed_paths, untracked = changed_range.uncommitted_paths(root)
+        # Read BEFORE `detect_changes`, for the reason `changed.py` gives at its own call: that call
+        # opens the db, and a stamp taken after it would read "just now" for every index there is.
+        age = changed_range.graph_index_age(project, root, changed_paths + untracked)
         try:
             raw = self._run("detect_changes", {"project": project}, max(timeout_ms, 15000))
             if not isinstance(raw, dict):
@@ -704,6 +718,7 @@ class GraphOps(DispatchCallers, ChangedSince):
                     return ("## Changes impact\n(no source changes — the working tree's "
                             f"{dropped} uncommitted change(s) are all non-source files)")
                 return "## Changes impact\n(working tree clean — no uncommitted changes)"
+            self._uncommitted_age_gap(age, untracked, syms, root)
             everyone, ripple_truncated = self._changed_ripple(files, project, timeout_ms)
             # A caller found only by its name is a candidate, not a finding: the headline counts the
             # resolved ones and says how many more there are, and the name matches are listed apart.
@@ -796,6 +811,36 @@ class GraphOps(DispatchCallers, ChangedSince):
             return "\n".join(parts)
         except Exception:
             return None
+
+    def _uncommitted_age_gap(
+        self, age: changed_range.IndexAge, untracked: list[str],
+        syms: list[tuple[str, str, int]], root: str,
+    ) -> None:
+        """`stale-index` or `index-age-unknown` on the uncommitted answer, worded like range mode's.
+
+        An untracked source file the answer has no symbols for is stale whatever its mtime: the
+        index has never seen it, so its symbols and the callers they gain are missing. The symbol
+        paths are relative to the root the answer came from; *untracked* is absolute."""
+        base = os.path.realpath(self._answered_root or root)
+        indexed = {os.path.normpath(os.path.join(base, fp)) for _, fp, _ in syms if fp}
+        unseen = [p for p in untracked
+                  if is_code_path(p) and os.path.normpath(os.path.realpath(p)) not in indexed]
+        if unseen:
+            first = os.path.relpath(unseen[0], base)
+            more = f" (and {len(unseen) - 1} more)" if len(unseen) > 1 else ""
+            self._add_gap(
+                "changed", "stale-index",
+                f"`{first}`{more} is untracked and the graph index has no symbols in it, so the "
+                "index predates it — its symbols, and the callers they gain, are missing below")
+        elif age.state == "stale":
+            self._add_gap(
+                "changed", "stale-index",
+                f"{age.detail}, so the symbols and callers below describe an older tree than the "
+                "working tree — a symbol or caller added since then is missing from them")
+        elif age.state == "unknown":
+            self._add_gap(
+                "changed", "index-age-unknown",
+                f"{age.detail}, so these symbols and callers cannot be called current")
 
     _RIPPLE_FILE_CAP = 40
 

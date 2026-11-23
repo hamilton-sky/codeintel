@@ -90,10 +90,14 @@ def _fail_backend(gp: GraphProvider, missing: Missing):
 # T4 — no graph op reports a backend failure as an absence.
 # --------------------------------------------------------------------------------------------- #
 
-def test_no_graph_op_reports_a_backend_failure_as_an_absence():
+def test_no_graph_op_reports_a_backend_failure_as_an_absence(monkeypatch):
     ops = sorted({n[len("_op_"):] for cls in GraphProvider.__mro__
                   for n in vars(cls) if n.startswith("_op_")})
     assert len(ops) >= 8, f"op domain looks broken, only found: {ops}"
+    # `/tmp/x` is not a git work tree, so uncommitted `changed` would answer `not-a-git-repo`
+    # before the failing backend is ever asked. This test is about the backend, so that one git
+    # check is answered "yes".
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.in_work_tree", lambda root: True)
 
     for missing in (
         Missing("backend-error", "the graph backend did not answer"),

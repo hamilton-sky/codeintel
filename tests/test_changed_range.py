@@ -232,7 +232,8 @@ def test_a_committed_branch_is_reported_where_a_clean_working_tree_used_to_hide_
 
 
 def test_an_empty_target_is_still_the_original_uncommitted_op(monkeypatch, tmp_path, repo):
-    """No target: byte-for-byte the op that existed — it asks the backend, and nothing else runs."""
+    """No target: the op that existed — it asks the backend. The only git it runs is the work-tree
+    check and `git status` (for the index-age check); none of the range pipeline runs."""
     graph = _standard_graph()
     p = _provider(monkeypatch, tmp_path, repo, graph)
     calls = []
@@ -244,10 +245,22 @@ def test_an_empty_target_is_still_the_original_uncommitted_op(monkeypatch, tmp_p
         return {"changed_files": [], "changed_count": 0, "impacted_symbols": [], "depth": 2}
 
     monkeypatch.setattr(p, "_run", run)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("a subprocess was run"))
+    real_run = subprocess.run
+    git_calls = []
+
+    def only_the_uncommitted_git_calls(argv, *a, **k):
+        sub = [x for x in argv[1:] if x not in ("-c", "core.fsmonitor=false")]
+        if argv[0] != "git" or sub[:1] not in (["rev-parse"], ["status"]) or (
+                sub[0] == "rev-parse" and sub[1] not in ("--is-inside-work-tree", "--show-toplevel")):
+            pytest.fail(f"a subprocess was run: {argv}")
+        git_calls.append(sub[0])
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", only_the_uncommitted_git_calls)
     env = _ask(p, repo, target="")
     assert env["result"] == "## Changes impact\n(working tree clean — no uncommitted changes)"
     assert ("detect_changes", {"project": PROJECT}) in calls
+    assert "rev-parse" in git_calls and "status" in git_calls
 
 
 def test_a_blank_target_of_only_whitespace_is_still_the_original_op(monkeypatch, tmp_path, repo):

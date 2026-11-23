@@ -22,6 +22,14 @@ ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
 
 
+@pytest.fixture
+def in_a_work_tree(monkeypatch):
+    """`ROOT` is not a real directory, let alone a git work tree. The uncommitted `changed` tests
+    here are about rendering the backend's answer, not about the git check in front of it, so
+    that one check is answered "yes"."""
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.in_work_tree", lambda root: True)
+
+
 def _provider(monkeypatch, *, edge_rows, node_rows):
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
@@ -59,6 +67,7 @@ def test_a_genuinely_absent_symbol_still_says_so_and_still_offers_the_reindex(mo
     assert "codeintel index" in env["hint"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(monkeypatch):
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
@@ -90,6 +99,7 @@ def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(mon
     assert "resolved by name matching" in body
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_says_zero_ripple_out_loud_rather_than_omitting_the_section(monkeypatch):
     """An absent section and an empty one read the same to a model. Only one of them is a claim."""
     monkeypatch.setattr(
@@ -545,6 +555,7 @@ def test_a_zero_count_is_never_rendered_as_a_relationship(monkeypatch):
     assert "Other relationships DO point at it" not in hint, hint
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkeypatch):
     """A function REGISTERED somewhere breaks just as thoroughly when its signature moves, and the
     edge recording that is CALL_REFERENCE — which the ripple query used to exclude. This op answers
@@ -571,6 +582,7 @@ def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkey
     assert rows[0].startswith("- proj.app.run"), rows
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_ripple_asks_for_the_registration_edge(monkeypatch):
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
@@ -630,6 +642,7 @@ def _caller(name: str, *, conf: str, strategy: str) -> dict:
             "c.confidence": conf, "kind": "CALLS", "strategy": strategy}
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_the_headline_counts_resolved_callers_and_name_matches_get_their_own_heading(monkeypatch):
     """D4. '38 callers elsewhere' included 14 that the footnote admitted may not reach the code at
     all. The headline now counts the resolved ones, says how many more are name matches, and those
@@ -647,6 +660,7 @@ def test_the_headline_counts_resolved_callers_and_name_matches_get_their_own_hea
     assert "[?0.38]" in guessed and "resolved by name matching" in guessed
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_only_name_matches_is_not_reported_as_zero_callers(monkeypatch):
     """The negative control: nothing resolved must not read as 'nothing calls into them'."""
     body = _ripple_body(monkeypatch, [_caller("g", conf="0.38", strategy="suffix_match")])
@@ -656,6 +670,7 @@ def test_only_name_matches_is_not_reported_as_zero_callers(monkeypatch):
     assert "No symbol outside the changed files calls into them" not in body
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_a_headline_without_name_matches_is_unchanged(monkeypatch):
     body = _ripple_body(monkeypatch, [_caller("real", conf="0.95", strategy="import_map")])
     assert "1 callers elsewhere)" in body and "matched by name only" not in body
