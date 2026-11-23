@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 01, 14
 Test first: yes
 Level: 3
@@ -193,3 +193,7 @@ ADVISORY (12 — never gating)
   dependency (see docs/layers-design.md §1). Use --json for the list.
 
 2 gating finding(s) — exit 2
+
+## Review findings (round 1, footprint check)
+
+the build changed paths outside the ticket's `Touches:` line (src/codeintel/gateway/gateway.py src/codeintel/gateway/cache.py src/codeintel/gateway/reindexer.py README.md tests/test_cache.py tests/test_reindexer.py tests/test_reindex_lock.py tests/test_gateway.py tests/test_gateway_freshness.py): docs/c4.md, src/codeintel/c4/check.py, src/codeintel/c4/model.py, tests/test_c4.py, tests/test_c4_check.py. tickets run side by side because their Touches do not overlap, so change only what Touches names. if the ticket cannot be done inside it, say so in the Answer and stop: the plan has to change, not the footprint. one file the ticket truly needs (a test that pins the old behaviour, a generator) may be named in the Answer as `Extra file: <path> - <why>`, when it is the only one
