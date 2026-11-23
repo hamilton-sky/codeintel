@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 01
 Test first: yes
 Level: 3
@@ -144,3 +144,45 @@ SPEC
 codeintel: callers maybe_reindex: helped
 
 REVIEW: PASS
+
+## Review findings (round 2, gate (full))
+
+gate: output in /home/user/codeintel/.feature-flow/state/gate-trust-fixes.log
+gate: Build: .venv/bin/python -m compileall -q src/codeintel
+gate: Test: .venv/bin/pytest tests/ -q --deselect tests/test_doctor.py::test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read
+gate: Lint: .venv/bin/ruff check src tests bench && .venv/bin/codeintel c4 . --check --out /tmp/codeintel-c4-check
+gate: Lint failed after 1s. the last lines of its output:
+All checks passed!
+codeintel c4 --check — layer report
+  project: codeintel      depth 3 (auto-fit)      mode: declared
+  layers:   cli > transports > tools > gateway > engines > core
+  coverage: 10 of 21 elements assigned; 11 unassigned
+
+VIOLATIONS (1 gating, 0 allowlisted)
+  layer-order  src.codeintel.engines -> src.codeintel.transports    engines imports transports, which is above it
+      src/codeintel/engines/ -> src/codeintel/transports/  (x10)
+
+CYCLES (1)
+  import-cycle  3 elements: src.codeintel.engines, src.codeintel.gateway, src.codeintel.transports
+
+UNASSIGNED (11) — never gating
+  layer-unassigned  bench.agent_bench matches no declared layer
+  layer-unassigned  bench.agent_tools matches no declared layer
+  layer-unassigned  bench.graphify_arm matches no declared layer
+  layer-unassigned  bench.oracle_py matches no declared layer
+  layer-unassigned  bench.oracle_ts matches no declared layer
+  layer-unassigned  bench.questions matches no declared layer
+  layer-unassigned  bench.run matches no declared layer
+  layer-unassigned  bench.score matches no declared layer
+  layer-unassigned  plans.trust_fixes.acceptance matches no declared layer
+  layer-unassigned  scripts.check_release_consistency matches no declared layer
+  layer-unassigned  scripts.release_canary matches no declared layer
+
+STALE ALLOWLIST (1) — never gating
+  stale-allow  allowlist entry 0 (src/codeintel/engines/graph/** -> src/codeintel/transports/metrics.py) matches no current violation — the exception can be deleted
+
+ADVISORY (12 — never gating)
+  12 CALLS/USAGE-only edge(s) point up the stack. These are NOT evidence of a
+  dependency (see docs/layers-design.md §1). Use --json for the list.
+
+2 gating finding(s) — exit 2
