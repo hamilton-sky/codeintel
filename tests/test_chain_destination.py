@@ -125,7 +125,7 @@ def test_a_reachable_destination_gives_the_path_with_its_hops_in_order(monkeypat
     res = p.build_result("chain", "main -> validate", [], 5000, ROOT)
     text = res["result"]
     assert text is not None, res
-    assert "## Path src.app.main → src.app.validate" in text
+    assert "## Path main → validate" in text
     assert _path_hops(text) == [
         ("src.app.main", "src.app.load"),
         ("src.app.load", "src.app.parse"),
@@ -141,7 +141,7 @@ def test_an_unreachable_destination_is_no_path_found_and_partial(monkeypatch):
     res = p.build_result("chain", "main->orphan", [], 5000, ROOT)
     text = res["result"]
     assert text is not None, res
-    assert ("No call path from src.app.main to src.app.orphan within 5 hops "
+    assert ("No call path from main to orphan within 5 hops "
             "(this is not proof none exists)") in text
     assert "## Path" not in text
     assert "no-path-found" in _gap_kinds(res)
@@ -270,7 +270,7 @@ def test_a_path_the_hops_cannot_rebuild_is_no_path(monkeypatch):
     res = p.build_result("chain", "main->validate", [], 5000, ROOT)
     text = res["result"]
     assert "## Path" not in text
-    assert "No call path from src.app.main to src.app.validate within 5 hops" in text
+    assert "No call path from main to validate within 5 hops" in text
     assert "no-path-found" in _gap_kinds(res)
 
 
@@ -282,3 +282,22 @@ def test_an_empty_side_of_the_arrow_is_refused_and_says_which(monkeypatch, targe
     assert res["reason"] == "no-target"
     assert "->" in res["hint"]
     assert "trace_path" not in [m for m, _ in calls]
+
+
+def test_a_path_hop_is_labelled_by_its_own_edges_strategy(monkeypatch):
+    """`query_graph` edges carry a `strategy` even on 0.9.x, and it is the resolution of THAT hop;
+    the traced node's (absent here) is only the fallback."""
+    p, _ = _provider(monkeypatch)
+    real_query = _query
+
+    def _labelled(payload):
+        out = real_query(payload)
+        out["columns"] = [*out["columns"], "strategy"]
+        out["rows"] = [[*r, "lsp_callable_alias"] for r in out["rows"]]
+        return out
+
+    monkeypatch.setattr(f"{__name__}._query", _labelled)
+    res = p.build_result("chain", "main->validate", [], 5000, ROOT)
+    path_lines = [ln for ln in res["result"].splitlines() if ln.startswith("- ")]
+    assert len(path_lines) == 3 and all(ln.endswith("[lsp]") for ln in path_lines), res["result"]
+    assert "hop-resolution-unstated" not in _gap_kinds(res)

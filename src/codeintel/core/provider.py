@@ -118,6 +118,8 @@ def safe_null_result(
     not_found_reasons = {
         "below-floor", "no-edges", "no-index", "no-result", "not-found", "not-in-graph",
         "unknown-ref",
+        # `chain A->B`: an end of the path names no symbol in the index.
+        "target-not-found",
     }
     if reason in failed_reasons:
         outcome = "failed"

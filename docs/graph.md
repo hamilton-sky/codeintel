@@ -62,7 +62,7 @@ this repo is indexed.
 | `callees` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 functions called by the symbol |
 | `impact` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Combined callers + callees section |
 | `context` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Alias for `impact` — the graph's contribution to the `context` fan-out |
-| `chain` | `"A->B"` or symbol | Call path from A (trace_path). Each hop carries how it was **resolved** (`[lsp]`, `[import]`, `[?name-guess]`), and the walk follows `CALL_REFERENCE` as well as `CALLS` |
+| `chain` | `"A->B"` or symbol | With `A->B`: the call path from A to B within 5 hops (`## Path A → B`), or "No call path … within N hops" with a `no-path-found` gap, or `reason: "target-not-found"` when A or B is not indexed. With a bare symbol: its callees and callers (trace_path). Each hop carries how it was **resolved** (`[lsp]`, `[import]`, `[?name-guess]`, or `[unstated]` when the backend did not say), and the walk follows `CALL_REFERENCE` as well as `CALLS` |
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | *(optional)* a git ref — `main`, `HEAD~3`, a SHA, a tag, or `<ref>...HEAD` | With no target: impact of the **uncommitted git worktree**, changed files → impacted symbols (via `detect_changes`). With a ref: what a **branch** removed, re-signed or rewrote, and who still uses it — see [`changed` against a base ref](#changed-against-a-base-ref) |
@@ -415,8 +415,28 @@ string, not safe-null; only a backend failure returns safe-null.
 
 ### `chain` detail
 
-If `target` contains `"->"`, the part before `->` is used as the source for a `trace_path`
-call in `calls` mode. Otherwise, `chain` falls back to `impact`.
+If `target` contains `"->"`, `chain` answers the path from A to B. Each side may carry the same
+`name@file` or qualified-name hint `callers` takes. Both ends are looked up by name with
+`search_graph` first:
+
+- an end that is not in the index safe-nulls with `reason: "target-not-found"` (outcome
+  `not_found`), naming it;
+- an end that names several symbols lists them as candidates and claims no path.
+
+Then `trace_path` walks **outbound** from A's qualified name, `depth: 5`. Its hops carry hop numbers
+but no parent links, so the path is rebuilt from the caller/callee edges among the nodes it reached
+(a walk back from B, one `query_graph` per step), and the answer is one of:
+
+- `## Path A → B` with the hops in order, one `caller → callee [hop N] [how]` line each, each
+  labelled with its own edge's resolution;
+- "No call path from A to B within N hops (this is not proof none exists)" with a `no-path-found`
+  gap, so `confidence: partial`. N is the depth sent. B not being reached in the walk, or the edges
+  not connecting A to B, both land here.
+
+A bare symbol (no `->`) gets that symbol's callees and callers in `calls` mode, `direction: both`.
+
+A hop the backend gave no `strategy` (every hop on codebase-memory-mcp 0.9.x) prints `[unstated]`
+and adds one `hop-resolution-unstated` gap to the answer, which caps it at `partial`.
 
 Two arguments matter:
 

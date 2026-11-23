@@ -446,6 +446,13 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("count", "GraphOps._op_impact"):
         "a zero is rendered only when the lookup answered — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",
+    ("count", "GraphOps._chain_between"):
+        "the hops listed under `## Path A → B` are a connected chain from A's qualified name to "
+        "B's — each listed hop is an edge the backend holds and each hop's callee is the next "
+        "hop's caller — test_the_path_hops_form_a_connected_chain_and_n_is_the_depth_sent",
+    ("tally", "GraphOps._chain_between"):
+        "N in \"within N hops\" is the depth actually sent to `trace_path`, read from the request "
+        "the stub captured — test_the_path_hops_form_a_connected_chain_and_n_is_the_depth_sent",
     ("count", "AnswerRendering._empty_edge_answer"):
         "a zero is rendered only when rows were retrieved — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",

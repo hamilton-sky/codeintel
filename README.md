@@ -201,7 +201,7 @@ It's one call: `code.query(op, target, engine="auto")`. In `auto` mode (the defa
 | Who calls this? | `callers` | graph | caller symbols + files |
 | What does this call? | `callees` | graph | callee symbols + files |
 | Blast radius of a change | `impact` | graph | callers **and** callees together |
-| Trace a call chain up/downstream | `chain` | graph | ordered hops, each labelled with how it was resolved |
+| Trace a call chain up/downstream | `chain` (`"A->B"` for the path from A to B) | graph | ordered hops, each labelled with how it was resolved (`[unstated]` when the backend did not say) |
 | Find symbols by pattern | `pattern` | graph | matching nodes + locations |
 | Project shape at a glance | `overview` | graph → lsp | modules, node/edge counts, languages |
 | Everything about one symbol | `context` | graph + lsp | both views merged |

@@ -19,6 +19,7 @@ replace by assignment. Inheritance leaves every stub intercepting the same call 
 from __future__ import annotations
 
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from codeintel.core.source_kind import is_code_path
@@ -374,9 +375,14 @@ class GraphOps(DispatchCallers, ChangedSince):
         parts.append(callees or f"## Callees of {target} (0)\n(none found)")
         return "\n".join(parts)
 
+    # How far `chain A->B` walks out from A, and the N its no-path line states. The spec's bound.
+    _CHAIN_DEPTH = 5
+
     def _op_chain(self, target: str, project: str, timeout_ms: int) -> str | None:
-        # Accept an "A->B" form (trace from the source symbol) or a bare symbol.
-        src = target.split("->")[0].strip() if "->" in target else target.strip()
+        # "A->B" asks for the path from A to B; a bare symbol asks for A's neighbourhood.
+        if "->" in target:
+            return self._chain_between(target, project, timeout_ms)
+        src = target.strip()
         # A `name@file` hint is codeintel's own disambiguator (see `_SymbolTarget`); `trace_path`
         # would look for a function literally called that and report nothing found. A DOTTED target
         # is deliberately left intact — the backend resolves qualified names itself and reports its
@@ -414,7 +420,10 @@ class GraphOps(DispatchCallers, ChangedSince):
             body = "\n".join(f"- {n}" for n in names)
             return f"## Ambiguous symbol '{src}' — candidates\n{body}"
 
+        unstated = False
+
         def _fmt(items: Any) -> list[str]:
+            nonlocal unstated
             out = []
             if isinstance(items, list):
                 for it in items:
@@ -423,21 +432,9 @@ class GraphOps(DispatchCallers, ChangedSince):
                     nm = str(it.get("name") or "?")
                     qn = _strip_project_prefix(str(it.get("qualified_name") or ""),
                                                may_be_filename=False)
-                    hop = it.get("hop")
-                    label = qn or nm
-                    hop_s = f" [hop {hop}]" if hop is not None else ""
-                    # How this hop was resolved, in the same vocabulary `callers` uses, so a reader
-                    # does not have to learn two. A guessed hop is the one that makes a whole chain
-                    # downstream of it suspect, and it used to be indistinguishable.
-                    klass = _evidence_class(str(it.get("strategy") or ""))
-                    ev_s = ""
-                    if klass == "name-guess":
-                        ev_s = " [?name-guess]"
-                    elif klass:
-                        ev_s = f" [{klass}]"
-                    risk = it.get("risk")
-                    risk_s = f" [risk: {risk}]" if risk and not klass else ""
-                    out.append(f"- {label}{hop_s}{ev_s}{risk_s}")
+                    badges, blank = self._chain_badges(it, it.get("hop"))
+                    unstated = unstated or blank
+                    out.append(f"- {qn or nm}{badges}")
             return out
 
         callees = _fmt(raw.get("callees"))
@@ -449,7 +446,175 @@ class GraphOps(DispatchCallers, ChangedSince):
         parts.extend(callees or ["(none)"])
         parts.append("### Callers (upstream)")
         parts.extend(callers or ["(none)"])
-        return "\n".join(parts)
+        return "\n".join(parts) + (self._unstated_hops_note() if unstated else "")
+
+    @staticmethod
+    def _chain_badges(it: dict, hop: Any) -> tuple[str, bool]:
+        """The `[hop N] [how it was resolved]` badges of one traced hop, and whether its resolution
+        is unstated.
+
+        How a hop was resolved is printed in the same vocabulary `callers` uses, so a reader does not
+        have to learn two. A guessed hop is the one that makes a whole chain downstream of it
+        suspect. A hop the backend gave no `strategy` (every hop from 0.9.x) says `[unstated]`
+        rather than printing nothing, which read exactly like a hop that needed no label."""
+        hop_s = f" [hop {hop}]" if hop is not None else ""
+        klass = _evidence_class(str(it.get("strategy") or ""))
+        if klass == "name-guess":
+            ev_s = " [?name-guess]"
+        elif klass:
+            ev_s = f" [{klass}]"
+        else:
+            ev_s = " [unstated]"
+        risk = it.get("risk")
+        risk_s = f" [risk: {risk}]" if risk and not klass else ""
+        return f"{hop_s}{ev_s}{risk_s}", not klass
+
+    def _unstated_hops_note(self) -> str:
+        """One `hop-resolution-unstated` gap for the answer, and the same fact in its body. A hop
+        with no stated resolution caps the answer at partial, as an unstated `callers` row does."""
+        detail = ("the backend reported no `strategy` for the hops marked `[unstated]` "
+                  "(codebase-memory-mcp 0.9.x never does), so whether each one followed a real "
+                  "binding or guessed from a name is unknown")
+        self._add_gap("chain", "hop-resolution-unstated", detail)
+        return f"\n\n> Resolution unstated: {detail}."
+
+    def _chain_endpoint(self, raw: str, project: str, timeout_ms: int) -> list[dict] | None:
+        """The indexed symbols one end of `A->B` names, narrowed by its `_SymbolTarget` hint the
+        way `callers` narrows its target. `None` when the lookup itself failed."""
+        wanted = _parse_symbol_target(raw)
+        found = self._search_symbols(
+            {"name_pattern": f"^{re.escape(wanted.name)}$", "limit": 50}, project, timeout_ms)
+        if found is None:
+            return None
+        return [r for r in found
+                if str(r.get("name") or "") == wanted.name and r.get("qualified_name")
+                and wanted.matches(r.get("qualified_name"), r.get("file_path"))]
+
+    def _chain_between(self, target: str, project: str, timeout_ms: int) -> str | None:
+        """`chain A->B`: the call path from A to B within `_CHAIN_DEPTH` hops, or no path, or B
+        not found.
+
+        Both ends are resolved first, so a misspelt B is reported as missing rather than as a path
+        that does not exist, and so `trace_path` is handed A's qualified name and cannot answer
+        about a namesake. An end that names several symbols lists them and claims no path."""
+        a_raw, _, b_raw = (side.strip() for side in target.partition("->"))
+        if not a_raw or not b_raw:
+            side = "before" if not a_raw else "after"
+            self._pending_null = (
+                "no-target",
+                f"`{target.strip()}` has no symbol {side} the `->`. `chain A->B` traces the call "
+                f"path from A to B and needs both; for one symbol's whole chain, pass it alone.")
+            return None
+        ends: list[dict] = []
+        for end in (a_raw, b_raw):
+            found = self._chain_endpoint(end, project, timeout_ms)
+            if found is None:
+                return None
+            if not found:
+                self._pending_null = (
+                    "target-not-found",
+                    f"`{end}` is not in the graph index for this project, so no path to or from it "
+                    f"can be traced. Check the spelling; if you just added or renamed it, refresh "
+                    f"the index with `codeintel index`, or over MCP call `index_repository` with "
+                    f"`incremental=true`.")
+                return None
+            if len(found) > 1:
+                body = "\n".join(
+                    f"- {_label_of(r)}" + (f" ({r['file_path']})" if r.get("file_path") else "")
+                    for r in found)
+                return (f"## Ambiguous symbol '{end}' — candidates\n{body}\n"
+                        f"No path is claimed. Name one with `name@file` or its qualified name and "
+                        f"ask again.")
+            ends.append(found[0])
+        a_qn, b_qn = str(ends[0]["qualified_name"]), str(ends[1]["qualified_name"])
+        # The ends as the caller wrote them: the hop lines below name each symbol in full.
+        a_label, b_label = a_raw, b_raw
+
+        depth = self._CHAIN_DEPTH
+        raw = self._run(
+            "trace_path",
+            # Outbound only: the question is what A reaches. Same `edge_types` and evidence as the
+            # bare form, for the reasons given in `_op_chain`.
+            {"project": project, "function_name": a_qn, "mode": "calls",
+             "direction": "outbound", "depth": depth, "include_evidence": True,
+             "edge_types": ["CALLS", "CALL_REFERENCE"]},
+            timeout_ms,
+        )
+        if not isinstance(raw, dict):
+            return None
+        hops = {str(it.get("qualified_name")): it for it in (raw.get("callees") or [])
+                if isinstance(it, dict) and it.get("qualified_name")}
+        path = (self._rebuild_chain(a_qn, b_qn, hops, depth, project, timeout_ms)
+                if b_qn in hops else None)
+        if path is None:
+            self._add_gap(
+                "chain", "no-path-found",
+                f"no call path from {a_label} to {b_label} was found within {depth} hops of an "
+                f"outbound walk from {a_label}; a longer path, a dynamic call or an edge the index "
+                f"did not record would not show here")
+            return (f"## Call chain from {a_label} to {b_label}\n"
+                    f"No call path from {a_label} to {b_label} within {depth} hops "
+                    f"(this is not proof none exists).")
+
+        lines = [f"## Path {a_label} → {b_label}"]
+        unstated = False
+        for n, (caller, (callee, strategy)) in enumerate(path, start=1):
+            # The edge's own strategy names how THIS hop was resolved; the traced node's is the
+            # fallback, for a backend whose edges do not carry one.
+            how = {**hops.get(callee, {}), **({"strategy": strategy} if strategy else {})}
+            badges, blank = self._chain_badges(how, n)
+            unstated = unstated or blank
+            lines.append(f"- {_label_of({'qualified_name': caller})} → "
+                         f"{_label_of({'qualified_name': callee})}{badges}")
+        return "\n".join(lines) + (self._unstated_hops_note() if unstated else "")
+
+    def _rebuild_chain(self, a_qn: str, b_qn: str, hops: dict[str, dict], depth: int,
+                       project: str, timeout_ms: int) -> list[tuple[str, tuple[str, str]]] | None:
+        """The hops from A to B, in order, as `(caller, (callee, edge strategy))`; `None` when the
+        traced nodes do not connect them.
+
+        `trace_path` (0.9.x and 0.10.x alike) reports each node it reached with a hop number and no
+        parent link, so the path is rebuilt from the caller/callee pairs among those nodes: a
+        breadth-first walk BACK from B, one query per step, each restricted to edges from nodes the
+        trace reached before B. The first time A is reached, the links followed are a shortest path
+        among them, no longer than B's own hop."""
+        b_hop = _int_or_zero(hops[b_qn].get("hop"))
+        allowed = {qn for qn, it in hops.items()
+                   if qn != b_qn and (not b_hop or 0 < _int_or_zero(it.get("hop")) < b_hop)}
+        allowed.add(a_qn)
+        toward_b: dict[str, tuple[str, str]] = {}
+        seen = {b_qn}
+        frontier = [b_qn]
+        for _ in range(depth):
+            sources = sorted(allowed - seen)
+            if not frontier or not sources:
+                break
+            rows = self._query_rows(
+                f"MATCH (a)-[c:CALLS|CALL_REFERENCE]->(b) "
+                f"WHERE b.qualified_name IN [{_in_list(frontier)}] "
+                f"AND a.qualified_name IN [{_in_list(sources)}] "
+                f"RETURN a.qualified_name, b.qualified_name, c.strategy AS strategy "
+                f"LIMIT {_EDGE_FETCH_CEILING}",
+                project, timeout_ms)
+            front = set(frontier)
+            frontier = []
+            for r in rows:
+                caller = str(r.get("a.qualified_name") or "")
+                callee = str(r.get("b.qualified_name") or "")
+                if callee in front and caller in allowed and caller not in seen:
+                    seen.add(caller)
+                    toward_b[caller] = (callee, str(r.get("strategy") or ""))
+                    frontier.append(caller)
+            if a_qn in toward_b:
+                break
+        if a_qn not in toward_b:
+            return None
+        path = []
+        at = a_qn
+        while at != b_qn:
+            path.append((at, toward_b[at]))
+            at = toward_b[at][0]
+        return path
 
     def _op_pattern(self, target: str, project: str, timeout_ms: int) -> str | None:
         try:
