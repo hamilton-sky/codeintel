@@ -17,7 +17,7 @@ def _args(**kw) -> argparse.Namespace:
 
 
 class _FakeInstallerModule:
-    """Stands in for `codeintel.installer` — only the read-only surface `--dry-run` may touch."""
+    """Stands in for `codeintel.setup.installer` — only the read-only surface `--dry-run` may touch."""
 
     def __init__(self, *, registered: dict[str, str | None], detected: list[str],
                  agents: tuple[str, ...] = ("claude", "codex", "gemini", "zed")):
@@ -45,10 +45,10 @@ class _FakeInstallerModule:
 
 
 def _run_dry(monkeypatch, fake, **overrides):
-    monkeypatch.setattr("codeintel.installer", fake, raising=False)
+    monkeypatch.setattr("codeintel.setup.installer", fake, raising=False)
     import sys
-    monkeypatch.setitem(sys.modules, "codeintel.installer", fake)
-    return import_module("codeintel.commands.install").run(_args(**overrides))
+    monkeypatch.setitem(sys.modules, "codeintel.setup.installer", fake)
+    return import_module("codeintel.cli.install").run(_args(**overrides))
 
 
 def test_dry_run_reports_a_would_be_registration_and_writes_nothing(monkeypatch, capsys):

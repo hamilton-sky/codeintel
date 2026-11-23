@@ -18,8 +18,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-from codeintel.installer import Installer
-from codeintel.verify import verify_stdio_server
+from codeintel.setup.installer import Installer
+from codeintel.setup.verify import verify_stdio_server
 
 # Launching a server + importing the engine stack is slow on a cold CI runner.
 _TIMEOUT_S = 90.0
@@ -52,7 +52,7 @@ class _Client:
         # `verify._reap` is the production teardown — terminate, then kill, then CLOSE THE PIPES.
         # This used to terminate and wait without closing stdin/stdout, so every handshake test
         # leaked two pipe fds and, on the kill path, an unwaited child.
-        from codeintel.verify import _reap
+        from codeintel.setup.verify import _reap
 
         _reap(self._proc)
 

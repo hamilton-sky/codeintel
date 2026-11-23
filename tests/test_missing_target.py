@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.gateway import Gateway
-from codeintel.policy import TieringPolicy
-from codeintel.provider import Result, safe_null_result
-from codeintel.providers.graph import GraphProvider
-from codeintel.query_ops import OPS_REQUIRING_A_TARGET, QUERY_OPS, TARGETLESS_OPS
+from codeintel.core.provider import Result, safe_null_result
+from codeintel.core.query_ops import OPS_REQUIRING_A_TARGET, QUERY_OPS, TARGETLESS_OPS
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.gateway.gateway import Gateway
+from codeintel.gateway.policy import TieringPolicy
 
 ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
@@ -187,7 +187,7 @@ def test_the_guard_runs_before_any_indexing_work():
 
 def _graph_provider(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
         LIST_PROJECTS if method == "list_projects" else None))
@@ -226,7 +226,7 @@ def test_the_mcp_remediation_does_not_hand_back_a_path_no_shell_will_expand(monk
     `index_repository(repo_path="~/Documents/project/app")` ships a remediation that cannot run —
     strictly worse than the CLI-only hint it was added to improve. The MCP form points at the root
     the caller already passed instead of printing a redacted copy of it."""
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     gw = Gateway(graph=_graph_provider(monkeypatch))
     hint = gw.query(op="callers", target="nope", project_root=ROOT)["hint"]
@@ -251,12 +251,12 @@ def test_the_targetless_op_set_matches_the_graph_providers_own():
     Compared over the intersection with `QUERY_OPS`: `_ROOT_SCOPED_OPS` also carries `changes`
     (an alias) and `deadcode` (withdrawn), neither of which is a `code.query` op, and neither of
     which this set should grow."""
-    from codeintel.providers.graph import _ROOT_SCOPED_OPS
+    from codeintel.engines.graph.provider import _ROOT_SCOPED_OPS
 
     theirs = _ROOT_SCOPED_OPS & frozenset(QUERY_OPS)
     ours = frozenset(TARGETLESS_OPS)
     assert ours == theirs, (
-        "codeintel.query_ops.TARGETLESS_OPS and providers/graph._ROOT_SCOPED_OPS have drifted — "
+        "codeintel.core.query_ops.TARGETLESS_OPS and providers/graph._ROOT_SCOPED_OPS have drifted — "
         f"only in TARGETLESS_OPS: {sorted(ours - theirs)}; "
         f"only in _ROOT_SCOPED_OPS: {sorted(theirs - ours)}."
     )

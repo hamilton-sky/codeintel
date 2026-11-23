@@ -5,7 +5,7 @@ that tailoring: a satisfied engine is never named as something to install, and a
 registered machine reduces to "just restart me"."""
 from __future__ import annotations
 
-from codeintel.agent_prompt import build_prompt, resolve_agent
+from codeintel.setup.agent_prompt import build_prompt, resolve_agent
 
 
 def _report(*, graph="ok", lsp="ok", semantic="ok", registered_agent=None, healthy=True) -> dict:
@@ -69,17 +69,17 @@ def test_prompt_is_never_empty_and_always_tells_the_agent_to_verify():
 def test_resolve_agent_honours_named_falls_back_to_detected_then_generic(monkeypatch):
     assert resolve_agent("codex") == "codex"
     assert resolve_agent("CLAUDE") == "claude"                       # case-insensitive
-    monkeypatch.setattr("codeintel.agent_prompt.detect_agents", lambda: ["gemini", "zed"])
+    monkeypatch.setattr("codeintel.setup.agent_prompt.detect_agents", lambda: ["gemini", "zed"])
     assert resolve_agent("auto") == "gemini"                          # first detected
     assert resolve_agent("nonsense") == "gemini"                      # unknown name → detect
-    monkeypatch.setattr("codeintel.agent_prompt.detect_agents", list)
+    monkeypatch.setattr("codeintel.setup.agent_prompt.detect_agents", list)
     assert resolve_agent("auto") == ""                                # none → generic
 
 
 def test_the_command_never_raises_and_fresh_needs_no_backend():
     from types import SimpleNamespace
 
-    from codeintel.commands import prompt as prompt_cmd
+    from codeintel.cli import prompt as prompt_cmd
 
     # --fresh takes no probe, so it must succeed with no backend and print a non-empty prompt.
     args = SimpleNamespace(project_root=None, agent="claude", fresh=True, deep=False)

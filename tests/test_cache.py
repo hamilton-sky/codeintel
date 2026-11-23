@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-from codeintel.cache import ContentHashCache, _compute_hash
+from codeintel.gateway.cache import ContentHashCache, _compute_hash
 
 
 def _result(tag: str) -> dict:

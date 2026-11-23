@@ -6,14 +6,14 @@ import tempfile
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
-from codeintel.injector import Injector
-from codeintel.mapper import (
+from codeintel.engines.graph.provider import ProjectResolution
+from codeintel.mapping.mapper import (
     _RANK_LABELS,
     MapGenerator,
     _is_populated_map,
     _minimal_map,
 )
-from codeintel.providers.graph import ProjectResolution
+from codeintel.setup.injector import Injector
 
 _POPULATED = (
     "# CODE_INTEL.md — repo\n\n"
@@ -105,7 +105,7 @@ def test_entry_point_query_over_requests_so_the_filter_has_something_to_filter()
     through — the truncation trap already documented for the ranking query. At `LIMIT 10` a repo
     whose first ten entry points were all fixtures would render an EMPTY section after filtering,
     trading one wrong answer for no answer."""
-    from codeintel.mapper import _ENTRY_CYPHER, _ENTRY_POINT_LIMIT
+    from codeintel.mapping.mapper import _ENTRY_CYPHER, _ENTRY_POINT_LIMIT
 
     assert "LIMIT 10" not in _ENTRY_CYPHER
     assert _ENTRY_POINT_LIMIT == 10
@@ -219,10 +219,10 @@ def test_generate_reads_columns_rows_shape():
     ranked = {
         "columns": ["fn.name", "fn.qualified_name", "fn.file_path", "in_degree"],
         "rows": [
-            ["query", "codeintel.gateway.Gateway.query", "src/codeintel/gateway.py", "29"],
+            ["query", "codeintel.gateway.gateway.Gateway.query", "src/codeintel/gateway.py", "29"],
             ["str", "builtins.str", "<python-builtins>", "27"],       # noise → dropped
             ["codeintel", "codeintel.pyproject", "pyproject.toml", "30"],  # noise → dropped
-            ["Result", "codeintel.provider.Result", "src/codeintel/provider.py", "22"],
+            ["Result", "codeintel.core.provider.Result", "src/codeintel/provider.py", "22"],
         ],
     }
     entry = {"columns": ["fn.name", "fn.file_path"], "rows": [["main", "src/codeintel/__main__.py"]]}
@@ -374,7 +374,7 @@ def test_inject_never_duplicates_the_users_own_content(tmp_path, monkeypatch):
     function's own append branch — made every subsequent --inject re-emit the text between the
     stray marker and the block, growing without bound. CLAUDE.md is prompt context, so this
     silently degraded the agent it serves."""
-    from codeintel.injector import _END_MARKER, Injector
+    from codeintel.setup.injector import _END_MARKER, Injector
 
     monkeypatch.chdir(tmp_path)
     claude = tmp_path / "CLAUDE.md"
@@ -394,7 +394,7 @@ def test_inject_never_duplicates_the_users_own_content(tmp_path, monkeypatch):
 def test_inject_preserves_file_mode_and_line_endings(tmp_path, monkeypatch):
     """os.replace installs a NEW inode, so the original's permissions were dropped for the umask
     and universal-newline mode rewrote CRLF to LF — a whole-file diff on every --inject."""
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     monkeypatch.chdir(tmp_path)
     claude = tmp_path / "CLAUDE.md"
@@ -410,7 +410,7 @@ def test_inject_preserves_file_mode_and_line_endings(tmp_path, monkeypatch):
 def test_inject_writes_through_a_symlinked_rules_file(tmp_path, monkeypatch):
     """A symlinked CLAUDE.md (dotfile manager, shared team rules) was replaced by a regular file,
     orphaning the real source."""
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     monkeypatch.chdir(tmp_path)
     real = tmp_path / "shared-rules.md"
@@ -428,7 +428,7 @@ def test_inject_writes_through_a_symlinked_rules_file(tmp_path, monkeypatch):
 def test_inject_refuses_to_create_agents_md_without_consent(tmp_path):
     """No CLAUDE.md, no AGENTS.md, and no ``create=True``: nothing is written. Writing into a file
     that shapes an agent's future behaviour needs consent, not a default."""
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     path, action = Injector().inject(str(tmp_path))
     assert (path, action) == (None, "no-context-file")
@@ -436,7 +436,7 @@ def test_inject_refuses_to_create_agents_md_without_consent(tmp_path):
 
 
 def test_inject_creates_agents_md_with_consent(tmp_path):
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     path, action = Injector().inject(str(tmp_path), create=True)
     assert path == str(tmp_path / "AGENTS.md")
@@ -448,7 +448,7 @@ def test_inject_creates_agents_md_with_consent(tmp_path):
 
 
 def test_inject_agents_md_is_idempotent(tmp_path):
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     Injector().inject(str(tmp_path), create=True)
     Injector().inject(str(tmp_path), create=True)
@@ -458,7 +458,7 @@ def test_inject_agents_md_is_idempotent(tmp_path):
 
 
 def test_inject_preserves_user_prose_in_agents_md(tmp_path):
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     (tmp_path / "AGENTS.md").write_text("# Team rules\n\nDo not touch payments/.\n")
     Injector().inject(str(tmp_path), create=True)
@@ -468,7 +468,7 @@ def test_inject_preserves_user_prose_in_agents_md(tmp_path):
 
 
 def test_inject_gives_claude_md_a_one_line_agents_import_when_both_exist(tmp_path):
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     (tmp_path / "CLAUDE.md").write_text("# Project rules\n")
     Injector().inject(str(tmp_path), create=True)
@@ -481,7 +481,7 @@ def test_inject_migrates_a_pre_agents_md_claude_block_to_an_import(tmp_path):
     """A CLAUDE.md that already carries codeintel's OLD full block (written before AGENTS.md
     existed) gets it replaced with the one-line import once AGENTS.md becomes the canonical
     target — otherwise the stale block would sit there forever."""
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     (tmp_path / "CLAUDE.md").write_text(
         "# rules\n<!-- codeintel-map-start -->\nold stale block\n<!-- codeintel-map-end -->\n"
@@ -495,7 +495,7 @@ def test_inject_migrates_a_pre_agents_md_claude_block_to_an_import(tmp_path):
 def test_inject_without_consent_falls_back_to_claude_md_full_block(tmp_path):
     """No AGENTS.md and no consent to create one: CLAUDE.md keeps getting the full block, so an
     existing CLAUDE.md-only setup is not a silent no-op."""
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     (tmp_path / "CLAUDE.md").write_text("# rules\n")
     path, action = Injector().inject(str(tmp_path))
@@ -505,7 +505,7 @@ def test_inject_without_consent_falls_back_to_claude_md_full_block(tmp_path):
 
 
 def test_using_codeintel_md_names_the_tools_and_confidence_caveat(tmp_path):
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     Injector().inject(str(tmp_path), create=True)
     content = (tmp_path / "USING_CODEINTEL.md").read_text()
@@ -514,7 +514,7 @@ def test_using_codeintel_md_names_the_tools_and_confidence_caveat(tmp_path):
 
 
 def test_injected_block_names_the_tools_and_trigger_phrases(tmp_path):
-    from codeintel.injector import Injector
+    from codeintel.setup.injector import Injector
 
     Injector().inject(str(tmp_path), create=True)
     content = (tmp_path / "AGENTS.md").read_text()
@@ -526,7 +526,7 @@ def test_injected_block_names_the_tools_and_trigger_phrases(tmp_path):
 # --------------------------------------------------------------------------- offer_injection
 
 def test_offer_injection_prompts_on_a_tty_and_injects_on_yes(tmp_path, monkeypatch):
-    from codeintel.injector import offer_injection
+    from codeintel.setup.injector import offer_injection
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
@@ -536,7 +536,7 @@ def test_offer_injection_prompts_on_a_tty_and_injects_on_yes(tmp_path, monkeypat
 
 
 def test_offer_injection_declines_on_no(tmp_path, monkeypatch):
-    from codeintel.injector import offer_injection
+    from codeintel.setup.injector import offer_injection
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
@@ -546,7 +546,7 @@ def test_offer_injection_declines_on_no(tmp_path, monkeypatch):
 
 
 def test_offer_injection_prints_command_off_a_tty(tmp_path, monkeypatch, capsys):
-    from codeintel.injector import offer_injection
+    from codeintel.setup.injector import offer_injection
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     result = offer_injection(str(tmp_path))

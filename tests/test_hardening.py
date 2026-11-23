@@ -12,18 +12,18 @@ import os
 
 import pytest
 
-import codeintel.providers.semantic as sem
-from codeintel.gateway import Gateway
-from codeintel.provider import log_swallowed
+import codeintel.engines.semantic.provider as sem
+from codeintel.core.provider import log_swallowed
+from codeintel.gateway.gateway import Gateway
 
 # --------------------------------------------------------------------------- semantic cold/warm
 
 def _patch_semantic(monkeypatch, tmp_path, has_index_value):
     """Point the provider at a throwaway db and stub the heavy Searcher/Indexer bits."""
-    from codeintel.indexer import Indexer
-    from codeintel.searcher import Searcher
+    from codeintel.engines.semantic.indexer import Indexer
+    from codeintel.engines.semantic.searcher import Searcher
 
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     calls = {"index": 0}
 
     def _fake_index(self, root):
@@ -66,8 +66,8 @@ def test_reindex_off_forces_inline_index_even_when_warm(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- indexer global cap
 
 def test_indexer_stops_at_max_total_chunks(tmp_path):
-    from codeintel.indexer import Indexer, _project_key
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer, _project_key
 
     for i in range(6):
         (tmp_path / f"f{i}.py").write_text("\n".join(f"x = {j}" for j in range(60)))
@@ -131,7 +131,7 @@ def test_overview_falls_back_to_lsp_when_graph_unavailable():
 # about the call, false about the thing it claims to check.
 
 def test_reindexer_honors_reindex_never(tmp_path, monkeypatch, background_reindex):
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
     (tmp_path / ".codeintel.toml").write_text('reindex = "never"\n')
     rx = Reindexer(debounce_seconds=0)
     submitted = []
@@ -141,7 +141,7 @@ def test_reindexer_honors_reindex_never(tmp_path, monkeypatch, background_reinde
 
 
 def test_reindexer_schedules_by_default(tmp_path, monkeypatch, background_reindex):
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
     monkeypatch.setenv("CODEINTEL_REINDEX", "on")
     rx = Reindexer(debounce_seconds=0)  # no .codeintel.toml → default "on-demand"
     submitted = []
@@ -155,9 +155,9 @@ def test_reindexer_schedules_by_default(tmp_path, monkeypatch, background_reinde
 def _bare_graph(monkeypatch, run_result):
     import threading as _t
 
-    import codeintel.providers.graph as gmod
-    from codeintel.graph_backend import BackendClient
-    from codeintel.graph_resolution import ProjectResolver
+    import codeintel.engines.graph.provider as gmod
+    from codeintel.engines.graph.backend import BackendClient
+    from codeintel.engines.graph.resolution import ProjectResolver
     p = gmod.GraphProvider.__new__(gmod.GraphProvider)  # skip _detect_backend / PATH probing
     p._backend = BackendClient.__new__(BackendClient)
     p._resolver = ProjectResolver.__new__(ProjectResolver)

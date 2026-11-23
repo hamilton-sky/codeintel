@@ -11,7 +11,7 @@ import sys
 import textwrap
 import time
 
-from codeintel.verify import verify_stdio_server
+from codeintel.setup.verify import verify_stdio_server
 
 
 def _script(tmp_path, body: str) -> list[str]:
@@ -230,7 +230,7 @@ def test_a_live_silent_server_still_reports_a_real_timeout(tmp_path):
 def test_the_reason_is_recorded_by_the_reader_that_knows_it(tmp_path):
     """`gave_up` exists because only the read loop can tell EOF from an expired deadline. Pinned
     directly so a refactor cannot quietly drop the distinction and leave `_why_no_reply` guessing."""
-    from codeintel.verify import _Conn, _reap
+    from codeintel.setup.verify import _Conn, _reap
 
     argv = _script(tmp_path, "import os, time\nos.close(1)\ntime.sleep(30)")
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -22,9 +22,9 @@ from typing import Any
 
 import pytest
 
-from codeintel.gateway import Gateway
-from codeintel.outcome import Missing
-from codeintel.providers.graph import GraphProvider
+from codeintel.core.outcome import Missing
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.gateway.gateway import Gateway
 
 PROJECT = "tmp-proj"          # hyphenated, like a path-slug registration, so the prefix is stripped
 
@@ -178,7 +178,7 @@ def _index(cache: Path, *, age: str = "fresh") -> None:
 def _provider(monkeypatch, tmp_path, repo: Path, graph: _Graph, *,
               index: str | None = "fresh") -> GraphProvider:
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     cache = tmp_path / "graph-cache"
     monkeypatch.setenv("CODEBASE_MEMORY_CACHE_DIR", str(cache))
     if index is not None:
@@ -391,7 +391,7 @@ def test_an_unexpected_failure_inside_the_range_is_a_safe_null_never_a_raise(
     def boom(*a, **k):
         raise RuntimeError("diff exploded")
 
-    monkeypatch.setattr("codeintel.graph_changed.diff_file", boom)
+    monkeypatch.setattr("codeintel.engines.graph.changed.diff_file", boom)
     env = _ask(p, repo)
     assert env["ok"] is True and env["result"] is None and env["reason"] == "error"
     assert "not a statement about your code" in env["hint"]
@@ -490,8 +490,8 @@ def test_a_function_moved_to_another_file_is_flagged_as_possibly_moved(monkeypat
 
 
 def test_a_failed_text_search_is_unknown_and_never_an_empty_list(monkeypatch, tmp_path, repo):
-    monkeypatch.setattr("codeintel.graph_changed.grep_mentions", lambda *a, **k: __import__(
-        "codeintel.changed_range", fromlist=["MentionSearch"]).MentionSearch((), error="git grep died"))
+    monkeypatch.setattr("codeintel.engines.graph.changed.grep_mentions", lambda *a, **k: __import__(
+        "codeintel.engines.graph.changed_range", fromlist=["MentionSearch"]).MentionSearch((), error="git grep died"))
     env = _ask(_provider(monkeypatch, tmp_path, repo, _standard_graph()), repo)
     body = env["result"]
     assert "did not complete (git grep died)" in body and "UNKNOWN, not no" in body
@@ -1053,7 +1053,7 @@ def test_a_removed_function_named_nowhere_outside_source_raises_no_such_gap(
 
 
 def test_the_files_a_name_survives_in_are_listed_configuration_first(tmp_path):
-    from codeintel.changed_range import grep_mentions
+    from codeintel.engines.graph.changed_range import grep_mentions
 
     repo = _branch(
         tmp_path, "order",
@@ -1095,9 +1095,9 @@ def test_a_truncated_text_search_makes_the_total_unknown_and_not_the_rows_that_f
         monkeypatch, tmp_path, repo):
     """The text half of the same defect: a `git grep` cut at its cap knows a lower bound, and the
     envelope stated the rows that fit as the total."""
-    from codeintel.changed_range import grep_mentions
+    from codeintel.engines.graph.changed_range import grep_mentions
 
-    monkeypatch.setattr("codeintel.graph_changed.grep_mentions",
+    monkeypatch.setattr("codeintel.engines.graph.changed.grep_mentions",
                         lambda root, name: grep_mentions(root, name, cap=1))
     env = _ask(_provider(monkeypatch, tmp_path, repo, _standard_graph()), repo)
 
@@ -1114,7 +1114,7 @@ def test_git_grep_output_is_read_up_to_a_bound_and_no_further(monkeypatch, tmp_p
     stopped by the timeout instead — and reports an error where this one reports a cut list."""
     import sys
 
-    from codeintel import changed_range
+    from codeintel.engines.graph import changed_range
 
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -1160,7 +1160,7 @@ def test_a_repository_configured_fsmonitor_command_is_never_run(monkeypatch, tmp
 
 def test_a_failed_listing_of_untracked_files_is_a_gap_and_not_a_silent_omission(
         monkeypatch, tmp_path, repo):
-    from codeintel import changed_range
+    from codeintel.engines.graph import changed_range
 
     real = changed_range._git
 
@@ -1180,7 +1180,7 @@ def test_a_failed_listing_of_untracked_files_is_a_gap_and_not_a_silent_omission(
 
 def test_resolving_a_base_does_not_ask_git_about_shallowness_when_it_succeeds(monkeypatch, repo):
     """The answer was stored and never read, at the price of one more `git` process per call."""
-    from codeintel import changed_range
+    from codeintel.engines.graph import changed_range
 
     seen: list[tuple[str, ...]] = []
     real = changed_range._git
@@ -1246,7 +1246,7 @@ def test_a_refused_caller_lookup_carries_the_fix_not_only_the_message(monkeypatc
     """`callers` puts the refusal AND the way past it in its hint. The gap on `changed <ref>` quoted
     the message and stopped, so the one op an agent runs on a branch was the one that could not say
     what to do about a coordination lock."""
-    from codeintel.graph_backend import _refused
+    from codeintel.engines.graph.backend import _refused
 
     p = _provider(monkeypatch, tmp_path, repo, _standard_graph())
     refusal = _refused(1, "CBM CLI could not start because a pre-coordination or unverified CBM "
@@ -1344,7 +1344,7 @@ def test_a_removed_group_counts_the_comments_it_set_aside(monkeypatch, tmp_path,
 
 def test_an_unreadable_file_message_quotes_the_size_limit_the_reader_actually_enforces(
         monkeypatch, tmp_path, repo):
-    monkeypatch.setattr("codeintel.graph_changed.MAX_SOURCE_BYTES", 3_000_000)
+    monkeypatch.setattr("codeintel.engines.graph.changed.MAX_SOURCE_BYTES", 3_000_000)
     outside = tmp_path / "outside.py"
     outside.write_text("def stolen():\n    return 1\n")
     (repo / "pkg" / "escape.py").symlink_to(outside)
@@ -1475,7 +1475,7 @@ def test_changed_shares_one_scan_budget_across_its_workers(monkeypatch, tmp_path
     calling `callers`, which scans — so the allowance is created once, on the op, and handed to every
     worker, or forty symbols would each get the whole of it. The worker is another thread, so what it
     passes the scan is the proof it received the op's budget and not a fresh one."""
-    from codeintel import qualifier_scan
+    from codeintel.engines.graph import qualifier_scan
 
     given: list[Any] = []
     real = qualifier_scan.files_naming
@@ -1504,7 +1504,7 @@ def test_a_fifo_at_a_tracked_path_is_not_read_and_cannot_hang_the_reader(tmp_pat
     CONTROL: a regular file in the same directory is read."""
     import threading
 
-    from codeintel.changed_range import read_new
+    from codeintel.engines.graph.changed_range import read_new
 
     (tmp_path / "plain.py").write_text("x = 1\n")
     fifo = tmp_path / "pipe.py"

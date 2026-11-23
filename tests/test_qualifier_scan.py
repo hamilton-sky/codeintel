@@ -15,9 +15,9 @@ import types
 
 import pytest
 
-from codeintel import qualifier_scan
-from codeintel.changed_range import MAX_SOURCE_BYTES
-from codeintel.qualifier_scan import files_naming
+from codeintel.engines.graph import qualifier_scan
+from codeintel.engines.graph.changed_range import MAX_SOURCE_BYTES
+from codeintel.engines.graph.qualifier_scan import files_naming
 
 TOKEN = "StrategyChain"
 

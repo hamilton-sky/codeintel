@@ -54,7 +54,7 @@ def _commands(text: str) -> list[str]:
 
 def _safe_null_reasons() -> set[str]:
     """Every `reason` string `safe_null_result` classifies, read out of its source."""
-    import codeintel.provider as provider
+    import codeintel.core.provider as provider
 
     source = pathlib.Path(provider.__file__).read_text()
     tree = ast.parse(source)
@@ -73,7 +73,7 @@ def _gap_kinds() -> set[str]:
     """Every gap kind some provider raises, plus the `Missing` kinds that become one."""
     import typing
 
-    from codeintel.outcome import MissingKind
+    from codeintel.core.outcome import MissingKind
 
     kinds = set(typing.get_args(MissingKind))
     for path in sorted((ROOT / "src" / "codeintel").rglob("*.py")):
@@ -208,8 +208,8 @@ def test_the_checked_line_the_guide_quotes_is_the_line_the_answer_prints(monkeyp
 def test_the_fields_the_guide_names_for_the_qualifier_check_are_fields_the_answer_publishes():
     """`qualifier_seen` and `evidence.qualifier_absent` are what a reader is told to branch on, so
     both have to be keys the product emits, not names the guide made up."""
-    from codeintel.graph_answer import AnswerRendering
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.answer import AnswerRendering
+    from codeintel.engines.graph.provider import GraphProvider
 
     row = AnswerRendering._structured_row(
         {"a.name": "x", "_bucket": "name-matched"}, "a.name", "a.qualified_name", "a.file_path",
@@ -226,7 +226,7 @@ def test_the_instructions_an_agent_is_handed_describe_the_check_and_not_the_reti
     """The MCP instructions are the one place a model reads about these fields before it asks
     anything. They named a `Settle it:` command the answer prints; for a qualified method the answer
     now runs it, and a model told to run a command that has already been run wastes the turn."""
-    from codeintel.server import _MCP_INSTRUCTIONS
+    from codeintel.transports.mcp import _MCP_INSTRUCTIONS
 
     assert "qualifier_seen" in _MCP_INSTRUCTIONS and "qualifier_absent" in _MCP_INSTRUCTIONS
     assert "the `Settle it:` command the answer prints" not in _MCP_INSTRUCTIONS
@@ -258,7 +258,7 @@ def test_every_text_that_lists_how_a_caller_avoids_the_class_name_lists_an_insta
     lists the ways gets the whole list, and the four that put a `false` in front of a reader say that
     no class-qualified Python target has been measured, which is where untyped injection is the
     default."""
-    from codeintel.server import _MCP_INSTRUCTIONS
+    from codeintel.transports.mcp import _MCP_INSTRUCTIONS
     from tests.test_edge_confidence import _callers, _guesses, _scanned_callers
 
     checked = _scanned_callers(monkeypatch, tmp_path, _guesses(4))["result"]

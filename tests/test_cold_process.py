@@ -43,7 +43,7 @@ import sys
 import pytest
 
 import codeintel
-import codeintel.providers
+from tests._engines import engine_names
 
 # --------------------------------------------------------------------------------------------- #
 # Reason-family constants — shared by every assertion below. `reason` values, not test-specific
@@ -195,8 +195,7 @@ def _query(
 def _discovered_engines() -> list[str]:
     """The DOMAIN test 1 must probe, derived from the FILESYSTEM — never hand-typed. `none.py`
     always answers `reason="no-engine"` by construction and has nothing to be cold about."""
-    stems = {p.stem for p in pathlib.Path(codeintel.providers.__file__).parent.glob("*.py")}
-    return sorted(stems - {"__init__", "none"})
+    return sorted(engine_names() - {"none"})
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -208,7 +207,7 @@ def test_a_dead_backend_on_call_one_is_reported_as_unasked_not_as_empty(tmp_path
     for engine in engines:
         assert engine in _ENGINE_PROBE, (
             f"a new provider was added and the cold tier does not probe it: {engine!r} "
-            f"(src/codeintel/providers/{engine}.py) has no entry in _ENGINE_PROBE — add one to "
+            f"(src/codeintel/engines/{engine}/provider.py) has no entry in _ENGINE_PROBE — add one to "
             f"tests/test_cold_process.py before this can ship"
         )
 
@@ -391,9 +390,9 @@ def test_call_one_in_a_fresh_process_is_never_more_confident_than_call_two(tmp_p
     # different invariant.
     prog = f"""
 import json, time
-from codeintel import server
+from codeintel.gateway import factory
 
-gw = server._build_gateway(oneshot=True)
+gw = factory.build_gateway(oneshot=True)
 kwargs = dict(op="symbol", target="make_widget", engine="lsp", role="", budget=30000,
               project_root={repo!r})
 

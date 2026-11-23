@@ -10,12 +10,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from codeintel.gateway import Gateway
-from codeintel.indexer import Indexer
-from codeintel.provider import safe_null_result
-from codeintel.providers.semantic import SemanticProvider
-from codeintel.searcher import Searcher
-from codeintel.semantic_db import SemanticDb
+from codeintel.core.provider import safe_null_result
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.provider import SemanticProvider
+from codeintel.engines.semantic.searcher import Searcher
+from codeintel.gateway.gateway import Gateway
 
 
 class _FakeTextEmbedding:
@@ -88,7 +88,7 @@ def test_two_projects_do_not_leak_or_purge(tmp_path):
 # --- Bug #3: the gateway persists across handler calls -----------------------
 
 def test_gateway_is_reused_across_handler_calls():
-    from codeintel import server
+    from codeintel.transports import mcp as server
     server._reset_gateway()
     try:
         assert server._get_gateway() is server._get_gateway(), \
@@ -132,9 +132,9 @@ def test_overview_auto_falls_back_to_lsp():
 # --- F5 drift: empty project reports no-index (not below-floor) --------------
 
 def test_empty_project_reports_no_index(tmp_path, monkeypatch):
-    import codeintel.providers.semantic as sem
+    import codeintel.engines.semantic.provider as sem
     empty = tmp_path / "empty"; empty.mkdir()
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(sem, "_DEPS_OK", True)
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         r = SemanticProvider().build_result("search", "x", [], 0, str(empty))
@@ -145,12 +145,12 @@ def test_empty_project_reports_no_index(tmp_path, monkeypatch):
 # --- Bug #5: .codeintel.toml values are actually threaded into the query -----
 
 def test_config_cosine_floor_reaches_searcher(tmp_path, monkeypatch):
-    import codeintel.providers.semantic as sem
+    import codeintel.engines.semantic.provider as sem
     (tmp_path / ".codeintel.toml").write_text(
         'cosine_floor = 0.99\nrerank = "off"\nrerank_candidates = 7\n'
     )
     (tmp_path / "code.py").write_text("def f():\n    return 1\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(sem, "_DEPS_OK", True)
 
     captured = {}
@@ -177,7 +177,7 @@ def test_http_bad_content_length_returns_400():
     import threading
     import time
 
-    from codeintel.http_server import CodeIntelHTTPServer, _Handler
+    from codeintel.transports.http import CodeIntelHTTPServer, _Handler
 
     srv = CodeIntelHTTPServer(("127.0.0.1", 0), _Handler)
     port = srv.server_address[1]

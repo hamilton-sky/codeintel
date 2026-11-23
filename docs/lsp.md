@@ -155,7 +155,7 @@ disabled the cross-check behind `callers`/`context`'s `[?…]` unverified badges
 the reader to confirm against the LSP, and the LSP had always just declined.
 
 The wait lives in the provider, so **every transport inherits it**. It previously lived in
-`commands/query.py` as a retry loop, which meant the CLI had it and the MCP and HTTP transports —
+`cli/query.py` as a retry loop, which meant the CLI had it and the MCP and HTTP transports —
 the ones an agent actually calls — did not.
 
 The bound is **8.0 s** (`_WARM_WAIT_S`), additionally clamped to the caller's own budget. It is

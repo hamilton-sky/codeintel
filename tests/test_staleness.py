@@ -18,10 +18,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from codeintel.indexer import Indexer
-from codeintel.providers.semantic import SemanticProvider
-from codeintel.searcher import Searcher
-from codeintel.semantic_db import SemanticDb, chunk_content_hash, default_db_path
+from codeintel.engines.semantic.db import SemanticDb, chunk_content_hash, default_db_path
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.provider import SemanticProvider
+from codeintel.engines.semantic.searcher import Searcher
 
 
 class _FlatEmbedding:
@@ -105,7 +105,7 @@ def test_provider_reports_the_omission_rather_than_hiding_it(tmp_path):
     """A thinned list served as a whole one is the failure this engine's gap contract exists for."""
     (tmp_path / "app.py").write_text(_ORIGINAL)
     with patch("fastembed.TextEmbedding", _FlatEmbedding), \
-            patch("codeintel.semantic_db._base_dir", lambda: tmp_path / "cache"):
+            patch("codeintel.engines.semantic.db._base_dir", lambda: tmp_path / "cache"):
         p = SemanticProvider()
         p.build_result("search", "charge", [], 2000, str(tmp_path))  # cold pass builds the index
         (tmp_path / "app.py").write_text(_EDITED)
@@ -120,10 +120,10 @@ def test_provider_reports_the_omission_rather_than_hiding_it(tmp_path):
 def test_provider_reports_unreadable_source_instead_of_claiming_complete(tmp_path):
     (tmp_path / "app.py").write_text(_ORIGINAL)
     with patch("fastembed.TextEmbedding", _FlatEmbedding), \
-            patch("codeintel.semantic_db._base_dir", lambda: tmp_path / "cache"):
+            patch("codeintel.engines.semantic.db._base_dir", lambda: tmp_path / "cache"):
         provider = SemanticProvider()
         provider.build_result("search", "charge", [], 2000, str(tmp_path))
-        with patch("codeintel.searcher.open_contained", side_effect=PermissionError):
+        with patch("codeintel.engines.semantic.searcher.open_contained", side_effect=PermissionError):
             result = provider.build_result("search", "charge", [], 2000, str(tmp_path))
 
     assert result["outcome"] == "partial"
@@ -137,7 +137,7 @@ def test_all_hits_stale_is_reported_as_stale_not_as_absent(tmp_path):
     """`below-floor` reads as 'this code does not exist' — the worst thing to tell an agent here."""
     (tmp_path / "app.py").write_text(_ORIGINAL)
     with patch("fastembed.TextEmbedding", _FlatEmbedding), \
-            patch("codeintel.semantic_db._base_dir", lambda: tmp_path / "cache"):
+            patch("codeintel.engines.semantic.db._base_dir", lambda: tmp_path / "cache"):
         p = SemanticProvider()
         p.build_result("search", "charge", [], 2000, str(tmp_path))
         (tmp_path / "app.py").write_text("x = 1\n")  # every indexed span now invalid
@@ -231,7 +231,7 @@ def test_an_index_that_cannot_be_verified_is_reported_as_unconfirmed(tmp_path):
     with no results at all until they happen to re-index. Kept, and marked unconfirmed."""
     (tmp_path / "app.py").write_text(_ORIGINAL)
     with patch("fastembed.TextEmbedding", _FlatEmbedding), \
-            patch("codeintel.semantic_db._base_dir", lambda: tmp_path / "cache"):
+            patch("codeintel.engines.semantic.db._base_dir", lambda: tmp_path / "cache"):
         p = SemanticProvider()
         p.build_result("search", "charge", [], 2000, str(tmp_path))
 
@@ -254,7 +254,7 @@ def test_a_verified_index_is_not_labelled_unconfirmed(tmp_path):
     """The flip side: once spans exist, a clean answer must still read as clean."""
     (tmp_path / "app.py").write_text(_ORIGINAL)
     with patch("fastembed.TextEmbedding", _FlatEmbedding), \
-            patch("codeintel.semantic_db._base_dir", lambda: tmp_path / "cache"):
+            patch("codeintel.engines.semantic.db._base_dir", lambda: tmp_path / "cache"):
         p = SemanticProvider()
         p.build_result("search", "charge", [], 2000, str(tmp_path))
         res = p.build_result("search", "charge", [], 2000, str(tmp_path))

@@ -33,9 +33,9 @@ from pathlib import Path
 
 import pytest
 
-from codeintel.outcome import Missing
-from codeintel.providers.graph import GraphProvider
-from codeintel.redact import contains_home_path
+from codeintel.core.outcome import Missing
+from codeintel.core.redact import contains_home_path
+from codeintel.engines.graph.provider import GraphProvider
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="the fake backend is a POSIX shell script")
@@ -259,14 +259,14 @@ def test_a_usage_error_is_not_mistaken_for_a_refusal_to_run(message):
     """The no-second-launch rule must be narrow. Every message here is something an older backend
     or an ordinary failure might print, and none of them says the backend will not run at all —
     treating one as a refusal would turn off the fallback that keeps an older backend working."""
-    from codeintel.graph_backend import is_coordination_refusal, is_launch_refusal
+    from codeintel.engines.graph.backend import is_coordination_refusal, is_launch_refusal
 
     assert is_launch_refusal(message) is False
     assert is_coordination_refusal(message) is False
 
 
 def test_the_two_refusals_are_told_apart():
-    from codeintel.graph_backend import is_coordination_refusal, is_launch_refusal
+    from codeintel.engines.graph.backend import is_coordination_refusal, is_launch_refusal
 
     assert is_launch_refusal(_REFUSAL) and is_coordination_refusal(_REFUSAL)
     # Will not run, but not for the reason that has the daemon-directory fix.
@@ -341,7 +341,7 @@ def test_a_home_directory_in_the_backends_stderr_is_redacted(tmp_path, monkeypat
 def test_the_doctor_end_to_end_names_a_refusing_backend_and_calls_it_degraded(tmp_path, monkeypatch):
     """Nothing stubbed between the executable and the report: the real subprocess layer, the real
     probe, the real `run_doctor` and the real renderer. This is the incident, start to finish."""
-    from codeintel import doctor
+    from codeintel.setup import doctor
 
     _fake_backend(tmp_path, monkeypatch, _refuses())
     report = doctor.run_doctor(str(tmp_path))
@@ -418,7 +418,7 @@ def test_a_version_command_that_failed_reports_no_version(tmp_path, monkeypatch)
     # In the incident state the doctor's version column read `level=info msg=version_cohort.cl`:
     # `_cmd_version` ignored the exit code and took the first line it saw. A failed `--version` did
     # not report a version, whatever it printed.
-    from codeintel.doctor import _cmd_version
+    from codeintel.setup.doctor import _cmd_version
     _fake_backend(tmp_path, monkeypatch, _refuses())
 
     assert _cmd_version(["codebase-memory-mcp", "--version"]) is None
@@ -426,7 +426,7 @@ def test_a_version_command_that_failed_reports_no_version(tmp_path, monkeypatch)
 
 def test_a_version_printed_after_a_backend_log_line_is_still_read(tmp_path, monkeypatch):
     # 0.10.x writes `level=…` lines before it answers. A version that follows one is still a version.
-    from codeintel.doctor import _cmd_version
+    from codeintel.setup.doctor import _cmd_version
     _fake_backend(tmp_path, monkeypatch,
                   "echo 'level=info msg=mem.init budget_mb=8601'\necho 'codebase-memory-mcp 0.10.8'")
 
@@ -438,10 +438,10 @@ def test_a_refused_background_reindex_logs_the_backends_reason(tmp_path, monkeyp
     # the same three guesses the doctor used to make — while `_run` now knows which one it was.
     import logging
 
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
     _fake_backend(tmp_path, monkeypatch, _refuses())
 
-    with caplog.at_level(logging.WARNING, logger="codeintel.reindexer"):
+    with caplog.at_level(logging.WARNING, logger="codeintel.gateway.reindexer"):
         Reindexer(enabled=False)._graph_reindex(str(tmp_path))
 
     logged = " ".join(r.getMessage() for r in caplog.records)

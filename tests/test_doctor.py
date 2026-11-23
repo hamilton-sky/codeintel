@@ -13,11 +13,11 @@ import time
 
 import pytest
 
-from codeintel import doctor
-from codeintel.provider import safe_null_result
-from codeintel.providers.graph import GraphProvider
-from codeintel.providers.lsp import LspProvider, _State
-from codeintel.providers.semantic import SemanticProvider
+from codeintel.core.provider import safe_null_result
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.engines.lsp.provider import LspProvider, _State
+from codeintel.engines.semantic.provider import SemanticProvider
+from codeintel.setup import doctor
 
 CAP_LIST_PROJECTS = {
     "projects": [
@@ -132,7 +132,7 @@ def test_run_doctor_handles_bad_project_root():
 
 
 def test_run_doctor_no_hang_when_graph_absent(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     start = time.monotonic()
     r = doctor.run_doctor("/tmp/x", deep=False)  # shallow: no serena boot, no subprocess
     assert r["ok"] is True
@@ -144,7 +144,7 @@ def test_run_doctor_no_hang_when_graph_absent(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def _graph(monkeypatch, which="/fake/codebase-memory-mcp", run_ret=CAP_LIST_PROJECTS):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: which)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: which)
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda *a, **k: run_ret)
     return p
@@ -187,7 +187,7 @@ def _make_db(path, project_root_real, *, embedded=True):
     """
     import sqlite_vec
 
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
     db = SemanticDb(str(path))
     db.init()
     c = db.conn()
@@ -208,12 +208,12 @@ def _make_db(path, project_root_real, *, embedded=True):
 
 
 def test_semantic_probe_real_db_indexed(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     db_path = tmp_path / "semantic.db"
     repo = tmp_path / "repo"
     repo.mkdir()
     _make_db(db_path, os.path.realpath(str(repo)))
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda *a, **k: str(db_path))
 
     r = SemanticProvider().probe(str(repo))
     assert r["installed"] is True and r["runnable"] is True and r["repo_indexed"] is True
@@ -227,19 +227,19 @@ def test_semantic_probe_real_db_indexed(tmp_path, monkeypatch):
 
 
 def test_semantic_deep_probe_verifies_source_readability(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     db_path = tmp_path / "semantic.db"
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "f.py").write_text("def readable():\n    return True\n")
     _make_db(db_path, os.path.realpath(str(repo)))
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda *a, **k: str(db_path))
     # This test's subject is SOURCE READABILITY, so every other input to the rollup has to be
     # pinned or it is not testing what it names. `model_cached` was not: on a machine that has
     # never downloaded the weights `_status_for` correctly returns "warn" (see its own comment —
     # an uncached model is a pending download, not a fault), and the assertion below failed for a
     # reason that has nothing to do with readability. Pin it to the state this test means.
-    monkeypatch.setattr("codeintel.semantic_db.model_is_cached", lambda *a, **k: True)
+    monkeypatch.setattr("codeintel.engines.semantic.db.model_is_cached", lambda *a, **k: True)
 
     r = SemanticProvider().probe(str(repo), deep=True)
 
@@ -250,15 +250,15 @@ def test_semantic_deep_probe_verifies_source_readability(tmp_path, monkeypatch):
 
 
 def test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     db_path = tmp_path / "semantic.db"
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "f.py").write_text("def blocked():\n    return True\n")
     _make_db(db_path, os.path.realpath(str(repo)))
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda *a, **k: str(db_path))
     monkeypatch.setattr(
-        "codeintel.containment.open_contained",
+        "codeintel.core.containment.open_contained",
         lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
@@ -272,25 +272,25 @@ def test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read(tmp_path, 
 
 
 def test_semantic_probe_no_db(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(tmp_path / "missing.db"))
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda *a, **k: str(tmp_path / "missing.db"))
     r = SemanticProvider().probe(str(tmp_path))
     assert r["runnable"] is True and r["repo_indexed"] is False
     assert "codeintel index" in r["remediation"]
 
 
 def test_semantic_probe_corrupt_db(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     db_path = tmp_path / "semantic.db"
     db_path.write_bytes(b"this is not a sqlite database")
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda *a, **k: str(db_path))
     r = SemanticProvider().probe(str(tmp_path))
     assert r["installed"] is True and r["runnable"] is False  # unreadable → not runnable
     assert r["remediation"]
 
 
 def test_semantic_probe_not_installed(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", False)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", False)
     r = SemanticProvider().probe("/x")
     assert r["installed"] is False and r["runnable"] is False
 
@@ -300,13 +300,13 @@ def test_semantic_probe_not_installed(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_lsp_probe_shallow_not_installed(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: None)
     r = LspProvider().probe("/repo", deep=False)
     assert r["installed"] is False and r["runnable"] is False
 
 
 def test_lsp_probe_shallow_not_checked(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     r = LspProvider().probe("/repo", deep=False)
     assert r["installed"] is True
     assert r["runnable"] is None  # no session yet → not checked (warn)
@@ -315,7 +315,7 @@ def test_lsp_probe_shallow_not_checked(monkeypatch):
 
 
 def test_lsp_probe_shallow_reads_live_session_state(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     import threading
     fake = type("S", (), {})()
@@ -327,7 +327,7 @@ def test_lsp_probe_shallow_reads_live_session_state(monkeypatch):
 
 
 def test_lsp_probe_deep_boot_failure_is_bounded(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._cmd = "/nonexistent/serena-xyz-does-not-exist"  # real spawn will fail fast
     start = time.monotonic()
@@ -339,9 +339,9 @@ def test_lsp_probe_deep_boot_failure_is_bounded(monkeypatch):
 
 
 def test_lsp_probe_reports_repository_access_before_blaming_network(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     monkeypatch.setattr(
-        "codeintel.providers.lsp.os.scandir",
+        "codeintel.engines.lsp.provider.os.scandir",
         lambda root: (_ for _ in ()).throw(PermissionError(1, "denied", str(root))),
     )
     p = LspProvider()
@@ -364,7 +364,7 @@ def test_lsp_probe_reports_repository_access_before_blaming_network(monkeypatch)
 # --------------------------------------------------------------------------- #
 
 def test_code_doctor_handler_envelope():
-    from codeintel.server import code_doctor_handler
+    from codeintel.transports.mcp import code_doctor_handler
     r = code_doctor_handler({"project_root": os.getcwd()})
     assert r["ok"] is True
     assert set(r["engines"]) == {"graph", "lsp", "semantic"}
@@ -387,12 +387,12 @@ def test_an_unresolvable_home_is_not_reported_as_simply_not_indexed(monkeypatch)
     container running as a UID with no passwd entry, which is how coding agents are often run.
     Reporting that as "no semantic index database yet" sent the user to `codeintel index`, which
     fails the same way for the same reason: two commands, neither naming the problem."""
-    from codeintel.providers.semantic import SemanticProvider
+    from codeintel.engines.semantic.provider import SemanticProvider
 
     def _boom(*a, **k):
         raise RuntimeError("Could not determine home directory.")
 
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", _boom)
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", _boom)
     p = SemanticProvider()
     if not p.available:                       # fastembed/sqlite-vec absent in this environment
         pytest.skip("semantic engine not installed")
@@ -409,7 +409,7 @@ def test_an_unresolvable_home_is_not_reported_as_simply_not_indexed(monkeypatch)
 def test_codeintel_home_overrides_an_unusable_default(tmp_path, monkeypatch):
     """The override the remediation above points at has to actually exist, or the advice is a
     dead end of its own."""
-    from codeintel.semantic_db import default_db_path
+    from codeintel.engines.semantic.db import default_db_path
 
     monkeypatch.setenv("CODEINTEL_HOME", str(tmp_path / "cache"))
     assert default_db_path(None).startswith(str(tmp_path / "cache"))
@@ -421,7 +421,7 @@ def test_codeintel_home_overrides_an_unusable_default(tmp_path, monkeypatch):
 def test_a_blank_codeintel_home_falls_back_rather_than_using_the_cwd(monkeypatch):
     """An empty env var is a common accident (`CODEINTEL_HOME=` in a shell profile); treating it
     as a path would scatter the cache into whatever directory the process started in."""
-    from codeintel.semantic_db import default_db_path
+    from codeintel.engines.semantic.db import default_db_path
 
     monkeypatch.setenv("CODEINTEL_HOME", "   ")
     path = default_db_path(None)
@@ -432,7 +432,7 @@ def test_a_blank_codeintel_home_falls_back_rather_than_using_the_cwd(monkeypatch
 def test_setup_names_the_reason_indexing_failed(tmp_path, monkeypatch):
     """The step table said only "indexer reported an unrecoverable failure" while the real cause
     sat in an unlinked stderr line above it."""
-    from codeintel import onboarding
+    from codeintel.setup import onboarding
 
     class _FailingIndexer:
         def __init__(self, *a, **k):
@@ -442,8 +442,8 @@ def test_setup_names_the_reason_indexing_failed(tmp_path, monkeypatch):
             self.last_error = "ProxyError: 403 Forbidden"
             return -1
 
-    monkeypatch.setattr("codeintel.indexer.Indexer", _FailingIndexer)
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path",
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer", _FailingIndexer)
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path",
                         lambda *a, **k: str(tmp_path / "db.sqlite"))
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "a.py").write_text("def f(): pass\n")
@@ -466,8 +466,8 @@ def test_setup_names_the_reason_indexing_failed(tmp_path, monkeypatch):
 
 def _graph_with_rows(rows, *, failure=None):
     """A GraphProvider that resolves cleanly and whose real queries return `rows`."""
-    from codeintel.graph_backend import BackendClient
-    from codeintel.graph_resolution import ProjectResolution
+    from codeintel.engines.graph.backend import BackendClient
+    from codeintel.engines.graph.resolution import ProjectResolution
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)           # type: ignore[attr-defined]
@@ -514,7 +514,7 @@ def test_a_graph_project_with_rows_stays_runnable_under_deep():
 def test_a_graph_verification_query_that_fails_is_unknown_not_empty():
     """`outcome.py`'s rule at the health check: could-not-ask and answered-nothing are different
     facts, and only one of them means the engine is broken."""
-    from codeintel.outcome import Missing
+    from codeintel.core.outcome import Missing
 
     gp = _graph_with_rows([], failure=Missing("timeout", "the backend did not answer"))
     deep = gp.probe("/repo", deep=True)
@@ -524,7 +524,7 @@ def test_a_graph_verification_query_that_fails_is_unknown_not_empty():
 
 def _ready_lsp(repo, *, overview):
     """An LspProvider with a READY session whose `get_symbols_overview` returns `overview`."""
-    from codeintel.outcome import Ok
+    from codeintel.core.outcome import Ok
 
     lsp = LspProvider.__new__(LspProvider)
     lsp.available = True                                         # type: ignore[attr-defined]
@@ -637,7 +637,7 @@ def test_semantic_chunks_without_vectors_are_not_a_working_index(tmp_path):
     that chunked and then failed to embed leaves the first full and the second empty, and the
     count reports that as healthy."""
     pytest.importorskip("sqlite_vec")
-    from codeintel.providers.semantic import _deep_answer
+    from codeintel.engines.semantic.provider import _deep_answer
 
     answered, why = _deep_answer(_semantic_db(tmp_path, with_vectors=False), "/repo", "m", True)
     assert answered is False, why
@@ -651,7 +651,7 @@ def test_semantic_without_cached_weights_reports_unknown_rather_than_broken(tmp_
     """The weights being absent says nothing about the index. Reporting it as a failure would send
     a user to `reset && index`, which cannot fix it."""
     pytest.importorskip("sqlite_vec")
-    from codeintel.providers.semantic import _deep_answer
+    from codeintel.engines.semantic.provider import _deep_answer
 
     answered, why = _deep_answer(
         _semantic_db(tmp_path, with_vectors=True), "/repo", "bge-small", model_cached=None)
@@ -766,7 +766,7 @@ def _gateway_with(graph, lsp, semantic):
 
 
 def test_code_status_carries_degraded_and_the_flat_flags_still_mean_installed(monkeypatch):
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     monkeypatch.setattr(server, "_get_gateway", lambda: _gateway_with(
         _Row(**_REFUSING_GRAPH), _Row(), _Row()))
@@ -781,7 +781,7 @@ def test_code_status_carries_degraded_and_the_flat_flags_still_mean_installed(mo
 
 
 def test_code_status_degraded_is_empty_when_every_engine_is_fine(monkeypatch):
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     monkeypatch.setattr(server, "_get_gateway", lambda: _gateway_with(_Row(), _Row(), _Row()))
     status = server.code_status_handler({"project_root": "/repo"})
@@ -792,7 +792,7 @@ def test_the_status_fallback_and_the_refused_doctor_report_carry_the_key():
     """Shape stability: a caller reading `degraded` must not KeyError on the degraded path, or the
     check stops running exactly when things are worst. The value is `None` — "could not tell" — and
     NOT `[]`, which is what a report that actually looked says when nothing is failing."""
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     assert "degraded" in server._STATUS_FALLBACK and server._STATUS_FALLBACK["degraded"] is None
     gw = server._get_gateway()
@@ -810,7 +810,7 @@ def _cli_args(**kw):
 def test_codeintel_status_says_healthy_but_graph_degraded(monkeypatch, capsys):
     from importlib import import_module
 
-    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+    monkeypatch.setattr("codeintel.transports.mcp.code_status_handler", lambda args: {
         "readiness": {
             "graph": {"status": "fail", "detail": "refused to run (exit 1): CBM CLI could not start"},
             "lsp": {"status": "ok", "detail": "ok"},
@@ -818,7 +818,7 @@ def test_codeintel_status_says_healthy_but_graph_degraded(monkeypatch, capsys):
         },
         "healthy": True, "degraded": ["graph"],
     })
-    assert import_module("codeintel.commands.status").run(_cli_args()) == 0
+    assert import_module("codeintel.cli.status").run(_cli_args()) == 0
     out = capsys.readouterr().out
 
     assert "healthy, but graph degraded" in out, out
@@ -828,10 +828,10 @@ def test_codeintel_status_says_healthy_but_graph_degraded(monkeypatch, capsys):
 def test_codeintel_status_prints_no_degraded_line_when_nothing_is(monkeypatch, capsys):
     from importlib import import_module
 
-    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+    monkeypatch.setattr("codeintel.transports.mcp.code_status_handler", lambda args: {
         "readiness": {"graph": {"status": "ok", "detail": "ok"}}, "healthy": True, "degraded": [],
     })
-    assert import_module("codeintel.commands.status").run(_cli_args()) == 0
+    assert import_module("codeintel.cli.status").run(_cli_args()) == 0
     assert "degraded" not in capsys.readouterr().out
 
 
@@ -847,5 +847,5 @@ def test_codeintel_doctor_says_healthy_but_graph_degraded_and_exits_zero(monkeyp
             root, deep=deep, graph=_Row(**_REFUSING_GRAPH), lsp=_Row(), semantic=_Row()))
     args = _cli_args()
     args.project_root = "/repo"
-    assert import_module("codeintel.commands.doctor").run(args) == 0
+    assert import_module("codeintel.cli.doctor").run(args) == 0
     assert "healthy, but graph degraded" in capsys.readouterr().out

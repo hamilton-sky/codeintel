@@ -9,7 +9,7 @@ contract](#safe-null-contract)).
 
 ```
                        ┌──────────────────────────────────┐
-   agent   (MCP)  ────▶│  Gateway  (gateway.py)            │
+   agent   (MCP)  ────▶│  Gateway  (gateway/)              │
    harness (HTTP) ────▶│   • op → engine routing           │
    human   (CLI)  ────▶│   • safe-null contract            │
                        │   • content-hash cache            │
@@ -31,7 +31,7 @@ flowchart TD
     A["AI agent · MCP stdio"] --> GW
     H["Harness · HTTP"] --> GW
     C["Developer · CLI"] --> GW
-    subgraph Gateway["Gateway — gateway.py"]
+    subgraph Gateway["Gateway — gateway/"]
       GW["op/engine routing · safe-null<br/>content-hash cache · tiering · reindex seam"]
     end
     GW -->|CodeProvider| GP[GraphProvider]
@@ -44,13 +44,33 @@ flowchart TD
 
 ## Layers
 
-| Layer | Files | Responsibility |
-|---|---|---|
-| **Transports** | `server.py` (MCP stdio), `http_server.py` (HTTP), `__main__.py` (CLI) | Accept a request, hand it to the gateway, return the envelope verbatim. |
-| **Gateway** | `gateway.py`, `cache.py`, `policy.py`, `reindexer.py` | Route by op/engine, fan out & merge, cache, enforce the contract, fire background reindex. |
-| **Protocol** | `provider.py` | The `CodeProvider` interface + the `Result` envelope + `safe_null_result`. |
-| **Providers** | `providers/graph.py`, `lsp.py`, `semantic.py`, `none.py` | One adapter per engine; each **never raises**. `GraphProvider` composes three sibling modules: `graph_backend.py` (`BackendClient`, the subprocess transport), `graph_resolution.py` (`ProjectResolver`), `graph_render.py` (path/label + render helpers), and `wire_text.py` (reads the `0.10.x` backend's text dialect back into the `0.9.x` shapes every renderer parses — see [graph.md](graph.md)). |
-| **Backends** | (external) + `indexer.py`, `semantic_db.py`, `searcher.py` | The actual intelligence — two wrapped, one in-house. |
+The package layout under `src/codeintel/` *is* the layering: six packages, top to bottom.
+
+| # | Layer | Package | Holds |
+|---|---|---|---|
+| 1 | **CLI** | `cli/`, `__main__.py` | Argument parsing (`__main__.py`) and one module per subcommand, each exposing `run(args) -> int`. |
+| 2 | **Transports** | `transports/` | `mcp.py` (MCP stdio server and its `code.*` tools), `http.py` (HTTP, loopback only), `metrics.py`. Accept a request, hand it to the gateway, return the envelope verbatim. |
+| 3 | **Tools** | `setup/`, `c4/`, `mapping/` | Everything that is not a query: install, onboarding, `doctor`, `verify`, `reset`, the agent prompt (`setup/`); the `codeintel c4` model, layer inference and layer check (`c4/`); the `CODE_INTEL.md` mapper, graph export and HTML viewer (`mapping/`). |
+| 4 | **Gateway** | `gateway/` | `gateway.py` routes by op/engine, fans out and merges, enforces the contract; `cache.py`, `policy.py` + `auth.py` (RBAC), `reindexer.py`; `factory.py` builds a gateway with whatever engines this machine can run, for every front door. |
+| 5 | **Engines** | `engines/graph/`, `engines/lsp/`, `engines/semantic/`, `engines/none.py` | One package per engine, each with a `provider.py` adapter that **never raises**. The graph adapter composes `backend.py` (`BackendClient`, the subprocess transport), `resolution.py` (`ProjectResolver`), `render.py` (path/label + render helpers), `wire_text.py` (reads the `0.10.x` backend's text dialect back into the `0.9.x` shapes every renderer parses; see [graph.md](graph.md)) and the op modules. The semantic engine is fully in-house: `indexer.py`, `db.py`, `searcher.py`. |
+| 6 | **Core** | `core/` | The `CodeProvider` protocol, the `Result` envelope and `safe_null_result` (`provider.py`), plus cross-cutting primitives every layer may use: `paths`, `config`, `redact`, `filelock`, `source_kind`, `containment`, `term`, `outcome`, … |
+
+**The rule:** an import may point down the table or stay inside its own layer, never up. Engines
+also never import each other: each is an independent adapter behind the protocol, which is what
+keeps "swap a backend" true. Shared code moves down to `core/`.
+
+The rule is enforced twice:
+
+- `tests/test_architecture.py` reads every import from the AST (function-local ones included) and
+  fails on an upward import or an engine-to-engine import. It needs no backend, so it runs on every
+  CI leg. The single deliberate engine exception (`engines/graph/symbol_diff.py` reuses the semantic
+  indexer's tree-sitter definition tables) is listed there with its reason.
+- `.codeintel.toml` declares the same layers, and CI's `c4-validate` job runs
+  `codeintel c4 . --check` on this repository: the product checking its own architecture from the
+  live graph. See [c4.md](c4.md#checking-a-declared-layer-config-in-ci).
+
+**Adding a module:** put it in the lowest layer whose code it needs. A new top-level module outside
+these packages fails `test_every_module_belongs_to_a_layer`.
 
 ## The CodeProvider protocol
 
@@ -128,7 +148,7 @@ flowchart LR
 
 ## Content-hash cache
 
-`cache.py` keys results by `(op, target, engine, project_root)` plus a freshness generation. A
+`gateway/cache.py` keys results by `(op, target, engine, project_root)` plus a freshness generation. A
 repeated query on an unchanged file is served from cache (`cached: true`); an edit changes the
 content hash and forces a refresh. This keeps hot paths cheap without ever serving stale results
 across an edit. Ops whose answer depends on live, unhashable state — the `changed` op reads the
@@ -137,7 +157,7 @@ single-engine and fan-out paths, since the content-hash key can't see that state
 
 ## Freshness / reindex seam
 
-`reindexer.py` fires a **debounced, fire-and-forget** background reindex (semantic + graph) from a
+`gateway/reindexer.py` fires a **debounced, fire-and-forget** background reindex (semantic + graph) from a
 query — it never blocks the response. Disabled with `CODEINTEL_REINDEX=off`. See
 [query-flow.md](query-flow.md) for where it sits in the request path.
 

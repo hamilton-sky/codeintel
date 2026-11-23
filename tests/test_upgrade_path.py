@@ -30,8 +30,8 @@ import pathlib
 
 import pytest
 
-from codeintel.doctor import collect_registrations
-from codeintel.installer import _CONFIG, Installer, registered_command, resolve_command
+from codeintel.setup.doctor import collect_registrations
+from codeintel.setup.installer import _CONFIG, Installer, registered_command, resolve_command
 
 AGENTS = ["claude", "codex", "gemini", "zed"]
 
@@ -53,7 +53,7 @@ def _install_binary_at(monkeypatch, bindir: pathlib.Path) -> str:
 
 
 def _config_path(agent: str) -> pathlib.Path:
-    from codeintel.installer import resolve_config_path
+    from codeintel.setup.installer import resolve_config_path
     return pathlib.Path(resolve_config_path(_CONFIG[agent]))
 
 

@@ -684,7 +684,7 @@ people:
 beside the existing check for a language `.serena/project.yml` never mentioned. Both answer *will it
 answer for this repo's code?*, which is the question `READY` does not.
 
-**The envelope** no longer asserts the emptiness. [`outcome.py`](../src/codeintel/outcome.py) gained
+**The envelope** no longer asserts the emptiness. [`outcome.py`](../src/codeintel/core/outcome.py) gained
 a `Missing` kind, `unresolvable`, for the state its original rule did not have a name for: `Ok([])`
 means "asked, and there is nothing" only when the backend was **in a position to know**. Where it
 was not, the same query now answers

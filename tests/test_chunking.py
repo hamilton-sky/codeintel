@@ -15,8 +15,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from codeintel.indexer import Indexer, _project_key
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer, _project_key
 
 
 class _FakeTextEmbedding:
@@ -369,8 +369,8 @@ def test_a_binary_file_with_a_source_extension_is_not_indexed(tmp_path):
     """A source extension is not a promise of source. A compiled artifact named `.py` was read
     with errors="replace" and embedded as replacement-character garbage — 196KB of random bytes
     produced 162 chunks — which then competed for rank against real code in every search."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     (tmp_path / "real.py").write_text("def hello():\n    return 1\n")
     (tmp_path / "blob.py").write_bytes(b"\x7fELF\x00\x00\x00" + os.urandom(4096))
@@ -387,8 +387,8 @@ def test_a_binary_file_with_a_source_extension_is_not_indexed(tmp_path):
 
 def test_utf8_source_with_unusual_characters_is_still_indexed(tmp_path):
     """Guard the guard: the NUL sniff must not reject legitimate non-ASCII source."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     (tmp_path / "unicode.py").write_text("# ünïcödé ✓ 日本語\ndef f():\n    return '→'\n",
                                          encoding="utf-8")
@@ -409,7 +409,7 @@ def test_only_chunks_with_word_content_are_embedded(text, indexed):
     """A chunk of separators or punctuation embeds to a vector that matches everything weakly and
     so surfaces for any query — a `---` front-matter fence was the top hit for a real search. The
     test is deliberately the weakest possible one: anything stricter rejects real one-line code."""
-    from codeintel.indexer import _has_substance
+    from codeintel.engines.semantic.indexer import _has_substance
 
     assert _has_substance(text) is indexed
 
@@ -418,8 +418,8 @@ def test_only_chunks_with_word_content_are_embedded(text, indexed):
 def test_generated_and_retired_trees_are_not_indexed(directory, tmp_path):
     """Graph scans excluded these; the semantic indexer did not, so archived docs and build output
     competed with live code for every search hit."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     (tmp_path / directory).mkdir()
     (tmp_path / directory / "old.py").write_text("def retired(): pass\n")
@@ -447,8 +447,8 @@ def test_generated_names_are_only_ignored_at_the_repo_root(path, indexed, tmp_pa
     """The ignore list matched a basename at ANY depth, so real packages vanished: pypa/build
     indexed 0 files, coverage.py's collector was unreachable, and a NestJS vendor module was gone.
     At the root these names are almost always output; one level down they are somebody's package."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     target = tmp_path / path
     target.parent.mkdir(parents=True, exist_ok=True)

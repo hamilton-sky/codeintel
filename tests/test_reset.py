@@ -12,13 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from codeintel import reset as _reset
-from codeintel.reset import run_reset
-from codeintel.semantic_db import default_db_path
+from codeintel.engines.semantic.db import default_db_path
+from codeintel.setup import reset as _reset
+from codeintel.setup.reset import run_reset
 
 
 def _seed(db_path, project_root_real, n=1):
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
     db = SemanticDb(str(db_path))
     db.init()
     c = db.conn()
@@ -150,7 +150,7 @@ def test_reset_actually_recovers_from_a_corrupt_cache(tmp_path, monkeypatch):
     "removed 0 indexed chunk(s)" and exited 0, leaving the user in a loop: doctor diagnoses the
     corruption and prescribes reset, reset no-ops and claims success, doctor repeats forever.
     """
-    from codeintel import reset as _reset
+    from codeintel.setup import reset as _reset
 
     db = tmp_path / "semantic.db"
     db.write_bytes(os.urandom(4096))                    # not a database
@@ -166,7 +166,7 @@ def test_reset_actually_recovers_from_a_corrupt_cache(tmp_path, monkeypatch):
 def test_a_reset_failure_is_not_reported_as_success(tmp_path, monkeypatch):
     """The aggregate summed per-file counts and synthesized its own success line, discarding the
     per-file error — which is how a failed reset became indistinguishable from a clean one."""
-    from codeintel import reset as _reset
+    from codeintel.setup import reset as _reset
 
     monkeypatch.setattr(_reset, "_reset_scoped",
                         lambda root, path, apply: {"count": 0, "error": "DatabaseError: nope",
@@ -179,7 +179,7 @@ def test_a_reset_failure_is_not_reported_as_success(tmp_path, monkeypatch):
 
 
 def test_a_healthy_reset_still_reports_plainly(tmp_path, monkeypatch):
-    from codeintel import reset as _reset
+    from codeintel.setup import reset as _reset
     monkeypatch.setattr(_reset, "_reset_scoped", lambda root, path, apply: {"count": 7})
     monkeypatch.setattr(_reset, "_cache_files", lambda: ["/tmp/whatever.db"])
     # No graph index for this repo → the message reads exactly as it did before the graph half existed.
@@ -361,7 +361,7 @@ def test_graph_slug_matches_the_backends_real_file_names():
     """The slug MUST match what codebase-memory-mcp actually writes (verified against live caches).
     A naive `/`→`-` replace double-dashes any component that starts with a separator-adjacent char
     and silently misses the file — the exact leak this pins shut."""
-    from codeintel.reset import _graph_slug
+    from codeintel.setup.reset import _graph_slug
     assert _graph_slug("/Users/me/Documents/aws-resource-tools") == "Users-me-Documents-aws-resource-tools"
     # a component that begins with '-' (real scratchpad paths do): runs collapse, no double dash
     assert _graph_slug("/private/tmp/x/-Users-me/scratchpad/mini") == "private-tmp-x-Users-me-scratchpad-mini"
@@ -372,7 +372,7 @@ def test_scoped_reset_also_clears_this_projects_graph_index(tmp_path, sandbox):
     """The gap this closes: `reset <repo>` used to clear only the semantic side, leaving the repo's
     graph index — and therefore the repo itself, since `list_projects` enumerates these files —
     fully present. A scoped reset now removes THIS project's graph index, and only this one's."""
-    from codeintel.reset import _graph_slug
+    from codeintel.setup.reset import _graph_slug
     graph = sandbox.graph
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -401,7 +401,7 @@ def test_scoped_reset_also_clears_this_projects_graph_index(tmp_path, sandbox):
 
 def test_scoped_reset_dry_run_finds_the_graph_index_without_removing_it(tmp_path, sandbox):
     """A scoped dry-run must report the graph index it *would* remove and leave it on disk."""
-    from codeintel.reset import _graph_slug
+    from codeintel.setup.reset import _graph_slug
     graph = sandbox.graph
     repo = tmp_path / "repo"
     repo.mkdir()

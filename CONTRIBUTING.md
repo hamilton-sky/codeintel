@@ -18,7 +18,7 @@ Providers, the gateway, and the HTTP handlers **must never propagate an exceptio
 Every path returns the fixed safe-null envelope (`{ok, op, target, result, engine, cached,
 reason?}`) or a well-formed HTTP JSON error. When you add a code path, add its fault-injection case
 to `tests/test_never_raise.py`. If you must swallow an error, route it through
-`codeintel.provider.log_swallowed(where, exc)` so `CODEINTEL_DEBUG=1` can surface it.
+`codeintel.core.provider.log_swallowed(where, exc)` so `CODEINTEL_DEBUG=1` can surface it.
 
 ## Guidelines
 

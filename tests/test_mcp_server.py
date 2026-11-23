@@ -6,7 +6,7 @@ field plus tool descriptions that say when to use each. These assert that wiring
 """
 from __future__ import annotations
 
-import codeintel.server as srv
+import codeintel.transports.mcp as srv
 
 
 def test_server_advertises_instructions_and_rich_tool_descriptions(monkeypatch):
@@ -140,7 +140,7 @@ def test_code_query_op_is_a_schema_enum_not_bare_prose(monkeypatch):
 
 
 def test_query_ops_module_matches_the_query_op_literal():
-    """`codeintel.query_ops.QUERY_OPS` is a dependency-free copy of this same op vocabulary, split
+    """`codeintel.core.query_ops.QUERY_OPS` is a dependency-free copy of this same op vocabulary, split
     out because `server.py` pulls in `mcp`/`anyio`/`pydantic` (~4.4s to import) — too heavy for
     `codeintel --help` or the CLI's `--op` parser to pay for just to know the op names
     (`test_importing_the_cli_does_not_pull_in_any_engine`). Nothing else keeps the two definitions
@@ -154,13 +154,13 @@ def test_query_ops_module_matches_the_query_op_literal():
     the other's, so cross-module order is not load-bearing. Only membership is."""
     from typing import get_args
 
-    from codeintel.query_ops import QUERY_OPS
-    from codeintel.server import _QueryOp
+    from codeintel.core.query_ops import QUERY_OPS
+    from codeintel.transports.mcp import _QueryOp
 
     literal_ops = set(get_args(_QueryOp))
     tuple_ops = set(QUERY_OPS)
     assert literal_ops == tuple_ops, (
-        "codeintel.server._QueryOp and codeintel.query_ops.QUERY_OPS have drifted apart — "
+        "codeintel.transports.mcp._QueryOp and codeintel.core.query_ops.QUERY_OPS have drifted apart — "
         f"only in server._QueryOp: {sorted(literal_ops - tuple_ops)}; "
         f"only in query_ops.QUERY_OPS: {sorted(tuple_ops - literal_ops)}. "
         "Update whichever one is missing the other's ops."
@@ -242,8 +242,8 @@ def test_every_op_is_labelled_with_what_its_answer_supports(monkeypatch):
     """
     from typing import get_args
 
-    from codeintel.provider import _OP_CEILING
-    from codeintel.server import _QueryOp
+    from codeintel.core.provider import _OP_CEILING
+    from codeintel.transports.mcp import _QueryOp
 
     description = _query_input_schema(monkeypatch)["properties"]["op"]["description"]
 

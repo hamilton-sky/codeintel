@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from codeintel import doctor
+from codeintel.setup import doctor
 
 
 def _module_with(tmp_path, in_memory: str, on_disk: str) -> types.ModuleType:
@@ -96,7 +96,7 @@ def test_never_raises_on_a_hostile_module(fake_codeintel):
 def test_status_surfaces_the_skew(monkeypatch, tmp_path, fake_codeintel):
     # The field has to reach `code.status`, not just `doctor`: status is what a caller checks when
     # an expected fix appears to be missing.
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     fake_codeintel(_module_with(tmp_path, in_memory="0.15.3", on_disk="0.15.4"))
     monkeypatch.setattr(
@@ -118,7 +118,7 @@ def test_status_surfaces_the_skew(monkeypatch, tmp_path, fake_codeintel):
 def test_status_fallback_carries_the_key():
     # Shape stability: a caller that reads `version_skew` must not KeyError on the degraded path,
     # or the check silently stops running exactly when things are worst.
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     assert "version_skew" in server._STATUS_FALLBACK
     assert server._STATUS_FALLBACK["version_skew"] is None

@@ -17,7 +17,7 @@ import json
 import os
 from pathlib import Path
 
-from codeintel.installer import (
+from codeintel.setup.installer import (
     _CONFIG,
     Installer,
     detect_agents,
@@ -211,7 +211,7 @@ def test_register_can_verify_the_handshake(tmp_path, monkeypatch):
         calls.append((command, args))
         return {"ok": True, "tools": ["code.query"], "server": None, "detail": "stub"}
 
-    monkeypatch.setattr("codeintel.verify.verify_stdio_server", _fake)
+    monkeypatch.setattr("codeintel.setup.verify.verify_stdio_server", _fake)
 
     res = Installer().register("claude", verify=True)
 
@@ -226,7 +226,7 @@ def test_failed_verification_is_reported_on_the_result(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(
-        "codeintel.verify.verify_stdio_server",
+        "codeintel.setup.verify.verify_stdio_server",
         lambda *a, **k: {"ok": False, "tools": [], "server": None, "detail": "not on PATH"},
     )
     res = Installer().register("claude", verify=True)
@@ -242,7 +242,7 @@ def test_verification_runs_once_for_register_all(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     calls: list = []
     monkeypatch.setattr(
-        "codeintel.verify.verify_stdio_server",
+        "codeintel.setup.verify.verify_stdio_server",
         lambda *a, **k: (calls.append(1), {"ok": True, "tools": ["t"], "server": None,
                                            "detail": "stub"})[1],
     )
@@ -255,7 +255,7 @@ def test_verification_never_raises_out_of_register(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(
-        "codeintel.verify.verify_stdio_server",
+        "codeintel.setup.verify.verify_stdio_server",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     res = Installer().register("claude", verify=True)
@@ -456,7 +456,7 @@ def test_doctor_reports_a_stale_absolute_command(tmp_path, monkeypatch):
     """The one regression absolute paths introduce: an upgrade moves the binary and the config
     points at nothing. Invisible from inside the agent — the host just says the server won't
     start — so doctor has to name it."""
-    from codeintel.doctor import collect_registrations
+    from codeintel.setup.doctor import collect_registrations
 
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_agent_envs(monkeypatch)
@@ -479,7 +479,7 @@ def test_doctor_reports_a_live_registration_as_runnable(tmp_path, monkeypatch, c
     perfectly correct doctor reported `runnable: False`. That is a missing prerequisite, not a
     regression, and the fixture states which by pinning PATH to this checkout's script or skipping.
     """
-    from codeintel.doctor import collect_registrations
+    from codeintel.setup.doctor import collect_registrations
 
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_agent_envs(monkeypatch)
@@ -491,7 +491,7 @@ def test_doctor_reports_a_live_registration_as_runnable(tmp_path, monkeypatch, c
 
 
 def test_registered_command_reads_back_every_config_format(tmp_path, monkeypatch):
-    from codeintel.installer import registered_command
+    from codeintel.setup.installer import registered_command
 
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_agent_envs(monkeypatch)
@@ -502,7 +502,7 @@ def test_registered_command_reads_back_every_config_format(tmp_path, monkeypatch
 
 
 def test_registered_command_is_none_when_absent(tmp_path, monkeypatch):
-    from codeintel.installer import registered_command
+    from codeintel.setup.installer import registered_command
 
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_agent_envs(monkeypatch)
@@ -514,8 +514,8 @@ def test_registered_command_is_none_when_absent(tmp_path, monkeypatch):
 
 
 def test_registered_command_never_raises_on_a_corrupt_config(tmp_path, monkeypatch):
-    from codeintel.doctor import collect_registrations
-    from codeintel.installer import registered_command
+    from codeintel.setup.doctor import collect_registrations
+    from codeintel.setup.installer import registered_command
 
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_agent_envs(monkeypatch)

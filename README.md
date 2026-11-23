@@ -265,7 +265,7 @@ model {
       providers = area 'providers' {
         lsp = module 'lsp' {
           technology 'Python'
-          metadata { path 'src/codeintel/providers/lsp.py'  churn '12'  fan_out '2' }
+          metadata { path 'src/codeintel/engines/lsp/provider.py'  churn '12'  fan_out '2' }
         }
         graph = module 'graph' { /* … */ }
       }
@@ -589,7 +589,7 @@ jobs cover the contract itself: `graph-contract` installs the pinned `codebase-m
 the live graph tests — and **fails if they skipped**, because a silently-skipped contract test is
 how a total backend outage stayed green here once — while the nightly corpus job runs that same
 real backend against pinned third-party repositories. `lsp-contract` runs the live serena tests
-against the exact serena commit the provider launches (`providers/lsp.py`'s `_SERENA_REV`), and it
+against the exact serena commit the provider launches (`engines/lsp/provider.py`'s `_SERENA_REV`), and it
 **gates**: a serena regression turns CI red, and moving to a newer serena means bumping that pin
 with the contract job green against it. The release canary — the only check that
 asserts on real answer text from a built wheel — still covers **the semantic engine only**.

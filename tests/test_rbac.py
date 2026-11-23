@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from codeintel.auth import TokenAuth, load_auth
-from codeintel.http_server import CodeIntelHTTPServer, _Handler
-from codeintel.reindexer import Reindexer
+from codeintel.gateway.auth import TokenAuth, load_auth
+from codeintel.gateway.reindexer import Reindexer
+from codeintel.transports.http import CodeIntelHTTPServer, _Handler
 
 # A request that reaches a live graph/LSP backend legitimately takes seconds: the backend is a
 # native binary that re-initialises per invocation (~6s measured). The old 5s client timeout was
@@ -73,7 +73,7 @@ def rbac_server(tmp_path, monkeypatch):
         '[tokens]\n"admintok" = "admin"\n"readertok" = "reader"\n'
     )
     monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(tmp_path / "auth.toml"))
-    from codeintel import server as srv
+    from codeintel.transports import mcp as srv
     srv._reset_gateway()  # rebuild the gateway so its policy reflects THIS auth config
     s = CodeIntelHTTPServer(("127.0.0.1", 0), _Handler)
     s.token_auth = load_auth()  # the same config the gateway policy is built from
@@ -134,7 +134,7 @@ def test_the_http_transport_never_answers_from_the_servers_own_cwd(rbac_server, 
     have been started in — that serves one repo's structure to someone who asked about nothing.
     """
     called: list[str] = []
-    import codeintel.server as srv
+    import codeintel.transports.mcp as srv
     monkeypatch.setattr(srv.os, "getcwd", lambda: called.append("getcwd") or "/should/not/be/used")
 
     status, body = _query(rbac_server, {"op": "search", "target": "x"}, token="admintok")
@@ -148,7 +148,7 @@ def test_the_cwd_default_survives_on_the_stdio_path(monkeypatch, tmp_path):
 
     Pinned at the handler, since only `http_server` sets `allow_cwd_default=False`.
     """
-    import codeintel.server as srv
+    import codeintel.transports.mcp as srv
     monkeypatch.setattr(srv.os, "getcwd", lambda: str(tmp_path))
     seen: dict = {}
 
@@ -212,9 +212,9 @@ def test_rbac_admin_allowed_doctor(rbac_server):
 
 
 def test_denied_op_does_no_reindex_work(monkeypatch):
-    from codeintel.gateway import Gateway
-    from codeintel.policy import TieringPolicy
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.policy import TieringPolicy
+    from codeintel.gateway.reindexer import Reindexer
     rx = Reindexer()
     calls = {"n": 0}
     monkeypatch.setattr(rx, "maybe_reindex", lambda root: calls.__setitem__("n", calls["n"] + 1))
@@ -244,8 +244,8 @@ def test_rbac_healthz_still_unauthenticated(rbac_server):
 # server before the fix. These pin the closure.
 
 def _scoped(roots, rules=None):
-    from codeintel.gateway import Gateway
-    from codeintel.policy import TieringPolicy
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.policy import TieringPolicy
     return Gateway(graph=None, lsp=None, semantic=None,
                    policy=TieringPolicy(enabled=True, rules=rules or {}, roots=roots),
                    reindexer=Reindexer())
@@ -322,8 +322,8 @@ def test_a_wildcard_root_is_unrestricted(tmp_path):
 def test_scoping_is_inert_when_rbac_is_off(tmp_path):
     """The local stdio path passes role="" with RBAC disabled — it must stay unrestricted, or
     every ordinary `codeintel query` breaks."""
-    from codeintel.gateway import Gateway
-    from codeintel.policy import TieringPolicy
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.policy import TieringPolicy
     gw = Gateway(graph=None, lsp=None, semantic=None,
                  policy=TieringPolicy(enabled=False), reindexer=Reindexer())
     res = gw.query(op="search", target="x", role="", project_root=str(tmp_path))
@@ -333,8 +333,8 @@ def test_scoping_is_inert_when_rbac_is_off(tmp_path):
 def test_a_denied_root_does_no_work_at_all(tmp_path, monkeypatch):
     """The denial must land BEFORE maybe_reindex: an out-of-scope path must not even be walked,
     or the check leaks existence and burns the exact indexing work it is meant to prevent."""
-    from codeintel.gateway import Gateway
-    from codeintel.policy import TieringPolicy
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.policy import TieringPolicy
     rx = Reindexer()
     calls = {"n": 0}
     monkeypatch.setattr(rx, "maybe_reindex", lambda root: calls.__setitem__("n", calls["n"] + 1))
@@ -392,8 +392,8 @@ def test_a_planted_symlink_cannot_smuggle_a_file_out_of_an_indexed_root(tmp_path
     server can read and have it indexed, embedded, and returned as a snippet: a complete bypass one
     directory level down. Demonstrated before this guard existed.
     """
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     allowed, outside = tmp_path / "allowed", tmp_path / "outside"
     allowed.mkdir(); outside.mkdir()
@@ -417,10 +417,10 @@ def test_a_planted_symlink_cannot_smuggle_a_file_out_of_an_indexed_root(tmp_path
         # And the same property end to end, once the weights are actually present. Kept rather
         # than replaced: `_walk_files` is an internal seam, and only this half proves the smuggled
         # content never reaches a rendered search snippet.
-        from codeintel.semantic_db import DEFAULT_MODEL, model_is_cached
+        from codeintel.engines.semantic.db import DEFAULT_MODEL, model_is_cached
         if model_is_cached(DEFAULT_MODEL) is True:
             Indexer(db).index(str(allowed))
-            from codeintel.searcher import Searcher
+            from codeintel.engines.semantic.searcher import Searcher
             hits = {h.get("path") for h in Searcher(db).search("stolen secret", str(allowed))}
             assert "planted.py" not in hits, "a symlink escaped the indexed root"
             assert "fine.py" in hits, "the guard must not also drop legitimate in-root files"
@@ -432,7 +432,7 @@ def test_a_blank_project_root_is_denied_rather_than_meaning_the_server_cwd(tmp_p
     """`os.path.realpath("")` is the process's cwd, not an error — so a missing project_root
     silently resolved to wherever the server was launched, and passed whenever that happened to
     sit under an allowed root."""
-    from codeintel.policy import TieringPolicy
+    from codeintel.gateway.policy import TieringPolicy
 
     monkeypatch.chdir(tmp_path)
     policy = TieringPolicy(enabled=True, roots={"reader": [str(tmp_path)]})
@@ -449,8 +449,8 @@ def test_a_hardlink_cannot_smuggle_a_file_into_an_indexed_root(tmp_path):
     write in their own root could `ln` another tenant's file in and have it indexed. There is no
     way to ask "does this inode also live outside?", so extra links disqualify.
     """
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     allowed, secret = tmp_path / "allowed", tmp_path / "secret"
     allowed.mkdir(); secret.mkdir()
@@ -474,8 +474,8 @@ def test_a_hardlink_cannot_smuggle_a_file_into_an_indexed_root(tmp_path):
 
 def test_ordinary_single_link_files_are_still_indexed(tmp_path):
     """Guard the guard: the link-count check must not quietly exclude normal source files."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     for name in ("a.py", "b.py", "c.md"):
         (tmp_path / name).write_text("x = 1\n")
@@ -494,7 +494,7 @@ def test_a_blank_entry_in_a_roots_list_does_not_grant_the_server_cwd(blank, monk
     """The one fail-OPEN case in an otherwise fail-closed model: `_normalize_root("")` is the
     process cwd, not "", so a stray empty string or trailing-comma artifact silently added
     "wherever the server was launched" to the allowlist."""
-    from codeintel.policy import TieringPolicy
+    from codeintel.gateway.policy import TieringPolicy
 
     monkeypatch.chdir(tmp_path)
     policy = TieringPolicy(enabled=True, roots={"reader": ["/srv/allowed", blank]})
@@ -515,8 +515,8 @@ def test_a_blank_entry_in_a_roots_list_does_not_grant_the_server_cwd(blank, monk
 
 def test_a_symlink_planted_after_indexing_cannot_be_read_back(tmp_path):
     """The post-index swap: index a real file, then point it outside the root."""
-    from codeintel.containment import ContainmentError, contained_path, real_root
-    from codeintel.searcher import Searcher
+    from codeintel.core.containment import ContainmentError, contained_path, real_root
+    from codeintel.engines.semantic.searcher import Searcher
 
     allowed, outside = tmp_path / "allowed", tmp_path / "outside"
     allowed.mkdir(); outside.mkdir()
@@ -535,7 +535,7 @@ def test_a_symlink_planted_after_indexing_cannot_be_read_back(tmp_path):
     assert contained_path(root_real, bait) is None
     # ...the raw read raises rather than returning bytes...
     with pytest.raises(ContainmentError):
-        from codeintel.containment import open_contained
+        from codeintel.core.containment import open_contained
         open_contained(root_real, bait)
     # ...and the searcher's snippet path returns a refusal, never the canary.
     s = Searcher.__new__(Searcher)
@@ -548,8 +548,8 @@ def test_a_symlink_planted_after_indexing_cannot_be_read_back(tmp_path):
 def test_a_hardlink_planted_after_indexing_cannot_be_read_back(tmp_path):
     """The same swap using a hard link, whose realpath stays inside the root — so only the
     link-count check can see it."""
-    from codeintel.containment import contained_path, real_root
-    from codeintel.searcher import Searcher
+    from codeintel.core.containment import contained_path, real_root
+    from codeintel.engines.semantic.searcher import Searcher
 
     allowed, outside = tmp_path / "allowed", tmp_path / "outside"
     allowed.mkdir(); outside.mkdir()
@@ -577,14 +577,14 @@ def test_an_ordinary_deletion_is_not_reported_as_a_containment_escape(tmp_path, 
     been planted. False alarms on routine events are how real ones get ignored."""
     import logging
 
-    from codeintel.containment import ContainmentError, open_contained, real_root
+    from codeintel.core.containment import ContainmentError, open_contained, real_root
 
     gone = tmp_path / "gone.py"
     gone.write_text("def ok():\n    return 1\n")
     root_real = real_root(str(tmp_path))
     gone.unlink()
 
-    with caplog.at_level(logging.WARNING, logger="codeintel.containment"):
+    with caplog.at_level(logging.WARNING, logger="codeintel.core.containment"):
         with pytest.raises(FileNotFoundError):
             open_contained(root_real, gone)
         # ...and specifically NOT the escape exception, which callers render as a refusal.
@@ -605,10 +605,10 @@ def test_a_swapped_file_is_refused_through_the_real_search_path(tmp_path):
     test noticing. Assert it end to end, on the path an agent's query really takes."""
     import numpy as np
 
-    from codeintel.containment import real_root
-    from codeintel.indexer import Indexer
-    from codeintel.searcher import Searcher
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.core.containment import real_root
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
+    from codeintel.engines.semantic.searcher import Searcher
 
     class _Flat:
         def __init__(self, model_name=None):
@@ -642,7 +642,7 @@ def test_a_swapped_file_is_refused_through_the_real_search_path(tmp_path):
 def test_the_stale_row_of_a_swapped_file_is_reconciled_away(tmp_path):
     """`_cleanup_deleted` used `.exists()`, which follows a symlink to an existing target — so the
     row for a swapped file survived every reindex and kept the hole open indefinitely."""
-    from codeintel.containment import contained_path, real_root
+    from codeintel.core.containment import contained_path, real_root
 
     allowed, outside = tmp_path / "allowed", tmp_path / "outside"
     allowed.mkdir(); outside.mkdir()
@@ -659,7 +659,7 @@ def test_the_stale_row_of_a_swapped_file_is_reconciled_away(tmp_path):
 def test_containment_does_not_reject_legitimate_files(tmp_path):
     """The guard must not also drop ordinary in-root files, including through a symlinked ROOT —
     a repo reached via /var -> /private/var on macOS, or any symlinked home directory."""
-    from codeintel.containment import contained_path, real_root
+    from codeintel.core.containment import contained_path, real_root
 
     real_dir = tmp_path / "real"; real_dir.mkdir()
     (real_dir / "fine.py").write_text("def ok(): pass\n")
@@ -678,7 +678,7 @@ def test_containment_does_not_reject_legitimate_files(tmp_path):
 def test_a_sibling_directory_sharing_a_prefix_is_not_inside_the_root(tmp_path):
     """`/srv/repo-secrets` must not count as inside `/srv/repo` — a plain string prefix compare
     would say it is."""
-    from codeintel.containment import contained_path, real_root
+    from codeintel.core.containment import contained_path, real_root
 
     (tmp_path / "repo").mkdir()
     (tmp_path / "repo-secrets").mkdir()
@@ -706,7 +706,7 @@ def root_scoped_server(tmp_path, monkeypatch):
         '[tokens]\n"readertok" = "reader"\n'
     )
     monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(tmp_path / "auth.toml"))
-    from codeintel import server as srv
+    from codeintel.transports import mcp as srv
     srv._reset_gateway()
     s = CodeIntelHTTPServer(("127.0.0.1", 0), _Handler)
     s.token_auth = load_auth()

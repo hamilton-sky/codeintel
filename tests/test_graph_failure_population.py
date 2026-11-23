@@ -17,10 +17,10 @@ from __future__ import annotations
 import pathlib
 import threading
 
-from codeintel.graph_backend import BackendClient
-from codeintel.graph_resolution import ProjectResolver
-from codeintel.outcome import Missing
-from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
+from codeintel.core.outcome import Missing
+from codeintel.engines.graph.backend import BackendClient
+from codeintel.engines.graph.provider import GraphProvider, ProjectLookup, ProjectResolution
+from codeintel.engines.graph.resolution import ProjectResolver
 
 # Ops `_dispatch` does not route as an ordinary user-facing op, recorded as DATA rather than
 # silently skipped — a hand-typed exclusion list without a reason is exactly the domain-shrinking
@@ -431,7 +431,7 @@ def test_a_hint_that_matches_nothing_is_not_reported_as_having_no_callees():
 def test_a_truncated_callee_list_says_it_was_truncated():
     """The query caps rows. A list cut off at the cap reads exactly like a complete one, which is
     the same defect as a filtered list reading as complete."""
-    from codeintel.graph_edges import _EDGE_ROW_LIMIT
+    from codeintel.engines.graph.edges import _EDGE_ROW_LIMIT
 
     rows = [{
         "b.name": f"callee_{i}", "b.qualified_name": f"pkg.callee_{i}",
@@ -560,8 +560,8 @@ def test_a_filename_is_never_read_as_a_qualified_target():
     for `ts` — a symbol nobody asked about, on a repository where 985 names took exactly this shape
     (CHANGELOG 0.15.x, `_strip_project_prefix`). The extension population is derived from the
     source's own set, so a language added there is covered here without anyone remembering."""
-    from codeintel.graph_render import _FILE_EXTENSIONS
-    from codeintel.graph_targets import _parse_symbol_target
+    from codeintel.engines.graph.render import _FILE_EXTENSIONS
+    from codeintel.engines.graph.targets import _parse_symbol_target
 
     for ext in sorted(_FILE_EXTENSIONS):
         name = f"use-toast.{ext}"
@@ -571,7 +571,7 @@ def test_a_filename_is_never_read_as_a_qualified_target():
 
 
 def test_target_parsing_keeps_its_hands_off_what_is_not_a_hint():
-    from codeintel.graph_targets import _parse_symbol_target
+    from codeintel.engines.graph.targets import _parse_symbol_target
 
     plain = _parse_symbol_target("handle")
     assert (plain.name, plain.qualified, plain.file_hint) == ("handle", "", "")
@@ -590,7 +590,7 @@ def test_target_parsing_keeps_its_hands_off_what_is_not_a_hint():
 def test_a_qualified_hint_must_match_whole_segments():
     """`routes.handle` naming `api.myroutes.handle` would silently answer about the wrong symbol,
     which is the failure this whole mechanism exists to prevent."""
-    from codeintel.graph_targets import _qualified_name_matches
+    from codeintel.engines.graph.targets import _qualified_name_matches
 
     assert _qualified_name_matches("proj.api.routes.handle", "routes.handle")
     assert _qualified_name_matches("proj.api.routes.handle", "api.routes.handle")
@@ -602,7 +602,7 @@ def test_a_qualified_hint_must_match_whole_segments():
 
 
 def test_a_file_hint_must_match_whole_path_segments():
-    from codeintel.graph_targets import _file_path_matches
+    from codeintel.engines.graph.targets import _file_path_matches
 
     assert _file_path_matches("src/api/routes.py", "routes.py")
     assert _file_path_matches("src/api/routes.py", "api/routes.py")
@@ -733,7 +733,7 @@ def test_both_edge_ops_render_through_one_renderer():
 def test_module_scope_node_classifier_reads_both_wire_shapes():
     """The label arrives JSON-encoded (`'["File"]'`) over the real wire and as a plain list from the
     mocked backend; both must classify, and a callable label or a missing one never must."""
-    from codeintel.graph_render import _is_module_scope_node, _node_labels
+    from codeintel.engines.graph.render import _is_module_scope_node, _node_labels
 
     for container in ('["File"]', '["Module"]', ["File"], ["Module"], "File"):
         assert _is_module_scope_node(container), container

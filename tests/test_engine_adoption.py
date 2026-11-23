@@ -11,8 +11,8 @@ warmed provider is never replaced in the process.
 """
 from __future__ import annotations
 
-import codeintel.server as srv
-from codeintel.gateway import Gateway
+import codeintel.transports.mcp as srv
+from codeintel.gateway.gateway import Gateway
 
 
 class _FakeProvider:
@@ -110,7 +110,7 @@ def test_status_reporting_an_engine_runnable_implies_query_can_reach_it(monkeypa
     monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
 
     appeared = _FakeProvider()
-    import codeintel.doctor as _doctor
+    import codeintel.setup.doctor as _doctor
     monkeypatch.setattr(_doctor, "_probe_engine", _probe_stub(appeared), raising=True)
 
     status = srv.code_status_handler({"project_root": "/repo"})
@@ -128,7 +128,7 @@ def test_doctor_adopts_an_engine_so_its_own_remediation_converges(monkeypatch):
     monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
 
     appeared = _FakeProvider()
-    import codeintel.doctor as _doctor
+    import codeintel.setup.doctor as _doctor
     monkeypatch.setattr(_doctor, "_probe_engine", _probe_stub(appeared), raising=True)
 
     srv.code_doctor_handler({"project_root": "/repo"})

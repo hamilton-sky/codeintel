@@ -193,7 +193,7 @@ _PLANTED_RESOLVED = getattr(sys.modules[__name__], "_planted_live_by_string")
 # --------------------------------------------------------------------------- helpers
 
 def _graph():
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     p = GraphProvider()
     if not p.available:
@@ -253,7 +253,7 @@ def test_no_result_cites_a_generated_or_ignored_file(corpus_repo):
     """Generated content must not appear in a ranking. Checked against two oracles the project did
     not previously consult — its own shape heuristic, and `git check-ignore`, which is the
     repository's own statement about what is not source."""
-    from codeintel.source_kind import looks_generated_path
+    from codeintel.core.source_kind import looks_generated_path
 
     p = _indexed_graph(corpus_repo)
     offenders: list[str] = []
@@ -315,8 +315,8 @@ def test_generated_content_stays_out_of_the_corpus(corpus_repo):
     planted bundle sits in `assets/` — a name on no skip list — so only the content-shape heuristic
     can exclude it, and the symlink resolves outside the root so only containment can.
     """
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     db = SemanticDb(os.path.join(_CACHE, "walk.sqlite"))
     db.init()
@@ -475,7 +475,7 @@ def test_callers_render_module_scope_as_a_location_not_a_pseudo_symbol(corpus_re
     filename. Every such node must be caught by the module-scope filter, so a new container label the
     backend introduces fails here instead of rendering as a fiction again.
     """
-    from codeintel.graph_render import _FILE_EXTENSIONS, _is_module_scope_node, _strip_project_prefix
+    from codeintel.engines.graph.render import _FILE_EXTENSIONS, _is_module_scope_node, _strip_project_prefix
 
     p = _indexed_graph(corpus_repo)
     proj = _project_name(p, corpus_repo)
@@ -547,7 +547,7 @@ def test_the_same_query_gives_the_same_answer_in_a_fresh_process(corpus_repo):
     _indexed_graph(corpus_repo)          # ensure indexed before the subprocesses run
     prog = (
         "import json,sys;"
-        "from codeintel.providers.graph import GraphProvider;"
+        "from codeintel.engines.graph.provider import GraphProvider;"
         "p=GraphProvider();"
         f"r=p.build_result('hotspots','',[],60000,{corpus_repo!r});"
         "print(json.dumps(r.get('result')))"
@@ -621,8 +621,8 @@ def _python_definitions(repo: str) -> list[_Definition]:
     The candidate population for the measurement. Files the product itself considers out of scope
     (generated, archived) are skipped using the product's own predicates rather than a second
     hand-typed copy of them."""
-    from codeintel.graph_render import _ARCHIVE_DIRS, _VERIFY_SKIP_DIRS
-    from codeintel.source_kind import looks_generated_path, looks_generated_text
+    from codeintel.core.source_kind import looks_generated_path, looks_generated_text
+    from codeintel.engines.graph.render import _ARCHIVE_DIRS, _VERIFY_SKIP_DIRS
 
     found: list[_Definition] = []
     for dirpath, dirnames, filenames in os.walk(repo):

@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from codeintel.providers.lsp import LspProvider
+from codeintel.engines.lsp.provider import LspProvider
 
 
 def _repo(tmp_path, langs: list[str], files: dict[str, int]):
@@ -80,7 +80,7 @@ def test_an_unserved_language_makes_the_deep_probe_not_runnable(tmp_path, monkey
     monkeypatch.setattr(p, "_unserved_note", lambda r: ("— unserved", "fix it"))
 
     class _Ready:
-        state = __import__("codeintel.providers.lsp", fromlist=["_State"])._State.READY
+        state = __import__("codeintel.engines.lsp.provider", fromlist=["_State"])._State.READY
         _lock = __import__("threading").Lock()
 
     monkeypatch.setattr(p, "_get_or_create_session", lambda root: _Ready())
@@ -164,7 +164,7 @@ def test_a_missing_typescript_project_makes_the_deep_probe_not_runnable(tmp_path
         pytest.skip("neither serena nor uvx on PATH")
 
     class _Ready:
-        state = __import__("codeintel.providers.lsp", fromlist=["_State"])._State.READY
+        state = __import__("codeintel.engines.lsp.provider", fromlist=["_State"])._State.READY
         _lock = __import__("threading").Lock()
 
     monkeypatch.setattr(p, "_get_or_create_session", lambda root: _Ready())

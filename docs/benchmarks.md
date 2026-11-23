@@ -169,7 +169,7 @@ page cache), and run several passes rather than one — a single pass on a cold 
 ```bash
 CODEINTEL_HOME=/tmp/ci-bench PYTHONPATH=src .venv/bin/python -c '
 import os, statistics, time
-from codeintel.providers.semantic import SemanticProvider
+from codeintel.engines.semantic.provider import SemanticProvider
 p, root = SemanticProvider(), os.path.expanduser("/path/to/large-repo")
 ts = []
 for i in range(11):

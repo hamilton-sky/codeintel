@@ -6,8 +6,8 @@ import http.client
 import json
 import threading
 
-from codeintel.http_server import CodeIntelHTTPServer, _Handler
-from codeintel.metrics import Metrics
+from codeintel.transports.http import CodeIntelHTTPServer, _Handler
+from codeintel.transports.metrics import Metrics
 
 
 def _serve(token=None):
@@ -120,7 +120,7 @@ def test_metrics_exposes_rejected_and_in_flight():
 def test_run_refuses_non_loopback_without_auth(monkeypatch):
     import pytest
 
-    from codeintel.http_server import run
+    from codeintel.transports.http import run
     monkeypatch.delenv("CODEINTEL_ALLOW_NO_AUTH", raising=False)
     # non-loopback + --allow-remote but NO token and no override → must fail closed, not bind.
     with pytest.raises(SystemExit):
@@ -130,7 +130,7 @@ def test_run_refuses_non_loopback_without_auth(monkeypatch):
 def test_run_refuses_non_loopback_without_allow_remote():
     import pytest
 
-    from codeintel.http_server import run
+    from codeintel.transports.http import run
     with pytest.raises(SystemExit):
         run(host="0.0.0.0", port=0, allow_remote=False, token="tok")
 
@@ -141,7 +141,7 @@ def test_json_log_formatter_emits_valid_json():
     import json
     import logging
 
-    from codeintel.logconfig import _JsonFormatter
+    from codeintel.core.logconfig import _JsonFormatter
 
     rec = logging.LogRecord("codeintel", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
     parsed = json.loads(_JsonFormatter().format(rec))

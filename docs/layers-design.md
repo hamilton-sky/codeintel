@@ -8,7 +8,7 @@
 Status: **design only.** Nothing here is implemented. This document decides *how*, so an
 implementation session does not have to re-litigate it.
 
-Companion reading: [`docs/c4.md`](c4.md) (what `c4` does today), `src/codeintel/c4.py` (how).
+Companion reading: [`docs/c4.md`](c4.md) (what `c4` does today), `src/codeintel/c4/model.py` (how).
 
 ---
 
@@ -50,13 +50,13 @@ But the interesting question is *why* those cycles exist, because the answer dec
 Then I widened it. Every `CALLS|USAGE` edge pointing into `cache.py`:
 
 ```
-MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.file_path STARTS WITH 'src/codeintel/cache.py'
+MATCH (a)-[c:CALLS|USAGE]->(b) WHERE b.file_path STARTS WITH 'src/codeintel/gateway/cache.py'
 RETURN a.file_path, b.name, count(*) LIMIT 60
 ```
 
 **54 of the 60 rows returned target a symbol named `get`** (the query hit its own 60-row limit, so
-there are likely more). The sources include `src/codeintel/paths.py`, `src/codeintel/term.py`,
-`src/codeintel/source_kind.py`, `src/codeintel/logconfig.py`, twelve `tests/*` files, and
+there are likely more). The sources include `src/codeintel/core/paths.py`, `src/codeintel/core/term.py`,
+`src/codeintel/core/source_kind.py`, `src/codeintel/core/logconfig.py`, twelve `tests/*` files, and
 `scripts/release_canary.py`. Every `dict.get(...)` in the repository is being attributed to
 `ContentHashCache.get`, because it is the only user-defined `get` in the project. The six rows that
 are *not* `get` are the real ones: `gateway → ContentHashCache`, `gateway → put`, `gateway →
@@ -227,7 +227,7 @@ verbatim, and `tests/test_config.py:63` pins that behaviour. So a `[layers]` tab
 It survives *unvalidated*, though. `_DEFAULTS` and `_ENUMS` are scalar- and enum-shaped; a nested
 table does not fit `_coerce`'s model and forcing it in would distort a module whose contract is
 "every key degrades to a default." So **`c4` validates the layers block itself**, in a new
-`c4_layers.py`, under the same never-raise / degrade-and-report contract as the rest of the module.
+`c4/layers.py`, under the same never-raise / degrade-and-report contract as the rest of the module.
 A malformed `[layers]` yields a named `reason`, not a traceback, and not a silently empty check.
 
 This repo currently has no `.codeintel.toml`. The layers feature would be the first reason to write
@@ -246,16 +246,16 @@ allow_same_layer = true    # false: a same-layer import is a violation
 require_all      = false   # true: an element matching no layer is a finding
 
 [layers.members]
-cli       = ["src/codeintel/commands/**", "src/codeintel/__main__.py"]
-server    = ["src/codeintel/server.py", "src/codeintel/http_server.py"]
-gateway   = ["src/codeintel/gateway.py", "src/codeintel/policy.py", "src/codeintel/auth.py"]
-providers = ["src/codeintel/providers/**"]
+cli       = ["src/codeintel/cli/**", "src/codeintel/__main__.py"]
+server    = ["src/codeintel/transports/mcp.py", "src/codeintel/transports/http.py"]
+gateway   = ["src/codeintel/gateway/gateway.py", "src/codeintel/gateway/policy.py", "src/codeintel/gateway/auth.py"]
+providers = ["src/codeintel/engines/**"]
 core      = ["src/codeintel/*.py"]
 
 # Known exceptions. `reason` is REQUIRED.
 [[layers.allow]]
-from   = "src/codeintel/graph_resolution.py"
-to     = "src/codeintel/server.py"
+from   = "src/codeintel/engines/graph/resolution.py"
+to     = "src/codeintel/transports/mcp.py"
 reason = "settle-loop reach-through; tracked in #412"
 ```
 
@@ -283,7 +283,7 @@ Matching rules:
 | genuine tie | all three equal → `layer-ambiguous` finding, first in `order` wins, and the ambiguity is *reported* |
 
 Most-specific-wins is what lets `core = ["src/codeintel/*.py"]` act as a catch-all while
-`gateway = ["src/codeintel/gateway.py"]` still claims its file, without the author having to reason
+`gateway = ["src/codeintel/gateway/gateway.py"]` still claims its file, without the author having to reason
 about ordering. First-match-in-order would work too, but only if authors happen to list specific
 before general, and getting it wrong is invisible.
 
@@ -294,8 +294,8 @@ only became correct in 3.13, and this package's floor is 3.11.
 
 ### 3.4 Elements whose files span layers
 
-At depth 3, `src/codeintel/commands/` is one element. If the config puts `commands/doctor.py` in
-`cli` and `commands/_common.py` in `core`, the element has no single layer.
+At depth 3, `src/codeintel/cli/` is one element. If the config puts `cli/doctor.py` in
+`cli` and `cli/_common.py` in `core`, the element has no single layer.
 
 Resolution: the element takes the **highest** layer any of its files matches, and records
 `layer_split: {"cli": 12, "core": 1}` in metadata plus a `split` finding.
@@ -585,10 +585,10 @@ One finding is one record. Every finding class in §5.2 uses the same shape; irr
   # ---- the offending edge, at BOTH granularities ----------------------------
   "from_element": "commands",        # what the diagram labels
   "to_element":   "server",
-  "from_paths":   ["src/codeintel/commands/status.py"],   # the member files carrying it
-  "to_paths":     ["src/codeintel/server.py"],
-  "witness":      {"from": "src/codeintel/commands/status.py",
-                   "to":   "src/codeintel/server.py",
+  "from_paths":   ["src/codeintel/cli/status.py"],   # the member files carrying it
+  "to_paths":     ["src/codeintel/transports/mcp.py"],
+  "witness":      {"from": "src/codeintel/cli/status.py",
+                   "to":   "src/codeintel/transports/mcp.py",
                    "n":    1},       # ONE concrete file pair, always present
   "witnesses_total": 3,              # file pairs behind this element-level finding
   "weight":          7,              # summed count(*) across them
@@ -663,11 +663,11 @@ codeintel c4 --check — layer report
 
 VIOLATIONS (2 gating, 1 allowlisted)
   layer-order  providers -> server    providers is below server
-      src/codeintel/graph_resolution.py -> src/codeintel/server.py  (x2)
+      src/codeintel/engines/graph/resolution.py -> src/codeintel/transports/mcp.py  (x2)
   layer-order  core -> gateway        core is below gateway
-      src/codeintel/searcher.py -> src/codeintel/gateway.py  (x1)
+      src/codeintel/engines/semantic/searcher.py -> src/codeintel/gateway/gateway.py  (x1)
   layer-order  providers -> server    ALLOWED: settle-loop reach-through; tracked in #412
-      src/codeintel/graph_resolution.py -> src/codeintel/server.py  (x2)
+      src/codeintel/engines/graph/resolution.py -> src/codeintel/transports/mcp.py  (x2)
 
 CYCLES (0)
 
@@ -751,7 +751,7 @@ violations` in the mapper's output is one function, no new tool, no new schema, 
 information where an agent is already looking.
 
 Gate that on Phases 1–3 holding up. Note the seam: `mapper.py` is not in the currently-contended set
-of files, but `injector.py` (which `server.py` calls for map injection) **is** — re-check that
+of files, but `injector.py` (which `transports/mcp.py` calls for map injection) **is** — re-check that
 boundary before starting Phase 4.
 
 ---
@@ -785,7 +785,7 @@ wrong way; it cannot tell you an import that points the right way should not exi
 nothing it imports has imports — not because it is a primitive. On this repo, `term.py`, `paths.py`
 and `policy.py` share rank 0, and only some of those are primitives.
 
-**Granularity is `--depth`-dependent.** At depth 3, `src/codeintel/commands/` is one box and a
+**Granularity is `--depth`-dependent.** At depth 3, `src/codeintel/cli/` is one box and a
 violation between two files inside it is invisible. The check is exactly as fine as the roll-up, and
 `--depth` is auto-fit — so the same repo can get a coarser check simply by growing past the
 100-element cap. The report should print the depth it checked at, every time.
@@ -916,7 +916,7 @@ a fixture and test against that. Do not ship the degradation path unexercised.
 ### Phase 1 — inference only. No rendering at all. **DONE — 2026-09-01.**
 
 Shipped as specified, with the two decisions this phase was blocked on made and recorded in
-`c4_layers.py`'s own header (isolated elements excluded as `unassigned`; the 50% guard kept and
+`c4/layers.py`'s own header (isolated elements excluded as `unassigned`; the 50% guard kept and
 labelled a guard). §9.3 and the §2.2 Phase 0 note are closed accordingly. What the implementation
 measured on the way, all of it reproducing Phase 0 rather than contradicting it:
 
@@ -935,13 +935,13 @@ the strongest evidence available that the probe and the implementation agree.
 of 69 edges strictly descending; on pathly-adapters, 99 of 99 with two cycles present.
 
 **One correction the implementation forced.** The first draft of the CLI output described unassigned
-elements as *"unrelated rather than foundational"*. That is false, and `src/codeintel/doctor.py`
+elements as *"unrelated rather than foundational"*. That is false, and `src/codeintel/setup/doctor.py`
 disproves it: seven `codeintel` imports, every one inside a function, so `IMPORTS` sees none of them
 while the module is heavily coupled. Zero degree is a fact about the edge source, not the
 architecture. The wording now says so, and so does the module header — the §2.2 note was right that
 these elements must not be called the foundation, and half-right about why.
 
-New module `c4_layers.py`, pure:
+New module `c4/layers.py`, pure:
 
 ```
 compute_layers(elements, relations) -> {ranks, sccs, degraded, condensation_stats}
@@ -957,8 +957,8 @@ because it renders nothing it **cannot conflict with the concurrent renderer wor
 
 ### Phase 2 — declared layers and the check. Still no rendering. **DONE — 2026-09-01.**
 
-Shipped as specified. `c4_layers.py` gained config validation, the segment glob matcher and
-membership assignment; the check and its two serializers live in a new `c4_check.py`, which is the
+Shipped as specified. `c4/layers.py` gained config validation, the segment glob matcher and
+membership assignment; the check and its two serializers live in a new `c4/check.py`, which is the
 record-before-serializer split below being honoured rather than described.
 
 **§5.4's mechanism 2 is now a verified theorem, not a hope.** Generating a config with
@@ -1039,7 +1039,7 @@ The rest, listed rather than guessed at.
    and documented in code as a catastrophe guard rather than a tuned parameter.** Lowering it into
    the 20-25% range real repos reach would exercise it, but at the cost of stamping `degraded` on
    views that still read perfectly well — and the flag's whole value is meaning something when it
-   appears. `c4_layers.py`'s header states this explicitly, which is what the instruction below asked
+   appears. `c4/layers.py`'s header states this explicitly, which is what the instruction below asked
    for. Both cycle fractions (against ranked and against all elements) are reported in `stats`, so
    adding the isolated-element exclusion did not silently redefine the number that calibrated it.
    Original reasoning, kept: across four repos the largest `IMPORTS` SCC was 13.8%, so the

@@ -375,7 +375,7 @@ def test_every_op_value_named_in_help_text_is_a_real_query_op():
     required with no default — this specifically pins every `--op <value>` token anywhere on the
     help surface to the parser's own accepted set, so a typoed or retired op cannot hide in prose."""
     from codeintel.__main__ import _EPILOGS, _EXAMPLES, _START_HERE
-    from codeintel.query_ops import QUERY_OPS
+    from codeintel.core.query_ops import QUERY_OPS
 
     texts = [*_EPILOGS.values(), *(cmd for cmd, _ in _EXAMPLES), *(cmd for cmd, _ in _START_HERE)]
     seen: set[str] = set()
@@ -391,7 +391,7 @@ def test_query_epilog_documents_every_op_exactly_once():
     `operations:` block to the full canonical set, so a future op can't be added to the parser
     without also landing here."""
     from codeintel.__main__ import _EPILOGS
-    from codeintel.query_ops import QUERY_OPS
+    from codeintel.core.query_ops import QUERY_OPS
 
     ops_block = _EPILOGS["query"].split("operations:\n", 1)[1].split("\n\n", 1)[0]
     listed = re.findall(r"(?m)^  (\w[\w-]*)\s{2,}", ops_block)
@@ -400,7 +400,7 @@ def test_query_epilog_documents_every_op_exactly_once():
 
 def test_query_op_choices_match_the_canonical_list():
     from codeintel.__main__ import build_parser
-    from codeintel.query_ops import QUERY_OPS
+    from codeintel.core.query_ops import QUERY_OPS
 
     parser = build_parser()
     subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
@@ -411,7 +411,7 @@ def test_query_op_choices_match_the_canonical_list():
 
 def test_query_engine_choices_match_the_gateways_canonical_set():
     from codeintel.__main__ import build_parser
-    from codeintel.gateway import _KNOWN_ENGINES
+    from codeintel.gateway.gateway import _KNOWN_ENGINES
 
     parser = build_parser()
     subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
@@ -435,7 +435,7 @@ def test_query_target_is_optional_with_a_blank_default():
 
 # The QUERY_OPS/`_QueryOp` drift guard lives in tests/test_mcp_server.py
 # (test_query_ops_module_matches_the_query_op_literal) — it is a schema invariant on
-# `codeintel.server`, not CLI help text, and that file already imports `codeintel.server`.
+# `codeintel.transports.mcp`, not CLI help text, and that file already imports `codeintel.transports.mcp`.
 
 
 # --------------------------------------------------------------------------- one description table
@@ -471,8 +471,8 @@ def test_setup_install_deps_help_names_the_packages_onboarding_actually_installs
     source is the cheap version of that semantic check for this one flag."""
     import inspect
 
-    from codeintel import onboarding
     from codeintel.__main__ import build_parser
+    from codeintel.setup import onboarding
 
     parser = build_parser()
     subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))

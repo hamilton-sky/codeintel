@@ -30,14 +30,14 @@ import time
 
 import pytest
 
-from codeintel.filelock import (
+from codeintel.core.filelock import (
     _HAVE_FLOCK,
     exclusive,
     exclusive_waiting,
     held_by_another_process,
     lock_path,
 )
-from codeintel.reindexer import Reindexer
+from codeintel.gateway.reindexer import Reindexer
 
 pytestmark = pytest.mark.skipif(not _HAVE_FLOCK, reason="advisory locking needs POSIX fcntl")
 
@@ -193,7 +193,7 @@ def test_an_unusable_lock_directory_never_stops_indexing(home, monkeypatch, tmp_
     """Asymmetric degradation, and this is the direction that matters. A locking failure must not
     be able to prevent a repository being indexed — the fallback is the behaviour this module
     replaced, not an outage."""
-    import codeintel.filelock as fl
+    import codeintel.core.filelock as fl
 
     monkeypatch.setattr(fl, "lock_path", lambda _root: tmp_path / "no" / "such" / "dir" / "x.lock")
     monkeypatch.setattr(fl.os, "open", lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
@@ -207,7 +207,7 @@ def test_an_unusable_lock_directory_never_stops_indexing(home, monkeypatch, tmp_
 def test_a_probe_that_fails_does_not_claim_a_reindex_is_running(home, monkeypatch):
     """The other direction of the same asymmetry: we do not report a reindex in progress on
     evidence we could not gather. That is the rule `gaps` follow one level up."""
-    import codeintel.filelock as fl
+    import codeintel.core.filelock as fl
 
     path = lock_path("/repo/one")
     path.parent.mkdir(parents=True, exist_ok=True)

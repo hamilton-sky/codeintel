@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codeintel.providers.graph import _WITHDRAWN_OPS
+from codeintel.engines.graph.provider import _WITHDRAWN_OPS
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -63,7 +63,7 @@ def test_a_withdrawal_hint_never_offers_a_way_to_run_an_op_that_cannot_run():
     the gate's own source, so it cannot be satisfied by a flag that is documented but unread."""
     import inspect
 
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     gate = inspect.getsource(GraphProvider.build_result)
     flag_is_consulted = "_unverified_ops_enabled" in gate
@@ -85,7 +85,7 @@ def test_live_docs_do_not_describe_a_RUNNING_op_as_withdrawn():
     exact shape of the README's CI claim that `0.15.5` had to correct. So: a table row naming an op
     that DOES run must not call it withdrawn. Rows that also name a withdrawn op are skipped, since
     those rows are about the withdrawal."""
-    from codeintel.providers.graph import _GRAPH_OPS, _WITHDRAWN_OPS
+    from codeintel.engines.graph.provider import _GRAPH_OPS, _WITHDRAWN_OPS
 
     running = sorted(set(_GRAPH_OPS) - set(_WITHDRAWN_OPS))
     assert running, "no running graph ops — this check would pass vacuously"

@@ -75,7 +75,7 @@ where = ["src"]
 # without which the `Typing :: Typed` classifier is a promise the installed package cannot keep —
 # type checkers ignore an installed package's annotations entirely unless py.typed is present.
 [tool.setuptools.package-data]
-"codeintel.viewer" = ["*.html"]
+"codeintel.mapping.viewer" = ["*.html"]
 "codeintel" = ["py.typed"]
 
 [tool.ruff]

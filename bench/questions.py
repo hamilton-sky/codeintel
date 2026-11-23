@@ -100,8 +100,8 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             "real call sites."
         ),
         must_include=(
-            r"src/codeintel/server\.py",
-            r"src/codeintel/commands/query\.py",
+            r"src/codeintel/transports/mcp\.py",
+            r"src/codeintel/cli/query\.py",
         ),
         # The docstring trap. injector.py contains `code.query(op="changed")` as prose.
         must_forbid=(r"injector\.py",),
@@ -110,8 +110,8 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             "only real call sites; injector.py:74 is the same text inside a docstring."
         ),
         canned_answer=(
-            "There are two real call sites: src/codeintel/server.py:167 (inside the MCP handler) and "
-            "src/codeintel/commands/query.py:101 (the CLI path). Both call gw.query(...)."
+            "There are two real call sites: src/codeintel/transports/mcp.py:167 (inside the MCP handler) and "
+            "src/codeintel/cli/query.py:101 (the CLI path). Both call gw.query(...)."
         ),
     ),
     Question(
@@ -126,11 +126,11 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             r"_EDGE_CONFIDENCE_FLOOR",
             r"providers/graph\.py",
         ),
-        provenance=("rg -n '^_EDGE_CONFIDENCE_FLOOR' src/codeintel/providers/graph.py "
+        provenance=("rg -n '^_EDGE_CONFIDENCE_FLOOR' src/codeintel/engines/graph/provider.py "
                     "-> the constant is defined there, = 0.85"),
         canned_answer=(
             "The floor is 0.85, held in the constant _EDGE_CONFIDENCE_FLOOR, defined in "
-            "src/codeintel/providers/graph.py at line 398."
+            "src/codeintel/engines/graph/provider.py at line 398."
         ),
     ),
     Question(
@@ -144,12 +144,12 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             r"_RANK_LABELS", r"Function", r"Method", r"Class", r"Interface", r"Route",
         ),
         provenance=(
-            "rg -n '^_RANK_LABELS' src/codeintel/mapper.py -> "
+            "rg -n '^_RANK_LABELS' src/codeintel/mapping/mapper.py -> "
             "_RANK_LABELS = ('Function','Method','Class','Interface','Route')"
         ),
         canned_answer=(
-            "The constant is _RANK_LABELS in src/codeintel/mapper.py:55, and it contains Function, Method, Class, "
-            "Interface and Route."
+            "The constant is _RANK_LABELS in src/codeintel/mapping/mapper.py:55, and it contains Function, "
+            "Method, Class, Interface and Route."
         ),
     ),
     Question(
@@ -162,7 +162,7 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
         ),
         must_include=(r"index-failed", r"no-index"),
         provenance=("rg -n 'reason=\"index-failed\"|reason=\"no-index\"' "
-                    "src/codeintel/providers/semantic.py -> both strings are constructed "
+                    "src/codeintel/engines/semantic/provider.py -> both strings are constructed "
                     "there; `index-failed` is the pass that ran and failed"),
         canned_answer=(
             "The two strings are \"no-index\" (nothing was ever indexed) and \"index-failed\" (a pass ran and failed). "
@@ -177,10 +177,10 @@ _CODEINTEL_QUESTIONS: tuple[Question, ...] = (
             "which file defines it?"
         ),
         must_include=(r"safe_null_result", r"provider\.py"),
-        provenance=("rg -n '^def safe_null_result' src/codeintel/provider.py "
+        provenance=("rg -n '^def safe_null_result' src/codeintel/core/provider.py "
                     "-> defined there, and nowhere else in the package"),
         canned_answer=(
-            "The function is safe_null_result, defined in src/codeintel/provider.py at line 67."
+            "The function is safe_null_result, defined in src/codeintel/core/provider.py at line 67."
         ),
     ),
 )

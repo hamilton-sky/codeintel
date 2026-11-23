@@ -1,5 +1,5 @@
-"""Tests for the output-isolation half of `codeintel.c4` (`plan_output`/`write_model`, the
-fact-4 guarantee) and for `codeintel.commands.c4.run` — the CLI wiring on top of it.
+"""Tests for the output-isolation half of `codeintel.c4.model` (`plan_output`/`write_model`, the
+fact-4 guarantee) and for `codeintel.cli.c4.run` — the CLI wiring on top of it.
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from importlib import import_module
 
 import pytest
 
-from codeintel import c4
+from codeintel.c4 import model as c4
 
 
 def _args(defaults: dict | None = None, **overrides) -> argparse.Namespace:
@@ -124,12 +124,12 @@ def test_plan_output_names_the_actual_problem_when_out_is_a_file(tmp_path):
 # --------------------------------------------------------------------------- commands/c4.py
 
 def test_c4_writes_nothing_when_the_model_would_be_empty(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr("codeintel.c4.build_c4_payload",
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload",
                         lambda root, **kw: {**c4._EMPTY, "reason": "no-source-files"})
     out_dir = tmp_path / "codeintel-c4"
     args = _c4_args(project_root=str(tmp_path), out=str(out_dir))
 
-    assert import_module("codeintel.commands.c4").run(args) == 1
+    assert import_module("codeintel.cli.c4").run(args) == 1
     assert not out_dir.exists()
     assert "no-source-files" in capsys.readouterr().out
 
@@ -155,7 +155,7 @@ def _payload_sequence(monkeypatch, *payloads):
         calls["n"] += 1
         return payloads[min(i, len(payloads) - 1)]
 
-    monkeypatch.setattr("codeintel.c4.build_c4_payload", _build)
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload", _build)
     return calls
 
 
@@ -167,13 +167,13 @@ def test_an_unindexed_repo_is_indexed_and_the_model_produced_in_one_command(
                               {**c4._EMPTY, "reason": "project-not-indexed"},
                               _valid_payload())
     indexed: list[str] = []
-    monkeypatch.setattr("codeintel.c4.index_repo",
+    monkeypatch.setattr("codeintel.c4.model.index_repo",
                         lambda root, **kw: (indexed.append(str(root)), {"ok": True, "problem": ""})[1])
-    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
-    _no_wait(monkeypatch, import_module("codeintel.commands.c4"))
+    monkeypatch.setattr("codeintel.c4.model.render_c4_dsl", lambda p: "model {}\n")
+    _no_wait(monkeypatch, import_module("codeintel.cli.c4"))
     out_dir = tmp_path / "codeintel-c4"
 
-    assert import_module("codeintel.commands.c4").run(
+    assert import_module("codeintel.cli.c4").run(
         _c4_args(project_root=str(tmp_path), out=str(out_dir))) == 0
     assert indexed == [str(tmp_path)]          # it indexed THIS repo
     assert calls["n"] == 2                     # and rebuilt from the fresh index
@@ -188,21 +188,21 @@ def test_the_nested_repo_reason_also_auto_indexes(monkeypatch, capsys, tmp_path)
     _payload_sequence(monkeypatch,
                       {**c4._EMPTY, "reason": "project-not-indexed-standalone"},
                       _valid_payload())
-    monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
-    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
-    _no_wait(monkeypatch, import_module("codeintel.commands.c4"))
+    monkeypatch.setattr("codeintel.c4.model.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    monkeypatch.setattr("codeintel.c4.model.render_c4_dsl", lambda p: "model {}\n")
+    _no_wait(monkeypatch, import_module("codeintel.cli.c4"))
 
-    assert import_module("codeintel.commands.c4").run(
+    assert import_module("codeintel.cli.c4").run(
         _c4_args(project_root=str(tmp_path), out=str(tmp_path / "o"))) == 0
 
 
 def test_no_index_refuses_instead_of_indexing(monkeypatch, capsys, tmp_path):
     """CI needs "the index was missing" to fail the step, not be quietly repaired."""
     calls = _payload_sequence(monkeypatch, {**c4._EMPTY, "reason": "project-not-indexed"})
-    monkeypatch.setattr("codeintel.c4.index_repo",
+    monkeypatch.setattr("codeintel.c4.model.index_repo",
                         lambda root, **kw: pytest.fail("--no-index must not index"))
 
-    assert import_module("codeintel.commands.c4").run(
+    assert import_module("codeintel.cli.c4").run(
         _c4_args(project_root=str(tmp_path), no_index=True)) == 1
     assert calls["n"] == 1                     # built once, never retried
     assert "project-not-indexed" in capsys.readouterr().out
@@ -215,14 +215,14 @@ def test_a_project_the_backend_publishes_late_is_waited_for_not_declared_missing
     and the next command invocation produced a 62-element model from that same index. A single
     retry printed "✓ indexed" and "project-not-indexed — run `codeintel index`" one line apart.
     """
-    cmd = import_module("codeintel.commands.c4")
+    cmd = import_module("codeintel.cli.c4")
     # not-indexed, still not-indexed, THEN it appears — exactly the race, no real sleeping
     calls = _payload_sequence(monkeypatch,
                               {**c4._EMPTY, "reason": "project-not-indexed"},
                               {**c4._EMPTY, "reason": "project-not-indexed"},
                               _valid_payload())
-    monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
-    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    monkeypatch.setattr("codeintel.c4.model.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    monkeypatch.setattr("codeintel.c4.model.render_c4_dsl", lambda p: "model {}\n")
     _no_wait(monkeypatch, cmd)
     out_dir = tmp_path / "o"
 
@@ -235,9 +235,9 @@ def test_a_project_that_never_appears_does_not_tell_you_to_index_again(
         monkeypatch, capsys, tmp_path):
     """The old message advised the exact action that had just succeeded. Bounded wait, then an
     accurate reason — and no advice to re-run the step that already worked."""
-    cmd = import_module("codeintel.commands.c4")
+    cmd = import_module("codeintel.cli.c4")
     _payload_sequence(monkeypatch, {**c4._EMPTY, "reason": "project-not-indexed"})
-    monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    monkeypatch.setattr("codeintel.c4.model.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
     _no_wait(monkeypatch, cmd)
 
     assert cmd.run(_c4_args(project_root=str(tmp_path))) == 1
@@ -250,7 +250,7 @@ def test_a_project_that_never_appears_does_not_tell_you_to_index_again(
 def test_the_settle_wait_is_bounded_by_the_clock_not_the_attempt_count(monkeypatch):
     """A backend that never publishes must not spin forever: the loop is bounded by wall clock, so
     it cannot hang a CI step or this test suite."""
-    cmd = import_module("codeintel.commands.c4")
+    cmd = import_module("codeintel.cli.c4")
     ticks = iter([0.0] + [cmd.SETTLE_SECONDS + 1.0] * 50)   # first check inside, then past deadline
     monkeypatch.setattr(cmd.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(cmd.time, "sleep", lambda s: None)
@@ -266,7 +266,7 @@ def test_the_settle_wait_is_bounded_by_the_clock_not_the_attempt_count(monkeypat
 
 
 def test_the_settle_helper_degrades_instead_of_raising(monkeypatch):
-    cmd = import_module("codeintel.commands.c4")
+    cmd = import_module("codeintel.cli.c4")
     original = {**c4._EMPTY, "reason": "project-not-indexed"}
     monkeypatch.setattr(cmd.time, "sleep", lambda s: (_ for _ in ()).throw(RuntimeError("boom")))
     assert cmd._settle(lambda: _valid_payload(), original) is original
@@ -275,10 +275,10 @@ def test_the_settle_helper_degrades_instead_of_raising(monkeypatch):
 def test_a_failed_auto_index_reports_the_backend_problem_and_does_not_loop(
         monkeypatch, capsys, tmp_path):
     calls = _payload_sequence(monkeypatch, {**c4._EMPTY, "reason": "project-not-indexed"})
-    monkeypatch.setattr("codeintel.c4.index_repo",
+    monkeypatch.setattr("codeintel.c4.model.index_repo",
                         lambda root, **kw: {"ok": False, "problem": "worker crashed"})
 
-    assert import_module("codeintel.commands.c4").run(
+    assert import_module("codeintel.cli.c4").run(
         _c4_args(project_root=str(tmp_path))) == 1
     assert calls["n"] == 1                     # no retry after a failed index
     assert "worker crashed" in capsys.readouterr().out
@@ -288,10 +288,10 @@ def test_a_reason_that_indexing_cannot_fix_is_not_retried(monkeypatch, capsys, t
     """`no-source-files` means the index was READ and holds no source — re-indexing would spend
     minutes to rebuild the identical empty model."""
     calls = _payload_sequence(monkeypatch, {**c4._EMPTY, "reason": "no-source-files"})
-    monkeypatch.setattr("codeintel.c4.index_repo",
+    monkeypatch.setattr("codeintel.c4.model.index_repo",
                         lambda root, **kw: pytest.fail("no-source-files must not trigger an index"))
 
-    assert import_module("codeintel.commands.c4").run(
+    assert import_module("codeintel.cli.c4").run(
         _c4_args(project_root=str(tmp_path))) == 1
     assert calls["n"] == 1
 
@@ -301,10 +301,10 @@ def test_json_reports_the_model_from_after_the_auto_index(monkeypatch, capsys, t
     _payload_sequence(monkeypatch,
                       {**c4._EMPTY, "reason": "project-not-indexed"},
                       _valid_payload())
-    monkeypatch.setattr("codeintel.c4.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
-    _no_wait(monkeypatch, import_module("codeintel.commands.c4"))
+    monkeypatch.setattr("codeintel.c4.model.index_repo", lambda root, **kw: {"ok": True, "problem": ""})
+    _no_wait(monkeypatch, import_module("codeintel.cli.c4"))
 
-    assert import_module("codeintel.commands.c4").run(
+    assert import_module("codeintel.cli.c4").run(
         _c4_args(project_root=str(tmp_path), json=True)) == 0
     printed = capsys.readouterr().out
     payload = json.loads(printed[printed.index("{"):])
@@ -316,7 +316,7 @@ def test_index_repo_never_raises_and_reports_an_unavailable_engine(monkeypatch):
     class _Unavailable:
         available = False
 
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", _Unavailable)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", _Unavailable)
     result = c4.index_repo("/nope")
     assert result["ok"] is False and "unavailable" in result["problem"]
 
@@ -331,7 +331,7 @@ def test_index_repo_surfaces_a_backend_error_rather_than_claiming_success(monkey
             assert "repo_path" in payload      # NOT project_root — the backend rejects that name
             return {"status": "error", "hint": "repo_path is required"}
 
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", _Erroring)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", _Erroring)
     result = c4.index_repo("/x")
     assert result["ok"] is False and "repo_path is required" in result["problem"]
 
@@ -343,28 +343,28 @@ def test_index_repo_treats_no_response_as_a_failure(monkeypatch):
         def _run(self, method, payload, timeout_ms):
             return None
 
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", _Silent)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", _Silent)
     assert c4.index_repo("/x")["ok"] is False
 
 
 def test_c4_degrades_instead_of_tracebacking(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr("codeintel.c4.build_c4_payload",
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload",
                         lambda root, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
     args = _c4_args(project_root=str(tmp_path))
 
-    assert import_module("codeintel.commands.c4").run(args) == 1
+    assert import_module("codeintel.cli.c4").run(args) == 1
     assert "c4 failed: boom" in capsys.readouterr().out
 
 
 def test_c4_reports_the_chosen_depth_on_stdout(monkeypatch, capsys, tmp_path):
     payload = _stub_payload(depth=4, how="auto-fit", table={1: 6, 2: 11, 3: 15, 4: 22},
                             elements_n=22, relations_n=10)
-    monkeypatch.setattr("codeintel.c4.build_c4_payload", lambda root, **kw: payload)
-    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload", lambda root, **kw: payload)
+    monkeypatch.setattr("codeintel.c4.model.render_c4_dsl", lambda p: "model {}\n")
     out_dir = tmp_path / "codeintel-c4"
     args = _c4_args(project_root=str(tmp_path), out=str(out_dir))
 
-    assert import_module("codeintel.commands.c4").run(args) == 0
+    assert import_module("codeintel.cli.c4").run(args) == 0
     out = capsys.readouterr().out
     assert "depth 4" in out
     assert "22 elements" in out
@@ -375,12 +375,12 @@ def test_c4_reports_the_chosen_depth_on_stdout(monkeypatch, capsys, tmp_path):
 def test_c4_warns_when_the_model_exceeds_the_view_cap(monkeypatch, capsys, tmp_path):
     payload = _stub_payload(depth=1, how="auto-fit", table={1: 140}, elements_n=140,
                             relations_n=0, over_cap=True, cap=100)
-    monkeypatch.setattr("codeintel.c4.build_c4_payload", lambda root, **kw: payload)
-    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload", lambda root, **kw: payload)
+    monkeypatch.setattr("codeintel.c4.model.render_c4_dsl", lambda p: "model {}\n")
     out_dir = tmp_path / "codeintel-c4"
     args = _c4_args(project_root=str(tmp_path), out=str(out_dir))
 
-    assert import_module("codeintel.commands.c4").run(args) == 0
+    assert import_module("codeintel.cli.c4").run(args) == 0
     out = capsys.readouterr().out
     assert "WARNING" in out and "100" in out
     assert (out_dir / c4.MODEL_FILENAME).exists()
@@ -389,11 +389,11 @@ def test_c4_warns_when_the_model_exceeds_the_view_cap(monkeypatch, capsys, tmp_p
 def test_c4_json_emits_the_payload_and_writes_no_file(monkeypatch, capsys, tmp_path):
     payload = _stub_payload(depth=2, how="auto-fit", table={1: 3, 2: 5}, elements_n=5,
                             relations_n=2)
-    monkeypatch.setattr("codeintel.c4.build_c4_payload", lambda root, **kw: payload)
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload", lambda root, **kw: payload)
     out_dir = tmp_path / "codeintel-c4"
     args = _c4_args(project_root=str(tmp_path), out=str(out_dir), json=True)
 
-    assert import_module("codeintel.commands.c4").run(args) == 0
+    assert import_module("codeintel.cli.c4").run(args) == 0
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["fit"]["depth"] == 2
     assert not out_dir.exists()
@@ -403,12 +403,12 @@ def test_c4_reports_other_c4_files_elsewhere_in_the_repo(monkeypatch, capsys, tm
     (tmp_path / "docs" / "arch").mkdir(parents=True)
     (tmp_path / "docs" / "arch" / "legacy.c4").write_text("model {}\n")
     payload = _stub_payload(depth=1, how="auto-fit", table={1: 1}, elements_n=1, relations_n=0)
-    monkeypatch.setattr("codeintel.c4.build_c4_payload", lambda root, **kw: payload)
-    monkeypatch.setattr("codeintel.c4.render_c4_dsl", lambda p: "model {}\n")
+    monkeypatch.setattr("codeintel.c4.model.build_c4_payload", lambda root, **kw: payload)
+    monkeypatch.setattr("codeintel.c4.model.render_c4_dsl", lambda p: "model {}\n")
     out_dir = tmp_path / "codeintel-c4"
     args = _c4_args(project_root=str(tmp_path), out=str(out_dir))
 
-    assert import_module("codeintel.commands.c4").run(args) == 0
+    assert import_module("codeintel.cli.c4").run(args) == 0
     out = capsys.readouterr().out
     assert "legacy.c4" in out or "docs/arch" in out
     assert f"likec4 start {out_dir}" in out

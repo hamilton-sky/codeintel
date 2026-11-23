@@ -162,7 +162,7 @@ def main() -> int:
 
 
 def _canary(cli: str, home: Path, repo: Path) -> int:
-    from codeintel.verify import verify_stdio_call
+    from codeintel.setup.verify import verify_stdio_call
 
     # ---- 1. the entry point exists and reports a version --------------------------------------
     res = run([cli, "--version"])

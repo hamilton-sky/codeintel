@@ -16,7 +16,7 @@ import pathlib
 
 import pytest
 
-from codeintel.wire_text import is_text_dialect, parse, split_row
+from codeintel.engines.graph.wire_text import is_text_dialect, parse, split_row
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "wire_0_10"
 

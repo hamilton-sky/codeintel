@@ -21,7 +21,7 @@ from importlib import import_module
 import pytest
 
 from codeintel.__main__ import _COMMANDS, _MODULES
-from codeintel.commands import _common
+from codeintel.cli import _common
 
 
 def _args(defaults: dict | None = None, **overrides) -> argparse.Namespace:
@@ -37,7 +37,7 @@ def test_every_command_dispatches_to_a_module_exposing_run():
     module, or a module renamed out from under the dispatch dict."""
     assert set(_MODULES) == set(_COMMANDS)
     for command, module_name in _MODULES.items():
-        module = import_module(f"codeintel.commands.{module_name}")
+        module = import_module(f"codeintel.cli.{module_name}")
         assert callable(getattr(module, "run", None)), f"{command} -> {module_name}.run missing"
 
 
@@ -47,8 +47,8 @@ def test_importing_the_cli_does_not_pull_in_any_engine():
     `__main__` gives that back for every command at once — measured in a clean interpreter,
     because this test session has already imported most of the package."""
     probe = ("import sys, codeintel.__main__; "
-             "print([m for m in ('codeintel.indexer', 'codeintel.semantic_db', "
-             "'codeintel.providers.graph', 'codeintel.server', 'codeintel.http_server') "
+             "print([m for m in ('codeintel.engines.semantic.indexer', 'codeintel.engines.semantic.db', "
+             "'codeintel.engines.graph.provider', 'codeintel.transports.mcp', 'codeintel.transports.http') "
              "if m in sys.modules])")
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "[]", out.stdout + out.stderr
@@ -128,9 +128,9 @@ class _FakeInstaller:
 
 def _install(monkeypatch, results, skipped=(), **overrides):
     fake = _FakeInstaller(results, skipped)
-    monkeypatch.setattr("codeintel.installer.Installer", lambda: fake)
+    monkeypatch.setattr("codeintel.setup.installer.Installer", lambda: fake)
     args = _args({"agent": "auto", "no_verify": False, "relative_command": False}, **overrides)
-    return import_module("codeintel.commands.install").run(args), fake
+    return import_module("codeintel.cli.install").run(args), fake
 
 
 def test_install_reports_each_agent_and_succeeds_when_any_registered(monkeypatch, capsys):
@@ -218,8 +218,8 @@ def test_install_degrades_instead_of_tracebacking(monkeypatch, capsys):
         def register_detected(self, **kw):
             raise RuntimeError("home dir unresolvable")
 
-    monkeypatch.setattr("codeintel.installer.Installer", _Boom)
-    code = import_module("codeintel.commands.install").run(
+    monkeypatch.setattr("codeintel.setup.installer.Installer", _Boom)
+    code = import_module("codeintel.cli.install").run(
         _args(agent="auto", no_verify=False, relative_command=False))
     assert code == 1
     assert "install failed: home dir unresolvable" in capsys.readouterr().out
@@ -235,34 +235,34 @@ def test_reset_refuses_without_yes_in_a_non_interactive_shell(monkeypatch, capsy
     """Without a TTY there is nobody to answer the prompt, and input() would raise or read
     whatever is piped in — either way the wrong index gets cleared."""
     applied = []
-    monkeypatch.setattr("codeintel.reset.run_reset",
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
                         lambda root, **kw: applied.append(kw.get("apply")) or {"count": 7})
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
-    assert import_module("codeintel.commands.reset").run(_reset_args()) == 1
+    assert import_module("codeintel.cli.reset").run(_reset_args()) == 1
     assert True not in applied          # preview only; never applied
     assert "refusing to reset without --yes" in capsys.readouterr().out
 
 
 def test_reset_aborts_on_a_declined_prompt(monkeypatch, capsys):
     applied = []
-    monkeypatch.setattr("codeintel.reset.run_reset",
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
                         lambda root, **kw: applied.append(kw.get("apply")) or {"count": 7})
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
 
-    assert import_module("codeintel.commands.reset").run(_reset_args()) == 0
+    assert import_module("codeintel.cli.reset").run(_reset_args()) == 0
     assert True not in applied
     assert "aborted" in capsys.readouterr().out
 
 
 def test_reset_prompt_names_the_target_and_the_entry_count(monkeypatch):
     prompts = []
-    monkeypatch.setattr("codeintel.reset.run_reset", lambda root, **kw: {"count": 7})
+    monkeypatch.setattr("codeintel.setup.reset.run_reset", lambda root, **kw: {"count": 7})
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "n")
 
-    import_module("codeintel.commands.reset").run(_reset_args(all=True))
+    import_module("codeintel.cli.reset").run(_reset_args(all=True))
     assert "ALL projects" in prompts[0] and "7 entries" in prompts[0]
 
 
@@ -273,21 +273,21 @@ def test_reset_applies_on_confirmation(monkeypatch, capsys):
         applied.append(kw.get("apply"))
         return {"count": 7, "detail": "cleared 7 entries"}
 
-    monkeypatch.setattr("codeintel.reset.run_reset", _run_reset)
+    monkeypatch.setattr("codeintel.setup.reset.run_reset", _run_reset)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
 
-    assert import_module("codeintel.commands.reset").run(_reset_args()) == 0
+    assert import_module("codeintel.cli.reset").run(_reset_args()) == 0
     assert applied == [False, True]     # preview, then the real thing
     assert "cleared 7 entries" in capsys.readouterr().out
 
 
 def test_reset_with_yes_skips_the_prompt_entirely(monkeypatch):
-    monkeypatch.setattr("codeintel.reset.run_reset",
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
                         lambda root, **kw: {"count": 7, "detail": "cleared"})
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("prompted despite --yes"))
 
-    assert import_module("codeintel.commands.reset").run(_reset_args(yes=True)) == 0
+    assert import_module("codeintel.cli.reset").run(_reset_args(yes=True)) == 0
 
 
 # --------------------------------------------------------------------------- query
@@ -308,22 +308,22 @@ def _query_args(**kw):
 
 
 def test_query_prints_the_result(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.server._build_gateway",
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway",
                         lambda **_kw: _Gateway([{"result": "## Callers of main (1)"}]))
-    assert import_module("codeintel.commands.query").run(_query_args()) == 0
+    assert import_module("codeintel.cli.query").run(_query_args()) == 0
     assert "## Callers of main (1)" in capsys.readouterr().out
 
 
 def test_query_waits_out_the_lsp_warming_window(monkeypatch, capsys):
     """A one-shot CLI process dies with its subprocess, so returning on the first `warming` would
     mean the LSP engine never answers a single CLI query."""
-    query = import_module("codeintel.commands.query")
+    query = import_module("codeintel.cli.query")
     gw = _Gateway([
         {"result": None, "reason": "warming"},
         {"result": None, "reason": "warming"},
         {"result": "def main() -> None"},
     ])
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: gw)
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway", lambda **_kw: gw)
     monkeypatch.setattr(query.time, "sleep", lambda _s: None)
 
     assert query.run(_query_args()) == 0
@@ -333,9 +333,9 @@ def test_query_waits_out_the_lsp_warming_window(monkeypatch, capsys):
 
 def test_query_gives_up_when_warming_never_finishes(monkeypatch, capsys):
     """Bounded wait: the loop must exit on the deadline rather than spin forever."""
-    query = import_module("codeintel.commands.query")
+    query = import_module("codeintel.cli.query")
     clock = iter([0.0] + [float(i) for i in range(200)])
-    monkeypatch.setattr("codeintel.server._build_gateway",
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway",
                         lambda **_kw: _Gateway([{"result": None, "reason": "warming"}]))
     monkeypatch.setattr(query.time, "sleep", lambda _s: None)
     monkeypatch.setattr(query.time, "monotonic", lambda: next(clock))
@@ -345,10 +345,10 @@ def test_query_gives_up_when_warming_never_finishes(monkeypatch, capsys):
 
 
 def test_query_surfaces_the_reason_and_hint_when_empty(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Gateway([
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway", lambda **_kw: _Gateway([
         {"result": None, "reason": "not_indexed", "hint": "run `codeintel index`"}]))
 
-    assert import_module("codeintel.commands.query").run(_query_args()) == 1
+    assert import_module("codeintel.cli.query").run(_query_args()) == 1
     captured = capsys.readouterr()
     # Both on stderr: `reason` used to print to stdout while `hint` went to stderr, so
     # `2>/dev/null` kept the unhelpful line and discarded the actionable one.
@@ -366,18 +366,18 @@ def test_query_auto_engine_becomes_no_engine_preference(monkeypatch):
             seen.update(kw)
             return {"result": "ok"}
 
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Recorder())
-    import_module("codeintel.commands.query").run(_query_args())
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway", lambda **_kw: _Recorder())
+    import_module("codeintel.cli.query").run(_query_args())
     assert seen["engine"] is None
 
-    import_module("codeintel.commands.query").run(_query_args(engine="lsp"))
+    import_module("codeintel.cli.query").run(_query_args(engine="lsp"))
     assert seen["engine"] == "lsp"
 
 
 def test_query_never_raises(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.server._build_gateway",
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway",
                         lambda **_kw: (_ for _ in ()).throw(RuntimeError("no graph backend")))
-    assert import_module("codeintel.commands.query").run(_query_args()) == 1
+    assert import_module("codeintel.cli.query").run(_query_args()) == 1
     assert "No result (reason: no graph backend)" in capsys.readouterr().err
 
 
@@ -386,28 +386,28 @@ def test_query_never_raises(monkeypatch, capsys):
 @pytest.mark.parametrize("healthy,expected", [(True, 0), (False, 1)])
 def test_doctor_exit_code_gates_on_health(monkeypatch, capsys, healthy, expected):
     """CI gates on this exit code; a doctor that always exits 0 is a broken gate."""
-    monkeypatch.setattr("codeintel.doctor.run_doctor",
+    monkeypatch.setattr("codeintel.setup.doctor.run_doctor",
                         lambda root, deep=False: {"summary": {"healthy": healthy}})
-    monkeypatch.setattr("codeintel.doctor.render_doctor_text", lambda r: "TABLE")
+    monkeypatch.setattr("codeintel.setup.doctor.render_doctor_text", lambda r: "TABLE")
 
     args = _args(project_root=None, deep=False, json=False)
-    assert import_module("codeintel.commands.doctor").run(args) == expected
+    assert import_module("codeintel.cli.doctor").run(args) == expected
     assert "TABLE" in capsys.readouterr().out
 
 
 def test_doctor_json_emits_the_structured_report(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.doctor.run_doctor",
+    monkeypatch.setattr("codeintel.setup.doctor.run_doctor",
                         lambda root, deep=False: {"summary": {"healthy": True}})
     args = _args(project_root=None, deep=False, json=True)
-    import_module("codeintel.commands.doctor").run(args)
+    import_module("codeintel.cli.doctor").run(args)
     assert '"healthy": true' in capsys.readouterr().out
 
 
 def test_doctor_degrades_instead_of_tracebacking(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.doctor.run_doctor",
+    monkeypatch.setattr("codeintel.setup.doctor.run_doctor",
                         lambda root, deep=False: (_ for _ in ()).throw(RuntimeError("nope")))
     args = _args(project_root=None, deep=False, json=False)
-    assert import_module("codeintel.commands.doctor").run(args) == 0
+    assert import_module("codeintel.cli.doctor").run(args) == 0
     assert "doctor unavailable: nope" in capsys.readouterr().out
 
 
@@ -424,21 +424,21 @@ def test_setup_all_implies_every_automatable_step(monkeypatch, capsys):
         seen.update(kw)
         return {"doctor": {"summary": {"healthy": True}}}
 
-    monkeypatch.setattr("codeintel.onboarding.run_setup", _run_setup)
-    monkeypatch.setattr("codeintel.onboarding.render_setup_text", lambda r: "STEPS")
+    monkeypatch.setattr("codeintel.setup.onboarding.run_setup", _run_setup)
+    monkeypatch.setattr("codeintel.setup.onboarding.render_setup_text", lambda r: "STEPS")
 
-    assert import_module("codeintel.commands.setup").run(_setup_args(all_steps=True)) == 0
+    assert import_module("codeintel.cli.setup").run(_setup_args(all_steps=True)) == 0
     assert seen == {"install_uv": True, "install_deps": True, "do_index": True, "warm_lsp": True,
                     "fix_languages": True}
 
 
 def test_setup_without_all_runs_only_the_named_steps(monkeypatch):
     seen = {}
-    monkeypatch.setattr("codeintel.onboarding.run_setup",
+    monkeypatch.setattr("codeintel.setup.onboarding.run_setup",
                         lambda root, **kw: seen.update(kw) or {"doctor": {}})
-    monkeypatch.setattr("codeintel.onboarding.render_setup_text", lambda r: "STEPS")
+    monkeypatch.setattr("codeintel.setup.onboarding.render_setup_text", lambda r: "STEPS")
 
-    import_module("codeintel.commands.setup").run(_setup_args(index=True))
+    import_module("codeintel.cli.setup").run(_setup_args(index=True))
     assert seen == {"install_uv": False, "install_deps": False, "do_index": True,
                     "warm_lsp": False, "fix_languages": False}
 
@@ -449,9 +449,9 @@ def test_setup_without_all_runs_only_the_named_steps(monkeypatch):
     ({}, 1),                                            # no doctor block == not proven healthy
 ])
 def test_setup_exit_code_gates_on_the_nested_doctor_verdict(monkeypatch, report, expected):
-    monkeypatch.setattr("codeintel.onboarding.run_setup", lambda root, **kw: report)
-    monkeypatch.setattr("codeintel.onboarding.render_setup_text", lambda r: "STEPS")
-    assert import_module("codeintel.commands.setup").run(_setup_args()) == expected
+    monkeypatch.setattr("codeintel.setup.onboarding.run_setup", lambda root, **kw: report)
+    monkeypatch.setattr("codeintel.setup.onboarding.render_setup_text", lambda r: "STEPS")
+    assert import_module("codeintel.cli.setup").run(_setup_args()) == expected
 
 
 # --------------------------------------------------------------------------- graph / map
@@ -461,19 +461,19 @@ def _graph_args(**kw):
 
 
 def test_graph_defaults_to_json_on_stdout(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.grapher.build_graph_payload",
+    monkeypatch.setattr("codeintel.mapping.grapher.build_graph_payload",
                         lambda root, limit=220: {"nodes": [{"id": "a"}], "edges": []})
-    assert import_module("codeintel.commands.graph").run(_graph_args()) == 0
+    assert import_module("codeintel.cli.graph").run(_graph_args()) == 0
     assert '"nodes"' in capsys.readouterr().out
 
 
 def test_graph_html_writes_the_viewer_and_reports_its_size(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr("codeintel.grapher.build_graph_payload",
+    monkeypatch.setattr("codeintel.mapping.grapher.build_graph_payload",
                         lambda root, limit=220: {"nodes": [{"id": "a"}], "edges": [{"s": "a"}]})
-    monkeypatch.setattr("codeintel.grapher.render_html", lambda payload: "<html></html>")
+    monkeypatch.setattr("codeintel.mapping.grapher.render_html", lambda payload: "<html></html>")
     out = tmp_path / "g.html"
 
-    assert import_module("codeintel.commands.graph").run(_graph_args(html=True, out=str(out))) == 0
+    assert import_module("codeintel.cli.graph").run(_graph_args(html=True, out=str(out))) == 0
     assert out.read_text() == "<html></html>"
     assert "(1 nodes, 1 edges)" in capsys.readouterr().out
 
@@ -481,12 +481,12 @@ def test_graph_html_writes_the_viewer_and_reports_its_size(monkeypatch, capsys, 
 def test_graph_html_explains_an_empty_graph(monkeypatch, capsys, tmp_path):
     """An empty viewer with no explanation reads as "my repo has no calls" rather than "the graph
     backend never answered"."""
-    monkeypatch.setattr("codeintel.grapher.build_graph_payload",
+    monkeypatch.setattr("codeintel.mapping.grapher.build_graph_payload",
                         lambda root, limit=220: {"nodes": [], "edges": [], "reason": "not_indexed"})
-    monkeypatch.setattr("codeintel.grapher.render_html", lambda payload: "<html></html>")
+    monkeypatch.setattr("codeintel.mapping.grapher.render_html", lambda payload: "<html></html>")
 
     args = _graph_args(html=True, out=str(tmp_path / "g.html"))
-    import_module("codeintel.commands.graph").run(args)
+    import_module("codeintel.cli.graph").run(args)
     out = capsys.readouterr().out
     assert "graph empty: not_indexed" in out and "codeintel doctor" in out
 
@@ -494,9 +494,9 @@ def test_graph_html_explains_an_empty_graph(monkeypatch, capsys, tmp_path):
 def test_graph_degrades_instead_of_tracebacking(monkeypatch, capsys):
     """Degrades with a message — but exits NON-ZERO. This command's job is to write a file, and
     exiting 0 having failed to write it reports success to any make/CI step gating on $?."""
-    monkeypatch.setattr("codeintel.grapher.build_graph_payload",
+    monkeypatch.setattr("codeintel.mapping.grapher.build_graph_payload",
                         lambda root, limit=220: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert import_module("codeintel.commands.graph").run(_graph_args()) == 1
+    assert import_module("codeintel.cli.graph").run(_graph_args()) == 1
     assert "graph failed: boom" in capsys.readouterr().out
 
 
@@ -514,11 +514,11 @@ class _Gen:
 def test_map_keeps_the_existing_file_when_the_new_map_is_a_stub(monkeypatch, capsys):
     """Overwriting a good committed map with a stub because the graph happened to be down is the
     destructive failure mode here; the CLI has to say why it declined."""
-    monkeypatch.setattr("codeintel.mapper.MapGenerator", lambda provider: _Gen(wrote=False))
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: object())
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", lambda provider: _Gen(wrote=False))
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
 
     args = _args(project_root=None, inject=False, budget=32768)
-    assert import_module("codeintel.commands.map").run(args) == 0
+    assert import_module("codeintel.cli.map").run(args) == 0
     out = capsys.readouterr().out
     assert "Kept existing /p/CODE_INTEL.md" in out and "codeintel index" in out
 
@@ -526,36 +526,36 @@ def test_map_keeps_the_existing_file_when_the_new_map_is_a_stub(monkeypatch, cap
 def test_map_survives_an_unavailable_graph_provider(monkeypatch, capsys):
     """A missing graph backend degrades to a stub map, not a traceback — MapGenerator takes None."""
     seen = {}
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider",
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider",
                         lambda: (_ for _ in ()).throw(RuntimeError("no backend")))
-    monkeypatch.setattr("codeintel.mapper.MapGenerator",
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator",
                         lambda provider: seen.update(provider=provider) or _Gen())
 
     args = _args(project_root=None, inject=False, budget=32768)
-    assert import_module("codeintel.commands.map").run(args) == 0
+    assert import_module("codeintel.cli.map").run(args) == 0
     assert seen["provider"] is None
     assert "Wrote /p/CODE_INTEL.md" in capsys.readouterr().out
 
 
 def test_map_inject_reports_what_it_did_to_which_file(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.mapper.MapGenerator", lambda provider: _Gen())
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: object())
-    monkeypatch.setattr("codeintel.injector.Injector",
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", lambda provider: _Gen())
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
+    monkeypatch.setattr("codeintel.setup.injector.Injector",
                         lambda: type("I", (), {"inject": lambda self, root: ("CLAUDE.md",
                                                                              "updated")})())
 
     args = _args(project_root=None, inject=True, budget=32768)
-    import_module("codeintel.commands.map").run(args)
+    import_module("codeintel.cli.map").run(args)
     assert "Inject: updated block in CLAUDE.md" in capsys.readouterr().out
 
 
 def test_map_degrades_instead_of_tracebacking(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: object())
-    monkeypatch.setattr("codeintel.mapper.MapGenerator",
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator",
                         lambda provider: (_ for _ in ()).throw(RuntimeError("boom")))
 
     args = _args(project_root=None, inject=False, budget=32768)
-    assert import_module("codeintel.commands.map").run(args) == 1, "a failed write must not exit 0"
+    assert import_module("codeintel.cli.map").run(args) == 1, "a failed write must not exit 0"
     assert "map failed: boom" in capsys.readouterr().out
 
 
@@ -564,53 +564,53 @@ def test_map_degrades_instead_of_tracebacking(monkeypatch, capsys):
 def test_serve_http_prefers_the_flag_over_the_environment(monkeypatch):
     seen = {}
     monkeypatch.setenv("CODEINTEL_HTTP_TOKEN", "from-env")
-    monkeypatch.setattr("codeintel.http_server.run", lambda **kw: seen.update(kw))
+    monkeypatch.setattr("codeintel.transports.http.run", lambda **kw: seen.update(kw))
 
     args = _args(host="127.0.0.1", port=8766, allow_remote=False, token="from-flag")
-    assert import_module("codeintel.commands.serve_http").run(args) == 0
+    assert import_module("codeintel.cli.serve_http").run(args) == 0
     assert seen["token"] == "from-flag"
 
 
 def test_serve_http_falls_back_to_the_environment_token(monkeypatch):
     seen = {}
     monkeypatch.setenv("CODEINTEL_HTTP_TOKEN", "from-env")
-    monkeypatch.setattr("codeintel.http_server.run", lambda **kw: seen.update(kw))
+    monkeypatch.setattr("codeintel.transports.http.run", lambda **kw: seen.update(kw))
 
     args = _args(host="0.0.0.0", port=9000, allow_remote=True, token=None)
-    import_module("codeintel.commands.serve_http").run(args)
+    import_module("codeintel.cli.serve_http").run(args)
     assert seen == {"host": "0.0.0.0", "port": 9000, "allow_remote": True, "token": "from-env"}
 
 
 def test_serve_http_reports_a_startup_failure_without_a_traceback(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.http_server.run",
+    monkeypatch.setattr("codeintel.transports.http.run",
                         lambda **kw: (_ for _ in ()).throw(OSError("address in use")))
     args = _args(host="127.0.0.1", port=8766, allow_remote=False, token=None)
 
-    assert import_module("codeintel.commands.serve_http").run(args) == 1
+    assert import_module("codeintel.cli.serve_http").run(args) == 1
     assert "serve-http failed: address in use" in capsys.readouterr().err
 
 
 def test_serve_http_treats_ctrl_c_as_a_clean_shutdown(monkeypatch):
-    monkeypatch.setattr("codeintel.http_server.run",
+    monkeypatch.setattr("codeintel.transports.http.run",
                         lambda **kw: (_ for _ in ()).throw(KeyboardInterrupt()))
     args = _args(host="127.0.0.1", port=8766, allow_remote=False, token=None)
-    assert import_module("codeintel.commands.serve_http").run(args) == 0
+    assert import_module("codeintel.cli.serve_http").run(args) == 0
 
 
 def test_serve_http_lets_the_loopback_guard_exit(monkeypatch):
     """The guard refuses a non-loopback bind with SystemExit; catching it would turn a refusal to
     expose the endpoint into a silent success."""
-    monkeypatch.setattr("codeintel.http_server.run",
+    monkeypatch.setattr("codeintel.transports.http.run",
                         lambda **kw: (_ for _ in ()).throw(SystemExit(2)))
     args = _args(host="0.0.0.0", port=8766, allow_remote=False, token=None)
     with pytest.raises(SystemExit):
-        import_module("codeintel.commands.serve_http").run(args)
+        import_module("codeintel.cli.serve_http").run(args)
 
 
 def test_status_distinguishes_installed_from_ready(monkeypatch, capsys):
     """"available" used to mean "a binary is on PATH", which is neither runnable nor usable on
     THIS repo. Each engine has to say which of the three it is."""
-    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+    monkeypatch.setattr("codeintel.transports.mcp.code_status_handler", lambda args: {
         "readiness": {
             "graph": {"status": "ok", "detail": "resolved project"},
             "lsp": {"status": "warn", "detail": "boot not verified"},
@@ -618,7 +618,7 @@ def test_status_distinguishes_installed_from_ready(monkeypatch, capsys):
         },
         "healthy": False,
     })
-    assert import_module("codeintel.commands.status").run(_args(project_root=None)) == 0
+    assert import_module("codeintel.cli.status").run(_args(project_root=None)) == 0
     out = capsys.readouterr().out
     assert "graph      ready" in out
     assert "lsp        installed (not verified)" in out
@@ -627,9 +627,9 @@ def test_status_distinguishes_installed_from_ready(monkeypatch, capsys):
 
 
 def test_status_degrades_instead_of_tracebacking(monkeypatch, capsys):
-    monkeypatch.setattr("codeintel.server.code_status_handler",
+    monkeypatch.setattr("codeintel.transports.mcp.code_status_handler",
                         lambda args: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert import_module("codeintel.commands.status").run(_args(project_root=None)) == 0
+    assert import_module("codeintel.cli.status").run(_args(project_root=None)) == 0
     assert "Status unavailable: boom" in capsys.readouterr().out
 
 
@@ -642,12 +642,12 @@ def test_status_json_is_structured_and_includes_repo_index_age(monkeypatch, caps
         received.update(args)
         return {"readiness": {"graph": {"status": "ok"}}, "healthy": True}
 
-    monkeypatch.setattr("codeintel.server.code_status_handler", _status)
+    monkeypatch.setattr("codeintel.transports.mcp.code_status_handler", _status)
     monkeypatch.setattr(
-        "codeintel.semantic_db.default_db_path", lambda model: str(tmp_path / "none.db"))
+        "codeintel.engines.semantic.db.default_db_path", lambda model: str(tmp_path / "none.db"))
 
     args = _args(project_root=str(tmp_path), json=True, deep=True)
-    assert import_module("codeintel.commands.status").run(args) == 0
+    assert import_module("codeintel.cli.status").run(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["healthy"] is True
     assert payload["project_root"] == str(tmp_path)
@@ -663,21 +663,21 @@ def test_status_json_is_structured_and_includes_repo_index_age(monkeypatch, caps
 def test_status_hides_stale_index_age_when_repo_has_no_chunks(monkeypatch, capsys, tmp_path):
     import json
 
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
 
     db_path = tmp_path / "semantic.db"
     db = SemanticDb(str(db_path))
     db.init()
     db.mark_indexed(str(tmp_path.resolve()))
     db.close()
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda model: str(db_path))
-    monkeypatch.setattr("codeintel.server.code_status_handler", lambda args: {
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda model: str(db_path))
+    monkeypatch.setattr("codeintel.transports.mcp.code_status_handler", lambda args: {
         "readiness": {"semantic": {"status": "fail", "repo_indexed": False}},
         "healthy": False,
     })
 
     args = _args(project_root=str(tmp_path), json=True)
-    assert import_module("codeintel.commands.status").run(args) == 0
+    assert import_module("codeintel.cli.status").run(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["semantic_index"]["exists"] is True
     assert payload["semantic_index"]["indexed_at"] is None
@@ -735,34 +735,34 @@ def _stub_index(monkeypatch, tmp_path, *, count=3, indexer_exc=None, has_graph_b
             seen["mapped"] = True
             return ("/p/CODE_INTEL.md", True)
 
-    monkeypatch.setattr("codeintel.config.load_config", lambda root: {"model": "m", "window": 20})
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path",
+    monkeypatch.setattr("codeintel.core.config.load_config", lambda root: {"model": "m", "window": 20})
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path",
                         lambda model: str(tmp_path / "db" / "semantic.db"))
-    monkeypatch.setattr("codeintel.semantic_db.SemanticDb", _make_db)
-    monkeypatch.setattr("codeintel.indexer.Indexer", _FakeIndexer)
+    monkeypatch.setattr("codeintel.engines.semantic.db.SemanticDb", _make_db)
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer", _FakeIndexer)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/x" if has_graph_backend else None)
-    monkeypatch.setattr("codeintel.reindexer.Reindexer", _FakeReindexer)
-    monkeypatch.setattr("codeintel.mapper.MapGenerator", _FakeGen)
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: object())
+    monkeypatch.setattr("codeintel.gateway.reindexer.Reindexer", _FakeReindexer)
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", _FakeGen)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
     return seen
 
 
 def test_index_reports_the_chunk_count(monkeypatch, tmp_path, capsys):
     _stub_index(monkeypatch, tmp_path, count=42)
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 0
     assert "Indexed 42 chunks" in capsys.readouterr().out
 
 
 def test_index_prints_a_header_naming_the_model_and_strategy(monkeypatch, tmp_path, capsys):
     _stub_index(monkeypatch, tmp_path, count=5)
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path)))
     out = capsys.readouterr().out
     assert "codeintel index" in out and "def-aligned chunks" in out
 
 
 def test_index_quiet_suppresses_the_header_but_keeps_the_result_line(monkeypatch, tmp_path, capsys):
     _stub_index(monkeypatch, tmp_path, count=5)
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path), quiet=True))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path), quiet=True))
     out = capsys.readouterr().out
     assert "codeintel index" not in out          # header gone
     assert "Indexed 5 chunks" in out             # result line stays
@@ -771,7 +771,7 @@ def test_index_quiet_suppresses_the_header_but_keeps_the_result_line(monkeypatch
 def test_index_says_so_when_nothing_changed(monkeypatch, tmp_path, capsys):
     """Incremental runs are the common case; "Indexed 0 chunks" reads like a failure."""
     _stub_index(monkeypatch, tmp_path, count=0)
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path)))
     assert "Nothing new to index" in capsys.readouterr().out
 
 
@@ -779,7 +779,7 @@ def test_index_closes_the_db_even_when_indexing_raises(monkeypatch, tmp_path, ca
     """A leaked sqlite handle on the failure path is how the next run inherits a locked DB."""
     seen = _stub_index(monkeypatch, tmp_path, indexer_exc=RuntimeError("model download failed"))
     # Exits non-zero: the index did not happen, and a script must be able to tell.
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 1
     assert seen["db"].closed is True
     assert "index failed: model download failed" in capsys.readouterr().out
 
@@ -788,7 +788,7 @@ def test_index_still_refreshes_the_map_after_a_semantic_failure(monkeypatch, tmp
     """The graph and map passes are independent of the semantic one — a missing embedding model
     must not also cost you an up-to-date CODE_INTEL.md."""
     seen = _stub_index(monkeypatch, tmp_path, indexer_exc=RuntimeError("boom"))
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path)))
     assert seen["mapped"] is True
 
 
@@ -796,20 +796,20 @@ def test_index_never_creates_a_map_the_repo_does_not_have(monkeypatch, tmp_path)
     """Writing a file into the user's repo is `codeintel map`'s job, asked for by name. `index`
     created CODE_INTEL.md on first run in every repo it touched — even when the index failed."""
     seen = _stub_index(monkeypatch, tmp_path, has_map=False)
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 0
     assert seen["mapped"] is False
     assert not (tmp_path / "CODE_INTEL.md").exists()
 
 
 def test_index_skips_the_graph_reindex_when_the_backend_is_absent(monkeypatch, tmp_path):
     seen = _stub_index(monkeypatch, tmp_path, has_graph_backend=False)
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path)))
     assert seen["reindexed"] is False
 
 
 def test_index_reindexes_the_graph_when_the_backend_is_present(monkeypatch, tmp_path):
     seen = _stub_index(monkeypatch, tmp_path, has_graph_backend=True)
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path)))
     assert seen["reindexed"] is True
 
 
@@ -817,12 +817,12 @@ def test_index_survives_a_failing_graph_reindex_and_map_refresh(monkeypatch, tmp
     """Both are best-effort: they run after the index is already committed, so their failure must
     not turn a successful index into a non-zero exit."""
     _stub_index(monkeypatch, tmp_path, has_graph_backend=True)
-    monkeypatch.setattr("codeintel.reindexer.Reindexer",
+    monkeypatch.setattr("codeintel.gateway.reindexer.Reindexer",
                         lambda: (_ for _ in ()).throw(RuntimeError("graph down")))
-    monkeypatch.setattr("codeintel.mapper.MapGenerator",
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator",
                         lambda provider: (_ for _ in ()).throw(RuntimeError("map down")))
 
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 0
     out = capsys.readouterr().out
     assert "Indexed 3 chunks" in out
     assert "graph down" not in out and "map down" not in out
@@ -832,11 +832,11 @@ def test_index_passes_the_configured_chunking_knobs_through(monkeypatch, tmp_pat
     """`index` is the only caller that builds an Indexer from config; a dropped key here silently
     reverts a user's tuning to the defaults."""
     seen = _stub_index(monkeypatch, tmp_path)
-    monkeypatch.setattr("codeintel.config.load_config", lambda root: {
+    monkeypatch.setattr("codeintel.core.config.load_config", lambda root: {
         "model": "custom/model", "window": 5, "stride": 2, "max_chunks": 9,
         "max_total_chunks": 99, "chunk_strategy": "line"})
 
-    import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path)))
+    import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path)))
     knobs = {k: seen["kwargs"][k] for k in
              ("model_name", "window", "stride", "max_chunks", "max_total_chunks", "chunk_strategy")}
     assert knobs == {"model_name": "custom/model", "window": 5, "stride": 2,
@@ -848,14 +848,14 @@ def test_index_passes_the_configured_chunking_knobs_through(monkeypatch, tmp_pat
 
 def test_serve_starts_the_stdio_server(monkeypatch):
     started = []
-    monkeypatch.setattr("codeintel.server.run", lambda: started.append(True))
-    assert import_module("codeintel.commands.serve").run(_args()) == 0
+    monkeypatch.setattr("codeintel.transports.mcp.run", lambda: started.append(True))
+    assert import_module("codeintel.cli.serve").run(_args()) == 0
     assert started == [True]
 
 
 def test_gen_token_prints_a_fresh_urlsafe_token(capsys):
     """Reused output would mean two deployments sharing a bearer token."""
-    gen_token = import_module("codeintel.commands.gen_token")
+    gen_token = import_module("codeintel.cli.gen_token")
     assert gen_token.run(_args()) == 0
     assert gen_token.run(_args()) == 0
     first, second = capsys.readouterr().out.split()
@@ -870,7 +870,7 @@ def test_index_rejects_a_project_root_that_is_not_a_directory(tmp_path, capsys):
     index" at exit 0 — indistinguishable from a correct incremental run, which is the worst
     possible response to a mistyped path in a script."""
     missing = str(tmp_path / "does-not-exist")
-    assert import_module("codeintel.commands.index").run(_args(project_root=missing)) == 1
+    assert import_module("codeintel.cli.index").run(_args(project_root=missing)) == 1
     assert "not a directory" in capsys.readouterr().out
 
 
@@ -878,7 +878,7 @@ def test_index_reports_an_unrecoverable_indexer_failure(monkeypatch, tmp_path, c
     """Indexer.index() returns -1 for an unrecoverable failure; a `> 0` test sent that into the
     "Nothing new to index" branch, so total failure read as a clean no-op."""
     _stub_index(monkeypatch, tmp_path, count=-1)
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 1
     out = capsys.readouterr().out
     assert "index failed" in out and "Nothing new to index" not in out
 
@@ -899,7 +899,7 @@ def test_a_nonexistent_project_root_fails_loudly(command, args_, tmp_path, capsy
     exist — `setup /typo` rendered a full three-engine health table for it. In a script that is
     indistinguishable from success, which is the worst possible response to a typo."""
     args_ = {**args_, "project_root": str(tmp_path / "does-not-exist")}
-    assert import_module(f"codeintel.commands.{command}").run(_args(args_)) == 1
+    assert import_module(f"codeintel.cli.{command}").run(_args(args_)) == 1
     assert "not a directory" in capsys.readouterr().out
 
 
@@ -909,11 +909,11 @@ def test_query_json_emits_the_whole_envelope(monkeypatch, capsys):
     unreachable — documentation describing a workflow the tool did not support."""
     import json as _json
 
-    monkeypatch.setattr("codeintel.server._build_gateway", lambda **_kw: _Gateway([{
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway", lambda **_kw: _Gateway([{
         "ok": True, "op": "callers", "target": "f", "result": "## Callers",
         "engine": "graph", "cached": True, "reindexing": True}]))
 
-    assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 0
+    assert import_module("codeintel.cli.query").run(_query_args(json=True)) == 0
     payload = _json.loads(capsys.readouterr().out)
 
     assert payload["engine"] == "graph"
@@ -923,10 +923,10 @@ def test_query_json_emits_the_whole_envelope(monkeypatch, capsys):
 
 def test_query_without_json_still_prints_only_the_answer(monkeypatch, capsys):
     """The default stays human-facing — an agent host reads the envelope over MCP, not the CLI."""
-    monkeypatch.setattr("codeintel.server._build_gateway",
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway",
                         lambda **_kw: _Gateway([{"result": "## Callers", "engine": "graph"}]))
 
-    import_module("codeintel.commands.query").run(_query_args(json=False))
+    import_module("codeintel.cli.query").run(_query_args(json=False))
     out = capsys.readouterr().out
     assert out.strip() == "## Callers"
     assert "engine" not in out
@@ -938,10 +938,10 @@ def test_query_json_stays_parseable_when_the_query_itself_fails(monkeypatch, cap
     stay valid JSON regardless. Exit code is 1: `result` is null, so there is no answer."""
     import json as _json
 
-    monkeypatch.setattr("codeintel.server._build_gateway",
+    monkeypatch.setattr("codeintel.gateway.factory.build_gateway",
                         lambda **_kw: (_ for _ in ()).throw(RuntimeError("backend exploded")))
 
-    assert import_module("codeintel.commands.query").run(_query_args(json=True)) == 1
+    assert import_module("codeintel.cli.query").run(_query_args(json=True)) == 1
     payload = _json.loads(capsys.readouterr().out)      # must not raise
     assert payload["result"] is None
     assert "backend exploded" in payload["reason"]
@@ -952,14 +952,14 @@ def test_query_json_stays_parseable_when_the_query_itself_fails(monkeypatch, cap
 def test_index_holds_the_reindex_lock_for_its_whole_pass(monkeypatch, tmp_path):
     """A server's background reindex skips while this is held, so the repository is embedded once.
     Checked from inside the pass, because holding it "somewhere around" the pass is not enough."""
-    from codeintel.filelock import _HAVE_FLOCK, held_by_another_process, lock_path
+    from codeintel.core.filelock import _HAVE_FLOCK, held_by_another_process, lock_path
     if not _HAVE_FLOCK:
         pytest.skip("advisory locking needs POSIX fcntl")
     seen = _stub_index(monkeypatch, tmp_path, count=1, has_graph_backend=True)
     path = lock_path(os.path.realpath(str(tmp_path)))
     held: dict[str, bool] = {}
 
-    import codeintel.indexer as indexer_mod
+    import codeintel.engines.semantic.indexer as indexer_mod
     base = indexer_mod.Indexer
 
     class _Checking(base):  # type: ignore[misc, valid-type]
@@ -967,8 +967,8 @@ def test_index_holds_the_reindex_lock_for_its_whole_pass(monkeypatch, tmp_path):
             held["semantic"] = held_by_another_process(path)
             return super().index(root)
 
-    monkeypatch.setattr("codeintel.indexer.Indexer", _Checking)
-    import codeintel.reindexer as reindexer_mod
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer", _Checking)
+    import codeintel.gateway.reindexer as reindexer_mod
     graph_base = reindexer_mod.Reindexer
 
     class _CheckingGraph(graph_base):  # type: ignore[misc, valid-type]
@@ -976,9 +976,9 @@ def test_index_holds_the_reindex_lock_for_its_whole_pass(monkeypatch, tmp_path):
             held["graph"] = held_by_another_process(path)
             super()._graph_reindex(root)
 
-    monkeypatch.setattr("codeintel.reindexer.Reindexer", _CheckingGraph)
+    monkeypatch.setattr("codeintel.gateway.reindexer.Reindexer", _CheckingGraph)
 
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 0
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 0
     assert held == {"semantic": True, "graph": True}, held
     assert seen["reindexed"]
     assert not held_by_another_process(path), "the lock outlived the command"
@@ -987,11 +987,11 @@ def test_index_holds_the_reindex_lock_for_its_whole_pass(monkeypatch, tmp_path):
 def test_index_waits_for_another_pass_then_indexes_anyway_on_timeout(monkeypatch, tmp_path, capsys):
     """Held by someone else: say so, wait, and — past the limit — index anyway. Never skip: the
     user asked for an index, and a hung holder must not be able to stop one."""
-    from codeintel.filelock import _HAVE_FLOCK, exclusive, lock_path
+    from codeintel.core.filelock import _HAVE_FLOCK, exclusive, lock_path
     if not _HAVE_FLOCK:
         pytest.skip("advisory locking needs POSIX fcntl")
     _stub_index(monkeypatch, tmp_path, count=7)
-    mod = import_module("codeintel.commands.index")
+    mod = import_module("codeintel.cli.index")
     monkeypatch.setattr(mod, "_LOCK_WAIT_S", 0.3)
 
     with exclusive(lock_path(os.path.realpath(str(tmp_path)))) as other:
@@ -1006,11 +1006,11 @@ def test_index_waits_for_another_pass_then_indexes_anyway_on_timeout(monkeypatch
 
 def test_index_quiet_stays_quiet_while_waiting_for_the_lock(monkeypatch, tmp_path, capsys):
     """`--quiet` promises the result line only. Contention is not an exception to that."""
-    from codeintel.filelock import _HAVE_FLOCK, exclusive, lock_path
+    from codeintel.core.filelock import _HAVE_FLOCK, exclusive, lock_path
     if not _HAVE_FLOCK:
         pytest.skip("advisory locking needs POSIX fcntl")
     _stub_index(monkeypatch, tmp_path, count=2)
-    mod = import_module("codeintel.commands.index")
+    mod = import_module("codeintel.cli.index")
     monkeypatch.setattr(mod, "_LOCK_WAIT_S", 0.2)
 
     with exclusive(lock_path(os.path.realpath(str(tmp_path)))) as other:
@@ -1029,8 +1029,8 @@ def test_index_without_a_resolvable_home_fails_with_a_message_not_a_traceback(
     def _no_home(*a, **k):
         raise RuntimeError("could not determine home directory")
 
-    monkeypatch.setattr("codeintel.filelock.lock_path", _no_home)
-    monkeypatch.setattr("codeintel.config.load_config", _no_home)
+    monkeypatch.setattr("codeintel.core.filelock.lock_path", _no_home)
+    monkeypatch.setattr("codeintel.core.config.load_config", _no_home)
 
-    assert import_module("codeintel.commands.index").run(_args(project_root=str(tmp_path))) == 1
+    assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 1
     assert "index failed: could not determine home directory" in capsys.readouterr().out

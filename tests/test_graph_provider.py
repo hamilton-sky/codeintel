@@ -8,10 +8,10 @@ import subprocess
 
 import pytest
 
-from codeintel.graph_backend import BackendClient
-from codeintel.graph_resolution import ProjectResolver
-from codeintel.providers.graph import GraphProvider, ProjectLookup, ProjectResolution
-from codeintel.server import code_status_handler
+from codeintel.engines.graph.backend import BackendClient
+from codeintel.engines.graph.provider import GraphProvider, ProjectLookup, ProjectResolution
+from codeintel.engines.graph.resolution import ProjectResolver
+from codeintel.transports.mcp import code_status_handler
 
 
 def test_match_project_resolves_a_relative_path(tmp_path, monkeypatch):
@@ -51,7 +51,7 @@ def test_graph_provider_wrong_types():
 # ---------------------------------------------------------------------------
 
 def test_graph_provider_unavailable(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     p = GraphProvider()
     assert p.available is False
     r = p.build_result("symbol", "x", [], 0, "")
@@ -66,7 +66,7 @@ def test_graph_provider_unavailable(monkeypatch):
 
 def test_graph_provider_project_not_indexed(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
     p = GraphProvider()
@@ -83,7 +83,7 @@ def test_graph_provider_project_not_indexed(monkeypatch):
 
 def test_graph_provider_subprocess_timeout(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
     p = GraphProvider()
@@ -98,7 +98,7 @@ def test_graph_provider_subprocess_timeout(monkeypatch):
 
 def test_graph_provider_subprocess_crash(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
     p = GraphProvider()
@@ -113,7 +113,7 @@ def test_graph_provider_subprocess_crash(monkeypatch):
 
 def test_graph_provider_unknown_op(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
     p = GraphProvider()
@@ -128,7 +128,7 @@ def test_unsupported_op_hint_lists_valid_ops(monkeypatch):
     """`unsupported-op` used to carry no hint and no way forward — the only safe-null in this file
     without one. A wrong op guess is easily misread as "found nothing"."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
     p = GraphProvider()
@@ -141,7 +141,7 @@ def test_unsupported_op_hint_lists_valid_ops(monkeypatch):
 def test_unsupported_op_hint_suggests_a_close_match():
     """A one-character typo of a real op ('callres' -> 'callers') should surface as a suggestion,
     mirroring __main__.py's `_suggest` (close match, then prefix)."""
-    from codeintel.providers.graph import _suggest_op
+    from codeintel.engines.graph.provider import _suggest_op
 
     assert "callers" in _suggest_op("callres")
     assert "overview" in _suggest_op("overviw")
@@ -150,7 +150,7 @@ def test_unsupported_op_hint_suggests_a_close_match():
 def test_unsupported_op_hint_never_suggests_a_retired_op():
     """Suggesting `deadcode` for a typo would recommend a feature that fails by design — it
     should never appear in the candidate list."""
-    from codeintel.providers.graph import _suggest_op
+    from codeintel.engines.graph.provider import _suggest_op
 
     assert "deadcode" not in _suggest_op("deadcod")
     assert "deadcode" not in _suggest_op("dead")
@@ -162,7 +162,7 @@ def test_unsupported_op_hint_never_suggests_a_retired_op():
 
 def test_graph_provider_engine_field(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
 
@@ -194,7 +194,7 @@ def test_graph_provider_engine_field(monkeypatch):
 
 def test_code_status_with_graph(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which",
+        "codeintel.engines.graph.provider.shutil.which",
         lambda x: "/fake/codebase-memory-mcp",
     )
     r = code_status_handler({})
@@ -203,7 +203,7 @@ def test_code_status_with_graph(monkeypatch):
 
 
 def test_code_status_without_graph(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     r = code_status_handler({})
     assert "graph" not in r["engines"]
 
@@ -280,7 +280,7 @@ def test_every_dispatched_op_is_declared_supported():
     drift."""
     import inspect
 
-    from codeintel.providers.graph import _GRAPH_OPS, _WITHDRAWN_OPS
+    from codeintel.engines.graph.provider import _GRAPH_OPS, _WITHDRAWN_OPS
 
     source = inspect.getsource(GraphProvider._dispatch)
     dispatched = set(re.findall(r'op == "([a-z]+)"', source))
@@ -430,7 +430,7 @@ def test_result_lines_do_not_carry_the_backends_project_id(tmp_path):
     `Users-alice-Documents-project-myrepo.src.pkg.fn`: the author's home directory repeated per
     row, on results that run to a hundred lines. Noise for a human, wasted tokens for the agent
     this tool exists to serve."""
-    from codeintel.providers.graph import _strip_project_prefix
+    from codeintel.engines.graph.provider import _strip_project_prefix
 
     assert _strip_project_prefix(
         "Users-alice-Documents-project-myrepo.src.pkg.fn") == "src.pkg.fn"
@@ -440,9 +440,9 @@ def test_result_lines_do_not_carry_the_backends_project_id(tmp_path):
 def test_stripping_never_eats_a_real_module_path():
     """A hyphen cannot appear in a Python package name, which is what makes the slug detectable —
     so a genuine dotted module path must pass through untouched."""
-    from codeintel.providers.graph import _strip_project_prefix
+    from codeintel.engines.graph.provider import _strip_project_prefix
 
-    for qn in ("src.codeintel.gateway.query", "codeintel.server.run", "main", "", "pkg.mod"):
+    for qn in ("src.codeintel.gateway.query", "codeintel.transports.mcp.run", "main", "", "pkg.mod"):
         assert _strip_project_prefix(qn) == qn
 
 
@@ -477,7 +477,7 @@ def test_no_renderer_anywhere_emits_a_raw_qualified_name():
     a real repo. So enumerate the MODULE, not a list of functions someone remembered."""
     import re
 
-    source = pathlib.Path("src/codeintel/providers/graph.py").read_text()
+    source = pathlib.Path("src/codeintel/engines/graph/provider.py").read_text()
     statements = _logical_lines(source)
     # Every site that READS the field off a backend row. `_display` is a sanctioned renderer that
     # strips internally, so passing it the key name is fine; anything else must strip the value —
@@ -503,7 +503,7 @@ def test_scan_ops_hide_archived_code(tmp_path):
     `.archive/` tree put a retired 507-line component THIRD in a repo's refactor hotspots, a
     near-duplicate of the live one. Pointing an agent at dead code as the thing most worth
     refactoring is worse than returning nothing."""
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     assert GraphProvider._is_noise({"file_path": "pathly/features/.archive/x/Old.tsx"}) is True
     assert GraphProvider._is_noise({"file_path": "studio/src/components/Editor/index.tsx"}) is False
@@ -550,7 +550,7 @@ def test_is_noise_does_not_filter_a_real_symbol_named_get():
 def test_only_named_archive_directories_are_hidden(path, archived):
     """Excluding EVERY dot-directory swept up live automation — `.claude/hooks`, `.storybook`,
     `.husky`, `.server`, `src/.internal`. An unknown dot-directory is source until proven retired."""
-    from codeintel.graph_render import _is_archived_path
+    from codeintel.engines.graph.render import _is_archived_path
 
     assert _is_archived_path(path) is archived
 
@@ -563,7 +563,7 @@ def test_only_named_archive_directories_are_hidden(path, archived):
 def test_collapsing_repeats_never_rewrites_a_number(label, expected):
     """Splitting on "." also splits version numbers and dotted quads, where consecutive equal
     parts are meaningful: `CHANGELOG.1.1.0` became `CHANGELOG.1.0` — a different real release."""
-    from codeintel.graph_render import _collapse_repeats
+    from codeintel.engines.graph.render import _collapse_repeats
 
     assert _collapse_repeats(label) == expected
 
@@ -580,7 +580,7 @@ def test_generated_output_is_not_a_refactor_target(path, excluded):
     """A checked-in minified bundle took the top TWO hotspot slots on a real repo (cx:586,
     cog:1145) — a webpack chunk is by far the most "complex" function in any tree containing one.
     The first version excluded only dot-directories, so a plain `out/` or `dist/` sailed through."""
-    from codeintel.graph_render import _is_archived_path
+    from codeintel.engines.graph.render import _is_archived_path
 
     assert _is_archived_path(path) is excluded
 
@@ -590,7 +590,7 @@ def test_probe_discloses_when_the_index_belongs_to_a_containing_project(monkeypa
     indexed repo, badly wrong for a repo that merely sits inside one. Asking about
     `~/projects/my-app` when only `~/projects` is indexed reported "ready", then answered from a
     graph spanning every repo on the machine."""
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
@@ -609,7 +609,7 @@ def test_probe_discloses_when_the_index_belongs_to_a_containing_project(monkeypa
 
 def test_probe_stays_quiet_when_the_project_root_matches(monkeypatch, tmp_path):
     """The disclosure must be rare enough to mean something — a normal indexed repo says nothing."""
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
@@ -630,7 +630,7 @@ def test_a_kebab_case_filename_is_not_mistaken_for_a_project_slug(name):
     """"hyphen ⇒ project slug" was wrong: kebab-case FILENAMES are the dominant TS/JS convention,
     so `use-toast.ts` rendered as `ts` — 985 names in one real repo, 811 in another. The `changed`
     op takes exactly this path, because its rows carry `name` and no `qualified_name`."""
-    from codeintel.providers.graph import _strip_project_prefix
+    from codeintel.engines.graph.provider import _strip_project_prefix
 
     assert _strip_project_prefix(name) == name
 
@@ -640,7 +640,7 @@ def test_a_kebab_case_filename_is_not_mistaken_for_a_project_slug(name):
     ("my-repo.src.pkg.fn", "src.pkg.fn"),
 ])
 def test_a_real_project_slug_is_still_stripped(qn, expected):
-    from codeintel.providers.graph import _strip_project_prefix
+    from codeintel.engines.graph.provider import _strip_project_prefix
 
     assert _strip_project_prefix(qn) == expected
 
@@ -649,7 +649,7 @@ def test_probe_picks_the_same_duplicate_entry_the_resolver_did(monkeypatch, tmp_
     """`_project_root_of` returned the FIRST entry with that name rather than the one
     `_match_project` chose, so a stale duplicate registration produced a false "not indexed on its
     own" warning about a correctly-indexed repo."""
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)              # type: ignore[attr-defined]
@@ -668,7 +668,7 @@ def test_same_dir_is_case_insensitive_where_the_filesystem_is(tmp_path):
     """`realpath` resolves symlinks but does not canonicalise CASE, and macOS APFS is
     case-insensitive — so one directory under two spellings compared as two, and a correctly
     indexed repo read as unindexed."""
-    from codeintel.graph_resolution import _same_dir
+    from codeintel.engines.graph.resolution import _same_dir
 
     assert _same_dir(str(tmp_path), str(tmp_path)) is True
     assert _same_dir(str(tmp_path), str(tmp_path) + "/") is True
@@ -792,7 +792,7 @@ def test_a_text_speaking_backend_is_now_understood(monkeypatch):
             b'  baz pkg.baz baz.py "[\\"Function\\"]" CALLS\n'
             b'total: 2\n')
     gp, fake = _provider_speaking(text)
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", fake)
     gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
         ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
 
@@ -813,7 +813,7 @@ def test_a_third_dialect_is_still_reported_as_incompatible_not_as_missing_data(m
     distinction is the only reason the 0.9→0.10 break was diagnosable rather than looking like an
     unindexed repository, and the next wire change will look exactly the same from here."""
     gp, fake = _provider_speaking(b"<html><body>gateway timeout</body></html>")
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", fake)
     gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
         ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
 
@@ -830,7 +830,7 @@ def test_a_json_speaking_backend_is_not_flagged_incompatible(monkeypatch):
     body = b'{"columns":["a.name","a.qualified_name","a.file_path","type(c)"],' \
            b'"rows":[["bar","pkg.bar","bar.py","CALLS"]],"total":1}'
     gp, fake = _provider_speaking(body)
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake)
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", fake)
     gp._lookup_project = lambda root: ProjectLookup(                # type: ignore[method-assign]
         ProjectResolution(name="proj", matched_root="/repo", scope="exact"), "ok")
 
@@ -877,7 +877,7 @@ def test_a_symbol_named_like_a_file_extension_still_loses_the_project_prefix(qua
     `my-component.spec.ts` and `Response.json` are the same shape, and no rule on the string can
     separate them. The FIELD separates them — a filename arrives in `name`, a module path in
     `qualified_name` — so the guard is now the caller's to claim."""
-    from codeintel.providers.graph import _strip_project_prefix
+    from codeintel.engines.graph.provider import _strip_project_prefix
 
     assert _strip_project_prefix(qualified, may_be_filename=False) == qualified.split(".", 1)[1]
     # And the guard still protects the case it was added for, on the path that needs it.
@@ -891,7 +891,7 @@ def test_no_renderer_passes_a_qualified_name_through_the_filename_guard():
     guard left on and so silently keeps the prefix for any symbol named `json`, `html` or `toml`."""
     import re
 
-    source = pathlib.Path("src/codeintel/providers/graph.py").read_text()
+    source = pathlib.Path("src/codeintel/engines/graph/provider.py").read_text()
     offenders = [
         f"{n}: {stmt}"
         for n, stmt in _logical_lines(source)
@@ -913,7 +913,7 @@ def test_looks_like_test_recognises_the_javascript_conventions():
     to `backend/src/__tests__/agent/ack-checkpoint.service.spec.ts`, were reported as brightsky-ai's
     three most load-bearing symbols in its committed CODE_INTEL.md. `__tests__` is not `/tests/` and
     `.spec.ts` is not `_test.py`, so the filter whose whole job was to stop them never fired."""
-    from codeintel.providers.graph import GraphProvider as _GP
+    from codeintel.engines.graph.provider import GraphProvider as _GP
 
     assert _GP._looks_like_test(
         "backend/src/__tests__/agent/ack-checkpoint.service.spec.ts", "Injectable")
@@ -930,7 +930,7 @@ def test_looks_like_test_recognises_a_fixtures_directory():
     `forwardReleasedItem` denotes nothing in this project. The README claims that section shows
     "the first things a newcomer, or an agent, should understand before touching anything", so the
     committed artifact contradicted the doc that advertises it."""
-    from codeintel.providers.graph import GraphProvider as _GP
+    from codeintel.engines.graph.provider import GraphProvider as _GP
 
     assert _GP._looks_like_test("bench/fixtures/corpus_ts/src/proxy.ts", "forwardReleasedItem")
     assert _GP._looks_like_test("bench/fixtures/corpus/src/corpuspkg/sse.py", "_broadcast")
@@ -942,7 +942,7 @@ def test_looks_like_test_does_not_catch_fixture_shaped_real_source():
     """`fixtures` is matched as a path SEGMENT, not a substring — the same bar `.spec`/`.test` are
     held to. A module named `fixtures.py` is real source somebody imports, and over-filtering is
     what retired `deadcode` at 25% precision."""
-    from codeintel.providers.graph import GraphProvider as _GP
+    from codeintel.engines.graph.provider import GraphProvider as _GP
 
     for path in ("src/fixtures.py",             # a module, not a directory
                  "src/app/fixtureshop/api.py",  # starts with "fixture"
@@ -954,7 +954,7 @@ def test_looks_like_test_does_not_catch_real_source_that_merely_reads_test_shape
     """The bar for widening this filter is that a convention cannot hide a real symbol —
     over-filtering is what retired `deadcode` at 25% precision. `.spec`/`.test` are matched as
     filename INFIXES, not substrings, so ordinary words containing them are safe."""
-    from codeintel.providers.graph import GraphProvider as _GP
+    from codeintel.engines.graph.provider import GraphProvider as _GP
 
     for path in ("src/spectrum.ts",            # starts with "spec"
                  "src/latest.ts",              # ends with "test"

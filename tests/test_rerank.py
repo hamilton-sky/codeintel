@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from codeintel.indexer import Indexer
-from codeintel.searcher import _SYMBOL_BOOST, Searcher, _tokenize
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.searcher import _SYMBOL_BOOST, Searcher, _tokenize
 
 
 def _angle_vec(theta_deg: float) -> np.ndarray:
@@ -162,7 +162,7 @@ def test_rerank_falsey_values_treated_as_off(tmp_path):
 
 
 def test_candidate_limit_is_capped(tmp_path, monkeypatch):
-    import codeintel.searcher as sm
+    import codeintel.engines.semantic.searcher as sm
     for i in range(6):
         (tmp_path / f"f{i}.py").write_text(f"def fn{i}():\n    return {i}\n")
     monkeypatch.setattr(sm, "_RERANK_CANDIDATES_CAP", 2)  # tiny cap for the test
@@ -185,7 +185,7 @@ def test_candidate_limit_is_capped(tmp_path, monkeypatch):
 def test_large_k_is_not_shrunk_by_cap(tmp_path, monkeypatch):
     # the cap bounds only the extra rerank breadth (rerank_candidates); a large k must still be
     # honored, so rerank-on never returns fewer results than pure cosine would for that k
-    import codeintel.searcher as sm
+    import codeintel.engines.semantic.searcher as sm
     for i in range(6):
         (tmp_path / f"f{i}.py").write_text(f"def fn{i}():\n    return {i}\n")
     monkeypatch.setattr(sm, "_RERANK_CANDIDATES_CAP", 2)  # tiny cap, but k below must still win
@@ -268,7 +268,7 @@ def test_candidate_set_idf_was_reverted_and_must_not_return_unmeasured():
     """
     import inspect
 
-    from codeintel import searcher
+    from codeintel.engines.semantic import searcher
 
     assert not hasattr(searcher, "_idf_weights"), "candidate-set IDF is back without measurement"
     assert len(inspect.signature(searcher.Searcher._lexical_score).parameters) == 2

@@ -16,7 +16,7 @@ import shutil
 
 import pytest
 
-from codeintel.providers.graph import GraphProvider
+from codeintel.engines.graph.provider import GraphProvider
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -144,7 +144,7 @@ CAP_TRACE_RISK = {
 def _provider(monkeypatch, responses):
     """A GraphProvider whose _run replays captured responses keyed by method."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp"
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp"
     )
     p = GraphProvider()
 
@@ -288,7 +288,7 @@ def test_malformed_query_response_is_safe_null(monkeypatch):
 
 def test_run_raising_is_caught(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp"
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp"
     )
     p = GraphProvider()
 
@@ -310,7 +310,7 @@ ROOT = "/Users/x/Documents/project/codeintel"
 def _capturing_provider(monkeypatch, method_response):
     """Provider that records the (method, payload, timeout) of the non-list_projects call."""
     seen: dict = {}
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
 
     def _cap(method, payload, timeout_ms):
@@ -468,7 +468,7 @@ def test_chain_requests_evidence_and_the_registration_edge(monkeypatch):
 
 
 def test_new_ops_never_raise_when_run_throws(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
 
     def _boom(method, payload, timeout_ms):

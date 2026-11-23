@@ -6,8 +6,8 @@ contract for it: what each field claims, what it deliberately does not, why the 
 optional, what `--deep` asserts, how a failing graph backend is classified, and the one recovery
 procedure that has a known fix.
 
-The report is built by `run_doctor` (`src/codeintel/doctor.py`). `status` is a thinner view of the
-same probes (`server.py`, `_code_status_handler_inner`) — it adds no check of its own.
+The report is built by `run_doctor` (`src/codeintel/setup/doctor.py`). `status` is a thinner view of the
+same probes (`transports/mcp.py`, `_code_status_handler_inner`) — it adds no check of its own.
 
 ## The fields
 
@@ -97,7 +97,7 @@ this repo indexed?*, and `--deep` asks **a real question and requires content in
 
 ## When the graph backend is installed and fails
 
-The graph engine speaks to `codebase-memory-mcp` as a subprocess (`graph_backend.py`). A call that
+The graph engine speaks to `codebase-memory-mcp` as a subprocess (`engines/graph/backend.py`). A call that
 produced no answer is classified by what the process *did*, and the answer to "why" is kept — it used to
 be thrown away, and every cause was reported as "failed/timed out".
 

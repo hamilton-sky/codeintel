@@ -1,9 +1,9 @@
 """Fault-injection tests proving the never-raise invariant for codeintel F1."""
 from __future__ import annotations
 
-from codeintel.gateway import Gateway
-from codeintel.providers.none import NoneProvider
-from codeintel.server import code_query_handler
+from codeintel.engines.none import NoneProvider
+from codeintel.gateway.gateway import Gateway
+from codeintel.transports.mcp import code_query_handler
 
 # ---------------------------------------------------------------------------
 # Group 1: NoneProvider — None args
@@ -33,7 +33,7 @@ def test_none_provider_inner_catch(monkeypatch):
     def _boom(*args, **kwargs):
         raise RuntimeError("injected")
 
-    monkeypatch.setattr("codeintel.providers.none.safe_null_result", _boom)
+    monkeypatch.setattr("codeintel.engines.none.safe_null_result", _boom)
 
     p = NoneProvider()
     r = p.build_result("symbol", "x", [], 0, "")
@@ -133,11 +133,11 @@ import shutil as _shutil
 import threading
 import urllib.request as _urllib_request
 
-import codeintel.providers.semantic as _sem_mod
-from codeintel.http_server import CodeIntelHTTPServer, _Handler
-from codeintel.providers.graph import GraphProvider
-from codeintel.providers.lsp import LspProvider
-from codeintel.providers.semantic import SemanticProvider
+import codeintel.engines.semantic.provider as _sem_mod
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.engines.lsp.provider import LspProvider
+from codeintel.engines.semantic.provider import SemanticProvider
+from codeintel.transports.http import CodeIntelHTTPServer, _Handler
 
 # ---------------------------------------------------------------------------
 # Group 9: GraphProvider — never-raise (None args, wrong types)
@@ -193,7 +193,7 @@ def test_semantic_provider_none_args_deps_false(monkeypatch):
 def test_semantic_provider_db_init_raises(monkeypatch):
     monkeypatch.setattr(_sem_mod, "_DEPS_OK", True)
     try:
-        from codeintel.semantic_db import SemanticDb
+        from codeintel.engines.semantic.db import SemanticDb
         monkeypatch.setattr(SemanticDb, "init", _semantic_boom_init)
     except ImportError:
         pass
@@ -213,7 +213,7 @@ def test_semantic_provider_db_init_raises(monkeypatch):
 # strictly worse outcome than the bare "403 Forbidden" it replaces.
 
 def _model_unavailable(*_a, **_k):
-    from codeintel.semantic_db import DEFAULT_MODEL, EmbeddingModelUnavailable
+    from codeintel.engines.semantic.db import DEFAULT_MODEL, EmbeddingModelUnavailable
     # The `remedy` argument is REQUIRED. Omitting it raised TypeError here instead, which every
     # boundary below caught anyway (they catch `Exception`) — so all four tests passed while
     # exercising none of the path they exist to pin. A fault-injection test that injects the
@@ -225,7 +225,7 @@ def _model_unavailable(*_a, **_k):
 
 def _assert_is_model_unavailable():
     """Guard the guard: prove the injected fault is the one these tests claim to inject."""
-    from codeintel.semantic_db import EmbeddingModelUnavailable
+    from codeintel.engines.semantic.db import EmbeddingModelUnavailable
     try:
         _model_unavailable()
     except EmbeddingModelUnavailable:
@@ -240,7 +240,7 @@ def test_the_injected_fault_is_the_advertised_one():
 
 
 def test_indexer_index_absorbs_a_model_load_failure(monkeypatch, tmp_path):
-    from codeintel.indexer import Indexer
+    from codeintel.engines.semantic.indexer import Indexer
 
     monkeypatch.setattr(Indexer, "_index", _model_unavailable)
     indexer = Indexer.__new__(Indexer)
@@ -251,7 +251,7 @@ def test_indexer_index_absorbs_a_model_load_failure(monkeypatch, tmp_path):
 
 
 def test_searcher_embed_absorbs_a_model_load_failure(monkeypatch):
-    from codeintel.searcher import Searcher
+    from codeintel.engines.semantic.searcher import Searcher
 
     monkeypatch.setattr(Searcher, "_get_embedder", _model_unavailable)
     s = Searcher.__new__(Searcher)
@@ -264,7 +264,7 @@ def test_searcher_embed_absorbs_a_model_load_failure(monkeypatch):
 
 def test_semantic_provider_absorbs_a_model_load_failure(monkeypatch):
     """The full envelope path: the provider runs an inline index pass on a cold repo."""
-    from codeintel.indexer import Indexer
+    from codeintel.engines.semantic.indexer import Indexer
 
     monkeypatch.setattr(_sem_mod, "_DEPS_OK", True)
     monkeypatch.setattr(Indexer, "_index", _model_unavailable)
@@ -277,8 +277,8 @@ def test_semantic_provider_absorbs_a_model_load_failure(monkeypatch):
 def test_reindexer_absorbs_a_model_load_failure(monkeypatch, tmp_path):
     """The background pass runs on a daemon thread, where an escape is invisible AND fatal to the
     pass — and the generation bump would still advance behind it."""
-    from codeintel.indexer import Indexer
-    from codeintel.reindexer import Reindexer
+    from codeintel.engines.semantic.indexer import Indexer
+    from codeintel.gateway.reindexer import Reindexer
 
     monkeypatch.setattr(Indexer, "_index", _model_unavailable)
     r = Reindexer.__new__(Reindexer)

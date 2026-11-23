@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from codeintel.outcome import Missing, Ok
-from codeintel.providers.lsp import _SERENA_GIT, LspProvider, _serena_launch_args, _State
+from codeintel.core.outcome import Missing, Ok
+from codeintel.engines.lsp.provider import _SERENA_GIT, LspProvider, _serena_launch_args, _State
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -39,7 +39,7 @@ FIND_SYMBOL_JSON = (
 FIND_REFS_JSON = (
     '{"src/codeintel/gateway.py": {'
     '"File": [{"name_path": "gateway", "body_location": {"start_line": 0, "end_line": 229}, '
-    '"content_around_reference": "...   6:from x import y\\n  >   7:from codeintel.provider import safe_null_result\\n...   8:z"}], '
+    '"content_around_reference": "...   6:from x import y\\n  >   7:from codeintel.core.provider import safe_null_result\\n...   8:z"}], '
     '"Method": [{"name_path": "Gateway/_fan_out", "body_location": {"start_line": 55, "end_line": 86}, '
     '"content_around_reference": "...  78:a\\n  >  79:        results[e] = safe_null_result(op)\\n...  80:b"}]}, '
     '"src/codeintel/server.py": {'
@@ -100,7 +100,7 @@ def test_launch_argv_direct_binary():
 # --------------------------------------------------------------------------- #
 
 def test_symbol_two_step_uses_located_relative_path(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     session = _ready_session()
     p._sessions["/repo"] = session
@@ -143,7 +143,7 @@ def test_symbol_two_step_uses_located_relative_path(monkeypatch):
 
 def test_context_aliases_to_symbol(monkeypatch):
     # `context` is a fan-out op; the LSP engine answers it with its symbol (def+refs) view.
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/repo"] = _ready_session()
 
@@ -162,7 +162,7 @@ def test_context_aliases_to_symbol(monkeypatch):
 
 
 def test_symbol_definition_only_when_no_references(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/repo"] = _ready_session()
 
@@ -187,7 +187,7 @@ def test_symbol_definition_only_when_no_references(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_overview_parses_symbols_overview(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/repo"] = _ready_session()
 
@@ -212,7 +212,7 @@ def test_overview_parses_symbols_overview(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_boot_failure_cools_down_and_never_raises(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     # Point the launcher at a command that cannot spawn — the background warm-up must fail,
     # flip to FAILED with a cooldown, and NOT respawn on the next request.
@@ -245,7 +245,7 @@ def test_boot_failure_cools_down_and_never_raises(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_symbol_tool_returns_none_degrades(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/repo"] = _ready_session()
     monkeypatch.setattr(p, "_call_tool", lambda *a, **k: Missing("backend-error", "every tool call fails"))
@@ -260,7 +260,7 @@ def test_symbol_tool_returns_none_degrades(monkeypatch):
 
 
 def test_symbol_tool_raising_is_caught(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/repo"] = _ready_session()
 

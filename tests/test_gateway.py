@@ -1,9 +1,9 @@
 """Tests for F4: unified gateway — engine routing, fan-out merge, cache, and tiering."""
 from __future__ import annotations
 
-from codeintel.gateway import Gateway
-from codeintel.policy import TieringPolicy
-from codeintel.provider import Result, attach_confidence
+from codeintel.core.provider import Result, attach_confidence
+from codeintel.gateway.gateway import Gateway
+from codeintel.gateway.policy import TieringPolicy
 
 # ---------------------------------------------------------------------------
 # Stub providers — no mocking library
@@ -412,7 +412,7 @@ class _NotIndexedGraph:
     available = True
 
     def build_result(self, op, target, files, budget, project_root):
-        from codeintel.provider import safe_null_result
+        from codeintel.core.provider import safe_null_result
         return safe_null_result(op, target, engine="graph", reason="project-not-indexed")
 
 
@@ -425,8 +425,8 @@ class _AnsweringLsp:
 
 
 def _overview_gateway():
-    from codeintel.gateway import Gateway
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.reindexer import Reindexer
     rx = Reindexer()
     rx.maybe_reindex = lambda root: None          # hold freshness steady across the calls
     return Gateway(graph=_NotIndexedGraph(), lsp=_AnsweringLsp(), semantic=None, reindexer=rx)
@@ -463,8 +463,8 @@ def test_auto_and_explicit_requests_keep_their_own_cache_entries():
 
 def test_a_repeated_query_is_still_served_from_cache():
     """Guard the guard: splitting the key must not disable caching."""
-    from codeintel.gateway import Gateway
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.reindexer import Reindexer
 
     calls = {"n": 0}
 
@@ -492,7 +492,7 @@ def test_cache_get_and_put_always_use_the_same_key():
     import inspect
     import re
 
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     # `query` is a thin redaction wrapper; the dispatch body (and so the cache) lives in `_query`.
     source = inspect.getsource(Gateway._query)
@@ -522,8 +522,8 @@ def test_an_answer_served_during_a_reindex_says_so():
     reveal that the index is behind. An agent's loop is edit -> ask what I broke, which lands
     exactly in that window. Invalidating the cache would not help: the index itself is stale, so
     re-asking just refetches the same data more expensively. Saying so is the only honest fix."""
-    from codeintel.gateway import Gateway
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.reindexer import Reindexer
 
     rx = Reindexer()
     gw = Gateway(graph=_Answering(), lsp=None, semantic=None, reindexer=rx)
@@ -542,8 +542,8 @@ def test_a_settled_index_does_not_flag_an_answer():
     and is legitimately flagged while it runs — the index really is being rebuilt underneath.)"""
     import time
 
-    from codeintel.gateway import Gateway
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.reindexer import Reindexer
 
     rx = Reindexer()
     rx._last_fired["/repo"] = time.monotonic()      # inside the debounce window: nothing re-fires
@@ -557,9 +557,9 @@ def test_a_settled_index_does_not_flag_an_answer():
 def test_an_empty_result_is_not_flagged_as_reindexing():
     """`reindexing` qualifies an answer. On a safe-null there is no answer to qualify, and the
     `reason`/`hint` already carry the explanation."""
-    from codeintel.gateway import Gateway
-    from codeintel.provider import safe_null_result
-    from codeintel.reindexer import Reindexer
+    from codeintel.core.provider import safe_null_result
+    from codeintel.gateway.gateway import Gateway
+    from codeintel.gateway.reindexer import Reindexer
 
     class _Empty(_Answering):
         def build_result(self, op, target, files, budget, project_root):
@@ -575,7 +575,7 @@ def test_an_empty_result_is_not_flagged_as_reindexing():
 
 
 def test_reindex_pending_clears_once_the_pass_completes(monkeypatch):
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
     rx = Reindexer()
     monkeypatch.setattr(rx, "_semantic_reindex", lambda root: None)
@@ -589,7 +589,7 @@ def test_reindex_pending_clears_once_the_pass_completes(monkeypatch):
 
 def test_reindex_pending_clears_even_when_both_passes_fail(monkeypatch):
     """A stuck flag would mark every later answer stale and train the reader to ignore it."""
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
     rx = Reindexer()
     for name in ("_semantic_reindex", "_graph_reindex"):
@@ -701,7 +701,7 @@ def test_a_fanout_result_is_marked_stale_during_a_reindex():
 # command the Quickstart tells a new user to run first. `doctor` knew the remedy the whole time.
 #
 # The two gateway arms matter more than the provider ones, because `_dispatch_single` short-
-# circuits on `available is False` and `server._build_gateway` leaves an absent engine's slot
+# circuits on `available is False` and `factory.build_gateway` leaves an absent engine's slot
 # None — so in production neither provider's own `build_result` is ever reached, and fixing only
 # the providers would have left the user-visible symptom exactly as it was.
 # ---------------------------------------------------------------------------
@@ -716,7 +716,7 @@ def test_an_unavailable_provider_still_yields_an_actionable_hint():
 def test_an_unattached_engine_reports_the_providers_own_remediation():
     """The None-slot arm. The text must come from the provider module rather than a copy here,
     so the envelope and `doctor` cannot drift apart — assert the identity, not a substring."""
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     gw = Gateway(graph=None)
     r = gw.query(op="callers", target="x", engine="graph")
@@ -727,7 +727,7 @@ def test_an_unattached_engine_reports_the_providers_own_remediation():
 def test_every_engine_has_an_unavailable_hint_wired_to_the_gateway():
     """A fourth engine added later inherits the behaviour only if it declares the attribute; this
     fails the day one is added without it, which is the point."""
-    from codeintel.gateway import _unattached_hint
+    from codeintel.gateway.gateway import _unattached_hint
 
     for engine in ("graph", "lsp", "semantic"):
         gw = Gateway()
@@ -740,7 +740,7 @@ def test_an_unavailable_hint_never_reads_as_evidence_of_absence():
     """The reason this hint exists at all: an agent that receives an empty `callers` answer and no
     explanation concludes the symbol has none, and deletes code. Each engine's text has to deny
     that reading explicitly — the same discipline `index-failed` already applies."""
-    from codeintel.gateway import _unattached_hint
+    from codeintel.gateway.gateway import _unattached_hint
 
     for engine in ("graph", "lsp", "semantic"):
         assert "NOT evidence" in (_unattached_hint(engine) or ""), engine
@@ -749,7 +749,7 @@ def test_an_unavailable_hint_never_reads_as_evidence_of_absence():
 def test_the_query_hint_is_the_same_remediation_doctor_prints():
     """One source of truth per engine. These were two copies of the same sentence before, and the
     query path's copy was the empty string."""
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     gp = GraphProvider()
     gp.available = False        # the documented test seam; independent of what is on this PATH

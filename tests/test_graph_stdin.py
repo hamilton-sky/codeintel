@@ -13,7 +13,7 @@ import subprocess
 
 import pytest
 
-from codeintel.providers.graph import GraphProvider
+from codeintel.engines.graph.provider import GraphProvider
 
 
 class _Done:
@@ -24,7 +24,7 @@ class _Done:
 
 def _provider(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp"
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp"
     )
     return GraphProvider()
 
@@ -36,7 +36,7 @@ def test_run_pipes_payload_via_stdin_no_positional_arg(monkeypatch):
         calls.append((argv, kw.get("input")))
         return _Done(stdout=json.dumps({"projects": []}).encode(), returncode=0)
 
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake_run)
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", fake_run)
     p = _provider(monkeypatch)
     out = p._run("list_projects", {"x": 1}, 3000)
 
@@ -56,7 +56,7 @@ def test_falls_back_to_rawjson_when_stdin_fails(monkeypatch):
             return _Done(stdout=b"", returncode=2)
         return _Done(stdout=json.dumps({"ok": 1}).encode(), returncode=0)  # raw-JSON form works
 
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake_run)
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", fake_run)
     p = _provider(monkeypatch)
     out = p._run("list_projects", {}, 3000)
 
@@ -69,14 +69,14 @@ def test_stdin_and_fallback_timeout_returns_none(monkeypatch):
     def boom(argv, **kw):
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", boom)
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", boom)
     p = _provider(monkeypatch)
     assert p._run("list_projects", {}, 100) is None   # never raises
 
 
 def test_reindexer_graph_reindex_routes_through_stdin(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp"
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp"
     )
     calls = []
 
@@ -84,8 +84,8 @@ def test_reindexer_graph_reindex_routes_through_stdin(monkeypatch):
         calls.append((argv, kw.get("input")))
         return _Done(stdout=b"{}", returncode=0)
 
-    monkeypatch.setattr("codeintel.providers.graph.subprocess.run", fake_run)
-    from codeintel.reindexer import Reindexer
+    monkeypatch.setattr("codeintel.engines.graph.provider.subprocess.run", fake_run)
+    from codeintel.gateway.reindexer import Reindexer
     Reindexer()._graph_reindex("/some/repo")
 
     assert calls, "no subprocess call made"
@@ -129,7 +129,7 @@ def test_live_reindex_argument_name_is_the_one_the_backend_accepts(tmp_path):
     (tmp_path / "sample.py").write_text("def f():\n    return 1\n")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
 
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
     Reindexer()._graph_reindex(str(tmp_path))
 
     # The reindex must have registered the repo — proof the payload was accepted, not just sent.
