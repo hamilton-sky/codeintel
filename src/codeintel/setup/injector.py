@@ -4,6 +4,8 @@ import logging
 import os
 import sys
 
+from codeintel.core.containment import REFUSAL_TEXT, write_contained
+
 _START_MARKER = "<!-- codeintel-map-start -->"
 _END_MARKER = "<!-- codeintel-map-end -->"
 
@@ -104,7 +106,13 @@ class Injector:
     AGENTS.md does not exist and creating one was not consented to, so a CLAUDE.md-only repo keeps
     working exactly as before."""
 
+    def __init__(self) -> None:
+        # One line per file the last `inject` refused to write (a symlink resolving outside the
+        # repo or into its .git directory), naming the path so the user can inject by hand.
+        self.refusals: list[str] = []
+
     def inject(self, project_root: str, *, create: bool = False) -> tuple[str | None, str]:
+        self.refusals = []
         try:
             path = _find_context_file(project_root, create=create)
             if path is None:
@@ -116,17 +124,27 @@ class Injector:
                 return (None, "error")
 
             new_content, action = _update_block(content, _AGENTS_BLOCK)
-            _write_file(path, new_content)
+            if not self._note(_write_file(project_root, os.path.basename(path), new_content), path):
+                return (None, "refused")
             if not existed:
                 action = "created"
 
             if os.path.basename(path) == _AGENTS_FILE:
-                _sync_claude_import(project_root)
-            _write_using_codeintel_md(project_root)
+                self._note(_sync_claude_import(project_root),
+                           os.path.join(project_root, _CLAUDE_FILE))
+            self._note(_write_using_codeintel_md(project_root),
+                       os.path.join(project_root, _USING_CODEINTEL_FILE))
             return (path, action)
         except Exception as exc:
             _logger.warning("Injector.inject failed: %s", exc)
             return (None, "error")
+
+    def _note(self, refusal: str | None, path: str) -> bool:
+        """Record a refused write; True when the file was not refused."""
+        if refusal is None:
+            return True
+        self.refusals.append(f"Refused to write {path}: {REFUSAL_TEXT[refusal]}")
+        return False
 
 
 def _find_context_file(project_root: str, *, create: bool = False) -> str | None:
@@ -143,32 +161,35 @@ def _find_context_file(project_root: str, *, create: bool = False) -> str | None
     return None
 
 
-def _sync_claude_import(project_root: str) -> None:
+def _sync_claude_import(project_root: str) -> str | None:
     """Best-effort: replace CLAUDE.md's own copy of the block — including a stale one left by a
     pre-AGENTS.md codeintel — with the one-line ``@AGENTS.md`` import, now that AGENTS.md is the
-    source of truth. Never raises; worst case CLAUDE.md is left exactly as it was."""
+    source of truth. Never raises; worst case CLAUDE.md is left exactly as it was. Returns the
+    refusal reason when CLAUDE.md links outside the repo or into .git, else None."""
     try:
         claude = os.path.join(project_root, _CLAUDE_FILE)
         if not os.path.isfile(claude):
-            return
+            return None
         content = _read_file(claude)
         if content is None:
-            return
+            return None
         new_content, _action = _update_block(content, _CLAUDE_IMPORT_BLOCK)
-        _write_file(claude, new_content)
+        return _write_file(project_root, _CLAUDE_FILE, new_content)
     except Exception as exc:
         _logger.warning("Injector: could not sync CLAUDE.md import: %s", exc)
+        return None
 
 
-def _write_using_codeintel_md(project_root: str) -> None:
+def _write_using_codeintel_md(project_root: str) -> str | None:
     """Regenerate the canonical usage guide wholesale. Unlike AGENTS.md/CLAUDE.md this carries no
-    markers and no merge logic — it is never hand-edited, so overwriting it in full is safe."""
+    markers and no merge logic — it is never hand-edited, so overwriting it in full is safe.
+    Returns the refusal reason when it links outside the repo or into .git, else None."""
     try:
-        path = os.path.join(project_root, _USING_CODEINTEL_FILE)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(_USING_CODEINTEL_CONTENT)
+        return write_contained(project_root, _USING_CODEINTEL_FILE, _USING_CODEINTEL_CONTENT,
+                               follow_links=True)
     except Exception as exc:
         _logger.warning("Injector: could not write %s: %s", _USING_CODEINTEL_FILE, exc)
+        return None
 
 
 def _read_file(path: str) -> str | None:
@@ -182,29 +203,12 @@ def _read_file(path: str) -> str | None:
         return None
 
 
-def _write_file(path: str, content: str) -> None:
-    # Atomic: write a sibling temp file then os.replace it into place, so an interrupted
-    # write can never leave the user's CLAUDE.md/AGENTS.md truncated or half-written.
-    #
-    # os.replace swaps in a NEW inode, so without care it also (a) drops the original's
-    # permissions in favour of whatever the umask gives, and (b) replaces a symlinked
-    # CLAUDE.md — a dotfile-manager or shared-team-rules setup — with a regular file, orphaning
-    # the source. Resolve the link and carry the mode across.
-    target = os.path.realpath(path)
-    try:
-        mode: int | None = os.stat(target).st_mode & 0o7777
-    except OSError:
-        mode = None
-
-    tmp = target + ".codeintel.tmp"
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(content)
-    if mode is not None:
-        try:
-            os.chmod(tmp, mode)
-        except OSError:
-            pass
-    os.replace(tmp, target)
+def _write_file(project_root: str, name: str, content: str) -> str | None:
+    # Atomic, mode-preserving, and a symlinked CLAUDE.md/AGENTS.md (shared team rules elsewhere in
+    # the work tree) is written through to its target with the link kept — all in
+    # `write_contained`. A link that resolves outside the repo or into its .git directory is
+    # refused: the reason is returned and nothing is written.
+    return write_contained(project_root, name, content, follow_links=True)
 
 
 def _update_block(content: str, block_body: str) -> tuple[str, str]:

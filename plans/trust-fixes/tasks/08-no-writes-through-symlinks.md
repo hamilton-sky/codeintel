@@ -1,7 +1,7 @@
 # Never write CODE_INTEL.md through a symlink, and refuse AGENTS.md, CLAUDE.md or USING_CODEINTEL.md links that leave the work tree or enter .git
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 3
@@ -68,3 +68,38 @@ prints passed
 - open(2): https://manpages.debian.org/trixie/manpages-dev/open.2.en.html
 
 ## Answer
+
+Work started at d05a5f956ecb1a07ceb56df39b1b2a18891fa84a. Test-only commit: af9d1f5 (`test(trust-fixes): 08 failing test`).
+
+**Built**
+- `src/codeintel/core/containment.py`: `write_contained(root, name, content, *, follow_links) -> str | None` and `REFUSAL_TEXT` (`symlink`, `outside-repo`, `inside-git-dir` mapped to the words a user reads). Refusals log WARNING `refusing to write <path>: <text> (<reason>)`. Write: sibling temp `<resolved>.<pid>.<rand>.codeintel.tmp` opened `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, existing mode carried over with `os.chmod`, then `os.replace(tmp, resolved)`; the temp is removed if anything fails. I/O errors raise (callers already catch).
+- `src/codeintel/mapping/mapper.py`: `MapGenerator.last_refusal` (reset on each `write`); `write` routes through `write_contained(..., follow_links=False)` and returns `(path, False)` with `last_refusal = "Refused to write CODE_INTEL.md: it is a symlink (<path>)"`. The stub-keep check no longer reads through a link (`not islink and isfile`), so a link is always reported as a refusal, never as a kept stub.
+- `src/codeintel/cli/map.py`: prints `getattr(gen, "last_refusal", None)` and exits 1; `--inject` passes `create=True`, prints any `Injector.refusals` lines, and exits 1 when one exists.
+- `src/codeintel/cli/index.py`: refresh gate checks `os.path.islink` before `isfile`; a link skips the refresh (no stdout) and logs the same WARNING.
+- `src/codeintel/setup/injector.py`: `Injector.refusals` (one line per refused file, naming the path); `_write_file(project_root, name, content)` and `_write_using_codeintel_md` go through `write_contained(..., follow_links=True)`; `_sync_claude_import` returns its refusal. A refused main target returns `(None, "refused")` and writes nothing else; a refused CLAUDE.md sync or USING_CODEINTEL.md is recorded while the safe file is still written.
+- `src/codeintel/transports/mcp.py`: `code.map` adds `note: <last_refusal>` and `inject.refused: [...]`; inject keeps `create=False`.
+- `docs/deploy.md`: the RBAC warning now says the snippet read path is closed via `core.containment.open_contained` (and `_cleanup_deleted` via `contained_path`), names the unaudited read path (the `context` op's graph/LSP halves), and says repo-file writes go through `write_contained`.
+- Tests: `tests/test_hardening.py` (16 new cases), `tests/test_cli_commands.py` (2 new tests, fake-injector test now takes `create` and asserts it is True).
+
+**Proof**
+- Hardening tests: `.venv/bin/pytest tests/test_hardening.py tests/test_cli_commands.py -q -o addopts=` with `src/` stashed back to d05a5f9: 16 failed (all new ones: map, index refresh, inside/dangling links, 3 names x {link, parent-dir}, `.git/config`, `.git/hooks/pre-commit`, MCP code.map, and the 3 cli tests), 94 passed. With the change: all pass. Each hardening test asserts the victim bytes unchanged and the refusal reported (cli line / `last_refusal` / `Injector.refusals` / WARNING record for `index` / MCP `note`).
+- cli tests: `test_map_inject_creates_agents_md_when_the_repo_has_no_context_file`, `test_map_on_a_symlinked_code_intel_md_exits_1_naming_the_path`, `test_map_inject_reports_what_it_did_to_which_file` (accepts `create`, asserts True) pass; `test_map_keeps_the_existing_file_when_the_new_map_is_a_stub` passes unchanged.
+- `.venv/bin/pytest tests/test_mapper.py::test_inject_writes_through_a_symlinked_rules_file -q -o addopts=`: 1 passed; `git diff d05a5f9 -- tests/test_mapper.py` is empty.
+- Check block `.venv/bin/pytest tests/test_hardening.py tests/test_mapper.py tests/test_cli_commands.py tests/test_cli_install_offer_injection.py tests/test_installer.py tests/test_mcp_server.py tests/test_summary_integrity.py -q -o addopts=`: `278 passed, 1 xfailed` (the xfail is the pre-existing strict c4-coverage FINDING in test_summary_integrity), exit 0. The four off-Touches files are unchanged.
+- Other tests touching these modules (`test_null_reason_and_ripple, test_qualifier_scan, test_rbac, test_changed_range, test_corpus, test_architecture, test_c4, test_c4_model, test_doctor` minus the known root-only deselect): 336 passed, 26 skipped. "All existing tests still pass" for the whole suite: left to the conductor's gate.
+- `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 files. `codeintel c4 . --check --out /tmp/codeintel-c4-check`: 0 gating findings, exit 0. compileall: exit 0.
+- Smoke in a scratch repo: `codeintel map .` with `CODE_INTEL.md -> ../victim` printed the refusal, exit 1, victim unchanged; `codeintel map --inject .` in an empty repo created AGENTS.md and USING_CODEINTEL.md.
+
+**Decisions**
+- Refusal reporting for the injector is an attribute (`Injector.refusals`) rather than a new action string, so `(path, action)` keeps its meaning and the fakes in test_cli_commands need no change beyond `create`. Callers read it with `getattr`.
+- `follow_links=True` on a missing file checks `realpath(path)` (resolves a linked parent) against the root instead of `contained_path`, because `contained_path` refuses a path that does not exist yet; an existing or dangling entry goes through `contained_path` (dangling therefore refused as `outside-repo`). A hard-linked AGENTS.md is refused too (contained_path's nlink rule).
+- `cli map` exits 1 on any refusal, including an inject refusal: the user asked for a write that did not happen.
+- `index`'s refused refresh logs a WARNING (stderr via logging) but prints nothing and keeps exit 0, matching "skips silently, as other refresh failures do" while still satisfying "every refusal logs a WARNING".
+- Temp names carry pid + random suffix so a stale temp from a crash cannot wedge `O_EXCL` forever.
+
+**Shortcuts taken**
+- `os.chmod(tmp, mode)` by path rather than `fchmod` (Python 3.11 on Windows lacks `os.fchmod`). The temp was just created by us with `O_EXCL|O_NOFOLLOW`; a racing swap of the temp name inside the repo directory is the only gap, and an attacker with that access already owns the repo. Upgrade to `fchmod` when 3.11 is dropped.
+- A chmod failure now raises (logged as an inject/map failure) instead of being silently skipped as before.
+
+**For later tickets**
+- Ticket 13 (CHANGELOG): T6 `map-symlink-write-through`, `install-inject-advice-noop` (`map --inject` now creates AGENTS.md) and `deploy-doc-stale-symlink-hole` are fixed here. New user-visible: `map` exits 1 on a refused write; MCP `code.map` gains `note` and `inject.refused`.

@@ -397,13 +397,24 @@ def _code_map_handler_inner(args: dict) -> dict:
         # size_bytes = bytes actually written; 0 when an existing populated map was preserved
         # (the new content was a stub) — `wrote` disambiguates for the caller.
         size = len(content.encode("utf-8")) if wrote else 0
+        # A symlinked CODE_INTEL.md is refused, never written through; say so rather than leave
+        # `wrote: false` to read as "the new map was a stub".
+        refusal = getattr(gen, "last_refusal", None)
 
-        inject_result = None
+        inject_result: dict | None = None
         if inject:
-            inj_path, inj_action = Injector().inject(project_root)
+            injector = Injector()
+            inj_path, inj_action = injector.inject(project_root)
             inject_result = {"path": inj_path, "action": inj_action}
+            refused = list(getattr(injector, "refusals", None) or [])
+            if refused:
+                inject_result["refused"] = refused
 
-        return {"ok": True, "path": path, "size_bytes": size, "wrote": wrote, "inject": inject_result}
+        out: dict = {"ok": True, "path": path, "size_bytes": size, "wrote": wrote,
+                     "inject": inject_result}
+        if refusal:
+            out["note"] = refusal
+        return out
     except Exception:
         return {"ok": True, "path": None, "size_bytes": 0, "note": "map-error"}
 

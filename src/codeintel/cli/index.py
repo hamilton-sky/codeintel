@@ -187,8 +187,16 @@ def run(args: Any) -> int:
     # creates one. Creating it put an uncommitted file into every repo on the first `index` —
     # including one whose index had just failed — when writing into the repo is `map`'s job, asked
     # for by name.
+    #
+    # `isfile` follows links, so a symlinked CODE_INTEL.md (an untrusted repo can point it at
+    # `~/.bashrc`) is checked first and never refreshed — skipped like any other refresh failure,
+    # with the WARNING every refused write logs.
     try:
-        if os.path.isfile(os.path.join(project_root, "CODE_INTEL.md")):
+        map_path = os.path.join(project_root, "CODE_INTEL.md")
+        if os.path.islink(map_path):
+            logging.getLogger(__name__).warning(
+                "refusing to write %s: it is a symlink (symlink)", map_path)
+        elif os.path.isfile(map_path):
             from codeintel.engines.graph.provider import GraphProvider
             from codeintel.mapping.mapper import MapGenerator
 

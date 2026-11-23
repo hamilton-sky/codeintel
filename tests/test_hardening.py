@@ -405,3 +405,24 @@ def test_inject_refuses_agents_md_linked_into_the_git_dir(tmp_path, git_file):
 
     assert {p: p.read_bytes() for p in before} == before
     assert any(str(repo / "AGENTS.md") in m and ".git" in m for m in inj.refusals), inj.refusals
+
+
+def test_mcp_code_map_reports_a_symlinked_code_intel_md(tmp_path, monkeypatch):
+    from codeintel.transports.mcp import code_map_handler
+
+    repo, victim = _hostile_repo(tmp_path)
+    (repo / "CODE_INTEL.md").symlink_to(victim)
+    monkeypatch.setattr("codeintel.transports.mcp.GraphProvider",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no backend")))
+
+    rules = tmp_path / "rules"
+    rules.write_bytes(_VICTIM)
+    (repo / "AGENTS.md").symlink_to(rules)
+
+    out = code_map_handler({"project_root": str(repo), "inject": True})
+    assert out["wrote"] is False
+    assert out["note"] == f"Refused to write CODE_INTEL.md: it is a symlink ({repo / 'CODE_INTEL.md'})"
+    assert out["inject"]["action"] == "refused"
+    assert out["inject"]["refused"] == [
+        f"Refused to write {repo / 'AGENTS.md'}: it resolves outside the repo"]
+    assert victim.read_bytes() == _VICTIM and rules.read_bytes() == _VICTIM

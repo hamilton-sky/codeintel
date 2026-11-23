@@ -93,3 +93,80 @@ def open_contained(root_real: str, candidate: str | Path, **kwargs):
         )
         raise ContainmentError(str(candidate))
     return open(safe, **kwargs)
+
+
+# What each refusal reason from ``write_contained`` means, worded for the line a user reads.
+REFUSAL_TEXT = {
+    "symlink": "it is a symlink",
+    "outside-repo": "it resolves outside the repo",
+    "inside-git-dir": "it resolves inside the repo's .git directory",
+}
+
+
+def _inside(root_real: str, real: str) -> bool:
+    return real == root_real or real.startswith(root_real + os.sep)
+
+
+def write_contained(root: str, name: str, content: str, *, follow_links: bool) -> str | None:
+    """The one write path for files codeintel writes into a repo (``CODE_INTEL.md``, ``AGENTS.md``,
+    ``CLAUDE.md``, ``USING_CODEINTEL.md``). Returns ``None`` on success, or the refusal reason
+    (a key of ``REFUSAL_TEXT``). I/O errors raise.
+
+    A cloned, untrusted repo can ship ``CODE_INTEL.md -> ~/.bashrc``; a plain ``open(path, "w")``
+    then overwrites the user's file on a routine ``codeintel map``. So:
+
+    * ``follow_links=False`` (codeintel's own generated file): any symlink is refused, wherever it
+      points — outside, inside, or nowhere.
+    * ``follow_links=True`` (files the user may share by symlink): refused when the realpath leaves
+      the root (a link out, a parent directory linked out, a dangling link) or lands in the repo's
+      ``.git`` directory (``.git/config``, ``.git/hooks/…`` turn a write into code execution).
+      A link to a regular file elsewhere in the work tree is written through, and kept.
+
+    The write is atomic: a sibling temp file opened ``O_CREAT|O_EXCL|O_NOFOLLOW`` (so neither a
+    planted temp name nor a dangling link is followed), the existing mode carried over, then
+    ``os.replace`` onto the resolved path.
+    """
+    path = os.path.join(root, name)
+    if not follow_links:
+        if os.path.islink(path):
+            return _refuse_write(path, "symlink")
+        resolved = path
+    else:
+        root_real = real_root(root)
+        if os.path.lexists(path):
+            safe = contained_path(root_real, path)
+            if safe is None:
+                return _refuse_write(path, "outside-repo")
+            resolved = safe
+        else:
+            # Not there yet: realpath resolves any linked parent, and the file is created below.
+            resolved = os.path.realpath(path)
+            if not _inside(root_real, resolved):
+                return _refuse_write(path, "outside-repo")
+        git_dir = os.path.realpath(os.path.join(root_real, ".git"))
+        if os.path.isdir(git_dir) and _inside(git_dir, resolved):
+            return _refuse_write(path, "inside-git-dir")
+
+    try:
+        mode: int | None = os.stat(resolved).st_mode & 0o7777
+    except FileNotFoundError:
+        mode = None
+    tmp = f"{resolved}.{os.getpid()}.{os.urandom(4).hex()}.codeintel.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o666 if mode is None else mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        if mode is not None:
+            os.chmod(tmp, mode)   # the umask must not narrow or widen the old file's mode
+        os.replace(tmp, resolved)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+    return None
+
+
+def _refuse_write(path: str, reason: str) -> str:
+    logger.warning("refusing to write %s: %s (%s)", path, REFUSAL_TEXT[reason], reason)
+    return reason

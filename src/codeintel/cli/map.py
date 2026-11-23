@@ -27,16 +27,27 @@ def run(args: Any) -> int:
 
     content = gen.generate(project_root, budget_bytes=args.budget)
     path, wrote = gen.write(project_root, content)
+    # getattr: a refusal (symlinked CODE_INTEL.md) and a kept stub are both `wrote=False`.
+    refusal = getattr(gen, "last_refusal", None)
     if wrote:
         print(f"Wrote {path} ({len(content.encode())} bytes)")
+    elif refusal:
+        print(refusal)
     else:
         print(f"Kept existing {path} — new map was a stub (graph empty/unindexed; "
               f"run `codeintel index` first)")
 
+    inject_refused: list[str] = []
     if args.inject:
-        inj_path, inj_action = Injector().inject(project_root)
+        # create=True: the user asked for the injection by name, so a missing AGENTS.md is created
+        # (the advice `codeintel install` prints relies on it).
+        injector = Injector()
+        inj_path, inj_action = injector.inject(project_root, create=True)
         if inj_path:
             print(f"Inject: {inj_action} block in {inj_path}")
         else:
             print(f"Inject: {inj_action}")
-    return 0
+        inject_refused = list(getattr(injector, "refusals", None) or [])
+        for line in inject_refused:
+            print(line)
+    return 1 if (refusal or inject_refused) else 0

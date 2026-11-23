@@ -63,15 +63,22 @@ Binding a non-loopback host **requires** `--allow-remote` **and** authentication
 
 > ### ⚠️ Do not rely on this as an isolation boundary between untrusted tenants
 >
-> **A caller who can WRITE inside their own allowed root can read files outside it.** Path
-> containment is enforced when a repository is *indexed*, not when a result is *read back*. A file
-> that is indexed normally and then replaced with a symlink pointing outside the root is still
-> served: the stored row is never reconciled (a symlink to an existing target passes the
-> "does this file still exist?" check), and the query-time snippet read follows it. Roughly 40
-> lines are returned per planted chunk, and the target can be anything the **server process** can
-> read — including another role's repository and `~/.codeintel/auth.toml`, which holds the tokens.
+> **The snippet read path is closed; not every read path has been audited.** A file that was
+> indexed normally and later replaced with a symlink (or hard link) pointing outside the root used
+> to be served back: the stored row was never reconciled, and the query-time snippet read followed
+> the link. Both now go through `core.containment`: `_cleanup_deleted` reconciles such a row away,
+> and `search`'s snippet read opens the file with `core.containment.open_contained`, which refuses
+> (and logs at WARNING) anything that resolves outside the indexed root.
 >
-> This is a standing hole, not a race: the swap can happen at any time after indexing.
+> Read paths that have **not** been audited for the same swap: the `context` op (it fans out to the
+> graph backend and the language server, which read the repository themselves, outside
+> `core.containment`). Until they are, a caller who can write inside their own root should be
+> assumed able to reach what those engines can read.
+>
+> Writes into a repository go through one path too: `CODE_INTEL.md`, `AGENTS.md`, `CLAUDE.md` and
+> `USING_CODEINTEL.md` are written with `core.containment.write_contained`. A symlinked
+> `CODE_INTEL.md` is never written through; the other three are refused when they resolve outside
+> the repo root or into its `.git` directory.
 >
 > RBAC is sound for the case it was built for — **separating privilege levels among callers you
 > already trust**, so a narrow role cannot run `hotspots` or point an op at an unrelated
