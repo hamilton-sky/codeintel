@@ -1,11 +1,56 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import subprocess
 import threading
 import time
 
 logger = logging.getLogger(__name__)
+
+# The fingerprint's git calls run on the query path, so they are bounded hard. A slow or broken git
+# never turns into a pass: the caller falls back to the time debounce (see `maybe_reindex`).
+_FINGERPRINT_TIMEOUT_S = 5
+
+
+def _git_out(root: str, *args: str) -> bytes | None:
+    """stdout of one git call in *root*, or ``None`` when git could not run, failed or timed out.
+
+    An argv list and no shell. ``core.fsmonitor=false`` and the scrubbed environment are the same
+    guards ``changed_range._git`` uses: a repository's own config must not run a program here, and
+    an inherited ``GIT_DIR`` must not point the call at some other repository."""
+    from codeintel.engines.graph.changed_range import _GIT, _env
+    try:
+        done = subprocess.run(
+            [*_GIT, *args], cwd=root, capture_output=True, timeout=_FINGERPRINT_TIMEOUT_S,
+            env=_env(), check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _tree_fingerprint(root: str) -> str | None:
+    """HEAD's sha plus the newest mtime over ``git ls-files -m -o --exclude-standard``.
+
+    The listed paths are folded in too, so a deletion (no mtime left to read) still moves it.
+    ``None`` for a root git cannot fingerprint: not a work tree, no commit yet, git missing, a
+    failure or a timeout."""
+    head = _git_out(root, "rev-parse", "--verify", "--quiet", "HEAD")
+    if head is None:
+        return None
+    listed = _git_out(root, "ls-files", "-z", "-m", "-o", "--exclude-standard")
+    if listed is None:
+        return None
+    paths = sorted({p for p in listed.decode("utf-8", "surrogateescape").split("\0") if p})
+    newest = 0
+    for rel in paths:
+        try:
+            newest = max(newest, os.stat(os.path.join(root, rel)).st_mtime_ns)
+        except OSError:
+            continue  # deleted since; its name is still in the fingerprint below
+    listing = hashlib.sha256("\0".join(paths).encode("utf-8", "surrogateescape")).hexdigest()
+    return f"{head.decode('ascii', 'replace').strip()}:{newest}:{listing}"
 
 
 class _DaemonPool:
@@ -48,6 +93,8 @@ class Reindexer:
         )
         self._lock = threading.Lock()
         self._last_fired: dict[str, float] = {}
+        # The tree fingerprint each git root had when its last pass was submitted.
+        self._last_fingerprint: dict[str, str] = {}
         # Per-project index generation — bumped when a reindex completes. The gateway
         # folds it into the cache key so a structural answer is invalidated once the
         # index actually moves (a symbol/free-text target has no file content to hash).
@@ -82,11 +129,21 @@ class Reindexer:
         from codeintel.core.filelock import held_by_another_process, lock_path
         return held_by_another_process(lock_path(os.path.realpath(project_root)))
 
-    def maybe_reindex(self, project_root: str) -> None:
+    def maybe_reindex(self, project_root: str) -> bool:
+        """Submit a background pass for *project_root* when its tree changed; ``True`` if submitted.
+
+        A git root submits only when its fingerprint (`_tree_fingerprint`) differs from the one
+        last submitted, so a query on an unchanged tree starts nothing, and the gateway does not
+        report that query's own pass as "a reindex is in progress". The time debounce still bounds
+        every root: a changed tree inside the window waits for the next query after it. A root git
+        cannot fingerprint (not a repository, or git failed or timed out) keeps the time debounce
+        alone, so a broken git never submits more passes than before."""
         if not self._enabled:
-            return
+            return False
         if not project_root:
-            return
+            return False
+        if not os.path.isdir(project_root):
+            return False  # nothing there to index; a pass would only fail
 
         now = time.monotonic()
         with self._lock:
@@ -95,21 +152,37 @@ class Reindexer:
             # stacked another concurrent pass — overlapping writers against one SQLite file and
             # one graph subprocess, for no benefit.
             if project_root in self._in_flight:
-                return
+                return False
             last = self._last_fired.get(project_root, 0.0)
             if now - last < self._debounce_seconds:
-                return
+                return False
+
+        # Outside the lock: up to two git calls, each bounded by `_FINGERPRINT_TIMEOUT_S`.
+        fingerprint = _tree_fingerprint(project_root)
+
+        with self._lock:
+            # Re-checked: another thread may have submitted while git ran.
+            if project_root in self._in_flight:
+                return False
+            last = self._last_fired.get(project_root, 0.0)
+            if now - last < self._debounce_seconds:
+                return False
+            if fingerprint is not None and fingerprint == self._last_fingerprint.get(project_root):
+                return False
             self._last_fired[project_root] = now
+            if fingerprint is not None:
+                self._last_fingerprint[project_root] = fingerprint
 
         # Passed the debounce gate — honor a per-project `reindex = "never"` opt-out before doing
         # expensive work, so that config key actually disables background reindexing (not only the
         # inline path). Checked post-debounce, so config is read at most once per window.
         if self._reindex_disabled(project_root):
-            return
+            return False
 
         with self._lock:
             self._in_flight.add(project_root)
         self._executor.submit(self._do_reindex, project_root)
+        return True
 
     def _reindex_disabled(self, project_root: str) -> bool:
         try:
@@ -150,14 +223,16 @@ class Reindexer:
                     logger.debug("reindex of %s skipped: another process holds the lock",
                                  project_root)
                     return
-                try:
-                    self._semantic_reindex(project_root)
-                except Exception as exc:
-                    logger.warning("semantic reindex failed for %s: %s", project_root, exc)
+                # Graph first: a semantic pass can block for minutes on a model download, and the
+                # graph's freshness must not wait behind it.
                 try:
                     self._graph_reindex(project_root)
                 except Exception as exc:
                     logger.warning("graph reindex failed for %s: %s", project_root, exc)
+                try:
+                    self._semantic_reindex(project_root)
+                except Exception as exc:
+                    logger.warning("semantic reindex failed for %s: %s", project_root, exc)
         finally:
             with self._lock:
                 self._generation[project_root] = self._generation.get(project_root, 0) + 1

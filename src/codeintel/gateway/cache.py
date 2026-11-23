@@ -49,7 +49,7 @@ class ContentHashCache:
         target: str,
         engine: str,
         project_root: str,
-        freshness: int = 0,
+        freshness: int | str = 0,
     ) -> Result | None:
         key = (op, target, engine, project_root)
         with self._lock:
@@ -73,7 +73,7 @@ class ContentHashCache:
         engine: str,
         project_root: str,
         result: Result | None,
-        freshness: int = 0,
+        freshness: int | str = 0,
     ) -> None:
         if result is None or result.get("result") is None:
             return

@@ -304,7 +304,7 @@ Full reference: **[docs/c4.md](docs/c4.md)**. Why LikeC4 and not something else,
 - **It never throws.** Every call returns the same JSON envelope; a missing or broken backend degrades to `null` *with a reason*. No exceptions, no 500s, no malformed output for the agent to trip over — so you never wrap `code.query` in a `try`.
 - **One tool, not three.** Register a single MCP server and it auto-routes each question to graph, LSP, or semantic — instead of wiring up three backends with three response shapes and three failure modes.
 - **Degrades instead of breaking.** No graph backend installed? That engine returns `null` and the agent falls back to grep. The semantic engine needs nothing external, so codeintel is useful the moment it's installed and only gets sharper as you add backends.
-- **Fast on repeat, and the cache never lies.** A content-hash cache returns instantly for unchanged code and self-invalidates when a background reindex advances the index, so you never read a cached answer for code that moved on. The cache is bounded (LRU), so a long-running server holds steady memory. (The *cache* is always consistent with the index; how current the index itself is depends on the engine — see [Keeping answers fresh](#keeping-answers-fresh).)
+- **Fast on repeat, and the cache follows the index.** A content-hash cache returns instantly for unchanged code and is invalidated by a reindex from any process — the server's own background pass, a `codeintel index` in another terminal, or a `codeintel reset` that deletes the index — because its key includes the index files' modification times. It never serves an answer from an index that has since been rewritten. The cache is bounded (LRU), so a long-running server holds steady memory. (The *cache* is always consistent with the index; how current the index itself is depends on the engine — see [Keeping answers fresh](#keeping-answers-fresh).)
 - **Concurrency-safe.** The HTTP transport handles requests on threads, so one slow query (an LSP session warming, a first-time index) can't block every other agent.
 - **Honest about its own health.** `codeintel doctor` answers three separate questions per engine — *installed?* *runnable?* *is this repo indexed?* — with the single command to fix each gap, so "installed" is never mistaken for "working". And a readiness claim is one a query can actually honor: install a missing backend mid-session and the running server picks it up on the next call, rather than reporting the engine healthy while quietly routing around it until you restart the host.
 
@@ -383,8 +383,9 @@ rather than a bare reason.
 
 One more honest caveat. For targets that are **symbol names or free text** (most of them —
 `callers`, `impact`, `hotspots`, `search`), there is no file whose content hash could change, so a
-cached answer is invalidated only when a background reindex completes, and those are debounced
-(~30s). An edit followed immediately by the same query can therefore return the pre-edit answer.
+cached answer is invalidated only when the index is rewritten (a background reindex completes,
+or `codeintel index` runs), and background passes are debounced (~30s). An edit followed
+immediately by the same query can therefore return the pre-edit answer.
 Targets that are real file paths are content-hashed and refresh as soon as the bytes change.
 
 Pass `--engine auto` (the default) and codeintel chooses the best engine per operation. Pass `--engine both` or `--engine all` to fan out to multiple engines and merge results.
@@ -456,7 +457,7 @@ Config is **validated on load** — an out-of-range number, a misspelled enum, o
 | `CODEINTEL_LOG_FORMAT=json` | Structured (JSON-per-line) logs for ELK / Splunk / Datadog |
 | `CODEINTEL_HTTP_ACCESS_LOG=1` | One log line per HTTP request (method, path, status, latency) |
 | `CODEINTEL_DEBUG=1` | Log the full traceback of any error the never-throw contract swallows (silent by default) — the switch for diagnosing an unexpected `null` |
-| `CODEINTEL_REINDEX=off` | Disable the background reindexer; queries then index inline to stay fresh |
+| `CODEINTEL_REINDEX=off` | Disable the background reindexer. Graph answers are **not** indexed inline: run `codeintel index <root>` to refresh them, and the cache notices the new index on the next query. (Semantic `search` still indexes inline, on every query, while the reindexer is off.) |
 | `CODEINTEL_HOME` | Where per-machine state lives (default `~/.codeintel`) — the index cache, the global `config.toml`, and `auth.toml`. Set this when the process has **no resolvable home directory** — a container running as a UID with no passwd entry and no `$HOME`, which is common when an agent runs in one. Without it, `Path.home()` raises and every command fails somewhere far from the cause. |
 
 ## Privacy & dependencies

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from codeintel.core.paths import graph_db_stamp
 from codeintel.core.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.core.query_ops import OPS_REQUIRING_A_TARGET, TARGETLESS_OPS
 from codeintel.core.redact import redact
@@ -49,6 +51,29 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
     return {**result, "reindexing": True,
             "hint": "a reindex is in progress — this answer reflects the index as of the last "
                     "completed pass; re-ask shortly if you have just changed this code"}
+
+
+def _semantic_db_stamp(project_root: str) -> int:
+    """The semantic index file's mtime in nanoseconds (its ``-wal`` included); 0 when missing.
+
+    The file is the one ``default_db_path`` names for this root's configured model, the same one
+    the semantic provider and the reindexer write. The db runs in WAL mode, so a pass's writes land
+    in ``-wal`` until a checkpoint, which is why that sibling is read too. Never raises: a cache
+    key must not fail a query."""
+    try:
+        from codeintel.core.config import load_config
+        from codeintel.engines.semantic.db import default_db_path
+        path = default_db_path(str(load_config(project_root).get("model") or ""))
+    except Exception as exc:
+        log_swallowed("gateway._semantic_db_stamp", exc)
+        return 0
+    newest = 0
+    for candidate in (path, path + "-wal"):
+        try:
+            newest = max(newest, os.stat(candidate).st_mtime_ns)
+        except OSError:
+            continue
+    return newest
 
 
 def _unattached_hint(engine: str) -> str | None:
@@ -649,12 +674,6 @@ class Gateway:
                          f"The ops that need no target: {', '.join(sorted(TARGETLESS_OPS))}.",
                 )
 
-            if not self._oneshot:
-                try:
-                    self._reindexer.maybe_reindex(str(project_root or ""))
-                except Exception:
-                    pass
-
             # If a reindex is running, this answer comes from the PREVIOUS index. Structural
             # answers (callers/impact/hotspots) hash a symbol name, not file bytes, so nothing
             # else in the envelope can reveal that — and an agent that just edited and asked
@@ -664,13 +683,23 @@ class Gateway:
             # reindex was started, so there is nothing for the answer to be behind. In server mode
             # the flag now means what it always claimed to — a pass this process did not start is
             # genuinely still running — which is why it is fixed at the cause rather than deleted.
-            if self._oneshot:
-                reindexing = False
-            else:
+            #
+            # The pending check is read BEFORE `maybe_reindex`, so a pass this query submits is
+            # not reported by the same query unless `maybe_reindex` says it found a changed tree
+            # (it returns True only when it submitted). Read after it, every query on an
+            # unchanged tree flagged its own pass once the debounce window had passed.
+            reindexing = False
+            if not self._oneshot:
+                root_for_reindex = str(project_root or "")
                 try:
-                    reindexing = self._reindexer.reindex_pending(str(project_root or ""))
+                    reindexing = bool(self._reindexer.reindex_pending(root_for_reindex))
                 except Exception:
                     reindexing = False
+                try:
+                    if self._reindexer.maybe_reindex(root_for_reindex):
+                        reindexing = True
+                except Exception:
+                    pass
 
             # Legacy list-based path (backward compat with pre-Phase-2 tests)
             if self._legacy_providers is not None:
@@ -703,13 +732,20 @@ class Gateway:
 
             root_str = project_root or ""
 
-            # Freshness token — bumps when a background reindex completes, so a cached
-            # structural answer (a symbol/free-text target, whose content hash never
-            # changes) is invalidated once the index actually moves. 0 when unavailable.
+            # Freshness token: this process's reindex generation, plus the graph db's stamp and
+            # the semantic db's mtime, so a cached structural answer (a symbol/free-text target,
+            # whose content hash never changes) is invalidated once the index moves — whichever
+            # process wrote it. The generation alone missed `codeintel index` run in another
+            # process, and a `reset` that deleted the db, so a running server served its pre-index
+            # answer with `cached: true` for as long as it lived. Each part is 0 when unavailable.
             try:
-                freshness = self._reindexer.generation(root_str)
+                generation = self._reindexer.generation(root_str)
             except Exception:
-                freshness = 0
+                generation = 0
+            # No root names no index files, and resolving "" would read the process's cwd.
+            stamps = (f"{graph_db_stamp(root_str)}:{_semantic_db_stamp(root_str)}"
+                      if root_str else "0:0")
+            freshness = f"{generation}:{stamps}"
 
             # Ops that read live, unhashable state (the git worktree) must never be served from the
             # content-hash cache — it can't see uncommitted edits. Computed ONCE here so it covers

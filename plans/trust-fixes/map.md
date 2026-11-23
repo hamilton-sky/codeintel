@@ -46,6 +46,7 @@ Also, every regression test added for a finding fails on main eb0902f and passes
 - 01 — round 1 fixes: a failed `git status` gives `index-age-unknown`; uncommitted paths are scoped to the answered project's root; `graph_db_stamp` returns 0 on any OSError.
 - 01 — round 2 fixes: HEAD's time is read with `git log -1 --no-show-signature --format=%ct` and an unreadable one (HEAD present) is `unknown`; uncommitted `changed` says "working tree clean" only when `git status` succeeded and listed nothing.
 - 02 — callers/callees/impact/context get `stale-index`/`index-age-unknown` (section `index`) from `GraphProvider._stamp_staleness` via `changed_range.graph_index_age`; a missing file is dated by its nearest existing directory; rows in missing or newer files become `unstated`.
+- 03 — gateway cache key is `generation:graph_db_stamp:semantic_db(+wal) mtime`; `maybe_reindex` returns bool, submits a git root only when HEAD+modified/untracked fingerprint moved (time debounce still applies; git failure falls back to it), returns False for a missing root; `reindexing` = pending-before or submitted; graph pass runs before semantic.
 
 ## Open questions
 

@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01
 Test first: yes
 Level: 3
@@ -61,3 +61,41 @@ prints passed
 - The comment in `src/codeintel/gateway/gateway.py` about one-shot mode and a query reporting its own pass
 
 ## Answer
+
+Work started at commit 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f. Test-only commit: e2e7d8e.
+
+**Built**
+- `src/codeintel/gateway/reindexer.py`: `_git_out` (argv list, `cwd=root`, `timeout=_FINGERPRINT_TIMEOUT_S` = 5, no shell, reusing `changed_range._GIT` with `core.fsmonitor=false` and its scrubbed `_env()`), `_tree_fingerprint(root)` = HEAD sha + newest `st_mtime_ns` over `git ls-files -z -m -o --exclude-standard` + a hash of the listed paths; `None` when git cannot answer. `maybe_reindex` now returns `bool`: False for disabled, empty or non-directory roots, in flight, inside the debounce window, an unchanged fingerprint, or `reindex = "never"`; True only when it submitted. `_do_reindex` runs `_graph_reindex` before `_semantic_reindex`, each in its own try; the `finally` is unchanged.
+- `src/codeintel/gateway/cache.py`: `freshness: int | str` on `get`/`put`.
+- `src/codeintel/gateway/gateway.py`: `_query` reads `reindex_pending` before `maybe_reindex`; `reindexing` = pending or `maybe_reindex(...)` returned True. Freshness = `f"{generation}:{graph_db_stamp(root)}:{_semantic_db_stamp(root)}"` (`"{generation}:0:0"` when no root). New `_semantic_db_stamp(root)`: `default_db_path(load_config(root)["model"])`, max mtime_ns of the db and its `-wal`, 0 when missing, never raises.
+- `README.md`: the "cache never lies" bullet now says the cache is invalidated by a reindex from any process; the `CODEINTEL_REINDEX=off` row says graph answers are not indexed inline, run `codeintel index`, and the cache notices; the "honest caveat" paragraph's "only when a background reindex completes" now also names `codeintel index`.
+- Tests: new `tests/test_gateway_freshness.py` (4 tests); `tests/test_reindexer.py` (6 new tests, `result is False`); `tests/test_cache.py` (1 new test); `tests/test_reindex_lock.py` (only the two order lists).
+
+**Proof**
+- New `tests/test_gateway_freshness.py` fails on main, passes here: at test-only commit e2e7d8e (src = 03957a6) `pytest tests/test_gateway_freshness.py tests/test_reindexer.py tests/test_reindex_lock.py tests/test_cache.py -q -o addopts=` gave 13 failed, 42 passed; the db-touch, db-delete and semantic-db tests failed on `assert True is False` (`cached` stayed true). After the change: same command 55 passed. `test_a_graph_db_rewritten_by_another_process_is_a_cache_miss` (`os.utime` forward) and `test_a_deleted_graph_db_is_a_cache_miss` both assert `cached is False` and that the engine was asked twice.
+- `tests/test_reindexer.py` new tests, all passing: `test_an_unchanged_git_tree_submits_nothing_and_flags_nothing` (second call returns False, no extra pass, gateway answer has no `reindexing` key), `test_an_edited_file_submits_a_pass_and_returns_true`, `test_a_new_untracked_file_submits_a_pass`, `test_do_reindex_runs_the_graph_pass_before_the_semantic_pass`, `test_a_git_failure_in_the_fingerprint_submits_no_more_than_the_debounce[timeout|nonzero]` (in-flight cleared between the calls so only the debounce limits it; submitted == [root]), `test_the_fingerprint_git_calls_are_bounded_and_shell_free`. On main these failed (None returned / order / no `subprocess` in the module).
+- `tests/test_cache.py::test_a_different_freshness_string_misses` passes.
+- `CODEBASE_MEMORY_CACHE_DIR`: `test_gateway_freshness.py`'s `graph_cache` fixture deletes `CODEBASE_MEMORY_HOME` (it wins over CACHE_DIR in `graph_cache_dir`) and sets `CODEBASE_MEMORY_CACHE_DIR` to `tmp_path/graph-cache`; every test there uses it. The reindexer tests stub both passes and never stat a graph db.
+- `tests/test_reindex_lock.py`: `git diff 03957a6 -- tests/test_reindex_lock.py` shows exactly the two `ran == [...]` lines changed; passes.
+- Check block: `.venv/bin/pytest tests/test_gateway_freshness.py tests/test_reindexer.py tests/test_reindex_lock.py tests/test_cache.py tests/test_gateway.py tests/test_hardening.py tests/test_index_failure_reason.py tests/test_rbac.py tests/test_integration.py tests/test_missing_target.py tests/test_engine_adoption.py tests/test_cli_commands.py -q -o addopts=` -> `320 passed`, exit 0. Also every test file mentioning Gateway/Reindexer/code_query_handler/cached (35 files) -> 918 passed, 30 skipped, 1 xfailed. "All existing tests still pass" for the whole suite: left to the conductor's gate. Changed test files are all on Touches (`git diff --stat 03957a6 -- tests`: test_cache, test_gateway_freshness, test_reindex_lock, test_reindexer).
+- Also: `ruff check src tests bench` all passed; `mypy` no issues in 87 files; compileall OK; `tests/test_architecture.py` 6 passed. Acceptance `test_tf_freshness.py` 14 passed (was 9 failing before 02/03); `test_tf_semantic_failure.py`'s graph-before-semantic test passes, its 6 failures are ticket 10's.
+- `codeintel c4 . --check --out /tmp/codeintel-c4-check` prints `c4 failed: engine-unavailable` both with my change and with it stashed (the graph backend is unavailable in this container right now), so it is environmental and not from this ticket.
+
+**Decisions**
+- Non-existent root: `maybe_reindex` returns False without submitting (the ticket's reason for `result is False`). That forced five existing tests in `tests/test_reindexer.py` that called `maybe_reindex` on the non-existent `/tmp/test` or `/repo` and asserted a pass ran to use `tmp_path` instead; their assertions are unchanged. `test_disabled_via_env` keeps `/tmp/test` (it asserts nothing ran).
+- The time debounce still applies to git roots too (fingerprint changed AND window elapsed), so the fingerprint can never submit more than before. A changed tree inside the window is not recorded and is picked up by the next query after it.
+- The first query for a root in a process has no recorded fingerprint, so it submits and is flagged `reindexing` (as before; the acceptance test lets the first query settle). A non-git root keeps the time debounce, and its submit also returns True and flags the answer, since nothing can tell whether its tree changed.
+- The fingerprint also hashes the listed path names, so a deletion (no mtime) or a file whose mtime is older still moves it. Spec said HEAD + max mtime; this only adds detection, still bounded by the debounce.
+- Semantic half reads the db AND its `-wal` (max mtime), not one stat: `SemanticDb` sets `journal_mode=WAL`, so a pass's writes land in `-wal` until a checkpoint and a single stat of the db would miss them. The model comes from `load_config(root)` as the reindexer/provider do.
+- Empty `project_root`: the stamps are `0:0` without touching the filesystem; resolving `""` read the process cwd, which `tests/test_rbac.py::test_the_http_transport_never_answers_from_the_servers_own_cwd` forbids (it caught this).
+- git hygiene for the fingerprint reuses `changed_range._GIT` (`core.fsmonitor=false`) and `_env()` so a hostile repo config cannot run a program on every query.
+
+**Shortcuts taken**
+- `_semantic_db_stamp` calls `load_config(root)` on every non-empty-root query (two small TOML reads). Worth caching per root if query latency ever shows it.
+- A semantic search that indexes inline writes the semantic db, so the next identical query is a cache miss. Correct (the index moved) but costs caching for semantic answers on a churning repo.
+- The fingerprint stats every modified/untracked file on each check past the debounce; a repo with tens of thousands of un-ignored untracked files would pay for that. Bounded by the 5 s git timeouts for the listing itself, not for the stats.
+
+**For later tickets**
+- `Reindexer.maybe_reindex` returns `bool`; fakes returning None are read as "no pass". Tests driving the real one on a path must use an existing directory.
+- `_do_reindex` order is now graph then semantic (ticket 10 builds on that).
+- Docs outside Touches still describe the old cache rule / REINDEX=off behaviour: `docs/architecture.md` (~151, ~161), `docs/query-flow.md` (~36, ~90-92), `docs/semantic.md` (~61), `docs/deploy.md` (~27). Likely ticket 13.
