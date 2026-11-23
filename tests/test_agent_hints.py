@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from codeintel.core.outcome import Missing
+from codeintel.engines.graph.backend import _agent_facing
 from codeintel.engines.graph.provider import GraphProvider, _suggest_op
 
 ROOT = "/Users/x/Documents/project/codeintel"
@@ -92,8 +94,52 @@ def test_a_failed_name_search_leaves_the_hint_without_names_and_the_reason_alone
     env = p.build_result("callers", "compact_for_mcpp", [], 30000, ROOT)
 
     assert env["reason"] == "not-in-graph", env
-    assert "did you mean" not in env["hint"], env["hint"]
+    assert "did you mean" not in env["hint"].lower(), env["hint"]
+    assert "`compact_for_mcp`" not in env["hint"], env["hint"]
     assert "codeintel index" in env["hint"], env["hint"]
+
+
+def _failing_search(p, seen: list[int]):
+    """A `search_graph` that records its time budget, records a backend failure as `_run` does,
+    and returns nothing."""
+    def search(method, payload, timeout_ms):
+        seen.append(timeout_ms)
+        p._last_failure = Missing("timeout", "the graph backend did not respond within the budget")
+        return None
+    return search
+
+
+def test_a_failed_name_search_leaves_no_failure_behind_and_costs_less_than_a_full_budget(
+        monkeypatch):
+    p, _ = _stub_provider(monkeypatch)
+    seen: list[int] = []
+    inner = p._run
+    fail = _failing_search(p, seen)
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        fail(method, payload, timeout_ms) if method == "search_graph"
+        else inner(method, payload, timeout_ms)))
+    env = p.build_result("callers", "compact_for_mcpp", [], 30000, ROOT)
+
+    assert env["reason"] == "not-in-graph", env
+    assert "did you mean" not in env["hint"].lower(), env["hint"]
+    assert "timeout" not in json.dumps(env.get("gaps") or []), env
+    assert p._last_failure is None, "a best-effort suggestion search leaves no failure behind"
+    assert seen and all(0 < t < 30000 for t in seen), seen
+
+
+def test_an_ancestor_scoped_answer_offers_no_names_from_outside_the_root(monkeypatch):
+    p, sent = _stub_provider(monkeypatch)
+    parent = ROOT.rsplit("/", 1)[0]
+    inner = p._run
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        {"projects": [{"name": "parent", "root_path": parent}]} if method == "list_projects"
+        else inner(method, payload, timeout_ms)))
+    env = p.build_result("callers", "compact_for_mcpp", [], 30000, ROOT)
+
+    assert env["reason"] == "not-in-graph", env
+    assert "`compact_for_mcp`" not in env["hint"], env["hint"]
+    assert "did you mean" not in env["hint"].lower(), env["hint"]
+    assert not sent, "no name search runs over a project wider than the caller's root"
 
 
 # --------------------------------------------------------------------------- backend stderr
@@ -156,6 +202,35 @@ def test_the_backends_own_tool_advice_is_rewritten_to_code_query(tmp_path, monke
     for tool in _FOREIGN_TOOLS:
         assert tool not in said, said
     assert "code.query op=pattern target=helper" in env["hint"], env["hint"]
+
+
+@pytest.mark.parametrize("said", [
+    "project home-alice-work-repo not found",
+    "project 'home-alice-work-repo' not found",
+    'project "home-alice-work-repo" not found',
+    "query failed for project: home-alice-work-repo",
+])
+def test_a_flattened_project_id_is_withheld_however_it_is_quoted(said):
+    cleaned = _agent_facing(said)
+
+    assert "home-alice-work-repo" not in cleaned, cleaned
+    assert "alice" not in cleaned, cleaned
+
+
+def test_the_backends_list_projects_advice_names_an_agent_tool():
+    cleaned = _agent_facing("Use list_projects to see all indexed projects")
+
+    assert "list_projects" not in cleaned, cleaned
+    assert "code.status" in cleaned, cleaned
+
+
+@posix_only
+def test_a_bare_project_id_in_stderr_never_reaches_the_hint(tmp_path, monkeypatch):
+    _fake_backend(tmp_path, monkeypatch, "query failed: project home-alice-work-repo is locked")
+    env = GraphProvider().build_result("callers", "helper", [], 30000, ROOT)
+
+    assert env["reason"] == "backend-error", env
+    assert "alice" not in json.dumps(env), env
 
 
 # --------------------------------------------------------------------------- unsupported op
