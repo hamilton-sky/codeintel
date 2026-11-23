@@ -319,8 +319,9 @@ def test_live_index_and_query_on_the_python_fixture(tmp_path):
             [*cli, "query", "--op", "callers", "--target", target, "--json", "--engine", "graph"],
             cwd=repo, env=env, capture_output=True, text=True, timeout=120, check=False)
         answer = json.loads(done.stdout)
-        if answer.get("result") is None:
-            pytest.skip(f"the graph backend did not answer here: {answer.get('reason')}")
+        assert answer.get("result") is not None, (
+            f"codebase-memory-mcp is on PATH but the graph backend did not answer "
+            f"`callers {target}`: {answer.get('reason')}; stderr: {done.stderr[-2000:]}")
         assert answer["evidence"]["safe_for_destructive"] is False, answer
         kinds = {g["kind"] for g in answer.get("gaps") or []}
         expected = "aliased-import-unbound" if target == "helper" else "target-ambiguous"

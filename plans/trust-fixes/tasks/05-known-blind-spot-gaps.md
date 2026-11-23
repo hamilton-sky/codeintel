@@ -1,7 +1,7 @@
 # Add known-blind-spot gaps: aliased imports, nested shadowing, and `lsp_ts_local`
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 2
@@ -97,3 +97,29 @@ floor guard: the diff weakens the bar instead of meeting it
 skip: tests/test_blindspot_gaps.py: @pytest.mark.skipif(
 skip: tests/test_blindspot_gaps.py: pytest.skip(f"the graph backend did not answer here: {answer.get('reason')}")
 if a finding is intended, the ticket needs a line like: Floor: allow <category>
+
+## Answer (round 2)
+
+Work for this round started at eb32f487d53a92fd4481056f2cd580ce252482d6.
+
+**Built**
+- `tests/test_blindspot_gaps.py`: in `test_live_index_and_query_on_the_python_fixture`, the runtime `pytest.skip(...)` when the backend gives no `result` is now an `assert answer.get("result") is not None`, whose message names the target, the backend's `reason` and the tail of the CLI's stderr. Nothing else changed.
+
+**Proof**
+- Check block with `.venv/bin` on PATH (codebase-memory-mcp present): `441 passed, 1 xfailed`, exit 0.
+- Live test alone with the backend on PATH: `1 passed`.
+- Live test alone without the backend on PATH: `1 skipped` ("codebase-memory-mcp backend not installed"), the skip the ticket's `Floor: allow skip` covers.
+- `ruff check tests/test_blindspot_gaps.py`: all checks passed.
+
+**Decisions**
+- The only remaining skip is the `skipif` on the backend not being on PATH, the same as `tests/test_graph_real.py`.
+
+**Shortcuts taken**
+- none
+
+**Review fixes**
+- Round 1, `skip: @pytest.mark.skipif(`: kept; it is the case the plan repair allowed with `Floor: allow skip` (backend not on PATH).
+- Round 1, `skip: pytest.skip(f"the graph backend did not answer here: ...")`: removed. A backend that is present but does not answer now fails the test with an assertion message naming the target, the reason and stderr.
+
+**For later tickets**
+- none new
