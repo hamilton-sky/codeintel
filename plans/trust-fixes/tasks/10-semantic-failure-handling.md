@@ -1,7 +1,7 @@
 # Persist semantic model failures, report them in doctor and status, and fall back to graph name search
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 03
 Test first: yes
 Level: 3
@@ -120,3 +120,32 @@ Work started at commit cbc476df60570c3a3b952601e68113435ff082cb. Test-only commi
 **Round 2** (reopened by c68543e after the plan repair d2e1906; work started at c68543e)
 - No code change. The gap named under For later tickets (`codeintel index`, the reindexer's semantic pass and onboarding do not write or clear the failure record) is now ticket 16 (`16-semantic-failure-record-everywhere.md`, blocked by 10); it is not built here.
 - Check block re-run on HEAD c68543e: the first command gives `316 passed, 1 xfailed`; the doctor command gives `50 passed, 1 deselected`.
+
+## Review findings (round 1, pair review)
+
+QUALITY
+1. major src/codeintel/engines/semantic/provider.py: a hostile or corrupt record can set its own retry limit. `_read_failure_record` accepts any int/float `at`, and `json.loads` turns `NaN` into `float('nan')`; in `_model_failure`, `age = time.time() - nan` is NaN, so both `age < 0` and `age >= _FAILURE_RECORD_MAX_AGE_S` are False and the record applies forever. Checked: `{"cause":"evil","at":NaN,...}` makes `_model_failure` return "evil" (Infinity, -Infinity, 1e400 are ignored). While it stands every search gets `index-failed` with attacker text, the index never runs, and doctor reports not runnable. Breaks the level-3 rule that a bad record never blocks indexing for good. Fix: reject non-finite `at` (`math.isfinite`) and add a NaN case to the ignored-record tests in tests/test_background_index_failure.py.
+2. minor src/codeintel/engines/semantic/provider.py: the inline path writes the record for any failed `Indexer.index` (unwritable db, walk error), not only a model-load failure. Fix: write only in the model-load case.
+3. minor src/codeintel/gateway/gateway.py: the fallback's RBAC gate uses `Gateway.allows`, which returns True if `policy.is_allowed` raises; the main gate calls `is_allowed` directly. Prefer failing closed (no fallback) on this path.
+
+Probes: record contents/types/age/size, path (O_NOFOLLOW, mkstemp 0600, os.replace, unlink link only), cause capping, FASTEMBED_CACHE_PATH/model changes, gateway fallback routing: no way through apart from findings 1 and 3. Done when: 316 passed, 1 xfailed; 50 passed, 1 deselected. END eb00c6a = HEAD. Acceptance failures in test_tf_semantic_failure.py belong to ticket 16.
+
+codeintel: changed cbc476df60570c3a3b952601e68113435ff082cb: helped
+
+REVIEW: FAIL
+
+SPEC
+- Tests on the fastembed fakes that fail on main (fresh provider index-failed under 1 s without "first-time indexing"; FASTEMBED_CACHE_PATH change retries; old/future/invalid record retries; doctor runnable False with cause; search fallback with gap): MET.
+- test_search_fallback: a role allowed search but not pattern gets no fallback: MET.
+- The 8-file pytest command passes; last five files unchanged: MET.
+- tests/test_doctor.py passes except the deselected root-only test: MET.
+- All existing tests still pass: MET (2360 passed, 31 skipped, 1 deselected, 1 xfailed).
+- Acceptance test_tf_semantic_failure.py: 5 passed, 4 failed; all 4 set up the failure with `codeintel index`, which ticket 16 covers.
+- scope: OK. Production changes only provider.py, gateway.py, doctor.py; cli/status.py unchanged.
+- test first: OK (5319ec9).
+
+Range cbc476d..eb00c6a (HEAD). Answer not read.
+
+LEVEL: 3
+
+REVIEW: PASS
