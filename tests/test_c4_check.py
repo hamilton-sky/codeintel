@@ -310,6 +310,100 @@ def test_an_allowlist_entry_may_use_a_glob_and_an_element_id():
     assert next(f for f in result["findings"] if f["kind"] == "violation")["allowlisted"] is True
 
 
+# ── the allowlist matches file edges, whatever depth auto-fit picks (ticket 14) ────────────────────
+
+_RENDER_EDGE = ["src/codeintel/engines/graph/render.py", "src/codeintel/transports/metrics.py", 1]
+
+
+def _depth_cfg():
+    """The repo's own `.codeintel.toml` layers block, cut to the three layers these tests need."""
+    return parse_layers_config({"layers": {
+        "order": ["transports", "gateway", "engines"],
+        "members": {"transports": ["src/codeintel/transports/**"],
+                    "gateway": ["src/codeintel/gateway/**"],
+                    "engines": ["src/codeintel/engines/**"]},
+        "allow": [{"from": "src/codeintel/engines/graph/**",
+                   "to": "src/codeintel/transports/metrics.py",
+                   "reason": "backend resolves render to Metrics.render"}]}})
+
+
+def _imp_files(a, b, files):
+    return {"from": a, "to": b, "n": sum(f[2] for f in files), "kind": "imports",
+            "import_files": [list(f) for f in files]}
+
+
+def _depth4_payload():
+    return _payload(
+        [_el("src.codeintel.engines.graph", "src/codeintel/engines/graph/"),
+         _el("src.codeintel.transports.metrics", "src/codeintel/transports/metrics.py")],
+        [_imp_files("src.codeintel.engines.graph", "src.codeintel.transports.metrics",
+                    [_RENDER_EDGE])], depth=4)
+
+
+def _depth3_payload(*extra_files, with_gateway=False, cycle_extra=()):
+    elements = [_el("src.codeintel.engines", "src/codeintel/engines/"),
+                _el("src.codeintel.transports", "src/codeintel/transports/")]
+    relations = [_imp_files("src.codeintel.engines", "src.codeintel.transports",
+                            [_RENDER_EDGE, *extra_files, *cycle_extra])]
+    if with_gateway:
+        elements.append(_el("src.codeintel.gateway", "src/codeintel/gateway/"))
+        relations += [
+            _imp_files("src.codeintel.transports", "src.codeintel.gateway",
+                       [["src/codeintel/transports/http.py", "src/codeintel/gateway/gateway.py", 2]]),
+            _imp_files("src.codeintel.gateway", "src.codeintel.engines",
+                       [["src/codeintel/gateway/gateway.py", "src/codeintel/engines/graph/x.py", 4]]),
+        ]
+    return _payload(elements, relations, depth=3)
+
+
+def test_an_allowlisted_file_edge_stays_allowed_at_every_auto_fit_depth():
+    """The bug that stopped ticket 03's gate: at depth 3 the `transports` element's path is a
+    directory, so an entry naming a file stopped matching and the same false edge started gating."""
+    for payload in (_depth4_payload(), _depth3_payload()):
+        result = check_layers(payload, _depth_cfg())
+        violation = next(f for f in result["findings"] if f["kind"] == "violation")
+        assert violation["allowlisted"] is True, payload["fit"]
+        assert violation["severity"] == "info"
+        assert violation["allow_index"] == 0
+        assert result["gating"] == 0, payload["fit"]
+        assert [f for f in result["findings"] if f["kind"] == "stale-allow"] == []
+
+
+def test_one_file_edge_no_entry_matches_keeps_the_violation_gating_and_is_its_witness():
+    other = ["src/codeintel/engines/semantic/x.py", "src/codeintel/transports/http.py", 2]
+    result = check_layers(_depth3_payload(other), _depth_cfg())
+    violation = next(f for f in result["findings"] if f["kind"] == "violation")
+    assert violation["severity"] == "gating"
+    assert violation["allowlisted"] is False
+    assert violation["witness"] == {"from": other[0], "to": other[1], "n": 2}
+    assert violation["witnesses_total"] == 2
+    assert result["gating"] == 1
+    assert [f for f in result["findings"] if f["kind"] == "stale-allow"] == []
+
+
+def test_a_cycle_that_exists_only_through_an_allowlisted_edge_is_allowed_not_gating():
+    result = check_layers(_depth3_payload(with_gateway=True), _depth_cfg())
+    cycles = [f for f in result["findings"] if f["kind"] == "cycle"]
+    assert len(cycles) == 1
+    assert sorted(cycles[0]["cycle_members"]) == ["src.codeintel.engines", "src.codeintel.gateway",
+                                                  "src.codeintel.transports"]
+    assert cycles[0]["rule"] == "import-cycle"
+    assert cycles[0]["allowlisted"] is True
+    assert cycles[0]["severity"] == "info"
+    assert cycles[0]["allow_index"] == 0
+    assert cycles[0]["allow_reason"] == "backend resolves render to Metrics.render"
+    assert result["gating"] == 0
+    report = render_report(_depth3_payload(with_gateway=True), result)
+    assert "ALLOWED: backend resolves render to Metrics.render" in report.split("CYCLES")[1]
+
+    other = ["src/codeintel/engines/semantic/x.py", "src/codeintel/transports/http.py", 2]
+    gating = check_layers(_depth3_payload(with_gateway=True, cycle_extra=[other]), _depth_cfg())
+    cycles = [f for f in gating["findings"] if f["kind"] == "cycle"]
+    assert len(cycles) == 1
+    assert cycles[0]["severity"] == "gating" and cycles[0]["allowlisted"] is False
+    assert gating["gating"] == 2
+
+
 # ── the other classes ─────────────────────────────────────────────────────────────────────────────
 
 def test_a_cycle_gates_because_it_is_a_source_confirmed_structural_fact():
