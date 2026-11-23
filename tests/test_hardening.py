@@ -467,7 +467,7 @@ def test_write_contained_refuses_a_parent_swapped_for_a_link_after_the_check(tmp
     # out of the repo. The write walks the parents without following links, so it cannot land there.
     from codeintel.core.containment import write_contained
 
-    repo, victim = _hostile_repo(tmp_path)
+    repo, _victim = _hostile_repo(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "AGENTS.md").write_bytes(_VICTIM)

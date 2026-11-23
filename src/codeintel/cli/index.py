@@ -194,8 +194,9 @@ def run(args: Any) -> int:
     try:
         map_path = os.path.join(project_root, "CODE_INTEL.md")
         if os.path.islink(map_path):
-            logging.getLogger(__name__).warning(
-                "refusing to write %s: it is a symlink (symlink)", map_path)
+            from codeintel.core.containment import log_write_refusal
+
+            log_write_refusal(map_path, "symlink")
         elif os.path.isfile(map_path):
             from codeintel.engines.graph.provider import GraphProvider
             from codeintel.mapping.mapper import MapGenerator

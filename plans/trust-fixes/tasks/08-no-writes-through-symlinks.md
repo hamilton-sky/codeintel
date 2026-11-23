@@ -1,7 +1,7 @@
 # Never write CODE_INTEL.md through a symlink, and refuse AGENTS.md, CLAUDE.md or USING_CODEINTEL.md links that leave the work tree or enter .git
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 3
@@ -103,6 +103,34 @@ Work started at d05a5f956ecb1a07ceb56df39b1b2a18891fa84a. Test-only commit: af9d
 
 **For later tickets**
 - Ticket 13 (CHANGELOG): T6 `map-symlink-write-through`, `install-inject-advice-noop` (`map --inject` now creates AGENTS.md) and `deploy-doc-stale-symlink-hole` are fixed here. New user-visible: `map` exits 1 on a refused write; MCP `code.map` gains `note` and `inject.refused`.
+
+**Round 2 (review fixes).** Work started at 0e1ea07. Test-only commit: 04dae8e (`test(trust-fixes): 08 failing test`, 8 new cases failing for the right reason: config and pre-commit "appended" through a second spelling of `.git`, the swapped parent written through, and the in-tree refusals all reported as `outside-repo`).
+
+**Built (round 2)**
+- `src/codeintel/core/containment.py`: `write_contained` now resolves once (`realpath`, `outside-repo` if it leaves the root) and hands the path components to `_write_walk`, which opens the root and then each directory on the resolved path with `O_DIRECTORY|O_NOFOLLOW` relative to the previous descriptor, `fstat`s each and refuses `inside-git-dir` when one `samestat`-matches `os.stat(root/.git)` (only when that is a directory). The leaf is `lstat`ed through the last descriptor (`inside-git-dir`, `symlink`, `not-a-file`, `hard-link`, `dangling`), the temp is created with `dir_fd`, `fchmod`ed and `os.replace`d with `src_dir_fd/dst_dir_fd`. New `REFUSAL_TEXT` keys `dangling`, `not-a-file`, `hard-link`. `_refuse_write` became public `log_write_refusal(path, reason)`. Without `dir_fd` support (Windows) the same walk runs on paths with `lstat`.
+- `src/codeintel/cli/index.py`: the refresh gate calls `log_write_refusal(map_path, "symlink")`.
+- `docs/deploy.md`: says `.git` is matched by file identity, the write walks without following links, and names the race that remains on Windows.
+- `tests/test_hardening.py`: `test_inject_refuses_the_git_dir_reached_by_another_spelling` (x3), `test_write_contained_refuses_a_parent_swapped_for_a_link_after_the_check`, `test_write_contained_names_why_an_in_tree_target_is_refused` (x4).
+
+**Proof (round 2)**
+- Check block `.venv/bin/pytest tests/test_hardening.py tests/test_mapper.py tests/test_cli_commands.py tests/test_cli_install_offer_injection.py tests/test_installer.py tests/test_mcp_server.py tests/test_summary_integrity.py -q -o addopts=`: `286 passed, 1 xfailed`, exit 0 (278 before + 8 new).
+- `tests/test_mapper.py::test_inject_writes_through_a_symlinked_rules_file`: 1 passed; `git diff d05a5f9 --stat` on test_mapper, test_cli_install_offer_injection, test_installer, test_mcp_server, test_summary_integrity: empty.
+- `tests/test_rbac.py tests/test_doctor.py tests/test_architecture.py` (root-only deselect): 103 passed.
+- Acceptance `test_tf_symlinks.py` + `test_tf_small_fixes.py::test_deploy_doc_says_the_snippet_symlink_hole_is_closed_via_open_contained`: 14 passed. (The other 7 failures in test_tf_small_fixes.py are reset/mcp-size/ctrl-c/rows stories of other tickets, untouched here.)
+- `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 files. compileall exit 0. `codeintel c4 . --check --out /tmp/codeintel-c4-check`: 0 gating findings, exit 0. Whole Test command: left to the conductor's gate.
+
+**Review fixes**
+1. Case-insensitive `.git`: fixed by identity, as suggested. Every directory the write passes through and the leaf are `samestat`-compared with the git dir; for a new file the walk stops at its parent. Test fakes the case-insensitive spelling by making `realpath` spell paths under `.git` as `<repo>/./.git/...` (a different string for the same directory, which is what macOS returns for `.GIT/...`); it fails on the round-1 code (`appended` into `.git/config`) and passes now.
+2. Parent-swap race: closed with `dir_fd` on POSIX (each component opened `O_NOFOLLOW|O_DIRECTORY`, create/chmod/replace through the last descriptor); a component that turned into a link is refused as `symlink`. Test fakes the swap by having `realpath` report `sub/AGENTS.md` while `sub` is a link out; refused, the outside file and directory untouched. Windows (no `dir_fd`) keeps the race, documented in `docs/deploy.md`.
+3. Refusal reasons: dangling in-tree link -> `dangling`, a link to `.git` itself -> `inside-git-dir`, a link to an in-tree directory -> `not-a-file`, a hard link -> `hard-link`; `outside-repo` only when the realpath leaves the root. Pinned by the 4-case test.
+4. `cli/index.py` reuses `log_write_refusal` instead of rebuilding the text.
+
+**Decisions (round 2)**
+- `.git` itself, not only things under it, is matched (the walk compares every component and the leaf), so `USING_CODEINTEL.md -> .git` reports `inside-git-dir`.
+- The git check runs before the dangling check, so a dangling link into `.git/hooks/` is reported as `inside-git-dir`, the more useful reason.
+- `hard-link` is still refused only for the followed files (round-1 behaviour via `contained_path`); `CODE_INTEL.md` is replaced by rename, which never writes through another name of the inode.
+
+**Shortcuts taken (round 2)**: the round-1 `os.chmod` shortcut is gone on POSIX (`fchmod`); `os.chmod` by path remains only on the no-`dir_fd` fallback. The root directory itself is opened following links (it is the user's chosen root, already `realpath`ed).
 
 ## Review findings (round 1, pair review)
 

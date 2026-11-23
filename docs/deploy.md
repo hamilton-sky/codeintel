@@ -78,7 +78,11 @@ Binding a non-loopback host **requires** `--allow-remote` **and** authentication
 > Writes into a repository go through one path too: `CODE_INTEL.md`, `AGENTS.md`, `CLAUDE.md` and
 > `USING_CODEINTEL.md` are written with `core.containment.write_contained`. A symlinked
 > `CODE_INTEL.md` is never written through; the other three are refused when they resolve outside
-> the repo root or into its `.git` directory.
+> the repo root or into its `.git` directory (matched by file identity, so `.GIT/config` on a
+> case-insensitive filesystem is caught too). The write walks the resolved path one directory at a
+> time without following links and writes through the last directory's descriptor, so a parent
+> swapped for a symlink between the check and the write is refused. Windows has no `dir_fd`, so
+> there the write falls back to paths and that swap remains a check-then-write race.
 >
 > RBAC is sound for the case it was built for — **separating privilege levels among callers you
 > already trust**, so a narrow role cannot run `hotspots` or point an op at an unrelated
