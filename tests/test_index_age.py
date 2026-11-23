@@ -321,3 +321,98 @@ def test_the_reset_slug_is_the_shared_one():
     from codeintel.core.paths import graph_slug
     from codeintel.setup.reset import _graph_slug
     assert _graph_slug("/tmp/-Weird/repo") == graph_slug("/tmp/-Weird/repo") == "tmp-Weird-repo"
+
+
+# ========================================================== git status fails (review round 1)
+
+def test_a_failed_git_status_is_index_age_unknown_never_fresh(monkeypatch, tmp_path, repo):
+    """Without the list of uncommitted files there is nothing to date them by, so the answer
+    cannot say the index is current: a timeout on a large repo must not read as "fresh"."""
+    from codeintel.engines.graph import changed_range
+    real_git = changed_range._git
+
+    def git(root, *args):
+        if args and args[0] == "status":
+            return 1, b"", "fatal: simulated status failure"
+        return real_git(root, *args)
+
+    p = _provider(monkeypatch, tmp_path, repo)
+    _stamp_index(tmp_path / "graph-cache", time.time() - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n")
+    monkeypatch.setattr(changed_range, "_git", git)
+
+    env = _ask(p, repo)
+
+    assert env["result"] is not None, env
+    assert "index-age-unknown" in _gap_kinds(env), env.get("gaps")
+    detail = next(g["detail"] for g in env["gaps"] if g["kind"] == "index-age-unknown")
+    assert "git status" in detail and "simulated status failure" in detail, detail
+    assert env["confidence"] == "partial"
+
+
+def test_an_edit_outside_the_answered_project_does_not_make_its_index_stale(
+        monkeypatch, tmp_path, repo):
+    """The project is a subdirectory of the repository: an edit beside it is not in its index."""
+    sub = repo / "pkg"
+    now = time.time()
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n",
+           mtime=now - 90)
+    _write(repo, "elsewhere.py", "def other():\n    return 1\n", mtime=now - 10)
+    _git(repo, "add", "elsewhere.py")
+    p = _provider(monkeypatch, tmp_path, sub)
+
+    env = _ask(p, sub)
+
+    assert "Changes impact" in env["result"], env
+    kinds = _gap_kinds(env)
+    assert "stale-index" not in kinds and "index-age-unknown" not in kinds, env.get("gaps")
+
+
+def test_an_edit_inside_the_answered_project_still_makes_its_index_stale(
+        monkeypatch, tmp_path, repo):
+    sub = repo / "pkg"
+    now = time.time()
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n",
+           mtime=now - 10)
+    p = _provider(monkeypatch, tmp_path, sub)
+
+    env = _ask(p, sub)
+
+    assert "stale-index" in _gap_kinds(env), env.get("gaps")
+
+
+# ============================================================ the stamp never raises (round 1)
+
+def test_an_unreadable_cache_directory_gives_a_zero_stamp(monkeypatch, tmp_path):
+    from codeintel.core import paths
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("CODEBASE_MEMORY_CACHE_DIR", str(cache))
+
+    def denied(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(paths.os, "scandir", denied)
+    assert paths.graph_db_stamp(str(tmp_path / "repo")) == 0
+
+
+def test_an_unreadable_db_file_does_not_raise_from_the_stamp(monkeypatch, tmp_path):
+    from codeintel.core import paths
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("CODEBASE_MEMORY_CACHE_DIR", str(cache))
+    root = tmp_path / "repo"
+    root.mkdir()
+    db = cache / f"{paths.graph_slug(os.path.realpath(root))}.db"
+    db.write_bytes(b"")
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        if str(path).endswith((".db", ".db-wal")):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(paths.os, "stat", stat)
+    assert paths.graph_db_stamp(str(root)) == 0
