@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from codeintel.engines.graph import qualifier_scan
+from codeintel.engines.graph import blindspots, qualifier_scan
 from codeintel.engines.graph.confidence import (
     _EDGE_CONFIDENCE_FLOOR,
     _EDGE_CONFIDENCE_WEAK,
@@ -1353,6 +1353,9 @@ class AnswerRendering:
         # less the symbols past the candidate cap, whose rows nobody is shown.
         shown_groups = self._shown_groups(answered)
         scanned = self._scan_for_qualifier(op, shown_groups, wanted, file_key)
+        # After the scan, so its reads keep the budget they always had; before the rows are sorted,
+        # counted and recorded, so a row demoted here is ordered, counted and published as demoted.
+        blind_spots = self._known_blind_spots(op, answered, wanted, row_keys)
         # Rows are ordered so the direct calls come first — they are the answer to the question
         # that was asked — and, within those, the rows that followed a real binding come before the
         # ones matched by name. A reader who stops after the first few should be stopping on the
@@ -1428,8 +1431,101 @@ class AnswerRendering:
         if omitted is not None:
             withheld += omitted.rows
         self._record_rows(rendered, row_keys, unit, row_cap_hit=truncated, withheld=withheld)
-        return (body + self._kind_note(op, counts) + extra_notes
+        return (body + self._kind_note(op, counts) + extra_notes + blind_spots
                 + self._name_resolution_note(wanted, answered, truncated))
+
+    def _known_blind_spots(
+        self, op: str, groups: list[_EdgeGroup], wanted: _SymbolTarget, row_keys: tuple[str, str, str],
+    ) -> str:
+        """Add a gap for each thing the backend is known not to see, read from the source; the note.
+
+        Three rules (`blindspots`): an alias of the target imported in a row's file (`callers`), an
+        alias the target's body calls with no callee row for it (`callees`), and a caller that
+        defines its own nested namesake of the target before calling it (`callers`), whose row is
+        demoted to name-matched. Each gap goes through `_add_gap`, which already makes the answer
+        `partial` and not safe for a destructive change; no second trust field is needed.
+
+        Positive evidence only: a file that cannot be read adds nothing, except one the answer's
+        read budget refused, which adds an `aliased-import-unbound` gap saying it could not check."""
+        root = getattr(self, "_answered_root", None) or ""
+        if not root or op not in ("callers", "callees"):
+            return ""
+        budget = getattr(self, "_scan_budget", None)
+        if budget is None:
+            budget = qualifier_scan.Budget()
+            self._scan_budget = budget
+        reader = blindspots.SourceReader(root, budget)
+        name_key, qn_key, file_key = row_keys
+        name = wanted.name
+        found: list[tuple[str, str, str]] = []
+        if op == "callers":
+            files = [g.file for g in groups] + [str(r.get(file_key) or "") for g in groups for r in g.rows]
+            for f in dict.fromkeys(f for f in files if f):
+                text = reader.read(f)
+                aliases = blindspots.alias_imports(text, name, f) if text is not None else []
+                if aliases:
+                    found.append((
+                        "imports", "aliased-import-unbound",
+                        f"`{f}` imports `{name}` as " + ", ".join(f"`{a}`" for a in aliases)
+                        + f"; the graph does not bind a call written through an alias to `{name}`, so "
+                        f"callers that call it by that name may be missing from this answer"))
+            for g in groups:
+                for r in g.rows:
+                    f = str(r.get(file_key) or "")
+                    if r.get("_module_scope") is not None or not f:
+                        continue
+                    text = reader.read(f)
+                    if text is None:
+                        continue
+                    caller = str(r.get(name_key) or "")
+                    qn = _strip_project_prefix(str(r.get(qn_key) or ""), may_be_filename=False)
+                    span = blindspots.function_span(text, caller, f, qn)
+                    if span is None or not blindspots.nested_shadow(text, span, name):
+                        continue
+                    r["_bucket"] = _NAME_MATCHED
+                    r["_nested_shadow"] = name
+                    if "_low_confidence" not in r:
+                        r["_low_confidence"] = _edge_confidence(r)
+                    found.append((
+                        "callers", "target-ambiguous",
+                        f"`{qn or caller}` ({f}) defines its own nested `{name}` before it calls "
+                        f"`{name}`, so that call most likely reaches the nested definition, which the "
+                        f"index does not keep apart from {g.describe()}; the row is counted as "
+                        f"name-matched, not resolved"))
+        else:
+            for g in groups:
+                if not g.file:
+                    continue
+                text = reader.read(g.file)
+                if text is None:
+                    continue
+                imported = blindspots.import_aliases(text, g.file)
+                qn = _strip_project_prefix(g.qn_raw, may_be_filename=False)
+                span = blindspots.function_span(text, name, g.file, qn) if imported else None
+                if span is None:
+                    continue
+                bound = {str(r.get(name_key) or "") for r in g.rows}
+                for alias, original in sorted(blindspots.alias_calls(text, span, imported).items()):
+                    if original in bound or alias in bound:
+                        continue
+                    found.append((
+                        "imports", "aliased-import-unbound",
+                        f"{g.describe()} calls `{alias}`, which `{g.file}` imports as an alias of "
+                        f"`{original}`, and no callee row here is `{original}`: the graph does not bind "
+                        f"a call written through an alias, so that callee is missing from this answer"))
+        if reader.unchecked:
+            shown = reader.unchecked[:5]
+            more = " and others" if len(reader.unchecked) > len(shown) else ""
+            found.append((
+                "imports", "aliased-import-unbound",
+                "could not check " + ", ".join(f"`{f}`" for f in shown) + more
+                + f" for an aliased import or a nested definition of `{name}`: the answer's file-read "
+                f"budget was spent before they were read, so a call through an alias may be missing"))
+        notes = []
+        for section, kind, detail in found:
+            self._add_gap(section, kind, detail)
+            notes.append(f"\n\n_Known blind spot (`{kind}`): {detail}._")
+        return "".join(notes)
 
     def _name_resolution_note(
         self, wanted: _SymbolTarget, groups: list[_EdgeGroup], truncated: bool
@@ -1446,6 +1542,12 @@ class AnswerRendering:
             named = ", ".join(g.describe() for g in groups) or "nothing"
             return (f"\n\n_Narrowed by the {wanted.describe()} in the target to {named}. Other "
                     f"symbols named `{wanted.name}` are not included._")
+        if any(r.get("_nested_shadow") for g in groups for r in g.rows):
+            # The index holds one `name` with edges, and the source holds more: a caller defines its
+            # own nested one (`_known_blind_spots`). Uniqueness is the one thing not to say here.
+            return (f"\n\n_Resolved by symbol NAME, not by type: the index keeps one `{wanted.name}` "
+                    f"with edges, but the source defines more than one — a caller above defines its "
+                    f"own nested `{wanted.name}`. Verify before relying on a row you did not expect._")
         if len(groups) == 1 and groups[0].label and not truncated:
             # Being the only indexed holder of a name is not only a reassurance — it is the exact
             # precondition for the backend's `unique_name` strategy, which binds ANY unresolved call

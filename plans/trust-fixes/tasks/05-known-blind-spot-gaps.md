@@ -1,7 +1,7 @@
 # Add known-blind-spot gaps: aliased imports, nested shadowing, and `lsp_ts_local`
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 2
@@ -57,3 +57,35 @@ prints passed
 - src/codeintel/engines/graph/qualifier_scan.py: the budgeted reader to reuse, read-only
 
 ## Answer
+
+Work started at 8ff5fc80591b2e05612407fcc49394cf00712c64. Test-only commit: a435f03.
+
+**Built**
+- `src/codeintel/engines/graph/blindspots.py` (new): `import_aliases`, `alias_imports(text, name, path="")`, `function_span(text, name, path="", qualified="")`, `nested_shadow(text, caller_span, name)`, `alias_calls`, and `SourceReader`, which reads through `qualifier_scan`'s `_root`/`_read`/`_within` under the answer's `Budget`, and records in `unchecked` only the files the budget (files, bytes, seconds, or stalled-read guard) refused.
+- `src/codeintel/engines/graph/answer.py`: `_known_blind_spots(op, groups, wanted, row_keys)`, called in `_render_edge_answer` after `_scan_for_qualifier` and before the sort/headline/`_record_rows`. Its notes are appended to the body. `_name_resolution_note` never says "only symbol named" when a row carries `_nested_shadow`.
+- `src/codeintel/engines/graph/confidence.py`: `_evidence_class("lsp_ts_local…")` returns `name-guess`. `_why` gives its own sentences for `lsp_ts_local` rows and for rows demoted by the nested-shadow rule.
+- `tests/test_blindspot_gaps.py` (new, 20 tests incl. 1 live), `tests/fixtures/blindspots/py/` (main.py, alias_direct.py, pkg/__init__.py, pkg/reexport.py, pkg/sub/impl.py, pkg/shapes.py), `tests/fixtures/blindspots/ts/src/` (lib/impl.ts, lib/index.ts, main.ts, shapes.ts with the `Shape` interface, Circle/Square, totalArea, outer/nested inner plus a module inner).
+- `tests/test_edge_confidence.py`: unchanged (none of its tests pin `lsp_ts_local`).
+
+**Proof**
+- Fails on main / passes here: at a435f03 (test only), `.venv/bin/pytest tests/test_blindspot_gaps.py -q -o addopts=` gave 16 failed, 4 passed. The 4 that passed are the negative cases: a missing file, a missing root, a callee alias that has its row, and a caller with no nested def. After the code change: 20 passed. The cases: Python `callers helper` (0.9.0 rows with module-scope USAGE, and 0.10.x rows) gives `aliased-import-unbound` naming `alias_direct.py`/`h2` and `main.py`/`h`, with safe false. Python `callees entry` gives `aliased-import-unbound` and partial. Python and TS `callers inner`: `outer` has verified false, `target-ambiguous` is present, and "only symbol named" is absent. An `lsp_ts_local` row gives `possible: 1, verified: 0`, safe false. With `_MAX_FILES=0` the gap says "could not check".
+- Live test: with `.venv/bin` on PATH (codebase-memory-mcp 0.10.8), `test_live_index_and_query_on_the_python_fixture` passed. It copies the fixture to tmp_path, runs `python -m codeintel index -q` with `HF_HUB_OFFLINE=1`, then `query --op callers --json --engine graph` for helper and inner. Both answers have `safe_for_destructive` false, with `aliased-import-unbound` and `target-ambiguous` respectively. Without the backend on PATH it skips ("codebase-memory-mcp backend not installed").
+- Check block `.venv/bin/pytest tests/test_blindspot_gaps.py tests/test_edge_confidence.py tests/test_dispatch_callers.py tests/test_qualifier_scan.py tests/test_changed_range.py tests/test_graph_failure_population.py tests/test_summary_integrity.py tests/test_docs_trust_claims.py -q -o addopts=`: `440 passed, 1 skipped, 1 xfailed`. The skip is the live test, because the bare check has no venv PATH. With PATH set: `441 passed, 1 xfailed`. No existing test file changed. I also ran all 43 test files that reference the graph engine, deselecting the known root-only doctor test: `1352 passed, 29 skipped, 1 deselected, 1 xfailed`. `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 files. compileall: ok. Whole Test command: left to the conductor's gate.
+
+**Decisions**
+- The callers alias rule scans every row's file plus each answered symbol's own file, not only USAGE/import rows. Live 0.10.8 returns no USAGE rows for `helper` and does not fetch IMPORTS, so a USAGE-only rule never fires there, and the Done-when live assertion (helper not safe) could not hold. This fires even when the backend did bind that file's alias (`lsp_callable_alias`), because the file that is really missing (`main.py`, through the `pkg` re-export) is not a row at all. It errs conservative.
+- Section names: `aliased-import-unbound` uses the constant section `imports` and nested-shadow `target-ambiguous` uses `callers`. A variable or `callees` section would be counted by `test_graph_failure_population.py::test_every_gap_callees_can_report_states_its_numbers_in_the_body_too`, which has no scenario for it and may not change.
+- The caller's body span is read from the source (`function_span`: `ast` for .py, indentation when it does not parse, brace matching for TS/JS), not asked of the backend. The edge rows carry no line numbers, and an extra backend query would also hit every existing `_query_rows` fake.
+- The rule runs after the qualifier scan, so the scan keeps the read budget it always had (the `test_qualifier_scan` budget tests are unchanged). It shares the answer's `_scan_budget`, creating and storing one when none is set.
+- Demoted rows get `_bucket = name-matched`, `_nested_shadow = <name>` and a `_low_confidence` badge. `_confidence_note`'s counts, computed earlier, do not include them. The blind-spot note states them instead.
+
+**Shortcuts taken**
+- TS/JS spans are found by regex and brace counting, which ignores braces inside strings, comments and template literals. A body with an unbalanced brace in a string can get the wrong span and miss a nested def or alias call. Worth upgrading to tree-sitter if false negatives show up.
+- The alias regex does not follow `import x = require()`, `const { a: b } = require()`, or a Python `X = helper` assignment alias. Only `as` forms are caught.
+- The callees rule treats a callee capped out by the distinct cap as "no row", so it may raise a gap that is too cautious.
+- Answers whose blind-spot rules read files are not marked uncacheable (no `qualifier_checked`). A gateway-cached answer could miss an alias added without reindexing. Ticket 03's cache key only changes on an index rebuild.
+
+**For later tickets**
+- 06: `_known_blind_spots` in answer.py is the place to add `dispatch-sibling-unbound`. The Circle/Square/total_area (py) and Shape/totalArea (ts) fixtures are in `tests/fixtures/blindspots/`. Use a constant section (not a variable and not `callees`) or add a callees scenario, for the reason above.
+- 07: rows demoted here carry `_nested_shadow`. USAGE narrowing should leave them demoted.
+- 13: `test_blindspot_gaps.py` imports `blindspots` inside the pure-function tests, so on eb0902f those fail with ImportError and the provider tests fail on assertions.
