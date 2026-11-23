@@ -1,0 +1,200 @@
+"""`codeintel index` — build the semantic index, then best-effort refresh the graph and the map."""
+
+import logging
+import os
+from typing import Any
+
+from codeintel.cli._common import resolve_root
+
+# How long a foreground `codeintel index` waits for another process's pass over the same repository
+# before indexing anyway. Long enough to outlast a cold index of a large repo (measured at ~10 min
+# for 30k chunks, docs/benchmarks.md); short enough that a hung holder cannot block it forever.
+_LOCK_WAIT_S = 900.0
+
+
+class _ProgressLogBridge(logging.Handler):
+    """Routes WARNING+ log records from the indexer to a live progress counter's ``notice()``, so a
+    per-file skip warning prints as a clean permanent line ABOVE the redrawing status line instead
+    of colliding with it (``0 chunksskipping …``). Installed only for a live (TTY) run and removed
+    the moment indexing returns — a non-TTY has no live line to protect, and the warnings keep their
+    normal stderr path there."""
+
+    def __init__(self, counter: Any) -> None:
+        super().__init__(level=logging.WARNING)
+        self._counter = counter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._counter.notice(record.getMessage())
+        except Exception:
+            pass
+
+
+def run(args: Any) -> int:
+    import sys
+
+    import codeintel.core.term as term
+    from codeintel.core.config import load_config
+    from codeintel.engines.semantic.db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.indexer import Indexer
+
+    project_root = resolve_root(args)
+    # Validate before doing anything. `codeintel index /typo/path` walked nothing, found nothing,
+    # and printed "Nothing new to index" at exit 0 — indistinguishable from a correct incremental
+    # run, which is the worst possible response to a mistyped path in a script.
+    if not os.path.isdir(project_root):
+        print(f"index failed: not a directory: {project_root}")
+        return 1
+
+    # A console bound to the CURRENT stdout (honouring --no-color/--ascii/NO_COLOR), so progress is
+    # captured under test and routed correctly whether or not main() already ran configure(). The
+    # LiveCounter auto-goes silent on a non-TTY; --quiet suppresses it (and the header) outright.
+    console = term.Console(
+        stream=sys.stdout,
+        no_color=getattr(args, "no_color", False),
+        ascii_mode=(True if getattr(args, "ascii", False) else None),
+    )
+    quiet = getattr(args, "quiet", False)
+    counter = None if quiet else term.LiveCounter(console)
+
+    # Take the same per-repository lock the background reindexer takes, so a terminal `index` and
+    # a running server's background pass do not embed the whole repository twice. It covers the
+    # semantic AND graph passes, as the background pass does; the map refresh is not indexing.
+    import contextlib
+
+    from codeintel.core.filelock import exclusive_waiting, lock_path
+
+    def _say_waiting() -> None:
+        if not quiet:       # --quiet promises the result line only, contention or not
+            print("waiting for another codeintel process to finish indexing this repository…",
+                  flush=True)
+
+    lock = contextlib.ExitStack()
+    # Resolving the lock path reads the codeintel home, which raises where there is no resolvable
+    # home directory (a container UID with no passwd entry and no CODEINTEL_HOME). That must not
+    # turn into a traceback before the semantic pass's own error handling below — which reports
+    # exactly that failure as "index failed: …". A lock we cannot place is a lock we do without,
+    # by the rule in `filelock`: it may dedupe work, never stop it.
+    try:
+        path = lock_path(os.path.realpath(project_root))
+    except Exception:
+        path = None
+    if path is not None:
+        got_lock = lock.enter_context(
+            exclusive_waiting(path, _LOCK_WAIT_S, on_wait=_say_waiting))
+        if not got_lock and not quiet:
+            print(f"still locked after {int(_LOCK_WAIT_S)}s — indexing anyway; the other pass "
+                  "may repeat some of this work", flush=True)
+
+    failed = False
+    # Wrap the whole semantic pass so a setup failure (e.g. an unresolvable home dir →
+    # Path.home() raising) degrades with a message, like every other subcommand, not a traceback.
+    try:
+        cfg = load_config(project_root)
+        if not quiet:
+            # One dim header naming the model + chunk strategy: it says WHAT is running (and that it
+            # is all local), and on a cold cache it pre-explains the model-download stall.
+            strat = str(cfg.get("chunk_strategy", "syntax"))
+            strat_label = "def-aligned" if strat == "syntax" else "line-window"
+            model = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
+            sep = "." if console.ascii else "·"
+            print(console.header("index", project_root))
+            print(f"  {console.dim(f'{model} {sep} {strat_label} chunks')}")
+            print()
+        db_path = default_db_path(str(cfg.get("model") or ""))
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        db = SemanticDb(db_path)
+        # While a live status line is on screen, the indexer's skip WARNINGs must not print raw to
+        # the terminal (they land mid-line). Route them through the counter's notice() for the span
+        # of the index pass only; a non-TTY needs no bridge (its status lines end in \n).
+        bridge = _ProgressLogBridge(counter) if (counter is not None and counter.live) else None
+        idx_logger = logging.getLogger("codeintel")
+        try:
+            db.init()
+            if bridge is not None:
+                idx_logger.addHandler(bridge)
+            # Bound to a name rather than constructed inline: `index()` parks the failure reason
+            # on `indexer.last_error`, and a throwaway instance makes that unreachable — which is
+            # why this command could only ever say "see the warnings above".
+            indexer = Indexer(
+                db,
+                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                window=int(cfg.get("window", 20)),
+                stride=int(cfg.get("stride", 10)),
+                max_chunks=int(cfg.get("max_chunks", 500)),
+                max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
+                chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
+                progress=counter,
+            )
+            try:
+                count = indexer.index(project_root)
+            finally:
+                if bridge is not None:
+                    idx_logger.removeHandler(bridge)
+            # Seal the live line before the plain summary: commit the ✓ row on real work, else erase
+            # it so "Nothing new" / the failure message stands on its own clean line.
+            if counter:
+                counter.finish(commit=count > 0)
+            if count > 0:
+                print(f"Indexed {count} chunks")
+            elif count < 0:
+                # Indexer.index() returns -1 for an unrecoverable failure. `> 0` sent that into
+                # the "Nothing new to index" branch, so a total failure read as a clean no-op.
+                #
+                # SHOW the reason. It is captured on `last_error` for exactly this, and deferring
+                # to the log fails the reader twice over: under a live progress line those
+                # warnings are routed through the counter and may already be gone, and even when
+                # they survive, "see the warnings above" asks someone whose command just failed to
+                # go hunting for the sentence this line could have printed. The pointer stays only
+                # for the case where no reason was captured at all.
+                if indexer.last_error:
+                    print(f"index failed — {indexer.last_error}")
+                else:
+                    print("index failed — the indexer could not complete "
+                          "(see the warnings above)")
+                failed = True
+            else:
+                print("Nothing new to index")
+        finally:
+            db.close()
+    except Exception as exc:
+        if counter:
+            counter.finish(commit=False)
+        print(f"index failed: {exc}")
+        failed = True
+
+    # best-effort graph reindex — an opaque subprocess, so a ticking elapsed heartbeat is the honest
+    # fidelity (no counts cross the boundary): the number keeps moving so a minute-long reindex never
+    # reads as a hang, but we never fabricate a percentage we can't see.
+    import shutil
+
+    if shutil.which("codebase-memory-mcp"):
+        beat = None if quiet else term.LiveHeartbeat(console, "graph reindex").start()
+        try:
+            from codeintel.gateway.reindexer import Reindexer
+
+            Reindexer()._graph_reindex(project_root)
+            if beat:
+                beat.stop("ok")
+        except Exception:
+            if beat:
+                beat.stop("warn", "skipped")
+
+    lock.close()
+
+    # best-effort map refresh after index (fast, kept silent — not worth a checklist row). REFRESH
+    # only: `index` keeps a CODE_INTEL.md that `codeintel map` already wrote current, and never
+    # creates one. Creating it put an uncommitted file into every repo on the first `index` —
+    # including one whose index had just failed — when writing into the repo is `map`'s job, asked
+    # for by name.
+    try:
+        if os.path.isfile(os.path.join(project_root, "CODE_INTEL.md")):
+            from codeintel.engines.graph.provider import GraphProvider
+            from codeintel.mapping.mapper import MapGenerator
+
+            gen = MapGenerator(GraphProvider())
+            gen.write(project_root, gen.generate(project_root))
+    except Exception:
+        pass
+
+    return 1 if failed else 0

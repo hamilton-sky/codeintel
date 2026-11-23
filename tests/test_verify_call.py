@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import textwrap
 
-from codeintel.verify import _extract_text, verify_stdio_call
+from codeintel.setup.verify import _extract_text, verify_stdio_call
 
 
 def _script(tmp_path, body: str) -> list[str]:

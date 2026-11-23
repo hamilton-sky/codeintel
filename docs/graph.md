@@ -124,9 +124,9 @@ callers under a heading of their own, after the symbol's direct callers:
 ```text
 ## Callers through `CodeProvider.build_result` — they call the Protocol; at run time a call reaches this override only when the object is a `GraphProvider` (3)
 _`GraphProvider` does not inherit `CodeProvider`; it satisfies the Protocol by structure — it defines every method `CodeProvider` declares, checked by method NAME and not by signature. …_
-- src.codeintel.gateway.Gateway._dispatch_single [CALLS] [?via protocol 0.85] (src/codeintel/gateway.py)
-- src.codeintel.gateway.Gateway._query [CALLS] [?via protocol 0.85] (src/codeintel/gateway.py)
-- src.codeintel.mapper.MapGenerator.generate [CALLS] [?via protocol 0.85] (src/codeintel/mapper.py)
+- src.codeintel.gateway.Gateway._dispatch_single [CALLS] [?via protocol 0.85] (src/codeintel/gateway/gateway.py)
+- src.codeintel.gateway.Gateway._query [CALLS] [?via protocol 0.85] (src/codeintel/gateway/gateway.py)
+- src.codeintel.mapper.MapGenerator.generate [CALLS] [?via protocol 0.85] (src/codeintel/mapping/mapper.py)
 ```
 
 **Which methods count as a base.**
@@ -642,7 +642,7 @@ defaults to **5000 ms**.
   "ok": true,
   "op": "callers",
   "target": "build_result",
-  "result": "## Callers of build_result\n- gateway (src/codeintel/gateway.py)",
+  "result": "## Callers of build_result\n- gateway (src/codeintel/gateway/gateway.py)",
   "engine": "graph",
   "cached": false
 }

@@ -2,7 +2,7 @@
 never break a query that loads it."""
 from __future__ import annotations
 
-from codeintel.config import _DEFAULTS, _coerce, load_config
+from codeintel.core.config import _DEFAULTS, _coerce, load_config
 
 
 def test_defaults_present_for_unset_keys():
@@ -121,7 +121,7 @@ def test_config_and_auth_survive_a_host_with_no_home_directory(tmp_path, monkeyp
     promise. Absent config is not an error; it means there is no config."""
     import pathlib
 
-    from codeintel.auth import load_auth
+    from codeintel.gateway.auth import load_auth
 
     def _no_home(cls):
         raise RuntimeError("Could not determine home directory")

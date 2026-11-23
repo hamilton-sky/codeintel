@@ -19,8 +19,8 @@ import time
 
 import pytest
 
-import codeintel.providers.semantic as sem
-from codeintel.providers.semantic import (
+import codeintel.engines.semantic.provider as sem
+from codeintel.engines.semantic.provider import (
     _BG_INDEX_COOLDOWN_S,
     SemanticProvider,
     _background_index_failure,
@@ -200,8 +200,8 @@ def _cold_repo_provider(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
-    monkeypatch.setattr("codeintel.searcher.Searcher", FakeSearcher)
-    monkeypatch.setattr("codeintel.semantic_db.SemanticDb", FakeDb)
+    monkeypatch.setattr("codeintel.engines.semantic.searcher.Searcher", FakeSearcher)
+    monkeypatch.setattr("codeintel.engines.semantic.db.SemanticDb", FakeDb)
     monkeypatch.delenv("CODEINTEL_REINDEX", raising=False)
     return SemanticProvider(blocking_index=False)
 
@@ -261,7 +261,7 @@ def test_a_fresh_repo_still_reports_progress(monkeypatch, tmp_path):
 def test_index_failed_is_a_could_not_ask_in_the_fanout(monkeypatch, tmp_path):
     """`index-failed` is already in the gateway's `unreachable` set, so a `context` fan-out where
     it is the only outcome says so rather than "that symbol does not exist"."""
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     class _Null:
         available = True
@@ -307,7 +307,7 @@ def test_a_failed_pass_is_reported_as_not_runnable(tmp_path):
     unreadable"). The rolled-up status was already `fail` via `repo_indexed`, so this is about the
     field a consumer reads directly.
     """
-    from codeintel.doctor import _status_for
+    from codeintel.setup.doctor import _status_for
 
     _record_background_failure(_index_key(str(tmp_path)), "ProxyError: 403 Forbidden")
     probe = sem._not_indexed_probe(str(tmp_path), "no semantic index database yet")
@@ -351,7 +351,7 @@ def test_a_crash_on_the_thread_is_recorded_too(monkeypatch, tmp_path):
     A caller that gets `indexing-in-progress` forever cannot tell a crashed pass from a failed
     one, so both have to be remembered.
     """
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     monkeypatch.setattr(sdb.SemanticDb, "init",
                         lambda self: (_ for _ in ()).throw(RuntimeError("disk gone")))
@@ -383,8 +383,8 @@ def test_a_close_fault_does_not_overwrite_the_real_cause(monkeypatch, tmp_path):
     network/proxy access" with a database-close error — swapping the actionable cause for a
     downstream symptom of it.
     """
-    import codeintel.semantic_db as sdb
-    from codeintel.indexer import Indexer
+    import codeintel.engines.semantic.db as sdb
+    from codeintel.engines.semantic.indexer import Indexer
 
     monkeypatch.setattr(sdb.SemanticDb, "init", lambda self: None)
     monkeypatch.setattr(sdb.SemanticDb, "close",
@@ -413,7 +413,7 @@ def test_a_setup_failure_survives_a_failing_close(monkeypatch, tmp_path):
     the close error — recording a downstream symptom as the cause, and losing the only sentence
     that says what to fix. Guarding the close at its own site fixes both directions at once.
     """
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     monkeypatch.setattr(sdb.SemanticDb, "init",
                         lambda self: (_ for _ in ()).throw(RuntimeError("the REAL cause")))
@@ -437,8 +437,8 @@ def test_a_close_failure_alone_does_not_mark_the_pass_failed(monkeypatch, tmp_pa
 
     Recording it as a failed pass would suppress querying for a whole cooldown over cleanup.
     """
-    import codeintel.semantic_db as sdb
-    from codeintel.indexer import Indexer
+    import codeintel.engines.semantic.db as sdb
+    from codeintel.engines.semantic.indexer import Indexer
 
     monkeypatch.setattr(sdb.SemanticDb, "init", lambda self: None)
     monkeypatch.setattr(sdb.SemanticDb, "close",
@@ -465,7 +465,7 @@ def test_a_setup_failure_surfaces_the_recorded_cause_not_a_bare_provider_error(
     fails the request too, landing in the outer handler. That returned `provider-error` with no
     hint at all, while an actionable sentence sat in the registry unread.
     """
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
     monkeypatch.setattr(sdb.SemanticDb, "init",
@@ -488,7 +488,7 @@ def test_a_setup_failure_surfaces_the_recorded_cause_not_a_bare_provider_error(
 def test_a_setup_failure_with_no_recorded_cause_is_still_provider_error(monkeypatch, tmp_path):
     """The new branch must not swallow the case it was carved out of, and must not invent a
     background failure for a request that simply could not start."""
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
     monkeypatch.setattr(sdb.SemanticDb, "init",
@@ -503,7 +503,7 @@ def test_a_setup_failure_with_no_recorded_cause_is_still_provider_error(monkeypa
 
 def test_the_recovery_lookup_cannot_escape_the_never_raise_boundary(monkeypatch, tmp_path):
     """This runs inside `build_result`'s own handler — a fault there would escape the provider."""
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
     monkeypatch.setattr(sdb.SemanticDb, "init",

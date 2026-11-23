@@ -1,4 +1,4 @@
-"""Tests for `codeintel.c4_layers` — inferred architectural layers. No backend involved: every input
+"""Tests for `codeintel.c4.layers` — inferred architectural layers. No backend involved: every input
 here is a hand-written element/relation list, matching the module's pure contract.
 
 The tests are organised around the properties the design argues for, not around the functions, because
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import tomllib
 
-from codeintel.c4_layers import (
+from codeintel.c4.layers import (
     DEGRADED_FRACTION,
     compute_layers,
     empty_layers,

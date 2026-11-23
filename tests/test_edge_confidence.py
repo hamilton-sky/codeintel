@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-from codeintel.graph_confidence import _EDGE_CONFIDENCE_FLOOR, _EDGE_CONFIDENCE_WEAK
-from codeintel.providers.graph import GraphProvider
+from codeintel.engines.graph.confidence import _EDGE_CONFIDENCE_FLOOR, _EDGE_CONFIDENCE_WEAK
+from codeintel.engines.graph.provider import GraphProvider
 
 ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
@@ -42,7 +42,7 @@ def _rows(*confidences: str | None, name: str = "target") -> list[dict]:
 
 def _provider(monkeypatch, rows: list[dict]) -> GraphProvider:
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
         LIST_PROJECTS if method == "list_projects" else None))
@@ -230,9 +230,9 @@ def test_the_breakdown_counts_every_row_it_was_given(monkeypatch):
 def _guessed(*, n: int, resolved: int = 0, qualified: str = "chain.StrategyChain.resolve",
              leaf: str = "resolve") -> tuple:
     """(provider, groups, target) for `n` name-matched rows and `resolved` resolved ones."""
-    from codeintel.graph_backend import BackendClient
-    from codeintel.graph_edges import _EdgeGroup
-    from codeintel.graph_targets import _SymbolTarget
+    from codeintel.engines.graph.backend import BackendClient
+    from codeintel.engines.graph.edges import _EdgeGroup
+    from codeintel.engines.graph.targets import _SymbolTarget
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)          # type: ignore[attr-defined]
@@ -305,10 +305,10 @@ def test_no_command_when_the_resolved_rows_carry_the_answer():
 def test_no_command_when_there_is_nothing_sharper_to_grep():
     """A target with no qualifier and no defining file offers nothing the leaf name does not. An
     unhelpful command would read as diligence while settling nothing, which is worse than silence."""
-    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.engines.graph.edges import _EdgeGroup
 
     gp, _groups, _wanted = _guessed(n=8)
-    from codeintel.graph_targets import _SymbolTarget
+    from codeintel.engines.graph.targets import _SymbolTarget
     bare = [_EdgeGroup("run", "run", "", [
         {"a.name": f"c{i}", "a.qualified_name": f"pkg.c{i}", "a.file_path": f"src/f{i}.py",
          "type(c)": "CALLS", "_bucket": "name-matched"} for i in range(8)])]
@@ -355,8 +355,8 @@ def test_the_candidate_listing_can_never_be_read_as_result_rows():
     The envelope half was already handled: `_pending_nonrow_lines` withholds the row summary. This
     is the body half.
     """
-    from codeintel.graph_edges import _EdgeGroup
-    from codeintel.graph_targets import _SymbolTarget
+    from codeintel.engines.graph.edges import _EdgeGroup
+    from codeintel.engines.graph.targets import _SymbolTarget
 
     gp, _, _ = _guessed(n=1)
     others = [_EdgeGroup("resolve", f"pkg.b{i}.Other.resolve", f"src/b{i}.ts", []) for i in range(3)]
@@ -426,7 +426,7 @@ def _sided(monkeypatch, callers: list[dict], callees: list[dict]) -> GraphProvid
     its callers. That is fine for the single-op tests above and useless for the one thing impact is
     tested for here — that the envelope summarises BOTH halves of a body containing both."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
         LIST_PROJECTS if method == "list_projects" else None))
@@ -926,7 +926,7 @@ def test_a_receiver_that_names_the_modules_own_symbol_is_never_downgraded(monkey
 
 def test_the_same_module_call_check_states_the_rule_it_applies():
     """The check as a function, one line per case, so a change to the rule is a change to this table."""
-    from codeintel.graph_confidence import (
+    from codeintel.engines.graph.confidence import (
         _SAME_MODULE_FOREIGN,
         _SAME_MODULE_OWN,
         _SAME_MODULE_UNCHECKED,
@@ -1006,7 +1006,7 @@ def _lsp_ops() -> set[str]:
     import inspect
     import re
 
-    from codeintel.providers.lsp import LspProvider
+    from codeintel.engines.lsp.provider import LspProvider
 
     return set(re.findall(r'op == "(\w+)"', inspect.getsource(LspProvider._dispatch)))
 
@@ -1027,7 +1027,7 @@ def _advice_spans(text: str, answered_op: str) -> list[tuple[str, str]]:
 
 
 def test_no_hint_recommends_an_engine_and_op_that_returns_unsupported_op(monkeypatch):
-    from codeintel.providers.graph import _GRAPH_OPS
+    from codeintel.engines.graph.provider import _GRAPH_OPS
 
     lsp_ops = _lsp_ops()
     assert lsp_ops and "callers" not in lsp_ops, (
@@ -1041,7 +1041,7 @@ def test_no_hint_recommends_an_engine_and_op_that_returns_unsupported_op(monkeyp
 
     # 2. the `no-edges` safe-null, which tells the reader how to confirm a symbol nobody calls.
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
         LIST_PROJECTS if method == "list_projects" else None))
@@ -1127,7 +1127,7 @@ def _scanned_callers(monkeypatch, tmp_path, rows: list[dict], *, naming=frozense
     query sent to the backend is appended to *queries* when it is given."""
     _write_tree(tmp_path, rows, naming=set(naming), missing=set(missing))
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     listing = {"projects": [{"name": "codeintel", "root_path": str(tmp_path)}]}
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
@@ -1431,7 +1431,7 @@ def test_a_failed_lookup_of_the_defining_class_leaves_the_answer_as_it_was(monke
 
     _write_tree(tmp_path, rows)
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     listing = {"projects": [{"name": "codeintel", "root_path": str(tmp_path)}]}
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
@@ -1590,7 +1590,7 @@ def test_the_scan_and_the_same_module_rule_share_one_definition_of_the_enclosing
     and the other does not. They ask `_is_own_receiver` and `_own_receivers_of`."""
     import inspect
 
-    from codeintel.graph_confidence import _same_module_call
+    from codeintel.engines.graph.confidence import _same_module_call
 
     for fn in (GraphProvider._text_can_judge, _same_module_call):
         source = inspect.getsource(fn)
@@ -1605,7 +1605,7 @@ def test_an_attempted_check_is_marked_even_when_it_judges_nothing(monkeypatch, t
     the filesystem as it was NOW too, so it is marked `qualifier_checked`, which keeps the gateway from
     caching it and switching the check off for the symbol until the next reindex. CONTROL: an answer
     the check was never eligible for (below the floor) carries no mark, and its evidence is unchanged."""
-    from codeintel import qualifier_scan as scan
+    from codeintel.engines.graph import qualifier_scan as scan
 
     monkeypatch.setattr(scan, "files_naming", lambda *a, **k: None)   # judged nothing, as on a stall
     attempted = _scanned_callers(monkeypatch, tmp_path, _guesses(3))
@@ -1622,7 +1622,7 @@ def test_the_owner_lookup_spends_its_own_allowance_never_the_ops(monkeypatch, tm
     whether the answer is whole — callers through a base, `impact`'s callee half — had less, so an
     answer near the limit came back partial for the sake of a note. It runs in a scope of its own,
     holding one call's allowance, and the op's scope is left as it was."""
-    from codeintel.graph_dispatch import _LOOKUP_TIMEOUTS
+    from codeintel.engines.graph.dispatch import _LOOKUP_TIMEOUTS
 
     seen: dict[str, object] = {}
     real_owners = GraphProvider._method_owners

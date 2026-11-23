@@ -75,7 +75,7 @@ def _close_semantic_databases(monkeypatch):
     of ResourceWarnings and making a real leak invisible in the noise. Holding each wrapper until
     teardown preserves that idiom; closing all of them makes the resource lifetime deterministic.
     """
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
 
     original_init = SemanticDb.__init__
     opened = []
@@ -95,7 +95,7 @@ def _close_semantic_databases(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_gateway():
-    from codeintel import server
+    from codeintel.transports import mcp as server
     server._reset_gateway()
     yield
     server._reset_gateway()
@@ -151,7 +151,7 @@ def _no_background_reindex(request, monkeypatch):
     """
     if "background_reindex" in request.fixturenames:
         return
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
     monkeypatch.setattr(Reindexer, "maybe_reindex", lambda self, project_root: None)
 
@@ -205,7 +205,7 @@ def embedding_model() -> str:
     ``None`` from it means "could not determine" (an unreadable cache) — treated as unavailable,
     because a test that needs the weights should not be the thing that discovers it cannot look.
     """
-    from codeintel.semantic_db import DEFAULT_MODEL, MODEL_CACHE_ENV, model_is_cached
+    from codeintel.engines.semantic.db import DEFAULT_MODEL, MODEL_CACHE_ENV, model_is_cached
     if model_is_cached(DEFAULT_MODEL) is not True:
         pytest.skip(
             f"embedding weights for {DEFAULT_MODEL} are not cached — this test indexes for real. "
@@ -292,7 +292,7 @@ def _reap_leaked_backend_projects():
     a no-op where the backend is not installed (CI)."""
     yield
     try:
-        from codeintel.providers.graph import GraphProvider
+        from codeintel.engines.graph.provider import GraphProvider
 
         p = GraphProvider()
         if not p.available:
@@ -317,7 +317,7 @@ def _reset_graph_wire_format_cache():
     one live call fixes the verdict for the rest of the session, and the unit tests that stub the
     subprocess seam then inherit a verdict that has nothing to do with their stub.
     """
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.provider import GraphProvider
 
     GraphProvider._reset_wire_format_cache()
     yield

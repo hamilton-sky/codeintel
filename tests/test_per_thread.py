@@ -16,9 +16,9 @@ from typing import Any
 
 import pytest
 
-from codeintel.graph_backend import BackendClient
-from codeintel.per_thread import PerThread
-from codeintel.providers.graph import GraphProvider
+from codeintel.core.per_thread import PerThread
+from codeintel.engines.graph.backend import BackendClient
+from codeintel.engines.graph.provider import GraphProvider
 
 _GRAPH_FIELDS: dict[str, tuple[Any, Any]] = {
     "_pending_gaps": ((({"section": "callers", "kind": "a"}),), ({"section": "callers", "kind": "b"},)),
@@ -59,7 +59,7 @@ def test_graph_request_state_is_private_to_each_thread(field):
 def test_the_backend_failure_is_private_to_each_thread():
     """One request's timeout is not another's: `_last_failure` decides whether an op reports
     "the backend did not answer" or renders what it got."""
-    from codeintel.outcome import Missing
+    from codeintel.core.outcome import Missing
 
     client = BackendClient.__new__(BackendClient)
     values = (Missing("timeout", "a"), None)

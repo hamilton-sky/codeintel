@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from codeintel.indexer import Indexer
-from codeintel.progress import _Guard
-from codeintel.semantic_db import SemanticDb
-from codeintel.term import Console, LiveCounter, LiveHeartbeat, _fmt_elapsed
+from codeintel.core.progress import _Guard
+from codeintel.core.term import Console, LiveCounter, LiveHeartbeat, _fmt_elapsed
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer
 
 
 class _FakeTextEmbedding:
@@ -183,7 +183,7 @@ def test_notice_on_a_tty_erases_the_live_line_and_redraws_it_below():
 
 
 def test_progress_log_bridge_forwards_only_warnings_to_notice():
-    from codeintel.commands.index import _ProgressLogBridge
+    from codeintel.cli.index import _ProgressLogBridge
 
     class _RecordingCounter:
         def __init__(self):
@@ -193,7 +193,7 @@ def test_progress_log_bridge_forwards_only_warnings_to_notice():
             self.msgs.append(m)
 
     counter = _RecordingCounter()
-    lg = logging.getLogger("codeintel.indexer")
+    lg = logging.getLogger("codeintel.engines.semantic.indexer")
     handler = _ProgressLogBridge(counter)
     lg.addHandler(handler)
     try:

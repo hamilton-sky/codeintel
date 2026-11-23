@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from codeintel.semantic_db import (
+from codeintel.engines.semantic.db import (
     DEFAULT_MODEL,
     MODEL_CACHE_ENV,
     MODEL_HOST,
@@ -57,7 +57,7 @@ def _load_with(cause: BaseException, model_name: str = DEFAULT_MODEL, supported=
     out the fake has no such method, which is the "cannot read the list" fallback."""
     import builtins
 
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     real_import = builtins.__import__
 
@@ -128,7 +128,7 @@ def test_an_unlisted_model_stays_a_config_error_when_the_list_is_readable():
 
 def test_a_list_that_raises_falls_back_to_the_config_remedy():
     """The classifier must never replace the error it explains with one of its own."""
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     class _Broken:
         @classmethod
@@ -255,7 +255,7 @@ def test_every_field_is_flattened_not_only_the_cause():
 
 def test_a_multiline_model_name_survives_the_real_config_path(tmp_path):
     """Not hypothetical: this is what a valid `.codeintel.toml` can hand the indexer."""
-    from codeintel.config import load_config
+    from codeintel.core.config import load_config
 
     (tmp_path / ".codeintel.toml").write_text(
         'model = """BAAI/\nbge-small-en-v1.5"""\n', encoding="utf-8",
@@ -302,7 +302,7 @@ def test_an_unrelated_failure_is_not_dressed_as_a_model_download(monkeypatch, tm
     "connection" and got the whole embedding-model story appended to it, sending the reader to
     check a proxy that was never involved.
     """
-    from codeintel.indexer import Indexer
+    from codeintel.engines.semantic.indexer import Indexer
 
     indexer = Indexer.__new__(Indexer)
     indexer.model_name = DEFAULT_MODEL
@@ -320,7 +320,7 @@ def test_an_unrelated_failure_is_not_dressed_as_a_model_download(monkeypatch, tm
 def test_a_blocked_download_with_no_network_words_is_still_caught(monkeypatch, tmp_path):
     """The false negative. This message contains none of the substrings the old list looked for,
     so the explanation that mattered most was withheld exactly when it was needed."""
-    from codeintel.indexer import Indexer
+    from codeintel.engines.semantic.indexer import Indexer
 
     indexer = Indexer.__new__(Indexer)
     indexer.model_name = DEFAULT_MODEL
@@ -340,7 +340,7 @@ def test_a_blocked_download_with_no_network_words_is_still_caught(monkeypatch, t
 def test_last_error_reports_the_model_failure_verbatim(monkeypatch, tmp_path):
     """No class-name prefix: the message is already the whole story, and
     `EmbeddingModelUnavailable:` buries the remedy behind noise."""
-    from codeintel.indexer import Indexer
+    from codeintel.engines.semantic.indexer import Indexer
 
     exc = EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY)
     indexer = Indexer.__new__(Indexer)
@@ -355,7 +355,7 @@ def test_last_error_reports_the_model_failure_verbatim(monkeypatch, tmp_path):
 def test_other_failures_keep_their_type_prefix(monkeypatch, tmp_path):
     """For an arbitrary exception the TYPE is the information, so dropping it would make this fix
     a regression for every cause that is not the model."""
-    from codeintel.indexer import Indexer
+    from codeintel.engines.semantic.indexer import Indexer
 
     indexer = Indexer.__new__(Indexer)
     indexer.model_name = DEFAULT_MODEL
@@ -374,8 +374,8 @@ def test_an_unreadable_subtree_is_not_a_successful_empty_walk(monkeypatch, tmp_p
     though no source was readable.  The original permission error, including its path, must escape
     the walk so ``Indexer.index`` can report it as an unrecoverable failure.
     """
-    import codeintel.indexer as indexer_module
-    from codeintel.indexer import Indexer
+    import codeintel.engines.semantic.indexer as indexer_module
+    from codeintel.engines.semantic.indexer import Indexer
 
     protected = tmp_path / "protected-repo"
 
@@ -395,7 +395,7 @@ def test_an_unreadable_subtree_is_not_a_successful_empty_walk(monkeypatch, tmp_p
 
 def test_the_searcher_reports_it_too(monkeypatch):
     """A query is the other way a cold cache is discovered — stage-qualified, message verbatim."""
-    from codeintel.searcher import Searcher
+    from codeintel.engines.semantic.searcher import Searcher
 
     exc = EmbeddingModelUnavailable(DEFAULT_MODEL, ProxyError("403 Forbidden"), _DOWNLOAD_REMEDY)
     s = Searcher.__new__(Searcher)
@@ -458,11 +458,11 @@ def test_no_index_pass_discards_its_outcome():
 def test_the_census_actually_inspects_the_known_call_sites():
     """An empty domain would make the assertion above pass vacuously."""
     sites = {
-        p.name
+        p.relative_to(SRC).as_posix()
         for p in SRC.rglob("*.py")
         if "Indexer(" in p.read_text(encoding="utf-8")
     }
-    assert {"index.py", "reindexer.py", "semantic.py"} <= sites, sites
+    assert {"cli/index.py", "gateway/reindexer.py", "engines/semantic/provider.py"} <= sites, sites
 
 
 def test_the_census_can_actually_fail(tmp_path):
@@ -494,7 +494,7 @@ def test_the_background_cold_index_reports_its_failure():
     failure here. The request that started the pass had already returned `indexing-in-progress`,
     and every later query got the same answer forever.
     """
-    text = (SRC / "providers" / "semantic.py").read_text(encoding="utf-8")
+    text = (SRC / "engines" / "semantic" / "provider.py").read_text(encoding="utf-8")
     assert re.search(r"if\s+indexer\.index\(project_root\)\s*<\s*0:", text)
     assert "background cold index failed" in text
 
@@ -502,7 +502,7 @@ def test_the_background_cold_index_reports_its_failure():
 def test_the_cli_no_longer_leads_with_a_dead_pointer():
     """"see the warnings above" may remain as the fallback for a failure with no captured reason,
     but it must not be the only thing the command can say."""
-    text = (SRC / "commands" / "index.py").read_text(encoding="utf-8")
+    text = (SRC / "cli" / "index.py").read_text(encoding="utf-8")
     assert "indexer.last_error" in text
     assert 'print(f"index failed — {indexer.last_error}")' in text
 
@@ -510,7 +510,7 @@ def test_the_cli_no_longer_leads_with_a_dead_pointer():
 def test_the_background_reindexer_does_not_fail_silently():
     """It discarded `index()`'s return entirely, so a failed pass logged nothing — while the
     generation bump went on invalidating every cached answer for an index that had not moved."""
-    text = (SRC / "reindexer.py").read_text(encoding="utf-8")
+    text = (SRC / "gateway" / "reindexer.py").read_text(encoding="utf-8")
     assert re.search(r"if\s+indexer\.index\(project_root\)\s*<\s*0:", text)
     assert "semantic reindex failed" in text
 

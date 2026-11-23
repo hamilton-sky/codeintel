@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.redact import (
+from codeintel.core.redact import (
     contains_home_path,
     looks_like_any_home_path,
     redact,

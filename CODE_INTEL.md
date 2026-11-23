@@ -52,36 +52,36 @@
 
 | Symbol | File | Callers |
 |--------|------|---------|
-| `get` | src/codeintel/cache.py | 257 |
-| `run` | src/codeintel/server.py | 90 |
-| `Indexer` | src/codeintel/indexer.py | 69 |
-| `query` | src/codeintel/gateway.py | 59 |
-| `Gateway` | src/codeintel/gateway.py | 59 |
-| `index` | src/codeintel/indexer.py | 58 |
-| `build_result` | src/codeintel/provider.py | 50 |
-| `build_result` | src/codeintel/providers/graph.py | 46 |
-| `build_c4_payload` | src/codeintel/c4.py | 45 |
+| `get` | src/codeintel/gateway/cache.py | 257 |
+| `run` | src/codeintel/transports/mcp.py | 90 |
+| `Indexer` | src/codeintel/engines/semantic/indexer.py | 69 |
+| `query` | src/codeintel/gateway/gateway.py | 59 |
+| `Gateway` | src/codeintel/gateway/gateway.py | 59 |
+| `index` | src/codeintel/engines/semantic/indexer.py | 58 |
+| `build_result` | src/codeintel/core/provider.py | 50 |
+| `build_result` | src/codeintel/engines/graph/provider.py | 46 |
+| `build_c4_payload` | src/codeintel/c4/model.py | 45 |
 | `add` | bench/score.py | 45 |
-| `close` | src/codeintel/semantic_db.py | 44 |
-| `GraphProvider` | src/codeintel/providers/graph.py | 42 |
-| `Installer` | src/codeintel/installer.py | 42 |
-| `SemanticDb` | src/codeintel/semantic_db.py | 39 |
-| `render_c4_dsl` | src/codeintel/c4.py | 36 |
-| `register` | src/codeintel/installer.py | 36 |
-| `search` | src/codeintel/searcher.py | 35 |
-| `parse` | src/codeintel/wire_text.py | 34 |
-| `init` | src/codeintel/semantic_db.py | 34 |
-| `conn` | src/codeintel/semantic_db.py | 34 |
-| `Reindexer` | src/codeintel/reindexer.py | 34 |
-| `LspProvider` | src/codeintel/providers/lsp.py | 34 |
-| `SemanticProvider` | src/codeintel/providers/semantic.py | 34 |
-| `write` | src/codeintel/mapper.py | 31 |
-| `default_db_path` | src/codeintel/semantic_db.py | 27 |
-| `log_swallowed` | src/codeintel/provider.py | 24 |
-| `compute_layers` | src/codeintel/c4_layers.py | 24 |
-| `MapGenerator` | src/codeintel/mapper.py | 24 |
-| `check_layers` | src/codeintel/c4_check.py | 23 |
-| `run_reset` | src/codeintel/reset.py | 23 |
+| `close` | src/codeintel/engines/semantic/db.py | 44 |
+| `GraphProvider` | src/codeintel/engines/graph/provider.py | 42 |
+| `Installer` | src/codeintel/setup/installer.py | 42 |
+| `SemanticDb` | src/codeintel/engines/semantic/db.py | 39 |
+| `render_c4_dsl` | src/codeintel/c4/model.py | 36 |
+| `register` | src/codeintel/setup/installer.py | 36 |
+| `search` | src/codeintel/engines/semantic/searcher.py | 35 |
+| `parse` | src/codeintel/engines/graph/wire_text.py | 34 |
+| `init` | src/codeintel/engines/semantic/db.py | 34 |
+| `conn` | src/codeintel/engines/semantic/db.py | 34 |
+| `Reindexer` | src/codeintel/gateway/reindexer.py | 34 |
+| `LspProvider` | src/codeintel/engines/lsp/provider.py | 34 |
+| `SemanticProvider` | src/codeintel/engines/semantic/provider.py | 34 |
+| `write` | src/codeintel/mapping/mapper.py | 31 |
+| `default_db_path` | src/codeintel/engines/semantic/db.py | 27 |
+| `log_swallowed` | src/codeintel/core/provider.py | 24 |
+| `compute_layers` | src/codeintel/c4/layers.py | 24 |
+| `MapGenerator` | src/codeintel/mapping/mapper.py | 24 |
+| `check_layers` | src/codeintel/c4/check.py | 23 |
+| `run_reset` | src/codeintel/setup/reset.py | 23 |
 
 ## Entry Points
 

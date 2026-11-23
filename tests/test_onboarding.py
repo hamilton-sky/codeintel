@@ -10,7 +10,7 @@ import io
 import os
 import time
 
-from codeintel import onboarding
+from codeintel.setup import onboarding
 
 
 def test_pip_install_nonexistent_never_raises():
@@ -21,7 +21,7 @@ def test_pip_install_nonexistent_never_raises():
 
 
 def test_run_setup_never_raises_and_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     start = time.monotonic()
     report = onboarding.run_setup(tmp_path, do_index=False, warm_lsp=False)
     elapsed = time.monotonic() - start
@@ -35,7 +35,7 @@ def test_setup_index_timeout_bounded(tmp_path, monkeypatch):
         time.sleep(5)
         return 0
 
-    monkeypatch.setattr("codeintel.indexer.Indexer.index", _slow_index)
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer.index", _slow_index)
     start = time.monotonic()
     result = onboarding._bounded_index(str(tmp_path), timeout_s=1, out=io.StringIO())
     elapsed = time.monotonic() - start
@@ -57,12 +57,12 @@ def test_setup_index_real_db(tmp_path, monkeypatch, embedding_model):
     (repo / "sample.py").write_text("def greet():\n    return 'hello'\n")
 
     db_path = tmp_path / "semantic.db"
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path", lambda *a, **k: str(db_path))
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path", lambda *a, **k: str(db_path))
 
     report = onboarding.run_setup(str(repo), do_index=True, out=io.StringIO())
     assert report["ok"] is True
 
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
 
     db = SemanticDb(str(db_path))
     try:
@@ -93,8 +93,8 @@ def test_guidance_for_graph_is_optional_and_pip_installable():
 
 def test_run_setup_skips_install_when_engine_already_installed(tmp_path, monkeypatch):
     # Idempotency: `--all`/re-runs must NOT reinstall uv when the LSP engine already reports installed.
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")  # lsp installed
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")  # lsp installed
 
     def _boom(*a, **k):
         raise AssertionError("_pip_install must not run when the engine is already satisfied")
@@ -130,7 +130,7 @@ def test_next_steps_all_ready_is_just_agent_registration():
 
 def test_render_diagnose_only_points_to_all(monkeypatch):
     # Bare setup (no action flags) must point the user at the one-command form + show Next steps.
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     report = onboarding.run_setup("/tmp/x", do_index=False, warm_lsp=False)
     text = onboarding.render_setup_text(report)
     assert "setup --all" in text
@@ -141,7 +141,7 @@ def test_render_diagnose_only_points_to_all(monkeypatch):
 def test_warm_lsp_reprobes_after_install_not_stale_preflight(tmp_path, monkeypatch):
     # The warm step must re-probe (deep) AFTER installs, not reuse the pre-install shallow preflight —
     # else a fresh machine prints "warm lsp: fail" directly under "install uv: ok".
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
 
     def _probe(self, root, deep=False, timeout_s=0):
         if deep:  # the dedicated warm boot, run AFTER the install loop
@@ -149,7 +149,7 @@ def test_warm_lsp_reprobes_after_install_not_stale_preflight(tmp_path, monkeypat
                     "detail": "READY (warmed)", "remediation": None}
         return {"installed": False, "runnable": False, "repo_indexed": None,
                 "detail": "no uvx (preflight)", "remediation": None}
-    monkeypatch.setattr("codeintel.providers.lsp.LspProvider.probe", _probe)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.LspProvider.probe", _probe)
 
     report = onboarding.run_setup(tmp_path, warm_lsp=True, do_index=False, lsp_warm_timeout_s=5)
     warm = next(s for s in report["steps"] if s["name"] == "warm lsp")
@@ -173,7 +173,7 @@ def test_a_reporting_only_languages_step_does_not_suppress_the_diagnose_only_hin
     disappear from every bare `codeintel setup`, removing the one line that tells a new user how to
     fix anything. Steps now carry an explicit `action` flag, and this pins it.
     """
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     serena = tmp_path / ".serena"
     serena.mkdir()
     (serena / "project.yml").write_text("language_servers:\n- python\n", encoding="utf-8")
@@ -195,7 +195,7 @@ def test_a_reporting_only_languages_step_does_not_suppress_the_diagnose_only_hin
 def test_a_languages_step_that_wrote_counts_as_an_action(tmp_path, monkeypatch):
     """The other half: once it has edited the config, setup DID something and must not claim to have
     been diagnose-only."""
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     serena = tmp_path / ".serena"
     serena.mkdir()
     (serena / "project.yml").write_text("language_servers:\n- python\n", encoding="utf-8")

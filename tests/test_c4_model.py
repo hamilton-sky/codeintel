@@ -1,10 +1,10 @@
-"""Tests for the pure `codeintel.c4` functions — `keep_source`, `fit_depth`, `element_key`, and
+"""Tests for the pure `codeintel.c4.model` functions — `keep_source`, `fit_depth`, `element_key`, and
 the shadow-merge / collision-suffix rules that decide element identity. No backend involved: every
 input here is a plain list of path strings, per this module's documented contract.
 """
 from __future__ import annotations
 
-from codeintel import c4
+from codeintel.c4 import model as c4
 
 
 def test_noise_directories_are_dropped_at_any_path_depth():

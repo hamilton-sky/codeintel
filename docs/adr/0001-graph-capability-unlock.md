@@ -11,7 +11,7 @@
 **Status:** Accepted — shipped in v0.9.0
 **Date:** 2026-08-14
 **Deciders:** codeintel maintainers
-**Related:** `docs/graph.md`, `src/codeintel/providers/graph.py` (`_dispatch`), `CHANGELOG.md` (0.9.0)
+**Related:** `docs/graph.md`, `src/codeintel/engines/graph/provider.py` (`_dispatch`), `CHANGELOG.md` (0.9.0)
 
 ---
 
@@ -178,10 +178,10 @@ what has happened to it since, which is the part still worth reading.
 
 | Planned | Where it is now |
 |---|---|
-| `_op_changed` | `providers/graph.py`. Shipped and live. |
-| `_op_hotspots` | `providers/graph.py`. Shipped, later withdrawn, **reinstated** once it asked for `Method` nodes and stopped ranking an alphabetical slice. |
+| `_op_changed` | `engines/graph/provider.py`. Shipped and live. |
+| `_op_hotspots` | `engines/graph/provider.py`. Shipped, later withdrawn, **reinstated** once it asked for `Method` nodes and stopped ranking an alphabetical slice. |
 | `_op_deadcode` | **Gone.** The implementation was removed; `"deadcode"` remains in `_GRAPH_OPS` and `_ROOT_SCOPED_OPS` only so the name still explains itself and cannot be silently un-scoped if something later takes it. |
-| `_search_symbols` helper | `providers/graph.py`. Shipped, and still shared. |
+| `_search_symbols` helper | `engines/graph/provider.py`. Shipped, and still shared. |
 | `_UNCACHED_OPS` in `gateway.py` | Shipped — and grown to `frozenset({"changed", "changes"})`, the ADR having specified only `changed`. |
 | `chain` + `risk_labels:true` | Shipped, then replaced: hops carry resolution **evidence**, not a risk badge. |
 | Tool description, tests, `docs/graph.md` | All done. `graph.md` is the current reference and wins wherever it disagrees with this record. |

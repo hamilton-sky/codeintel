@@ -7,9 +7,9 @@ from importlib import import_module
 from typing import NoReturn
 
 from codeintel import __version__
-from codeintel.query_ops import QUERY_OPS
+from codeintel.core.query_ops import QUERY_OPS
 
-# `--engine`'s canonical values live in `codeintel.gateway._KNOWN_ENGINES` (a set — order is not
+# `--engine`'s canonical values live in `codeintel.gateway.gateway._KNOWN_ENGINES` (a set — order is not
 # meaningful there). This fixes a presentation order for help text and `choices=`. Membership is
 # pinned to the gateway's set by test_cli_help.py, which is where the guard belongs: importing
 # gateway here just to assert at module scope would pull it into every CLI startup.
@@ -68,7 +68,7 @@ _COMMANDS = [name for _group, items in _COMMAND_GROUPS for name, _desc in items]
 # engine" after `_COMMAND_GROUPS` had moved on to naming the actual ops).
 _DESCRIPTIONS: dict[str, str] = {name: desc for _group, items in _COMMAND_GROUPS for name, desc in items}
 
-# Each command's body lives in codeintel.commands.<module> as `run(args) -> int`. The mapping is
+# Each command's body lives in codeintel.cli.<module> as `run(args) -> int`. The mapping is
 # spelled out rather than derived from the command name so the target of any command is greppable,
 # and the import happens at dispatch time so `codeintel serve` never pays for the semantic
 # engine's imports (nor serve-http for the graph's).
@@ -152,9 +152,9 @@ def _formatter_class(prog: str) -> argparse.RawDescriptionHelpFormatter:
 def render_help() -> str:
     """The `codeintel` / `codeintel help` screen: grouped, colored, with real examples.
 
-    Color comes from codeintel.term, so it auto-degrades on a pipe, under NO_COLOR, and on a dumb
+    Color comes from codeintel.core.term, so it auto-degrades on a pipe, under NO_COLOR, and on a dumb
     terminal — same as every other human-facing command."""
-    from codeintel.term import c
+    from codeintel.core.term import c
 
     width = max(len(name) for name in _COMMANDS)
     out = [
@@ -235,7 +235,7 @@ def _suggest(unknown: str) -> list[str]:
 def _unknown_command(name: str) -> int:
     """Report an unrecognized command with a way forward. argparse's own error dumps the full list
     of choices and stops there, which is a dead end for a one-character typo."""
-    from codeintel.term import c_err as e
+    from codeintel.core.term import c_err as e
 
     print(e.red(f"unknown command: {name!r}"), file=sys.stderr)
     matches = _suggest(name)
@@ -384,7 +384,7 @@ class _RootArgumentParser(argparse.ArgumentParser):
     subcommand's own short, specific usage line — only the wide top-level wall is replaced."""
 
     def error(self, message: str) -> NoReturn:
-        from codeintel.term import c_err as e
+        from codeintel.core.term import c_err as e
 
         print(e.red(f"codeintel: error: {message}"), file=sys.stderr)
         print("\n  " + e.dim("run `codeintel help` to see every command, grouped"), file=sys.stderr)
@@ -694,14 +694,14 @@ def main() -> None:
     # screen. Without this, the command a new user actually types was the ONE path that missed
     # render_help() and fell back to stock argparse.
     if not argv or argv[0] in ("help", "-h", "--help"):
-        from codeintel import term
+        from codeintel.core import term
         term.configure(no_color=False, ascii_mode=None)
         print(render_help())
         sys.exit(0)
 
     args = parser.parse_args()
 
-    from codeintel import term
+    from codeintel.core import term
     term.configure(
         no_color=getattr(args, "no_color", False),
         ascii_mode=(True if getattr(args, "ascii", False) else None),
@@ -712,7 +712,7 @@ def main() -> None:
         print(render_help())    # "help" (`codeintel --no-color help`) — both skip the early-return
                                  # above because argv[0] is the flag, not the command/"help" itself
         sys.exit(0)
-    status = int(import_module(f"codeintel.commands.{module}").run(args))
+    status = int(import_module(f"codeintel.cli.{module}").run(args))
     if args.command in _NATIVE_RUNTIME_COMMANDS:
         _native_safe_exit(status)
     sys.exit(status)

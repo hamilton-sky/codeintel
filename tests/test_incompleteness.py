@@ -26,8 +26,8 @@ import pathlib
 
 import pytest
 
-from codeintel.loc import line1, loc, span
-from codeintel.outcome import Missing, Ok, is_missing
+from codeintel.core.loc import line1, loc, span
+from codeintel.core.outcome import Missing, Ok, is_missing
 
 # Strings that assert "there is nothing here". None of them may appear in a body that was produced
 # without the backend actually answering.
@@ -90,7 +90,7 @@ class _StarvedLspSession:
 
 
 def _lsp_provider():
-    from codeintel.providers.lsp import LspProvider
+    from codeintel.engines.lsp.provider import LspProvider
 
     p = LspProvider.__new__(LspProvider)  # bypass backend detection
     p._last_backend_error = None
@@ -214,7 +214,7 @@ def test_home_paths_are_redacted_from_every_envelope_field():
     this is asserted over the whole envelope rather than over the fields anyone remembered."""
     import os
 
-    from codeintel.redact import contains_home_path, redact
+    from codeintel.core.redact import contains_home_path, redact
 
     home = os.path.expanduser("~")
     env = {
@@ -235,7 +235,7 @@ def test_redaction_survives_the_private_prefix():
     home-prefix comparison misses."""
     import os
 
-    from codeintel.redact import contains_home_path, redact_text
+    from codeintel.core.redact import contains_home_path, redact_text
 
     home = os.path.expanduser("~")
     assert not contains_home_path(redact_text(f"/private{home}/x/y"))
@@ -251,13 +251,9 @@ def _provider_modules():
     `none.py` already was one. A guard whose domain is typed by hand certifies the sites the last
     bug was found at, which is exactly the habit that let the same defect reappear three times.
     """
-    import importlib
+    from tests._engines import engine_modules
 
-    import codeintel.providers as pkg
-
-    d = pathlib.Path(pkg.__file__).parent
-    names = sorted(f.stem for f in d.glob("*.py") if f.stem != "__init__")
-    return [(n, importlib.import_module(f"codeintel.providers.{n}")) for n in names]
+    return engine_modules()
 
 
 def test_every_provider_module_is_discovered_from_disk():
@@ -354,7 +350,7 @@ def test_the_census_guard_can_actually_fail(tmp_path, monkeypatch):
 
 
 def test_confidence_helper_semantics():
-    from codeintel.provider import attach_confidence
+    from codeintel.core.provider import attach_confidence
 
     answered = {"ok": True, "op": "x", "target": "y", "result": "BODY",
                 "engine": "e", "cached": False}
@@ -368,7 +364,7 @@ def test_confidence_helper_semantics():
 
 
 def test_null_result_outcome_is_machine_readable():
-    from codeintel.provider import safe_null_result
+    from codeintel.core.provider import safe_null_result
 
     assert safe_null_result("x", "y", reason="not-in-graph")["outcome"] == "not_found"
     assert safe_null_result("x", "y", reason="not-found")["outcome"] == "not_found"
@@ -385,7 +381,7 @@ def test_a_fanned_out_answer_reports_the_engine_that_could_not_be_asked():
     merged body simply omits the second — which reads as "it had nothing to add", not "it was never
     asked". The merge used to hand-build a six-key envelope and discard both `confidence` and the
     constituents' `gaps`."""
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     gw = Gateway()
     merged = gw._merge(
@@ -407,8 +403,8 @@ def test_fan_out_preserves_source_unreadable_as_unavailable():
     """The merge must consume the public outcome, not maintain another reason allow-list.  If all
     engines could not answer, a newly introduced reason must never collapse back to ``not_found``.
     """
-    from codeintel.gateway import Gateway
-    from codeintel.provider import safe_null_result
+    from codeintel.core.provider import safe_null_result
+    from codeintel.gateway.gateway import Gateway
 
     merged = Gateway()._merge(
         {
@@ -429,7 +425,7 @@ def test_fan_out_preserves_source_unreadable_as_unavailable():
 
 
 def test_a_constituent_gap_survives_the_merge():
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     gw = Gateway()
     merged = gw._merge(
@@ -448,7 +444,7 @@ def test_no_mcp_handler_bypasses_redaction():
     """`redact` was placed on one seam and three sibling handlers reached callers around it —
     `code.doctor` was measured emitting nine absolute home paths on a single call. Enumerate the
     exported handlers rather than naming the one that was caught."""
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     handlers = [n for n in dir(server) if n.startswith("code_") and n.endswith("_handler")]
     assert len(handlers) >= 4, handlers
@@ -468,8 +464,8 @@ def test_hotspots_ranks_across_languages():
     class method is a `Method` node) and the candidate set was capped at 200 rows returned in NAME
     order, so the client-side sort ranked an alphabetical slice. This pins both.
     """
-    from codeintel.graph_backend import BackendClient
-    from codeintel.providers.graph import GraphProvider
+    from codeintel.engines.graph.backend import BackendClient
+    from codeintel.engines.graph.provider import GraphProvider
 
     rows = [
         {"name": "handler", "qualified_name": "svc.handler", "file_path": "src/svc.py",
@@ -507,7 +503,7 @@ def test_hotspots_ranks_across_languages():
 def test_a_single_language_ranking_says_so():
     """When a ranking really is one file type, that must be stated rather than left to look like a
     considered result — the failure mode that hid the bug above for two whole repositories."""
-    from codeintel.graph_render import _language_coverage_note
+    from codeintel.engines.graph.render import _language_coverage_note
 
     only_tsx = [{"file_path": f"src/C{i}.tsx"} for i in range(10)]
     assert "tsx" in _language_coverage_note(only_tsx)
@@ -529,7 +525,7 @@ def test_withdrawn_ops_are_still_measured_by_the_corpus_oracle():
     # the flag, and must not read as the flag still being set.
     body = "\n".join(line for line in wf.read_text().splitlines()
                      if not line.lstrip().startswith("#"))
-    from codeintel.providers.graph import _WITHDRAWN_OPS, GraphProvider
+    from codeintel.engines.graph.provider import _WITHDRAWN_OPS, GraphProvider
 
     # Only an op that still HAS an implementation can be deadlocked this way. `deadcode` was, and
     # the deadlock is how it stayed unmeasured for two releases; it has since been measured and
@@ -553,7 +549,7 @@ def test_withdrawn_ops_are_still_measured_by_the_corpus_oracle():
 def test_prose_is_classified_without_swallowing_code():
     """Conservative by design: an unknown extension is CODE. The bug being fixed is prose crowding
     code out, and an over-eager rule would simply invert it."""
-    from codeintel.source_kind import is_prose
+    from codeintel.core.source_kind import is_prose
 
     for p in ("docs/x.md", "README.md", "tests/snapshots/t.claude.md", "a/.archive/s.json"):
         assert is_prose(p), p
@@ -564,7 +560,7 @@ def test_prose_is_classified_without_swallowing_code():
 def test_code_hits_outrank_prose_and_the_mix_is_reported():
     """Retrieval, not just rendering. Partitioning the final ten was not enough — on a doc-heavy
     repository all ten candidates were prose, so re-ordering had nothing to promote."""
-    from codeintel.source_kind import partition_by_corpus
+    from codeintel.core.source_kind import partition_by_corpus
 
     hits = [{"path": f"docs/d{i}.md"} for i in range(8)] + [{"path": "src/impl.py"}]
     code, prose = partition_by_corpus(hits)
@@ -575,7 +571,7 @@ def test_code_hits_outrank_prose_and_the_mix_is_reported():
 def test_semantic_corpus_count_describes_only_the_displayed_rows():
     """A widened candidate pool may contain dozens of docs, but a ten-row answer must never
     report an impossible diagnostic such as "37 of 10 hits are documentation"."""
-    from codeintel.providers.semantic import _displayed_prose_count
+    from codeintel.engines.semantic.provider import _displayed_prose_count
 
     displayed = ([{"path": f"src/m{i}.py"} for i in range(7)]
                  + [{"path": f"docs/d{i}.md"} for i in range(3)])
@@ -586,7 +582,7 @@ def test_semantic_corpus_count_describes_only_the_displayed_rows():
 def test_an_all_prose_answer_says_no_code_matched():
     """A caller who asked 'where is X done' and got only prose must be told no source matched —
     otherwise an empty code corpus reads as 'the implementation does not exist'."""
-    src = pathlib.Path(__file__).resolve().parent.parent / "src" / "codeintel" / "providers" / "semantic.py"
+    src = pathlib.Path(__file__).resolve().parent.parent / "src" / "codeintel" / "engines" / "semantic" / "provider.py"
     body = src.read_text()
     assert "no-code-matches" in body
     assert "NOT evidence" in body
@@ -607,7 +603,7 @@ def test_the_home_path_is_redacted_in_its_flattened_form_too(monkeypatch):
     this assertion correctly failed. Two tests in one suite disagreeing, with the machine casting
     the deciding vote, is not coverage. `/root` is the routine container and CI case, so the
     disagreement showed up exactly where the project most needs its suite to be trustworthy."""
-    import codeintel.redact as r
+    import codeintel.core.redact as r
 
     monkeypatch.setattr(r, "_home", lambda: "/Users/alice")
     leaky = "private-tmp-Users-alice-scratch-cobra.Execute"
@@ -620,7 +616,7 @@ def test_a_flat_namespace_qualified_name_still_gets_its_project_prefix_stripped(
     stripper required a dotted remainder, so on those languages it stripped nothing at all. Two
     languages could not surface this; both Python and TypeScript happen to produce dotted
     remainders."""
-    from codeintel.providers.graph import _strip_project_prefix
+    from codeintel.engines.graph.provider import _strip_project_prefix
 
     assert _strip_project_prefix("my-repo.Execute") == "Execute"
     assert _strip_project_prefix("Users-alice-work-cobra.ExecuteC") == "ExecuteC"
@@ -643,7 +639,7 @@ def test_the_flattened_home_is_detected_on_every_platform(home, expected_flat, m
     The macOS/Linux form of this same defect was found by evaluating a third LANGUAGE; this one is
     the same defect one PLATFORM over. Parametrised rather than fixed to the host, so the platform
     this happens to run on stops deciding what gets verified."""
-    import codeintel.redact as r
+    import codeintel.core.redact as r
 
     monkeypatch.setattr(r, "_home", lambda: home)
     assert r._flattened_home() == expected_flat

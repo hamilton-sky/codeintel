@@ -40,9 +40,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from codeintel.indexer import Indexer
-from codeintel.searcher import Searcher
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.searcher import Searcher
 
 
 class _CountingEmbedding:
@@ -96,7 +96,7 @@ def _search_and_count(db, tmp_path, **kw) -> tuple[list[dict], _Counters]:
     supported seam and it sees every statement the connection runs, so an N+1 introduced anywhere
     beneath `search` is counted whether or not it goes through the code path a mock would cover.
     """
-    import codeintel.searcher as searcher_mod
+    import codeintel.engines.semantic.searcher as searcher_mod
 
     counters = _Counters()
     real_open = searcher_mod.open_contained
@@ -203,7 +203,7 @@ def test_the_budget_can_actually_fail(tmp_path):
 
     Prove the instrumentation bites by making the search path read each candidate a second time,
     exactly as a snippet re-read would, and showing the per-candidate assertion catches it."""
-    import codeintel.searcher as searcher_mod
+    import codeintel.engines.semantic.searcher as searcher_mod
 
     with patch("fastembed.TextEmbedding", _CountingEmbedding):
         db = _indexed(tmp_path, 40)

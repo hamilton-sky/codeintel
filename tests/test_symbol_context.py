@@ -15,10 +15,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from codeintel.indexer import Indexer
-from codeintel.providers.semantic import _preview
-from codeintel.searcher import Searcher
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.provider import _preview
+from codeintel.engines.semantic.searcher import Searcher
 
 
 class _Flat:

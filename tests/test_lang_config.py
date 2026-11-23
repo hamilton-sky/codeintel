@@ -1,4 +1,4 @@
-"""Tests for `codeintel.lang_config` — repairing serena's `language_servers:` list.
+"""Tests for `codeintel.engines.lsp.lang_config` — repairing serena's `language_servers:` list.
 
 Every case builds a throwaway `.serena/project.yml` under `tmp_path`, so nothing here touches a real
 repository's config. That matters more than usual: this is the only module in the package that
@@ -22,7 +22,7 @@ import os
 
 import pytest
 
-from codeintel import lang_config
+from codeintel.engines.lsp import lang_config
 
 # A miniature of what serena's init actually writes: a comment above the key, one language, a blank
 # line, then more comments and further keys. The shape is what the surgical edit has to survive.
@@ -92,7 +92,7 @@ def test_a_language_below_the_file_floor_is_recorded_but_not_proposed(tmp_path):
 def test_the_floor_is_the_same_one_the_warning_uses(tmp_path):
     """Not an independent constant — it comes from `LspProvider._UNSERVED_FILE_FLOOR`, so the repair
     and the warning can never disagree about what counts as a language the repo is written in."""
-    from codeintel.providers.lsp import LspProvider
+    from codeintel.engines.lsp.provider import LspProvider
 
     floor = int(LspProvider._UNSERVED_FILE_FLOOR)
     root = _project(tmp_path, files={".py": 10, ".ts": floor})

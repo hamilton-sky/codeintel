@@ -9,10 +9,10 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from codeintel.indexer import Indexer
-from codeintel.providers import semantic as semantic_mod
-from codeintel.providers.semantic import SemanticProvider
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic import provider as semantic_mod
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.provider import SemanticProvider
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,7 +95,7 @@ def test_changed_chunk_reembeds_at_stable_chunk_id(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_available_when_deps_present(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     assert SemanticProvider().available is True
 
 
@@ -105,8 +105,8 @@ def test_available_when_deps_present(monkeypatch):
 
 def test_search_returns_matches(tmp_path, monkeypatch):
     (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         result = SemanticProvider().build_result(
@@ -142,8 +142,8 @@ def test_unchanged_repo_skips_embed(tmp_path):
 def test_empty_index_safe_null(tmp_path, monkeypatch):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         result = SemanticProvider().build_result(
@@ -161,11 +161,11 @@ def test_empty_index_safe_null(tmp_path, monkeypatch):
 
 def test_below_floor_returns_none(tmp_path, monkeypatch):
     (tmp_path / "code.py").write_text("x = 1\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding), \
-         patch("codeintel.searcher.Searcher.search", return_value=[]):
+         patch("codeintel.engines.semantic.searcher.Searcher.search", return_value=[]):
         result = SemanticProvider().build_result(
             "search", "query", [], 0, str(tmp_path)
         )
@@ -180,7 +180,7 @@ def test_below_floor_returns_none(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_unsupported_op_safe_null(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     result = SemanticProvider().build_result("callers", "foo", [], 0, "/")
     assert result is not None
     assert result["result"] is None
@@ -190,7 +190,7 @@ def test_unsupported_op_safe_null(monkeypatch):
 def test_context_op_is_accepted(monkeypatch):
     # `context` (fan-out op) must be a valid semantic op — reaching the project-root check,
     # NOT rejected as op-not-supported (which would drop semantic from every context fan-out).
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     result = SemanticProvider().build_result("context", "foo", [], 0, "")
     assert result.get("reason") == "no-project-root"
 
@@ -200,10 +200,10 @@ def test_context_op_is_accepted(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_provider_never_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
 
-    with patch("codeintel.semantic_db.SemanticDb.init", side_effect=RuntimeError("injected")):
+    with patch("codeintel.engines.semantic.db.SemanticDb.init", side_effect=RuntimeError("injected")):
         result = SemanticProvider().build_result(
             "search", "query", [], 0, str(tmp_path)
         )
@@ -222,7 +222,7 @@ def test_a_result_preview_shows_a_line_worth_reading(snippet, expected):
     """The preview used line one unconditionally, so a hit whose chunk opened with a blank line or
     a `---` fence rendered as `path:line | ---` — a result the reader cannot judge without opening
     the file, which is the one thing this output exists to avoid."""
-    from codeintel.providers.semantic import _first_meaningful_line
+    from codeintel.engines.semantic.provider import _first_meaningful_line
 
     assert _first_meaningful_line(snippet) == expected
 
@@ -258,8 +258,8 @@ def _clear_background_index_state():
 
 def test_cold_repo_non_blocking_returns_fast_then_serves_the_retry(tmp_path, monkeypatch):
     (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         provider = SemanticProvider(blocking_index=False)
@@ -290,7 +290,7 @@ def test_start_background_index_dedupes_concurrent_calls_for_the_same_root(tmp_p
         proceed.wait(timeout=5)
         return 1
 
-    monkeypatch.setattr("codeintel.indexer.Indexer.index", _fake_index)
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer.index", _fake_index)
     root = str(tmp_path)
     db_path = str(tmp_path / "semantic.db")
 
@@ -315,7 +315,7 @@ def test_background_index_crash_does_not_wedge_the_project_root(tmp_path, monkey
     this guards against (a leaked `_BG_INDEX_STARTED` marker would be), so the property is now
     asserted directly instead: refused inside the window, startable again outside it.
     """
-    monkeypatch.setattr("codeintel.indexer.Indexer.index",
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer.index",
                          lambda self, project_root: (_ for _ in ()).throw(RuntimeError("boom")))
     root = str(tmp_path)
     db_path = str(tmp_path / "semantic.db")
@@ -335,7 +335,7 @@ def test_background_index_crash_does_not_wedge_the_project_root(tmp_path, monkey
             failed_at - semantic_mod._BG_INDEX_COOLDOWN_S - 1, cause,
         )
 
-    monkeypatch.setattr("codeintel.indexer.Indexer.index", lambda self, project_root: 0)
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer.index", lambda self, project_root: 0)
     assert semantic_mod._start_background_index(root, db_path, _DEFAULT_INDEXER_KWARGS) is True
     _wait_until_not_indexing(root)
 
@@ -344,8 +344,8 @@ def test_blocking_provider_still_indexes_inline_on_a_cold_repo(tmp_path, monkeyp
     """Default construction (every existing caller, including the CLI) must be unaffected: a cold
     repo is still indexed synchronously, in the same call, with no background thread involved."""
     (tmp_path / "sample.py").write_text("def greet():\n    return 'hello'\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         result = SemanticProvider(blocking_index=True).build_result(
@@ -358,8 +358,8 @@ def test_blocking_provider_still_indexes_inline_on_a_cold_repo(tmp_path, monkeyp
 
 
 def test_probe_reports_indexing_in_progress(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
-    monkeypatch.setattr("codeintel.semantic_db.default_db_path",
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path",
                          lambda *a, **k: str(tmp_path / "missing.db"))
     root = str(tmp_path)
 
@@ -392,13 +392,13 @@ class _FailingIndexer:
 
 
 def test_a_failed_inline_index_is_reported_as_index_failed_with_its_cause(tmp_path, monkeypatch):
-    import codeintel.indexer as idx
-    import codeintel.providers.semantic as sem
+    import codeintel.engines.semantic.indexer as idx
+    import codeintel.engines.semantic.provider as sem
 
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "widget.py").write_text("def make_widget(name):\n    return name\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(sem, "_DEPS_OK", True)
     monkeypatch.setattr(idx, "Indexer", _FailingIndexer)
 
@@ -417,11 +417,11 @@ def test_a_failed_inline_index_is_reported_as_index_failed_with_its_cause(tmp_pa
 def test_an_index_pass_that_finds_nothing_still_reports_no_index(tmp_path, monkeypatch):
     """The other half. `no-index` keeps its documented meaning — the pass completed and there was
     nothing to embed — which is an answer about the repository, not a failure to ask."""
-    import codeintel.providers.semantic as sem
+    import codeintel.engines.semantic.provider as sem
 
     empty = tmp_path / "empty"
     empty.mkdir()
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(sem, "_DEPS_OK", True)
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
         result = SemanticProvider().build_result("search", "x", [], 0, str(empty))
@@ -438,7 +438,7 @@ def test_a_fanout_where_the_index_failed_is_not_evidence_the_symbol_is_absent() 
     `index-failed` was added to it, a run where the index pass simply failed summarised as
     `no-result` with no caveat — which an agent reads as "that symbol does not exist".
     """
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     def stub(engine, reason):
         class _S:
@@ -462,7 +462,7 @@ def test_a_fanout_where_the_repo_is_merely_unindexed_keeps_its_ordinary_summary(
     """The negative control, and the reason `no-index` was deliberately left OUT of that set: a
     completed pass that found nothing to embed IS an answer about the repository, so it must not
     borrow the "could not ask" caveat."""
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     def stub(engine, reason):
         class _S:

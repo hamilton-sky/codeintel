@@ -66,11 +66,11 @@ self-contained to the indexer.
   `config.py` (`_ENUMS`). `"lines"` forces the old behavior (an escape hatch).
 
 ### Files
-- `src/codeintel/indexer.py` — new `_chunk_python_ast(lines, source)` returning `(start_line,
+- `src/codeintel/engines/semantic/indexer.py` — new `_chunk_python_ast(lines, source)` returning `(start_line,
   end_line)` spans; `_collect_new_chunks` chooses AST vs window per file + calls the new
   per-file orphan reconciliation. Keep `_embed_and_write` unchanged.
-- `src/codeintel/config.py` — `chunk_strategy` default + enum validation.
-- `src/codeintel/semantic_db.py` — optional small helper for per-file chunk-id deletion (or inline
+- `src/codeintel/core/config.py` — `chunk_strategy` default + enum validation.
+- `src/codeintel/engines/semantic/db.py` — optional small helper for per-file chunk-id deletion (or inline
   in the indexer).
 - `docs/semantic.md` — document the strategy + the new config key.
 
@@ -117,7 +117,7 @@ the literal match). A cheap fusion rerank fixes ordering with no model dependenc
   validated in `config.py`. `"off"` = today's pure-cosine path.
 
 ### Files
-- `src/codeintel/searcher.py` — candidate retrieval + `_lexical_score` + `_fuse`; `search` returns
+- `src/codeintel/engines/semantic/searcher.py` — candidate retrieval + `_lexical_score` + `_fuse`; `search` returns
   the reranked top-k. `config.py` — two new keys.
 
 ### Acceptance / tests (`tests/test_rerank.py`)

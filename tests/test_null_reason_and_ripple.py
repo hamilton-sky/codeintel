@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.gateway import Gateway
-from codeintel.providers.graph import GraphProvider
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.gateway.gateway import Gateway
 
 ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
@@ -24,7 +24,7 @@ LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
 
 def _provider(monkeypatch, *, edge_rows, node_rows):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
         LIST_PROJECTS if method == "list_projects" else None))
@@ -61,7 +61,7 @@ def test_a_genuinely_absent_symbol_still_says_so_and_still_offers_the_reindex(mo
 
 def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     detect = {"changed_files": ["src/domain/budget.ts"],
               "impacted_symbols": [{"name": "evaluate", "qualified_name": "domain.budget.evaluate",
@@ -93,7 +93,7 @@ def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(mon
 def test_changed_says_zero_ripple_out_loud_rather_than_omitting_the_section(monkeypatch):
     """An absent section and an empty one read the same to a model. Only one of them is a claim."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     detect = {"changed_files": ["src/leaf.py"], "impacted_symbols": []}
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
@@ -440,7 +440,7 @@ def test_a_retryable_first_boot_failure_is_not_cached():
 
 def _kinded(monkeypatch, rows, target="target"):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
         LIST_PROJECTS if method == "list_projects" else None))
@@ -460,7 +460,7 @@ def test_the_query_asks_for_the_relationship_that_records_a_callback(monkeypatch
     at two real sites came back as having no callers — the reading that deletes live code."""
     seen: list[str] = []
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda m, pay, t: LIST_PROJECTS if m == "list_projects" else None)
     monkeypatch.setattr(p, "_query_rows",
@@ -502,7 +502,7 @@ def test_no_edges_names_the_relationships_that_do_point_at_the_symbol(monkeypatc
     """"No callers" plus silence reads as "unused". Naming what DOES reference it is the difference
     between an answer and a dead end."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda m, pay, t: LIST_PROJECTS if m == "list_projects" else None)
 
@@ -528,7 +528,7 @@ def test_a_zero_count_is_never_rendered_as_a_relationship(monkeypatch):
     written `count(*)` missed and every kind printed as "0 x KIND" — a fact invented by a parse
     miss. The query is aliased now; this pins that a zero can never reach the text."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     monkeypatch.setattr(p, "_run", lambda m, pay, t: LIST_PROJECTS if m == "list_projects" else None)
 
@@ -550,7 +550,7 @@ def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkey
     edge recording that is CALL_REFERENCE — which the ripple query used to exclude. This op answers
     a recall question, so the asymmetry runs the other way from `callers`: include it, and label it."""
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     detect = {"changed_files": ["src/proxy.py"], "impacted_symbols": []}
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
@@ -573,7 +573,7 @@ def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkey
 
 def test_changed_ripple_asks_for_the_registration_edge(monkeypatch):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     seen: list[str] = []
     detect = {"changed_files": ["src/proxy.py"], "impacted_symbols": []}
@@ -615,7 +615,7 @@ def test_the_cross_check_restamps_the_envelope_it_adds_a_gap_to(lsp_env):
 
 def _ripple_body(monkeypatch, rows):
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     detect = {"changed_files": ["src/domain/budget.ts"], "impacted_symbols": []}
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (

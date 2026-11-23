@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.source_kind import (
+from codeintel.core.source_kind import (
     load_gitattributes_globs,
     looks_generated_path,
     looks_generated_text,
@@ -169,8 +169,8 @@ def test_a_missing_gitattributes_makes_no_claim(tmp_path):
 # --------------------------------------------------------------------------- end to end
 
 def _walked(tmp_path):
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     db = SemanticDb(str(tmp_path / "db.sqlite"))
     db.init()

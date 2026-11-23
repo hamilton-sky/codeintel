@@ -6,6 +6,23 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **The source tree is organized by layer.** The 58 flat modules under `src/codeintel/` now live in
+  six packages, top to bottom: `cli/`, `transports/`, tools (`setup/`, `c4/`, `mapping/`),
+  `gateway/`, `engines/` (`graph/`, `lsp/`, `semantic/`, `none.py`) and `core/`. An import may only
+  point down, and engines do not import each other. Nothing changes for users: the `codeintel`
+  command, `python -m codeintel` and the MCP tools are the same. Code that imported codeintel's
+  internal modules directly needs the new paths (e.g. `codeintel.providers.graph` is now
+  `codeintel.engines.graph.provider`); see `docs/architecture.md` for the map.
+- Gateway construction moved out of the MCP server into `gateway/factory.py`, so the CLI no longer
+  imports a transport to answer a query. The graph-cache directory and the filename-extension list
+  moved to `core/` so the graph engine no longer reaches into `reset` and the LSP engine no longer
+  reaches into the graph engine.
+
+### Added
+- `tests/test_architecture.py` enforces the layer rule from the AST on every test leg, and
+  `.codeintel.toml` declares the same layers so CI runs `codeintel c4 . --check` on this repository.
+
 ## [0.29.3] — 2026-10-28
 
 _0.29.1 and 0.29.2 were never published: each tag was pushed on a commit whose `__version__` did

@@ -32,14 +32,14 @@ from typing import Any
 
 import pytest
 
-from codeintel.graph_dispatch import (
+from codeintel.core.outcome import Missing
+from codeintel.engines.graph.dispatch import (
     _MAX_BASES,
     _MAX_DEPTH,
     _base_names,
     _leaf,
 )
-from codeintel.outcome import Missing
-from codeintel.providers.graph import GraphProvider
+from codeintel.engines.graph.provider import GraphProvider
 from tests.test_edge_confidence import _checked_counts
 from tests.test_summary_integrity import _headline_disagreements
 
@@ -173,7 +173,7 @@ class _Graph:
 
 def _provider(monkeypatch, graph: _Graph, root: str = ROOT) -> GraphProvider:
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     graph.provider = p
     listing = {"projects": [{"name": PROJECT, "root_path": root}]}
@@ -544,7 +544,7 @@ def test_a_fault_in_the_dispatch_code_cannot_take_the_direct_answer_down(monkeyp
     def broken(self, *a, **k):
         raise RuntimeError("a bug in the dispatch lookup")
 
-    monkeypatch.setattr("codeintel.graph_dispatch.DispatchCallers._dispatch_bases", broken)
+    monkeypatch.setattr("codeintel.engines.graph.dispatch.DispatchCallers._dispatch_bases", broken)
     env = _ask(monkeypatch, graph, "callers", "GraphProvider.build_result")
 
     assert env["ok"] is True and env.get("reason") is None, env
@@ -560,7 +560,7 @@ def test_a_fault_in_the_self_call_rule_leaves_the_rows_as_the_backend_labelled_t
     def broken(self, *a, **k):
         raise RuntimeError("a bug in the hierarchy walk")
 
-    monkeypatch.setattr("codeintel.graph_dispatch.DispatchCallers._grow_hierarchy", broken)
+    monkeypatch.setattr("codeintel.engines.graph.dispatch.DispatchCallers._grow_hierarchy", broken)
     env = _ask(monkeypatch, graph, "callers", "Mixin.render")
 
     assert env["result"] is not None and env["rows"][0]["verified"] is False, env
@@ -568,7 +568,7 @@ def test_a_fault_in_the_self_call_rule_leaves_the_rows_as_the_backend_labelled_t
 
 
 def test_a_lookup_cut_at_its_row_limit_is_a_gap_because_the_target_may_be_past_it(monkeypatch):
-    from codeintel.graph_dispatch import _LOOKUP_ROWS
+    from codeintel.engines.graph.dispatch import _LOOKUP_ROWS
 
     graph, _, _ = _protocol_graph()
     for i in range(_LOOKUP_ROWS):
@@ -583,7 +583,7 @@ def test_a_lookup_cut_at_its_row_limit_is_a_gap_because_the_target_may_be_past_i
 def test_a_hierarchy_lookup_at_its_row_limit_names_the_limit_it_hit(monkeypatch):
     """`_LOOKUP_ROWS` is stated in the sentence because it is the number that decides whether the
     hierarchy can be trusted; a message that named another number would be a summary of nothing."""
-    from codeintel.graph_dispatch import _LOOKUP_ROWS
+    from codeintel.engines.graph.dispatch import _LOOKUP_ROWS
 
     graph, _, child = _nominal_graph(inherits=True)
     real = graph.__class__._answer
@@ -603,7 +603,7 @@ def test_a_hierarchy_lookup_at_its_row_limit_names_the_limit_it_hit(monkeypatch)
 def test_a_base_name_lookup_at_its_row_limit_names_the_limit_it_hit(monkeypatch):
     """The name lookup runs only for a base the INHERITS edges did not account for, so the graph here
     has none, and it is flooded: a name that may have resolved to the wrong class is not resolved."""
-    from codeintel.graph_dispatch import _LOOKUP_ROWS
+    from codeintel.engines.graph.dispatch import _LOOKUP_ROWS
 
     graph, _, _ = _nominal_graph(inherits=False)
     real = graph.__class__._answer
@@ -622,7 +622,7 @@ def test_a_base_name_lookup_at_its_row_limit_names_the_limit_it_hit(monkeypatch)
 
 
 def test_a_method_listing_at_its_row_limit_names_the_limit_it_hit(monkeypatch):
-    from codeintel.graph_dispatch import _MEMBER_ROWS
+    from codeintel.engines.graph.dispatch import _MEMBER_ROWS
 
     graph, _, _ = _protocol_graph()
     real = graph.__class__._answer
@@ -1527,7 +1527,7 @@ def test_all_the_extra_lookups_of_one_request_share_one_allowance_of_time(monkey
                strategy="field_type_hint", conf="0.85")
     g.call("tests.t.test_m", "tests/t.py", f"{own}.m", "app/impl.py")
     now = {"t": 1000.0}
-    monkeypatch.setattr("codeintel.graph_dispatch._clock", lambda: now["t"], raising=False)
+    monkeypatch.setattr("codeintel.engines.graph.dispatch._clock", lambda: now["t"], raising=False)
     g.on_query = lambda cypher, timeout_ms: now.__setitem__("t", now["t"] + 25.0)   # of a 30 s budget
     env = _ask(monkeypatch, g, "callers", "Impl.m")
 
@@ -1568,7 +1568,7 @@ def test_a_cut_direct_lookup_does_not_claim_that_nothing_calls_the_symbol(monkey
     """The direct query was cut short and could not select the target, so "no caller is recorded
     against this symbol itself" is not a thing the answer knows. It says what was seen, carries the
     cap gap, and the total is unknown. CONTROL: a short probe keeps the sentence it always had."""
-    from codeintel.graph_edges import _EDGE_ROW_LIMIT
+    from codeintel.engines.graph.edges import _EDGE_ROW_LIMIT
 
     def shaped(namesake_callers: int) -> _Graph:
         g = _Graph()
@@ -1599,7 +1599,7 @@ def test_a_base_fetch_cut_short_whose_rows_were_all_filtered_still_makes_the_tot
     """The base's callers came back cut at the row limit, and every row that did was dropped as a
     cross-language collision, so nothing from that section is shown. The gap says the list was
     truncated; the envelope must say so too, instead of an exact total backed only by the gap."""
-    from codeintel.graph_edges import _EDGE_ROW_LIMIT
+    from codeintel.engines.graph.edges import _EDGE_ROW_LIMIT
 
     g = _Graph()
     base = g.add_class("Base", file="app/base.py", methods=["run"])
@@ -1636,7 +1636,7 @@ def test_a_class_a_shared_walk_stopped_at_is_not_reported_cut_once_a_later_walk_
         g.classes[qns[i]]["bases"] = [f"K{i + 1}"]
         g.classes[qns[i]]["inherits"] = [qns[i + 1]]
     p = _provider(monkeypatch, g)
-    from codeintel.graph_dispatch import _ClassNode
+    from codeintel.engines.graph.dispatch import _ClassNode
 
     def node(qn: str) -> _ClassNode:
         c = g.classes[qn]
@@ -1671,8 +1671,8 @@ def test_two_different_methods_matching_the_target_are_a_named_shortfall_and_not
         monkeypatch):
     """Two classes called `Child` define `run` and nothing narrows the target to one. Which one's
     bases to look up is not settled, which is a gap — not a lookup that quietly did not happen."""
-    from codeintel.graph_dispatch import _DirectTarget
-    from codeintel.graph_targets import _parse_symbol_target
+    from codeintel.engines.graph.dispatch import _DirectTarget
+    from codeintel.engines.graph.targets import _parse_symbol_target
 
     g = _Graph()
     g.add_class("Child", file="app/child.py", methods=["run"])

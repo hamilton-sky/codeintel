@@ -8,12 +8,12 @@ from __future__ import annotations
 import json
 import pathlib
 
-from codeintel import grapher
-from codeintel.providers.graph import GraphProvider, ProjectResolution
+from codeintel.engines.graph.provider import GraphProvider, ProjectResolution
+from codeintel.mapping import grapher
 
 
 def _wire(monkeypatch, *, available=True, search=None, rows=None, project="proj"):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which",
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which",
                         lambda x: "/fake/cm" if available else None)
     resolution = ProjectResolution(name=project, matched_root=r"/repo", scope="exact") if project else None
     monkeypatch.setattr(GraphProvider, "_resolve_project", lambda self, r: resolution if available else None)
@@ -50,7 +50,7 @@ def test_build_payload_engine_unavailable_is_safe(monkeypatch):
 
 def test_build_payload_not_indexed_is_safe(monkeypatch):
     _wire(monkeypatch, project=None)  # available but unresolved
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: "/fake/cm")
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/cm")
     monkeypatch.setattr(GraphProvider, "_resolve_project", lambda self, r: None)
     p = grapher.build_graph_payload("/repo")
     assert p["nodes"] == [] and p["reason"] == "project-not-indexed"
@@ -134,7 +134,7 @@ def test_build_payload_tolerates_none_metrics(monkeypatch):
 def test_the_graph_payload_never_carries_the_backends_project_id(monkeypatch, tmp_path):
     """`codeintel graph` was a FIFTH renderer leaking the home path: 646 node ids of the form
     `Users-<user>-Documents-...` on one repo, in a JSON payload people open and share."""
-    from codeintel import grapher
+    from codeintel.mapping import grapher
 
     rows = [{"a.qualified_name": "Users-alice-Documents-project-app.src.a.f", "a.name": "f",
              "a.file_path": "src/a.py",
@@ -154,7 +154,7 @@ def test_the_graph_payload_never_carries_the_backends_project_id(monkeypatch, tm
         def _query_rows(self, *a, **k):
             return rows
 
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", _P)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", _P)
     payload = grapher.build_graph_payload(str(tmp_path), limit=10)
 
     blob = json.dumps(payload)

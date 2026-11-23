@@ -9,7 +9,7 @@ import urllib.request
 
 import pytest
 
-from codeintel.http_server import _MAX_CONCURRENT_REQUESTS, CodeIntelHTTPServer, _Handler
+from codeintel.transports.http import _MAX_CONCURRENT_REQUESTS, CodeIntelHTTPServer, _Handler
 
 # A request that reaches a live graph/LSP backend legitimately takes seconds: the backend is a
 # native binary that re-initialises per invocation (~6s measured). The old 5s client timeout was

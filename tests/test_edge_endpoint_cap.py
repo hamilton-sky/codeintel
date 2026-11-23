@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import re
 
-from codeintel.graph_edges import _EDGE_FETCH_CEILING, _EDGE_ROW_LIMIT
-from codeintel.providers.graph import GraphProvider
+from codeintel.engines.graph.edges import _EDGE_FETCH_CEILING, _EDGE_ROW_LIMIT
+from codeintel.engines.graph.provider import GraphProvider
 
 ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
@@ -68,7 +68,7 @@ class _EdgeBackend:
 
 def _ask(monkeypatch, edges: list[dict], op: str, target: str) -> tuple[dict, _EdgeBackend]:
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     backend = _EdgeBackend(edges)
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
@@ -221,7 +221,7 @@ def test_a_follow_up_that_is_not_an_answer_leaves_the_conservative_cap_note(monk
     rows — a reply this code was not written to read — and nothing is guessed from it."""
     edges = [_edge(f"caller{i}") for i in range(_EDGE_ROW_LIMIT + 10)]
     monkeypatch.setattr(
-        "codeintel.providers.graph.shutil.which", lambda x: "/fake/codebase-memory-mcp")
+        "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
     seen: list[str] = []
     monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (

@@ -13,8 +13,8 @@ than the rest and are worth reading first:
 """
 from __future__ import annotations
 
-from codeintel.c4_check import PATHS_REPORT_CAP, check_layers, render_report
-from codeintel.c4_layers import assign_declared_layers, glob_match, parse_layers_config
+from codeintel.c4.check import PATHS_REPORT_CAP, check_layers, render_report
+from codeintel.c4.layers import assign_declared_layers, glob_match, parse_layers_config
 
 
 def _payload(elements, relations, *, depth=2, project="demo"):

@@ -1,7 +1,7 @@
 """term.py — the shared CLI output system: glyph width-safety, color gating, ASCII fallback."""
 from __future__ import annotations
 
-from codeintel.term import GLYPHS, Console, is_display_width_safe
+from codeintel.core.term import GLYPHS, Console, is_display_width_safe
 
 
 class _FakeTTY:

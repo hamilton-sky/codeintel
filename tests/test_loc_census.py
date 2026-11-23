@@ -8,17 +8,16 @@ number it actually emits against that map.
 from __future__ import annotations
 
 import json
-import pathlib
 from unittest.mock import patch
 
 import numpy as np
 
-import codeintel.providers
-from codeintel.graph_backend import BackendClient
-from codeintel.loc import LINE_BASES
-from codeintel.outcome import Ok
-from codeintel.providers.graph import GraphProvider
-from codeintel.providers.semantic import SemanticProvider
+from codeintel.core.loc import LINE_BASES
+from codeintel.core.outcome import Ok
+from codeintel.engines.graph.backend import BackendClient
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.engines.semantic.provider import SemanticProvider
+from tests._engines import engine_names
 
 # Providers that render no path:line at all, recorded as DATA rather than silently excluded — the
 # census must still see them and say WHY they are not in LINE_BASES.
@@ -39,8 +38,7 @@ def _backend_value(engine: str) -> int:
 # --------------------------------------------------------------------------------------------- #
 
 def test_every_provider_that_renders_a_position_is_censused():
-    stems = {p.stem for p in pathlib.Path(codeintel.providers.__file__).parent.glob("*.py")}
-    stems -= {"__init__"}
+    stems = engine_names()
     censused = set(LINE_BASES) | set(_RENDERS_NO_POSITION)
     missing = stems - censused
     assert not missing, (
@@ -66,7 +64,7 @@ class _FakeTextEmbedding:
 
 
 def _lsp_provider():
-    from codeintel.providers.lsp import LspProvider
+    from codeintel.engines.lsp.provider import LspProvider
 
     p = LspProvider.__new__(LspProvider)  # bypass backend detection
     p._last_backend_error = None
@@ -80,14 +78,14 @@ def test_each_engine_renders_a_known_position_as_the_same_one_based_line(tmp_pat
     widget = tmp_path / "widget.py"
     widget.write_text("def make_widget(name):\n    return {'name': name}\n")
 
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     match = {
         "path": str(widget), "line": bv_semantic,
         "snippet": "def make_widget(name):", "score": 0.9,
     }
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding), \
-         patch("codeintel.searcher.Searcher.search", return_value=[match]):
+         patch("codeintel.engines.semantic.searcher.Searcher.search", return_value=[match]):
         semantic_result = SemanticProvider().build_result(
             "search", "widget factory", [], 30000, str(tmp_path)
         )
@@ -158,11 +156,11 @@ def test_no_engine_ever_emits_a_position_that_does_not_exist(tmp_path, monkeypat
     # ---- semantic: degenerate 0-based value 0 ----
     widget = tmp_path / "widget.py"
     widget.write_text("def make_widget(name):\n    return {'name': name}\n")
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
     match = {"path": str(widget), "line": 0, "snippet": "def make_widget(name):", "score": 0.9}
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding), \
-         patch("codeintel.searcher.Searcher.search", return_value=[match]):
+         patch("codeintel.engines.semantic.searcher.Searcher.search", return_value=[match]):
         semantic_result = SemanticProvider().build_result(
             "search", "widget factory", [], 30000, str(tmp_path)
         )

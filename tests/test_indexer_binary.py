@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import logging
 
-from codeintel.indexer import Indexer, _looks_binary, _nul_byte_line
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import Indexer, _looks_binary, _nul_byte_line
 
 
 def test_nul_byte_line_points_at_the_first_nul(tmp_path):

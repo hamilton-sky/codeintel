@@ -138,7 +138,7 @@ are listed now, apart:
 
 ```text
 ## Callers through `CodeProvider.build_result` — they call the Protocol; at run time a call reaches this override only when the object is a `GraphProvider` (3)
-- src.codeintel.gateway.Gateway._dispatch_single [CALLS] [?via protocol 0.85] (src/codeintel/gateway.py)
+- src.codeintel.gateway.Gateway._dispatch_single [CALLS] [?via protocol 0.85] (src/codeintel/gateway/gateway.py)
 ```
 
 Read them as *the callers you must not change this method blind to*, and nothing stronger. Each carries `via`

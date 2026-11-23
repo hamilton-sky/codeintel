@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from codeintel.reindexer import Reindexer
+from codeintel.gateway.reindexer import Reindexer
 
 # The background pass IS the subject here, so this module opts out of the suite-wide guard that
 # stubs `maybe_reindex` (see `tests/conftest.py::_no_background_reindex`). Safe because every test
@@ -32,8 +32,8 @@ def _drain(r: Reindexer) -> None:
 # ---------------------------------------------------------------------------
 
 def test_maybe_reindex_fires_background_thread():
-    with patch("codeintel.indexer.Indexer") as MockIndexer, \
-         patch("codeintel.semantic_db.SemanticDb"), \
+    with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
+         patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         r = Reindexer(debounce_seconds=0)
         r.maybe_reindex("/tmp/test")
@@ -47,8 +47,8 @@ def test_maybe_reindex_fires_background_thread():
 # ---------------------------------------------------------------------------
 
 def test_debounce_suppresses_second_call():
-    with patch("codeintel.indexer.Indexer") as MockIndexer, \
-         patch("codeintel.semantic_db.SemanticDb"), \
+    with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
+         patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         r = Reindexer(debounce_seconds=1000)
         r.maybe_reindex("/tmp/test")
@@ -64,7 +64,7 @@ def test_debounce_suppresses_second_call():
 
 def test_disabled_via_env():
     with patch.dict(os.environ, {"CODEINTEL_REINDEX": "off"}), \
-         patch("codeintel.indexer.Indexer") as MockIndexer, \
+         patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
          patch("shutil.which", return_value=None):
         r = Reindexer()
         r.maybe_reindex("/tmp/test")
@@ -78,8 +78,8 @@ def test_disabled_via_env():
 # ---------------------------------------------------------------------------
 
 def test_never_raises_on_bad_path():
-    with patch("codeintel.semantic_db.SemanticDb") as MockDb, \
-         patch("codeintel.indexer.Indexer"), \
+    with patch("codeintel.engines.semantic.db.SemanticDb") as MockDb, \
+         patch("codeintel.engines.semantic.indexer.Indexer"), \
          patch("shutil.which", return_value=None):
         MockDb.return_value.init.side_effect = FileNotFoundError("no such path")
 
@@ -95,8 +95,8 @@ def test_never_raises_on_bad_path():
 # ---------------------------------------------------------------------------
 
 def test_never_raises_on_indexer_exception():
-    with patch("codeintel.indexer.Indexer") as MockIndexer, \
-         patch("codeintel.semantic_db.SemanticDb"), \
+    with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
+         patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         MockIndexer.return_value.index.side_effect = RuntimeError("boom")
 
@@ -121,8 +121,8 @@ def test_reindex_runs_on_daemon_threads():
         slow_started.set()
         release.wait(5)  # simulate a long reindex still in flight
 
-    with patch("codeintel.indexer.Indexer") as MockIndexer, \
-         patch("codeintel.semantic_db.SemanticDb"), \
+    with patch("codeintel.engines.semantic.indexer.Indexer") as MockIndexer, \
+         patch("codeintel.engines.semantic.db.SemanticDb"), \
          patch("shutil.which", return_value=None):
         MockIndexer.return_value.index.side_effect = _slow_index
         r = Reindexer(debounce_seconds=0)
@@ -162,10 +162,10 @@ def test_graph_reindex_calls_the_tool_that_actually_reindexes(monkeypatch):
     reindexes. The graph therefore never refreshed, silently, and queries kept answering from
     whatever the index held when it was first built.
     """
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
     fake = _FakeGraph({"status": "ok"})
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: fake)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: fake)
     Reindexer()._graph_reindex("/repo")
 
     assert [c[0] for c in fake.calls] == ["index_repository"]
@@ -176,11 +176,11 @@ def test_graph_reindex_calls_the_tool_that_actually_reindexes(monkeypatch):
 
 
 def test_graph_reindex_does_nothing_without_a_backend(monkeypatch):
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
     fake = _FakeGraph()
     fake.available = False
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: fake)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: fake)
     Reindexer()._graph_reindex("/repo")
 
     assert fake.calls == []
@@ -194,9 +194,9 @@ def test_graph_reindex_logs_a_backend_failure_instead_of_swallowing_it(monkeypat
                                                                       expected):
     """Swallowing the backend's own error is what let a broken reindex look exactly like a working
     one for as long as nobody compared the graph to the source."""
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider", lambda: _FakeGraph(reply))
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: _FakeGraph(reply))
     with caplog.at_level(logging.WARNING):
         Reindexer()._graph_reindex("/repo")
 
@@ -205,9 +205,9 @@ def test_graph_reindex_logs_a_backend_failure_instead_of_swallowing_it(monkeypat
 
 def test_graph_reindex_never_raises(monkeypatch):
     """It runs on a background thread after an index; an exception here must not take that down."""
-    from codeintel.reindexer import Reindexer
+    from codeintel.gateway.reindexer import Reindexer
 
-    monkeypatch.setattr("codeintel.providers.graph.GraphProvider",
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider",
                         lambda: (_ for _ in ()).throw(RuntimeError("backend exploded")))
     Reindexer()._graph_reindex("/repo")          # must return normally
 
@@ -304,7 +304,7 @@ def test_index_age_is_per_project_not_the_shared_database_mtime(tmp_path):
     recent index of ANY repository. Indexing an unrelated repo made a stale one look fresh."""
     import time as _time
 
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
 
     db = SemanticDb(str(tmp_path / "db.sqlite"))
     db.init()
@@ -327,8 +327,8 @@ def test_a_project_whose_root_is_gone_is_reconciled_away(tmp_path):
     """`_index` returned 0 before reaching cleanup when the root was missing — and 0 also means
     "nothing new", so a deleted or moved repository kept every row it ever had and went on being
     reported as indexed and healthy."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     db = SemanticDb(str(tmp_path / "db.sqlite"))
     db.init()
@@ -359,8 +359,8 @@ def test_a_project_whose_root_is_gone_is_reconciled_away(tmp_path):
 def test_reconciling_one_deleted_project_leaves_others_alone(tmp_path):
     """The counterpart guard: cleanup is scoped by project_root, so removing one repo must never
     touch another's index."""
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb
+    from codeintel.engines.semantic.db import SemanticDb
+    from codeintel.engines.semantic.indexer import Indexer
 
     db = SemanticDb(str(tmp_path / "db.sqlite"))
     db.init()

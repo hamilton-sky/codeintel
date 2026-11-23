@@ -274,6 +274,12 @@ jobs:
       - name: Generate this repo's own model
         run: python -m codeintel c4 . --out /tmp/c4-self
 
+      # The product judging its own repository: `.codeintel.toml` declares the layer order and
+      # `--check` exits 2 on an upward import. tests/test_architecture.py enforces the same rule from
+      # the AST on every test leg; this step is the live-graph reading of it.
+      - name: Check this repo's declared layers
+        run: python -m codeintel c4 . --check --no-index --out /tmp/c4-check
+
       - name: Build a reserved-word fixture repo
         run: |
           mkdir -p /tmp/c4-fixture/src

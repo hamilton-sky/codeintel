@@ -138,8 +138,8 @@ def _site_key(qualname: str, module_stem: str) -> str:
     every one of them rather than letting a moved summary quietly go unchecked.
 
     A BARE qualname is a top-level function, and those are not unique: `run` is a top-level
-    function in four different modules here (`commands/c4.py`, `commands/graph.py`,
-    `commands/index.py`, `bench/score.py`), each emitting an unrelated summary. Collapsing four
+    function in four different modules here (`cli/c4.py`, `cli/graph.py`,
+    `cli/index.py`, `bench/score.py`), each emitting an unrelated summary. Collapsing four
     summaries into one registry entry would mean three of them are recorded as checked by a test
     that never looks at them — which is this file's own subject matter, so it is worth not doing.
     """
@@ -330,7 +330,7 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
         "a booted backend that answers nothing is not runnable — "
         "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable, and under --deep "
         "test_semantic_chunks_without_vectors_are_not_a_working_index",
-    ("claim", "semantic._not_indexed_probe"):
+    ("claim", "provider._not_indexed_probe"):
         "the not-indexed state claims no readiness — "
         "test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable",
     ("claim", "doctor._probe_engine"):
@@ -345,19 +345,19 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("claim", "doctor.collect_registrations"):
         "an executable file is not a server that answers — "
         "test_a_registration_runnable_flag_is_only_about_the_file",
-    ("claim", "server._code_status_handler_inner"):
+    ("claim", "mcp._code_status_handler_inner"):
         "status relays doctor's tri-state without widening it — "
         "test_code_status_relays_the_same_tri_state_as_doctor; and `indexed` is true exactly when "
         "graph or semantic reports repo_indexed for THIS root, `indexed_by` naming which — "
         "test_status_indexed_means_some_engine_has_indexed_this_repo_and_names_which, and with no "
         "root test_status_with_no_root_does_not_call_a_repo_indexed_because_another_one_is",
-    ("claim", "server._code_doctor_handler_inner"):
+    ("claim", "mcp._code_doctor_handler_inner"):
         "a refused report asserts no readiness — test_a_refused_doctor_report_claims_no_readiness",
-    ("claim", "server.<module>"):
+    ("claim", "mcp.<module>"):
         "the status fallback fails closed — test_the_status_fallback_claims_nothing",
     # D3: over MCP an answer too large for the client keeps its `result` and cuts `rows`; the count
     # of what was cut is a tally, true when it equals the rows the envelope no longer carries.
-    ("tally", "server.compact_for_mcp"):
+    ("tally", "mcp.compact_for_mcp"):
         "rows_omitted is rows_total less the rows still carried, and the kept rows are the leading "
         "ones in order — test_rows_left_out_over_mcp_are_counted_and_say_where_the_rest_are",
 
@@ -496,9 +496,9 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("tally", "AnswerRendering._no_symbol_matched_the_hint"):
         "a no-match note states only what was asked — "
         "test_a_no_match_note_claims_nothing_about_the_symbol_itself",
-    ("claim", "c4_check.check_layers"):
+    ("claim", "check.check_layers"):
         "coverage sums to its own element total — test_c4_coverage_sums_to_its_own_total",
-    ("tally", "c4.render_c4_dsl"):
+    ("tally", "model.render_c4_dsl"):
         "the DSL comment counts the DSL beneath it — "
         "test_the_c4_dsl_comment_counts_what_the_dsl_contains",
     ("tally", "c4._print_layers"):
@@ -800,7 +800,7 @@ def _headline_disagreements(body: str) -> list[str]:
 
 def _graph_provider():
     """A GraphProvider with the subprocess seam absent — enough to drive the renderers."""
-    from codeintel.providers.graph import BackendClient, GraphProvider
+    from codeintel.engines.graph.provider import BackendClient, GraphProvider
 
     gp = GraphProvider.__new__(GraphProvider)
     gp._backend = BackendClient.__new__(BackendClient)    # type: ignore[attr-defined]
@@ -829,8 +829,8 @@ def test_every_rendered_headline_counts_the_rows_beneath_it(case):
     checked here against the thing it claims to count — the rows actually rendered, plus the rows
     the body explicitly says it did not render, which is a disclosure rather than a discrepancy.
     """
-    from codeintel.graph_edges import _EdgeGroup
-    from codeintel.graph_targets import _SymbolTarget
+    from codeintel.engines.graph.edges import _EdgeGroup
+    from codeintel.engines.graph.targets import _SymbolTarget
 
     gp = _graph_provider()
     keys = ("b.name", "b.qualified_name", "b.file_path")
@@ -856,7 +856,7 @@ def test_every_rendered_headline_counts_the_rows_beneath_it(case):
                 for i in range(12)]
         body = gp._render_scan(rows, "Complexity / fan-in hotspots", 5, lambda r: [])
     else:
-        from codeintel.providers.lsp import LspProvider
+        from codeintel.engines.lsp.provider import LspProvider
 
         lsp = LspProvider.__new__(LspProvider)
         lsp._last_backend_error = None                    # type: ignore[attr-defined]
@@ -887,7 +887,7 @@ def test_the_evidence_headline_sums_to_the_rows_it_describes():
     `_UNCENSUSED` and checked here. Its own failure mode is the one it was built to fix, one level
     down: a tally that does not add up to the list beneath it.
     """
-    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.engines.graph.edges import _EdgeGroup
 
     gp = _graph_provider()
     rows = (_edge_rows(2, bucket="resolved")
@@ -907,7 +907,7 @@ def test_the_evidence_headline_sums_to_the_rows_it_describes():
 
 def test_the_confidence_note_counts_the_rows_it_describes():
     """"43 of 50 row(s) were resolved by name matching" is only useful if 50 is the rows."""
-    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.engines.graph.edges import _EdgeGroup
 
     gp = _graph_provider()
     rows = _edge_rows(2) + _edge_rows(43, start=2)
@@ -931,7 +931,7 @@ def test_the_distinct_cap_note_states_the_counts_of_the_rows_it_describes():
     Each number is re-derived here from the rows themselves: the first from what survived the cut,
     the second from what went in, and the test/production split from the paths of the rows that did
     NOT survive, so a classification that drifted from the ranking it describes fails here."""
-    from codeintel.graph_edges import _EdgeGroup
+    from codeintel.engines.graph.edges import _EdgeGroup
 
     gp = _graph_provider()
     prod = [{"a.name": f"p{i}", "a.qualified_name": f"pkg.p{i}", "a.file_path": f"src/p{i}.py",
@@ -998,13 +998,13 @@ def test_impact_renders_a_zero_only_when_the_lookup_actually_answered():
 
 def test_the_cross_check_headline_counts_the_rows_it_rendered():
     """The gateway's LSP cross-check states a reference count above its own list."""
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     gw = Gateway()
     fn = getattr(gw, "_cross_check_name_resolved", None)
     if fn is None:
         pytest.skip("the cross-check seam has been renamed — the registry entry is stale")
-    source = pathlib.Path(_SRC / "gateway.py").read_text()
+    source = pathlib.Path(_SRC / "gateway" / "gateway.py").read_text()
     # The renderer builds its heading from the same list it then joins. Pin that structurally:
     # a heading built from one collection and a body built from another is the defect, and it is
     # visible in the source without booting an LSP.
@@ -1022,8 +1022,8 @@ def test_a_no_match_note_claims_nothing_about_the_symbol_itself():
     index not matching a target says nothing about the code.
     """
     gp = _graph_provider()
-    from codeintel.graph_edges import _EdgeGroup
-    from codeintel.graph_targets import _SymbolTarget
+    from codeintel.engines.graph.edges import _EdgeGroup
+    from codeintel.engines.graph.targets import _SymbolTarget
 
     others = [_EdgeGroup("handle", "pkg.b.handle", "src/b.py", _edge_rows(2))]
     note = gp._no_symbol_matched_the_hint(
@@ -1052,19 +1052,15 @@ def _providers_with_a_probe() -> list[str]:
     about its own provider sweep: a guard whose domain is hand-typed certifies the sites the last
     bug was found at, and a fourth engine would inherit the claim without ever being checked.
     """
-    import importlib
     import inspect
 
-    import codeintel.providers as pkg
+    from tests._engines import engine_modules
 
     out = []
-    for path in sorted(pathlib.Path(pkg.__file__).parent.glob("*.py")):
-        if path.stem == "__init__":
-            continue
-        module = importlib.import_module(f"codeintel.providers.{path.stem}")
+    for name, module in engine_modules():
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if obj.__module__ == module.__name__ and hasattr(obj, "probe"):
-                out.append(path.stem)
+                out.append(name)
                 break
     return out
 
@@ -1115,7 +1111,7 @@ def test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable(engine,
         report = gp.probe(str(repo))
 
     elif engine == "lsp":
-        from codeintel.providers.lsp import LspProvider, _State
+        from codeintel.engines.lsp.provider import LspProvider, _State
 
         # Enough TypeScript to clear `_UNSERVED_FILE_FLOOR`, a config that SERVES it, and no
         # tsconfig.json. That is `bench/fixtures/corpus_ts` — where `doctor --deep` reported
@@ -1144,12 +1140,12 @@ def test_a_backend_that_boots_and_answers_nothing_is_not_called_runnable(engine,
         report = lsp.probe(str(repo), deep=False)
 
     else:
-        from codeintel.providers.semantic import SemanticProvider
+        from codeintel.engines.semantic.provider import SemanticProvider
 
         sp = SemanticProvider()
         report = sp.probe(str(repo))
 
-    from codeintel.doctor import _status_for
+    from codeintel.setup.doctor import _status_for
 
     assert _status_for(report) == "fail", (
         f"{engine} rolls up as ready for a repository it cannot answer about — "
@@ -1167,7 +1163,7 @@ def test_the_lsp_capability_claim_is_scoped_to_the_repo_not_the_process(tmp_path
     that fires on correct repositories is one nobody reads, and `bench/run.py daycap` being
     byte-identical before and after the `unresolvable` fix is the measured version of this.
     """
-    from codeintel.providers.lsp import LspProvider, _State
+    from codeintel.engines.lsp.provider import LspProvider, _State
 
     repo = tmp_path / "ok"
     repo.mkdir()
@@ -1192,7 +1188,7 @@ def test_the_lsp_capability_claim_is_scoped_to_the_repo_not_the_process(tmp_path
         "language_servers:\n  - typescript\n", encoding="utf-8")
     lsp._sessions = {str(repo): _Ready()}                        # type: ignore[attr-defined]
 
-    from codeintel.doctor import _status_for
+    from codeintel.setup.doctor import _status_for
 
     report = lsp.probe(str(repo), deep=False)
     assert report["runnable"] is True, report
@@ -1201,7 +1197,7 @@ def test_the_lsp_capability_claim_is_scoped_to_the_repo_not_the_process(tmp_path
 
 def test_doctor_status_follows_the_probe_it_was_given():
     """`status` is a roll-up of the three questions beneath it and must not widen any of them."""
-    from codeintel.doctor import _status_for
+    from codeintel.setup.doctor import _status_for
 
     assert _status_for({"installed": True, "runnable": False, "repo_indexed": True}) == "fail"
     assert _status_for({"installed": False, "runnable": False, "repo_indexed": None}) == "fail"
@@ -1216,7 +1212,7 @@ def test_doctor_summary_sums_its_own_engine_rows():
     Same shape as a caller count, and it is the line a person reads before deciding whether to
     trust anything else the tool says.
     """
-    from codeintel.doctor import render_doctor_text
+    from codeintel.setup.doctor import render_doctor_text
 
     engines = {
         "graph": {"status": "ok", "installed": True, "runnable": True, "repo_indexed": True,
@@ -1254,7 +1250,7 @@ def test_a_registration_runnable_flag_is_only_about_the_file():
     """
     import inspect
 
-    from codeintel import doctor, verify
+    from codeintel.setup import doctor, verify
 
     source = inspect.getsource(doctor.collect_registrations)
     assert "X_OK" in source or "which" in source, source
@@ -1307,9 +1303,9 @@ def test_a_body_that_discloses_a_limitation_is_never_stamped_complete(scenario, 
     exact grammar: the honest sentence is present, and the field an agent branches on says the
     answer is whole.
     """
-    from codeintel.graph_edges import _EdgeGroup
-    from codeintel.graph_targets import _SymbolTarget
-    from codeintel.provider import attach_confidence
+    from codeintel.core.provider import attach_confidence
+    from codeintel.engines.graph.edges import _EdgeGroup
+    from codeintel.engines.graph.targets import _SymbolTarget
 
     gp = _graph_provider()
     keys = ("b.name", "b.qualified_name", "b.file_path")
@@ -1340,7 +1336,7 @@ def test_a_body_that_discloses_a_limitation_is_never_stamped_complete(scenario, 
             gp._row_cap_note("callers", "handle"))
 
     else:
-        from codeintel.providers.lsp import LspProvider
+        from codeintel.engines.lsp.provider import LspProvider
 
         repo = tmp_path / "ts"
         repo.mkdir()
@@ -1376,9 +1372,9 @@ def test_a_clean_answer_is_still_allowed_to_be_complete():
     `partial` that appears on correct answers is one nobody reads, which costs the disclosure its
     only value. `bench/run.py daycap` being byte-identical across the `unresolvable` fix is the
     measured form of this same guard."""
-    from codeintel.graph_edges import _EdgeGroup
-    from codeintel.graph_targets import _SymbolTarget
-    from codeintel.provider import attach_confidence
+    from codeintel.core.provider import attach_confidence
+    from codeintel.engines.graph.edges import _EdgeGroup
+    from codeintel.engines.graph.targets import _SymbolTarget
 
     gp = _graph_provider()
     rows = _edge_rows(3)
@@ -1403,7 +1399,7 @@ def test_wire_text_never_manufactures_a_confidence():
     """`_trace_path` relays a per-row confidence the backend supplied. A row the backend never
     scored must stay unscored: defaulting it would invent evidence, which is `_edge_confidence`'s
     own rule ("an unstamped edge is not a confident one") one layer out."""
-    from codeintel.wire_text import parse
+    from codeintel.engines.graph.wire_text import parse
 
     # The backend names its columns, and this reply carries no `strategy` and no `confidence` —
     # the 0.9.x shape, and any edge the newer backend leaves unlabelled.
@@ -1443,8 +1439,8 @@ def test_wire_text_never_manufactures_a_confidence():
 
 def test_setup_reports_the_chunk_count_the_indexer_returned(tmp_path, monkeypatch):
     """`indexed N new chunk(s)` is a claim about what is now in the database."""
-    import codeintel.indexer as indexer_mod
-    from codeintel import onboarding
+    import codeintel.engines.semantic.indexer as indexer_mod
+    from codeintel.setup import onboarding
 
     monkeypatch.setattr(indexer_mod, "Indexer", lambda *a, **k: _FakeIndexer(17))
     result = onboarding._bounded_index(str(tmp_path), timeout_s=30, out=lambda *a, **k: None)
@@ -1472,7 +1468,7 @@ class _FakeIndexer:
 def test_the_index_command_reports_the_count_the_indexer_returned():
     """`Indexed N chunks` is printed from the indexer's own return, and a failure must not print a
     count at all — `-1` formatted into that sentence would read as a successful index of -1."""
-    source = (_SRC / "commands" / "index.py").read_text()
+    source = (_SRC / "cli" / "index.py").read_text()
     printed = re.search(r'print\(f"Indexed \{(\w+)\} chunks"\)', source)
     assert printed, "the `Indexed N chunks` line has changed shape — re-verify what N is"
     counted = printed.group(1)
@@ -1486,7 +1482,7 @@ def test_the_index_command_reports_the_count_the_indexer_returned():
 def test_reset_counts_the_files_it_removed(tmp_path, monkeypatch):
     """`removed N index file(s)` must count files that are actually gone, and the dry run must
     count files that are actually there."""
-    from codeintel import reset
+    from codeintel.setup import reset
 
     base = tmp_path / "home"
     base.mkdir()
@@ -1510,7 +1506,7 @@ def test_the_progress_counter_reports_what_it_counted():
     """`N files, M chunks` on the indexing progress line is what the caller fed it."""
     import inspect
 
-    from codeintel.term import LiveCounter
+    from codeintel.core.term import LiveCounter
 
     # The progress line states two quantities. Both must be the arguments it was handed — a
     # counter that renders one of them from its own accumulated state would drift from the pass
@@ -1534,7 +1530,7 @@ def test_the_progress_counter_reports_what_it_counted():
 
 def test_verify_counts_the_tools_it_listed():
     """`{name} {version} — N tools (a, b, c)` must count the very list it then prints."""
-    source = (_SRC / "verify.py").read_text()
+    source = (_SRC / "setup" / "verify.py").read_text()
     line = re.search(r'f"\{name\} \{version\} — \{len\((\w+)\)\} tools \(\{\', \'\.join\((\w+)\)\}\)"',
                      source)
     assert line, "the verify detail line has changed shape — re-verify what N counts"
@@ -1555,7 +1551,7 @@ def test_the_ranked_heading_is_actually_ranked_by_caller_count():
     caller-count ranking would have published a lexical one. That is the law exactly — the sort is
     true about the VALUES and false about the quantity they denote.
     """
-    from codeintel.mapper import MapGenerator, _as_degree
+    from codeintel.mapping.mapper import MapGenerator, _as_degree
 
     assert _as_degree("138") == 138, "string counts are no longer coerced — the ranking is lexical"
     assert _as_degree("9") < _as_degree("138"), "the ranking compares strings, not quantities"
@@ -1569,7 +1565,7 @@ def test_the_ranked_heading_is_actually_ranked_by_caller_count():
     }
     rows = wire["rows"]
 
-    from codeintel.graph_resolution import ProjectResolution
+    from codeintel.engines.graph.resolution import ProjectResolution
 
     class _Provider:
         available = True
@@ -1601,7 +1597,7 @@ def test_the_map_stamp_reports_the_index_it_read():
     the body cannot describe different indexes — and when there is no such text the stamp says
     nothing rather than saying zero.
     """
-    from codeintel.mapper import _parse_index_counts, _stamp_line
+    from codeintel.mapping.mapper import _parse_index_counts, _stamp_line
 
     nodes, edges = _parse_index_counts("## Architecture: repo\n1577 nodes, 3440 edges\n")
     assert (nodes, edges) == (1577, 3440)
@@ -1617,7 +1613,7 @@ def test_the_map_stamp_reports_the_index_it_read():
 def test_the_unserved_language_note_counts_the_files_it_found(tmp_path):
     """`typescript (771 files)` is the evidence for the whole unserved-language claim — instance
     #1's own disclosure. A count that did not come from the census would make it unfalsifiable."""
-    from codeintel.providers.lsp import LspProvider
+    from codeintel.engines.lsp.provider import LspProvider
 
     repo = tmp_path / "poly"
     repo.mkdir()
@@ -1650,7 +1646,8 @@ def test_code_status_relays_the_same_tri_state_as_doctor(monkeypatch):
     """`code.status` used to build throwaway providers and report one flat boolean per engine, so
     `lsp: true` could mean "uvx is on PATH" for an engine that never boots. It relays doctor's
     tri-state now, and relaying is only honest if nothing widens on the way through."""
-    from codeintel import doctor, server
+    from codeintel.setup import doctor
+    from codeintel.transports import mcp as server
 
     report = {
         "ok": True, "project_root": "/repo", "deep": False,
@@ -1679,7 +1676,8 @@ def test_code_status_relays_the_same_tri_state_as_doctor(monkeypatch):
 
 
 def _status_with(monkeypatch, graph_indexed, semantic_indexed, project_root="/repo") -> dict:
-    from codeintel import doctor, server
+    from codeintel.setup import doctor
+    from codeintel.transports import mcp as server
 
     def engine(indexed):
         return {"status": "ok" if indexed else "fail", "installed": True, "runnable": True,
@@ -1713,7 +1711,7 @@ def test_status_with_no_root_does_not_call_a_repo_indexed_because_another_one_is
     """With no `project_root`, `indexed` was true when ANY `semantic*.db` sat in the per-machine
     cache directory — so once one repo was indexed, every repo on the machine was. It is the probe of
     the root doctor resolved (the server's cwd) now, like every other field."""
-    from codeintel import semantic_db
+    from codeintel.engines.semantic import db as semantic_db
 
     (tmp_path / "semantic.db").write_bytes(b"")
     monkeypatch.setattr(semantic_db, "default_db_path", lambda model=None: str(tmp_path / "semantic.db"))
@@ -1725,7 +1723,7 @@ def test_a_refused_doctor_report_claims_no_readiness():
     """An RBAC refusal must not be reported as a health verdict. `ready: 0, healthy: false` on a
     report that ran no probe is a claim about permissions, so it carries `reason` to say so —
     otherwise "0 / 3 engines ready" reads as three broken engines."""
-    from codeintel import server
+    from codeintel.transports import mcp as server
 
     gw = server._get_gateway()
     gw.allows = lambda role, op: False              # type: ignore[method-assign]
@@ -1748,7 +1746,7 @@ def test_the_status_fallback_claims_nothing():
     """The fallback is returned when the handler could not run at all. Every capability field in it
     must be false or empty: a fallback that defaulted `healthy` to true would assert readiness from
     the one state that establishes least."""
-    from codeintel.server import _STATUS_FALLBACK
+    from codeintel.transports.mcp import _STATUS_FALLBACK
 
     assert _STATUS_FALLBACK["healthy"] is False
     assert _STATUS_FALLBACK["indexed"] is False
@@ -1772,7 +1770,7 @@ def _c4_payload(n: int = 6) -> dict:
 
 def test_c4_coverage_sums_to_its_own_total():
     """`coverage: {assigned, unassigned, total}` is three numbers about one population."""
-    from codeintel.c4_check import check_layers
+    from codeintel.c4.check import check_layers
 
     payload = _c4_payload()
     parsed = {"order": ["top", "bottom"],
@@ -1802,7 +1800,7 @@ def test_c4_coverage_partitions_its_population_even_when_nothing_was_assessed():
     violations by construction. Reporting that as 'no problems' would dress..." — and the coverage
     line beside that verdict is the half that was not carried through.
     """
-    from codeintel.c4_check import check_layers
+    from codeintel.c4.check import check_layers
 
     for parsed in ({}, {"problem": "bad toml"}):
         coverage = check_layers(_c4_payload(), parsed)["coverage"]
@@ -1812,7 +1810,7 @@ def test_c4_coverage_partitions_its_population_even_when_nothing_was_assessed():
 
 def test_the_c4_dsl_comment_counts_what_the_dsl_contains():
     """`// N elements, M relations, K source files` sits at the top of a file people read as fact."""
-    from codeintel.c4 import render_c4_dsl
+    from codeintel.c4.model import render_c4_dsl
 
     elements = [{"id": f"e{i}", "path": f"src/e{i}.py", "title": f"e{i}", "kind": "module",
                  "tech": "Python", "files": 1, "churn": 0, "fan_in": 0, "fan_out": 0,
@@ -1838,7 +1836,7 @@ def test_the_c4_dsl_comment_counts_what_the_dsl_contains():
 
 def test_the_c4_layer_tally_sums_to_the_elements_it_placed():
     """`N band(s) over M of K element(s)` — the middle number is the placed ones, not the total."""
-    source = (_SRC / "commands" / "c4.py").read_text()
+    source = (_SRC / "cli" / "c4.py").read_text()
     line = re.search(r"\{(\w+\(?\w*\)?)\} band\(s\) over \{(\w+)\} of \{(\w+)\} element",
                      source)
     assert line, "the inferred-layers line has changed shape — re-verify what it counts"
@@ -1855,7 +1853,7 @@ def test_the_c4_layer_tally_sums_to_the_elements_it_placed():
 
 def test_the_graph_export_line_counts_what_it_wrote():
     """`Wrote path (N nodes, M edges)` is a claim about the file just written."""
-    source = (_SRC / "commands" / "graph.py").read_text()
+    source = (_SRC / "cli" / "graph.py").read_text()
     line = re.search(r'Wrote \{[^}]+\}\s*\(\{(\w+)\} nodes, \{(\w+)\} edges\)', source)
     assert line, "the export line has changed shape — re-verify what it counts"
     nodes, edges = line.groups()
@@ -2170,7 +2168,7 @@ def test_the_evidence_class_never_calls_a_partial_answer_proof():
     without a backend — no path through the stamp may reach `evidence` while the same envelope is
     saying a named part of it is missing.
     """
-    from codeintel.provider import _OP_CEILING, attach_confidence
+    from codeintel.core.provider import _OP_CEILING, attach_confidence
 
     gap = [{"section": "callers", "kind": "row-cap-reached", "detail": "capped"}]
     clean = {"verified": 4, "possible": 0, "unstated": 0, "returned": 4, "total": 4,
@@ -2209,7 +2207,7 @@ def test_an_answer_with_no_row_summary_is_proof_only_as_an_lsp_symbol_lookup():
     The default used to be proof: any engine answering an EVIDENCE-ceiling op in prose — a fan-out,
     a graph answer whose summary was withheld, a future backend — was stamped `evidence`. Only a
     language server's `symbol` resolves a real binding by construction, so only it keeps that."""
-    from codeintel.provider import attach_confidence
+    from codeintel.core.provider import attach_confidence
 
     def stamp(op, engine):
         return attach_confidence(

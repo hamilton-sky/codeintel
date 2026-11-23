@@ -1,4 +1,4 @@
-"""Tests for `codeintel.c4.build_c4_payload` (the data half) and `render_c4_dsl` (the renderer
+"""Tests for `codeintel.c4.model.build_c4_payload` (the data half) and `render_c4_dsl` (the renderer
 half). Fixtures follow `tests/test_grapher.py`: patch `GraphProvider._resolve_project` /
 `_query_rows` with the real row shapes (`{"f.file_path": …}`, `{"a.file_path": …, "b.file_path":
 …, "count(*)": …}`), never fabricated ones.
@@ -8,14 +8,14 @@ from __future__ import annotations
 import json
 import re
 
-from codeintel import c4
-from codeintel.providers.graph import GraphProvider, ProjectResolution
+from codeintel.c4 import model as c4
+from codeintel.engines.graph.provider import GraphProvider, ProjectResolution
 
 
 def _wire(monkeypatch, *, available=True, project="proj", is_ancestor=False,
          file_rows=None, churn_rows=None, import_rows=None, calls_rows=None,
          query_raises=None, churn_raises=False, capture_cypher=None):
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which",
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which",
                         lambda x: "/fake/cm" if available else None)
     resolution = (ProjectResolution(name=project, matched_root="/repo",
                                     scope="ancestor" if is_ancestor else "exact")

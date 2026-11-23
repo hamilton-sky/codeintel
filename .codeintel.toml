@@ -1,0 +1,27 @@
+# codeintel's own architecture, checked by codeintel itself:
+#     codeintel c4 . --check
+# CI runs this in the `c4-validate` job. tests/test_architecture.py enforces the same rule from the
+# AST on every test leg, plus the one rule this file cannot express: engines do not import each other.
+# The layer table and the reasoning behind it live in docs/architecture.md.
+
+[layers]
+# Top to bottom. An import may only point down (or stay within its own layer).
+order = ["cli", "transports", "tools", "gateway", "engines", "core"]
+
+[layers.members]
+cli        = ["src/codeintel/cli/**", "src/codeintel/__main__.py"]
+transports = ["src/codeintel/transports/**"]
+tools      = ["src/codeintel/setup/**", "src/codeintel/c4/**", "src/codeintel/mapping/**"]
+gateway    = ["src/codeintel/gateway/**"]
+engines    = ["src/codeintel/engines/**"]
+core       = ["src/codeintel/core/**", "src/codeintel/__init__.py"]
+
+# A false edge, not an import: the graph backend (codebase-memory-mcp 0.10) resolves
+# `from codeintel.engines.graph.render import ...` to the METHOD `Metrics.render`, because the
+# module and the method share the name `render`. No file in engines/ imports transports/, which
+# tests/test_architecture.py checks from the source. `--check` flags this entry as stale once the
+# backend resolves the import correctly; delete it then.
+[[layers.allow]]
+from   = "src/codeintel/engines/graph/**"
+to     = "src/codeintel/transports/metrics.py"
+reason = "backend resolves the engines.graph.render module import to the Metrics.render method"

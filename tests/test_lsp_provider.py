@@ -9,9 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from codeintel.outcome import Missing, Ok
-from codeintel.providers.lsp import LspProvider, _split_target_file_hint, _State
-from codeintel.server import code_status_handler
+from codeintel.core.outcome import Missing, Ok
+from codeintel.engines.lsp.provider import LspProvider, _split_target_file_hint, _State
+from codeintel.transports.mcp import code_status_handler
 
 
 def _make_fake_session(state: _State, cooldown_until: float = 0.0) -> Any:
@@ -39,7 +39,7 @@ def _make_fake_session(state: _State, cooldown_until: float = 0.0) -> Any:
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_none_args(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: None)
     p = LspProvider()
     r = p.build_result(None, None, None, None, None)
     assert r["ok"] is True
@@ -50,7 +50,7 @@ def test_lsp_provider_none_args(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_wrong_types(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: None)
     p = LspProvider()
     r = p.build_result(123, [], {}, "bad", object())
     assert r["ok"] is True
@@ -61,7 +61,7 @@ def test_lsp_provider_wrong_types(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_unavailable(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: None)
     p = LspProvider()
     assert p.available is False
     r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
@@ -75,7 +75,7 @@ def test_lsp_provider_unavailable(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_warming(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.WARMING)
     r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
@@ -95,9 +95,9 @@ def test_warming_says_when_to_ask_again_and_what_can_answer_now(monkeypatch):
     degrading to `warming` is the right answer for a cold `uvx` *with* `retry_after_s` in the
     envelope, and the `boot-failed` branch below has always carried one. Only this branch — the
     one on the common path, reached on the first call of every session — was left bare."""
-    from codeintel.providers.lsp import _WARM_WAIT_S
+    from codeintel.engines.lsp.provider import _WARM_WAIT_S
 
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.WARMING)
     r = p.build_result("symbol", "parse_result", [], 0, "/my/repo")
@@ -114,7 +114,7 @@ def test_warming_says_when_to_ask_again_and_what_can_answer_now(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_boot_failed_during_cooldown(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(
         _State.FAILED, cooldown_until=time.monotonic() + 60
@@ -130,7 +130,7 @@ def test_lsp_provider_boot_failed_during_cooldown(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_cooldown_expiry(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
 
     # Prevent real thread from starting by patching _LspSession.__init__
     started = []
@@ -148,7 +148,7 @@ def test_lsp_provider_cooldown_expiry(monkeypatch):
         def wait_until_settled(self, timeout_s):
             return self.state  # a boot still in flight when the wait expires
 
-    monkeypatch.setattr("codeintel.providers.lsp._LspSession", FakeNewSession)
+    monkeypatch.setattr("codeintel.engines.lsp.provider._LspSession", FakeNewSession)
 
     p = LspProvider()
     # Inject an expired FAILED session
@@ -167,7 +167,7 @@ def test_lsp_provider_cooldown_expiry(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_ready_symbol(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     fake = _make_fake_session(_State.READY)
     p._sessions["/my/repo"] = fake
@@ -191,7 +191,7 @@ def test_lsp_provider_ready_symbol(monkeypatch):
 
 def test_file_qualified_symbol_selects_the_matching_definition(monkeypatch):
     """A graph file hint must survive the LSP cross-check instead of selecting a same-name method."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     calls: list[tuple[str, dict]] = []
@@ -225,7 +225,7 @@ def test_file_qualified_symbol_selects_the_matching_definition(monkeypatch):
 
 def test_qualified_and_file_hinted_symbol_uses_leaf_name_and_exact_file(monkeypatch):
     """Graph-qualified names must not disable the exact LSP reference cross-check."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     calls: list[tuple[str, dict]] = []
@@ -254,7 +254,7 @@ def test_qualified_and_file_hinted_symbol_uses_leaf_name_and_exact_file(monkeypa
 
 
 def test_suffix_file_hint_is_not_passed_to_serena_as_an_exact_path(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     seen: list[dict] = []
@@ -276,7 +276,7 @@ def test_suffix_file_hint_is_not_passed_to_serena_as_an_exact_path(monkeypatch):
 
 
 def test_nested_container_name_path_is_accepted_when_fully_matched(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
 
@@ -295,7 +295,7 @@ def test_nested_container_name_path_is_accepted_when_fully_matched(monkeypatch):
 
 
 def test_qualified_method_does_not_accept_a_top_level_leaf_in_the_file(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
 
@@ -312,7 +312,7 @@ def test_qualified_method_does_not_accept_a_top_level_leaf_in_the_file(monkeypat
 
 
 def test_qualified_method_does_not_accept_unverified_module_prefix(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
 
@@ -330,7 +330,7 @@ def test_qualified_method_does_not_accept_unverified_module_prefix(monkeypatch):
 
 
 def test_ambiguous_suffix_file_hint_does_not_choose_an_arbitrary_definition(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     calls: list[str] = []
@@ -353,7 +353,7 @@ def test_ambiguous_suffix_file_hint_does_not_choose_an_arbitrary_definition(monk
 
 
 def test_capped_candidate_page_cannot_prove_an_exact_definition(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     definitions = [
@@ -383,7 +383,7 @@ def test_capped_candidate_page_cannot_prove_an_exact_definition(monkeypatch):
 
 
 def test_broad_qualified_lookup_fetches_metadata_before_one_exact_body(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     calls: list[tuple[str, dict]] = []
@@ -416,7 +416,7 @@ def test_broad_qualified_lookup_fetches_metadata_before_one_exact_body(monkeypat
 
 
 def test_overloaded_same_name_and_file_is_ambiguous(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     calls: list[str] = []
@@ -437,7 +437,7 @@ def test_overloaded_same_name_and_file_is_ambiguous(monkeypatch):
 
 
 def test_unusable_exact_body_lookup_fails_closed(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     replies = [
@@ -454,7 +454,7 @@ def test_unusable_exact_body_lookup_fails_closed(monkeypatch):
 
 
 def test_exact_body_timeout_preserves_retryability(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     replies = [
@@ -471,7 +471,7 @@ def test_exact_body_timeout_preserves_retryability(monkeypatch):
 
 
 def test_metadata_timeout_preserves_retryability(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     monkeypatch.setattr(
@@ -584,7 +584,7 @@ def test_pending_gaps_are_thread_local():
 
 
 def test_file_qualified_symbol_does_not_use_a_definition_from_another_file(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     calls: list[str] = []
@@ -612,7 +612,7 @@ def test_file_qualified_symbol_does_not_use_a_definition_from_another_file(monke
 # ---------------------------------------------------------------------------
 
 def test_lsp_provider_unsupported_op(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     p = LspProvider()
     p._sessions["/my/repo"] = _make_fake_session(_State.READY)
     r = p.build_result("callers", "foo", [], 0, "/my/repo")
@@ -641,8 +641,8 @@ def test_code_status_with_lsp(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_code_status_without_lsp(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: None)
-    monkeypatch.setattr("codeintel.providers.graph.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: None)
+    monkeypatch.setattr("codeintel.engines.graph.provider.shutil.which", lambda x: None)
     r = code_status_handler({})
     assert r["ok"] is True
     assert "lsp" not in r["engines"]
@@ -694,7 +694,7 @@ def _provider_returning(raw):
     # every call short-circuits to `warming` and the branch under test is never reached.
     import threading as _th
 
-    from codeintel.providers.lsp import _State
+    from codeintel.engines.lsp.provider import _State
 
     class _ReadySession:
         state = _State.READY
@@ -714,7 +714,7 @@ def _assert_no_backend_prose(res):
 
 
 def test_an_error_result_is_not_served_as_an_answer(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/serena")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/serena")
     p = _provider_returning(_Result(SERENA_ERROR, is_error=True))
     res = p.build_result("symbol", "safe_null_result", [], 0, "/repo")
 
@@ -730,7 +730,7 @@ def test_an_error_result_is_not_served_as_an_answer(monkeypatch):
 def test_an_error_shaped_response_without_the_flag_is_still_caught(monkeypatch):
     """`isError` is not set by every server or version, and the cost of missing one is that a
     failure reaches an agent as data. The text shape is a second gate."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/serena")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/serena")
     p = _provider_returning(_Result(SERENA_ERROR, is_error=False))
     res = p.build_result("symbol", "safe_null_result", [], 0, "/repo")
 
@@ -743,7 +743,7 @@ def test_real_source_that_merely_mentions_exceptions_is_not_mistaken_for_an_erro
     """The guard against over-detection: a `symbol` lookup quotes real code back, and plenty of
     real functions contain the word "Exception:". Hiding those would trade one silent wrong answer
     for another."""
-    from codeintel.providers.lsp import _looks_like_backend_error
+    from codeintel.engines.lsp.provider import _looks_like_backend_error
 
     body = (
         '[{"name_path": "handle", "relative_path": "src/app.py", '
@@ -751,7 +751,7 @@ def test_real_source_that_merely_mentions_exceptions_is_not_mistaken_for_an_erro
     )
     assert _looks_like_backend_error(body) is False
 
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/serena")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/serena")
     p = _provider_returning(_Result(body))
     res = p.build_result("symbol", "handle", [], 0, "/repo")
     assert res["result"] is not None
@@ -762,7 +762,7 @@ def test_the_error_summary_never_quotes_the_backend(monkeypatch):
     """The summary handed to a caller is fixed text. The backend's prose is logged for the
     operator and goes nowhere an agent can read it — an error path must not become a channel for
     instructing the caller's model."""
-    from codeintel.providers.lsp import _summarize_backend_error
+    from codeintel.engines.lsp.provider import _summarize_backend_error
 
     summary = _summarize_backend_error(SERENA_ERROR)
     assert "Inform the user" not in summary
@@ -781,7 +781,7 @@ def test_a_warming_session_is_waited_for_rather_than_declined():
     Dogfooding on three repos never once saw the cross-check arrive."""
     import threading
 
-    from codeintel.providers import lsp as lsp_mod
+    from codeintel.engines.lsp import provider as lsp_mod
 
     session = MagicMock()
     session._lock = threading.Lock()
@@ -813,7 +813,7 @@ def test_a_boot_that_never_settles_still_degrades_to_the_warming_safe_null():
     agent's call open."""
     import threading
 
-    from codeintel.providers import lsp as lsp_mod
+    from codeintel.engines.lsp import provider as lsp_mod
 
     session = MagicMock()
     session._lock = threading.Lock()
@@ -835,7 +835,7 @@ def test_the_wait_is_bounded_by_the_callers_own_timeout():
     """A caller that granted a short budget must not be held for the full `_WARM_WAIT_S`."""
     import threading
 
-    from codeintel.providers import lsp as lsp_mod
+    from codeintel.engines.lsp import provider as lsp_mod
 
     session = MagicMock()
     session._lock = threading.Lock()
@@ -857,7 +857,7 @@ def test_settled_is_set_on_a_failed_boot_so_a_waiter_is_not_stranded():
     """A waiter that is never woken burns its whole timeout on a session that already settled."""
     import threading
 
-    from codeintel.providers import lsp as lsp_mod
+    from codeintel.engines.lsp import provider as lsp_mod
 
     sess = lsp_mod._LspSession.__new__(lsp_mod._LspSession)
     sess.state = lsp_mod._State.WARMING
@@ -894,7 +894,7 @@ def _failed_session(attempt: int = 1, boot_error: str | None = None) -> Any:
 
 
 def test_boot_failed_on_a_cold_uvx_first_attempt_reads_as_retry(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which",
                         lambda x: "/fake/uvx" if x == "uvx" else None)
     p = LspProvider()
     assert p._cmd == "uvx"
@@ -909,11 +909,11 @@ def test_boot_failed_on_a_cold_uvx_first_attempt_reads_as_retry(monkeypatch):
 
 
 def test_an_unreadable_repository_never_launches_serena(monkeypatch):
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which",
                         lambda x: "/fake/uvx" if x == "uvx" else None)
-    monkeypatch.setattr("codeintel.providers.lsp.os.path.isdir", lambda root: True)
+    monkeypatch.setattr("codeintel.engines.lsp.provider.os.path.isdir", lambda root: True)
     monkeypatch.setattr(
-        "codeintel.providers.lsp._project_access_failure",
+        "codeintel.engines.lsp.provider._project_access_failure",
         lambda root: (
             f"repository root is not readable by codeintel (PermissionError: {root})",
             "grant repository access",
@@ -936,7 +936,7 @@ def test_an_unreadable_repository_never_launches_serena(monkeypatch):
 
 def test_boot_failed_on_a_respawn_does_not_blame_a_cold_cache(monkeypatch):
     """`uvx` populated its cache on the first attempt, so "still downloading" is only true once."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which",
                         lambda x: "/fake/uvx" if x == "uvx" else None)
     p = LspProvider()
     p._sessions["/my/repo"] = _failed_session(attempt=2)
@@ -949,7 +949,7 @@ def test_boot_failed_on_a_respawn_does_not_blame_a_cold_cache(monkeypatch):
 
 def test_boot_failed_with_an_installed_serena_does_not_blame_uvx(monkeypatch):
     """An installed binary downloads nothing, so a failed boot there is a real failure."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which",
                         lambda x: "/usr/bin/serena" if x == "serena" else None)
     p = LspProvider()
     assert p._cmd == "serena"
@@ -968,7 +968,7 @@ def test_boot_failed_hint_carries_the_exception_type_but_not_backend_prose(monke
     text to a calling agent — it can carry instructions addressed to a language model. A boot
     failure is subject to the same rule, so the hint names the exception class and nothing else.
     """
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which",
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which",
                         lambda x: "/fake/uvx" if x == "uvx" else None)
     p = LspProvider()
     p._sessions["/my/repo"] = _failed_session(attempt=2, boot_error="McpError")
@@ -979,7 +979,7 @@ def test_boot_failed_hint_carries_the_exception_type_but_not_backend_prose(monke
 
 def test_a_session_built_by_new_still_answers_the_hint_fields():
     """The `__new__` stub pattern used across these tests must not fault a failure handler."""
-    from codeintel.providers import lsp as lsp_mod
+    from codeintel.engines.lsp import provider as lsp_mod
 
     sess = lsp_mod._LspSession.__new__(lsp_mod._LspSession)
     assert sess.attempt == 1
@@ -988,7 +988,7 @@ def test_a_session_built_by_new_still_answers_the_hint_fields():
 
 def test_respawn_after_cooldown_increments_the_attempt_count(monkeypatch):
     """Without this the second boot would keep excusing itself as a cold cache forever."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     created: list[int] = []
 
     class FakeNewSession:
@@ -1004,7 +1004,7 @@ def test_respawn_after_cooldown_increments_the_attempt_count(monkeypatch):
         def wait_until_settled(self, timeout_s):
             return self.state
 
-    monkeypatch.setattr("codeintel.providers.lsp._LspSession", FakeNewSession)
+    monkeypatch.setattr("codeintel.engines.lsp.provider._LspSession", FakeNewSession)
     p = LspProvider()
     p._sessions["/my/repo"] = _failed_session(attempt=3)
     p._sessions["/my/repo"].cooldown_until = time.monotonic() - 1  # cooldown elapsed
@@ -1052,7 +1052,7 @@ def test_empty_references_without_a_tsproject_are_disclosed_not_asserted(tmp_pat
     empty. Rendered as `## References (0)` at `confidence: complete` that is a confident "nothing
     references this" about the question asked immediately before deleting code — the same sentence
     outcome.py was written to make unsayable, reached from the other side."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     root = _ts_repo(tmp_path, tsconfig=False)
     p = LspProvider()
     p._sessions[root] = _make_fake_session(_State.READY)
@@ -1073,7 +1073,7 @@ def test_empty_references_without_a_tsproject_are_disclosed_not_asserted(tmp_pat
 def test_empty_references_with_a_tsproject_remain_a_real_answer(tmp_path, monkeypatch):
     """The other half, and the one that keeps `partial` worth reading: where the backend COULD
     know, an empty list still means there is nothing, and still says so at complete confidence."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     root = _ts_repo(tmp_path, tsconfig=True)
     p = LspProvider()
     p._sessions[root] = _make_fake_session(_State.READY)
@@ -1107,7 +1107,7 @@ def _stub_references(p, monkeypatch, n: int):
 def test_a_capped_reference_list_is_disclosed_as_truncated(tmp_path, monkeypatch):
     """300 references used to render as `## References (50)` at `confidence: complete` and
     `evidence_class: evidence` — a cut list stated as the whole one, on the op run before a delete."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     root = _ts_repo(tmp_path, tsconfig=True)
     p = LspProvider()
     p._sessions[root] = _make_fake_session(_State.READY)
@@ -1127,7 +1127,7 @@ def test_a_capped_reference_list_is_disclosed_as_truncated(tmp_path, monkeypatch
 
 def test_a_reference_list_at_the_cap_exactly_is_still_complete(tmp_path, monkeypatch):
     """The boundary: 50 references, all listed, is a whole answer and must not be called cut."""
-    monkeypatch.setattr("codeintel.providers.lsp.shutil.which", lambda x: "/fake/uvx")
+    monkeypatch.setattr("codeintel.engines.lsp.provider.shutil.which", lambda x: "/fake/uvx")
     root = _ts_repo(tmp_path, tsconfig=True)
     p = LspProvider()
     p._sessions[root] = _make_fake_session(_State.READY)

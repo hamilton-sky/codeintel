@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from codeintel.symbol_diff import (
+from codeintel.engines.graph.symbol_diff import (
     ADDED,
     BODY,
     REMOVED,

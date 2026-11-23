@@ -28,8 +28,8 @@ import pathlib
 
 import pytest
 
-from codeintel.commands import uninstall as uninstall_cmd
-from codeintel.installer import _AGENTS, _CONFIG, Installer, registered_agents, registered_command
+from codeintel.cli import uninstall as uninstall_cmd
+from codeintel.setup.installer import _AGENTS, _CONFIG, Installer, registered_agents, registered_command
 
 AGENTS = list(_AGENTS)
 
@@ -45,7 +45,7 @@ def _home(tmp_path, monkeypatch) -> None:
 
 
 def _config_path(agent: str) -> pathlib.Path:
-    from codeintel.installer import resolve_config_path
+    from codeintel.setup.installer import resolve_config_path
     return pathlib.Path(resolve_config_path(_CONFIG[agent]))
 
 
@@ -226,7 +226,7 @@ def test_auto_targets_where_it_is_registered_not_what_is_installed(tmp_path, mon
     it, and uninstall must leave it alone — not create its config, not rewrite it, not report work
     on a file it has nothing in.
     """
-    from codeintel.installer import detect_agents
+    from codeintel.setup.installer import detect_agents
 
     _home(tmp_path, monkeypatch)
     (tmp_path / ".codex").mkdir()           # installed, never registered
@@ -300,7 +300,7 @@ def test_doctor_stops_reporting_a_registration_after_uninstall(tmp_path, monkeyp
     """The cross-check between the two halves. `doctor` reads the config independently of the
     installer, so a removal that wrote to a different file than doctor reads would pass every
     assertion above and leave the agent still listed."""
-    from codeintel.doctor import collect_registrations
+    from codeintel.setup.doctor import collect_registrations
 
     _home(tmp_path, monkeypatch)
     Installer().register("claude")

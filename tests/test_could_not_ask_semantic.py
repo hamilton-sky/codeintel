@@ -18,9 +18,9 @@ import os
 
 import pytest
 
-from codeintel.providers.semantic import SemanticProvider
-from codeintel.searcher import Searcher
-from codeintel.semantic_db import DEFAULT_MODEL, model_cache_dir, model_is_cached
+from codeintel.engines.semantic.db import DEFAULT_MODEL, model_cache_dir, model_is_cached
+from codeintel.engines.semantic.provider import SemanticProvider
+from codeintel.engines.semantic.searcher import Searcher
 
 
 class ProxyError(Exception):
@@ -95,7 +95,7 @@ def test_a_previous_failure_does_not_leak_into_a_later_search(tmp_path, monkeypa
 
 def _provider_with_searcher(monkeypatch, tmp_path, **searcher_state):
     """A SemanticProvider whose Searcher reports an index but returns no matches."""
-    import codeintel.providers.semantic as sem
+    import codeintel.engines.semantic.provider as sem
 
     class FakeSearcher:
         def __init__(self, db, model_name=DEFAULT_MODEL):
@@ -117,8 +117,8 @@ def _provider_with_searcher(monkeypatch, tmp_path, **searcher_state):
             pass
 
     monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
-    monkeypatch.setattr("codeintel.searcher.Searcher", FakeSearcher)
-    monkeypatch.setattr("codeintel.semantic_db.SemanticDb", FakeDb)
+    monkeypatch.setattr("codeintel.engines.semantic.searcher.Searcher", FakeSearcher)
+    monkeypatch.setattr("codeintel.engines.semantic.db.SemanticDb", FakeDb)
     return SemanticProvider()
 
 
@@ -174,7 +174,7 @@ def test_query_failed_is_in_the_gateways_unreachable_set():
     Otherwise `context` reports `no-result` — "that symbol does not exist" — from a fan-out where
     the only engine asked could not embed the question.
     """
-    from codeintel.gateway import Gateway
+    from codeintel.gateway.gateway import Gateway
 
     class _Null:
         def __init__(self, engine, reason):
@@ -255,7 +255,7 @@ def test_a_different_models_weights_do_not_count_as_this_one(monkeypatch, tmp_pa
 
 def test_an_unreadable_cache_is_unknown_not_missing(monkeypatch):
     """Claiming the weights are absent because we could not look sends the reader to the wrong fix."""
-    import codeintel.semantic_db as sdb
+    import codeintel.engines.semantic.db as sdb
 
     monkeypatch.setattr(sdb.os, "walk", lambda *a, **k: (_ for _ in ()).throw(OSError("EACCES")))
     monkeypatch.setattr(sdb.os.path, "isdir", lambda p: True)
@@ -264,7 +264,7 @@ def test_an_unreadable_cache_is_unknown_not_missing(monkeypatch):
 
 def test_doctor_separates_never_indexed_from_never_downloaded(monkeypatch, tmp_path):
     """The support burden this exists to end: "it's installed, why doesn't it work"."""
-    from codeintel.doctor import _status_for
+    from codeintel.setup.doctor import _status_for
 
     monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path / "empty"))
     probe = SemanticProvider().probe(str(tmp_path))
@@ -281,7 +281,7 @@ def test_doctor_separates_never_indexed_from_never_downloaded(monkeypatch, tmp_p
 
 def test_uncached_weights_alone_are_a_warn_not_a_failure():
     """On a connected machine this is a download that has not happened yet."""
-    from codeintel.doctor import _status_for
+    from codeintel.setup.doctor import _status_for
 
     healthy = {"installed": True, "runnable": True, "repo_indexed": True, "model_cached": True}
     assert _status_for(healthy) == "ok"

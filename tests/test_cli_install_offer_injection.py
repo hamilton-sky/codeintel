@@ -1,5 +1,5 @@
 """`codeintel install` now offers to wire an agent into codeintel via AGENTS.md after a successful
-registration (`codeintel.injector.offer_injection`) — previously "Start a new agent session to
+registration (`codeintel.setup.injector.offer_injection`) — previously "Start a new agent session to
 pick up the tools" was the only thing printed, so a registered, verified, indexed server sat there
 with no agent ever told to prefer `code.query` over grep.
 
@@ -35,13 +35,13 @@ class _FakeInstaller:
 
 
 def _install(monkeypatch, results, skipped=(), **overrides):
-    monkeypatch.setattr("codeintel.installer.Installer", lambda: _FakeInstaller(results, skipped))
-    return import_module("codeintel.commands.install").run(_args(**overrides))
+    monkeypatch.setattr("codeintel.setup.installer.Installer", lambda: _FakeInstaller(results, skipped))
+    return import_module("codeintel.cli.install").run(_args(**overrides))
 
 
 def test_offer_is_made_after_a_successful_install(monkeypatch):
     calls = []
-    monkeypatch.setattr("codeintel.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr("codeintel.setup.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
 
     code = _install(monkeypatch, [
         {"agent": "claude", "path": "/c/.claude.json", "action": "registered"},
@@ -53,7 +53,7 @@ def test_offer_is_made_after_a_successful_install(monkeypatch):
 
 def test_offer_is_not_made_when_every_registration_failed(monkeypatch):
     calls = []
-    monkeypatch.setattr("codeintel.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr("codeintel.setup.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
 
     code = _install(monkeypatch, [
         {"agent": "codex", "path": "/c/codex.toml", "action": "failed", "reason": "unwritable"},
@@ -68,7 +68,7 @@ def test_offer_is_not_made_when_verification_fails(monkeypatch):
     the exit code already treats it as a failure (`any_ok = False`); the offer follows the same
     signal."""
     calls = []
-    monkeypatch.setattr("codeintel.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr("codeintel.setup.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
 
     code = _install(monkeypatch, [
         {"agent": "claude", "path": "/c/.claude.json", "action": "registered",
@@ -81,7 +81,7 @@ def test_offer_is_not_made_when_verification_fails(monkeypatch):
 
 def test_offer_is_not_made_when_auto_finds_no_agent(monkeypatch):
     calls = []
-    monkeypatch.setattr("codeintel.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr("codeintel.setup.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
 
     code = _install(monkeypatch, [], skipped=["claude", "codex", "zed"])
 
@@ -110,10 +110,10 @@ def test_a_successful_install_writes_nothing_without_a_tty_to_consent(monkeypatc
 def test_dry_run_never_offers_injection_either(monkeypatch):
     """`--dry-run` returns before the real registration path — and before the offer — entirely."""
     calls = []
-    monkeypatch.setattr("codeintel.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
-    monkeypatch.setattr("codeintel.commands.install._run_dry", lambda args: 0)
+    monkeypatch.setattr("codeintel.setup.injector.offer_injection", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr("codeintel.cli.install._run_dry", lambda args: 0)
 
-    code = import_module("codeintel.commands.install").run(_args(dry_run=True))
+    code = import_module("codeintel.cli.install").run(_args(dry_run=True))
 
     assert code == 0
     assert calls == []

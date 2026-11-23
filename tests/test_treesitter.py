@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from codeintel.indexer import _INDEXED_EXTS, _TS_LANG_BY_EXT, Indexer
-from codeintel.semantic_db import SemanticDb
+from codeintel.engines.semantic.db import SemanticDb
+from codeintel.engines.semantic.indexer import _INDEXED_EXTS, _TS_LANG_BY_EXT, Indexer
 
 # A normal dependency — but skip cleanly rather than error if a platform lacks a wheel.
 pytest.importorskip("tree_sitter_language_pack")

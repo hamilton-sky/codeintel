@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from codeintel.http_server import _MAX_BODY_BYTES, CodeIntelHTTPServer, _Handler, _is_loopback, run
+from codeintel.transports.http import _MAX_BODY_BYTES, CodeIntelHTTPServer, _Handler, _is_loopback, run
 
 # A request that reaches a live graph/LSP backend legitimately takes seconds: the backend is a
 # native binary that re-initialises per invocation (~6s measured). The old 5s client timeout was

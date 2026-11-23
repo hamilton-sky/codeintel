@@ -76,6 +76,6 @@ metrics the `hotspots` op surfaces; edges are `CALLS`/`USAGE` relations. Builtin
 
 ## Where it lives
 
-- `src/codeintel/grapher.py` — `build_graph_payload()` (data) and `render_html()` (renderer).
-- `src/codeintel/viewer/graph_template.html` — the self-contained viewer template (ships with the
+- `src/codeintel/mapping/grapher.py` — `build_graph_payload()` (data) and `render_html()` (renderer).
+- `src/codeintel/mapping/viewer/graph_template.html` — the self-contained viewer template (ships with the
   package; `render_html` injects the payload into its `__DATA__` slot).

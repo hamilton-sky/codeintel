@@ -220,8 +220,8 @@ starts at a definition, but a def longer than `max_chunk_lines` is window-split,
 chunks open mid-body and the first meaningful line is whatever the window happened to start on:
 
 ```
-src/codeintel/searcher.py:373 | continue
-src/codeintel/searcher.py:383 | except Exception as exc:
+src/codeintel/engines/semantic/searcher.py:373 | continue
+src/codeintel/engines/semantic/searcher.py:383 | except Exception as exc:
 ```
 
 Correctly located, and useless — nothing says which function that is. Measured with `ast` across
@@ -232,7 +232,7 @@ The parser already knows the enclosing definition when the chunk is cut, so it i
 `chunk_hashes.chunk_symbol` and the preview leads with it when the line does not already name it:
 
 ```
-src/codeintel/searcher.py:373 | search() … except Exception as exc:
+src/codeintel/engines/semantic/searcher.py:373 | search() … except Exception as exc:
 ```
 
 The symbol index is a full walk of the parse tree (not the chunk spans), so the **innermost**

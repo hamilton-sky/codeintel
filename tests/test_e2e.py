@@ -7,11 +7,11 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-import codeintel.providers.semantic as _sem_mod
-from codeintel.gateway import Gateway
-from codeintel.providers.graph import GraphProvider
-from codeintel.providers.lsp import LspProvider
-from codeintel.providers.semantic import SemanticProvider
+import codeintel.engines.semantic.provider as _sem_mod
+from codeintel.engines.graph.provider import GraphProvider
+from codeintel.engines.lsp.provider import LspProvider
+from codeintel.engines.semantic.provider import SemanticProvider
+from codeintel.gateway.gateway import Gateway
 
 
 class _FakeTextEmbedding:
@@ -58,7 +58,7 @@ def fixture_repo(tmp_path):
 
 
 def test_e2e_search_returns_ranked_result(fixture_repo, tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     monkeypatch.setattr(_sem_mod, "_DEPS_OK", True)
 
     with patch("fastembed.TextEmbedding", _FakeTextEmbedding):

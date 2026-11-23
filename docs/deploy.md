@@ -26,7 +26,7 @@ Per-repo settings live in `.codeintel.toml` (see the README). Operational settin
 | `CODEINTEL_DEBUG` | off | `1` to log the full traceback of any error the never-throw contract swallows |
 | `CODEINTEL_REINDEX` | `on` | `off` disables the background reindexer (queries then index inline) |
 | `CODEINTEL_HOME` | `$HOME` | Where codeintel keeps its state (`$CODEINTEL_HOME/.codeintel`). **Set this in any container that overrides `runAsUser`**: `Path.home()` raises for a uid with no `/etc/passwd` entry, and this is the escape hatch that keeps state resolvable (`paths.py`). |
-| `CODEINTEL_BUDGET_MS` | per-query default | Overrides the per-query time budget (`commands/query.py`). |
+| `CODEINTEL_BUDGET_MS` | per-query default | Overrides the per-query time budget (`cli/query.py`). |
 | `CODEINTEL_GRAPH_RESOLVE_TIMEOUT_MS` | `20000` | How long symbol resolution may take before the graph engine gives up. Raise it if the backend is merely slow on this machine — the safe-null hint says so too. |
 
 The semantic index is a single per-machine SQLite file at `~/.codeintel/semantic.db` — or `$CODEINTEL_HOME/.codeintel/semantic.db` when that is set. Mount it on a persistent volume so a restart doesn't re-index from cold.

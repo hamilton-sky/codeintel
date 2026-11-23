@@ -13,10 +13,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from codeintel.indexer import Indexer
-from codeintel.reset import run_reset
-from codeintel.searcher import Searcher
-from codeintel.semantic_db import DEFAULT_MODEL, SemanticDb, default_db_path, release_embedder
+from codeintel.engines.semantic.db import DEFAULT_MODEL, SemanticDb, default_db_path, release_embedder
+from codeintel.engines.semantic.indexer import Indexer
+from codeintel.engines.semantic.searcher import Searcher
+from codeintel.setup.reset import run_reset
 
 
 def test_release_embedder_severs_native_session_owners():
@@ -63,7 +63,7 @@ def test_different_model_repos_do_not_wipe_each_other(tmp_path, monkeypatch):
     # The reverted fix wiped the whole shared cache on a model mismatch; with two repos on
     # different models that meant they perpetually destroyed each other. Per-model files make it
     # physically impossible.
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     (tmp_path / "a").mkdir(); (tmp_path / "a" / "a.py").write_text("def a():\n    return 1\n")
     (tmp_path / "b").mkdir(); (tmp_path / "b" / "b.py").write_text("def b():\n    return 2\n")
 
@@ -107,7 +107,7 @@ def test_ensure_embeddings_table_skips_on_dimension_mismatch(tmp_path):
 # --------------------------------------------------------------------------- path invariants
 
 def test_default_db_path_invariants(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     d = default_db_path
     legacy = str(tmp_path / "semantic.db")
     assert d() == d(None) == d("") == d("  ") == d(DEFAULT_MODEL) == legacy   # default → legacy file
@@ -119,7 +119,7 @@ def test_default_db_path_invariants(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- reset across files
 
 def test_scoped_reset_sweeps_all_model_files_but_spares_other_projects(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
     real_a = os.path.realpath(str(tmp_path / "a"))
     real_b = os.path.realpath(str(tmp_path / "b"))
     # project A has rows in TWO model files; project B has rows in the default file
@@ -143,9 +143,9 @@ def test_probe_and_build_result_resolve_the_same_file(tmp_path, monkeypatch):
     # regression for the divergence the CHANGELOG says it closed (build_result used a module
     # _DB_PATH, probe used default_db_path()): with a NON-default model both must hit the same file,
     # or probe reports "not indexed" for a repo build_result just indexed.
-    monkeypatch.setattr("codeintel.semantic_db._base_dir", lambda: tmp_path)
-    monkeypatch.setattr("codeintel.providers.semantic._DEPS_OK", True)
-    from codeintel.providers.semantic import SemanticProvider
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: tmp_path)
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
+    from codeintel.engines.semantic.provider import SemanticProvider
     repo = tmp_path / "r"; repo.mkdir()
     (repo / ".codeintel.toml").write_text('model = "custom-384-model"\n')
     (repo / "m.py").write_text("def f():\n    return 1\n")

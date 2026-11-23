@@ -36,7 +36,7 @@ import pathlib
 import numpy as np
 import pytest
 
-from codeintel.providers.semantic import SemanticProvider
+from codeintel.engines.semantic.provider import SemanticProvider
 
 
 class _FlatEmbedding:
@@ -70,8 +70,8 @@ def repo(tmp_path, monkeypatch):
         )
     from unittest.mock import patch
 
-    from codeintel.indexer import Indexer
-    from codeintel.semantic_db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.indexer import Indexer
 
     with patch("fastembed.TextEmbedding", _FlatEmbedding):
         db = SemanticDb(str(default_db_path()))
@@ -83,7 +83,7 @@ def repo(tmp_path, monkeypatch):
 
 def _forget_completion(repo_path: pathlib.Path) -> None:
     """Exactly what the SIGKILL left: chunks present, completion record absent."""
-    from codeintel.semantic_db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.db import SemanticDb, default_db_path
 
     db = SemanticDb(str(default_db_path()))
     db.init()
@@ -138,8 +138,8 @@ def test_the_gap_counts_the_chunks_the_query_actually_searched(repo):
     env = _search(repo)
     gap = _gap(env, "index-incomplete")
 
-    from codeintel.searcher import Searcher
-    from codeintel.semantic_db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.searcher import Searcher
     db = SemanticDb(str(default_db_path()))
     db.init()
     actual = Searcher(db)._row_count(os.path.realpath(str(repo)))
@@ -157,7 +157,7 @@ def test_a_repository_that_was_never_indexed_is_not_reported_as_incomplete(tmp_p
     empty = tmp_path / "empty"
     empty.mkdir()
 
-    from codeintel.semantic_db import SemanticDb, default_db_path
+    from codeintel.engines.semantic.db import SemanticDb, default_db_path
     db = SemanticDb(str(default_db_path()))
     db.init()
 
@@ -174,7 +174,7 @@ def test_nothing_matched_from_a_half_built_index_says_unknown_rather_than_absent
     """The most dangerous sentence this provider can produce. A null result carries no `gaps` — by
     design, `reason` is the whole story there — so the caveat has to ride the hint, and it has to
     say UNKNOWN rather than letting `below-floor` read as a fact about the repository."""
-    import codeintel.providers.semantic as sem
+    import codeintel.engines.semantic.provider as sem
 
     class FakeSearcher:
         def __init__(self, db, model_name=None):
@@ -205,8 +205,8 @@ def test_nothing_matched_from_a_half_built_index_says_unknown_rather_than_absent
             return None          # the interrupted pass
 
     monkeypatch.setattr(sem, "_DEPS_OK", True, raising=False)
-    monkeypatch.setattr("codeintel.searcher.Searcher", FakeSearcher)
-    monkeypatch.setattr("codeintel.semantic_db.SemanticDb", FakeDb)
+    monkeypatch.setattr("codeintel.engines.semantic.searcher.Searcher", FakeSearcher)
+    monkeypatch.setattr("codeintel.engines.semantic.db.SemanticDb", FakeDb)
 
     env = SemanticProvider().build_result("search", "anything", [], 0, str(tmp_path))
 

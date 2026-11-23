@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import codeintel.server as srv
+import codeintel.transports.mcp as srv
 from tests.test_changed_range import _ask, _branch, _edge, _Graph, _provider
 from tests.test_mcp_server import _registered_tools
 
@@ -78,7 +78,7 @@ def test_an_answer_that_fits_is_passed_through_unchanged(monkeypatch, tmp_path):
 
 
 def test_the_cli_json_still_prints_every_row(monkeypatch, capsys, big_answer):
-    from codeintel.commands import query
+    from codeintel.cli import query
 
     monkeypatch.setattr(query, "_query", lambda args: dict(big_answer))
     args = SimpleNamespace(op="changed", target="main", engine="auto", project_root=None, json=True)
