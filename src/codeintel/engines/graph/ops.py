@@ -655,10 +655,17 @@ class GraphOps(DispatchCallers, ChangedSince):
                 f"`{root}` is not inside a git work tree, so there are no uncommitted changes to "
                 f"report. Run it from a git checkout of this project (`git init` or `git clone`), "
                 f"or ask `callers` about specific symbols instead.")
-        changed_paths, untracked = changed_range.uncommitted_paths(root)
+        changed_paths, untracked, status_error = changed_range.uncommitted_paths(
+            root, self._answered_root or root)
         # Read BEFORE `detect_changes`, for the reason `changed.py` gives at its own call: that call
         # opens the db, and a stamp taken after it would read "just now" for every index there is.
-        age = changed_range.graph_index_age(project, root, changed_paths + untracked)
+        if status_error:
+            # No list of uncommitted files, nothing to date: HEAD alone would read as "fresh".
+            age = changed_range.IndexAge(
+                "unknown", f"git could not list the uncommitted files ({status_error}), so their "
+                           "age against the graph index cannot be read")
+        else:
+            age = changed_range.graph_index_age(project, root, changed_paths + untracked)
         try:
             raw = self._run("detect_changes", {"project": project}, max(timeout_ms, 15000))
             if not isinstance(raw, dict):

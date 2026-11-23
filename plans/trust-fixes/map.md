@@ -43,6 +43,7 @@ Also, every regression test added for a finding fails on main eb0902f and passes
 - (decided, brief) The lint bar is CI's `ruff check src tests bench`, replacing the brief's `ruff check .` in the bar, commands.md and ticket 13. Acceptance tests under `plans/` are not ruff-gated. Recorded in spec.md Decisions ("The lint bar").
 - (decided, brief) The project has no build step. commands.md's Build, `python -m compileall -q src/codeintel`, is a stand-in syntax check that is in neither `pyproject.toml` nor CI.
 - 01 — `changed` checks index age in every mode: `core.paths.graph_db_mtime/graph_db_stamp/graph_slug`, HEAD `%ct` counts, no slack; uncommitted mode refuses `not-a-git-repo` via `changed_range.in_work_tree`; tests get a fresh `graph_index_age` stub unless they request `real_index_age`.
+- 01 — round 1 fixes: a failed `git status` gives `index-age-unknown`; uncommitted paths are scoped to the answered project's root; `graph_db_stamp` returns 0 on any OSError.
 
 ## Open questions
 

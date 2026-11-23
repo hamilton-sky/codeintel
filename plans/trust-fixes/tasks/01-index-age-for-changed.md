@@ -1,7 +1,7 @@
 # Make `changed` check index age in every mode, against HEAD's commit time, with no slack
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 Test first: yes
 Level: 3
@@ -110,6 +110,19 @@ Work started at commit 23e7ab74dde64b646c0a861ff8bb6c0d210a5234. Test-only commi
 - Ticket 03: `core.paths.graph_db_stamp(root)` is ready for the cache key.
 - Docs (likely ticket 13, `docs/graph.md` is outside this ticket's Touches): `docs/graph.md` ~566 says "a plain commit does not count" for `stale-index`; that is now false (HEAD's commit time counts, no 2 s slack), and uncommitted `changed` now has `stale-index`/`index-age-unknown` and `not-a-git-repo`.
 - `tests/test_changed_range.py::test_a_plain_commit_after_the_index_does_not_make_it_stale` still passes (its index is dated in the future, after the commit) but its name and docstring describe the old rule; I left them as they were.
+
+**Review fixes (round 1)**
+
+Work for this round started at commit 390732d. Test-only commit: 3a03d20 (5 new tests in `tests/test_index_age.py`; 4 failed before the fix for the right reasons: no `index-age-unknown` gap, a `stale-index` from an edit outside the project, and two `PermissionError`s escaping `graph_db_stamp`).
+
+1. major, `git status` failure read as fresh: fixed. `changed_range.uncommitted_paths` now returns `(changed, untracked, error)`; `error` names the failed call (`` `git status` failed: <stderr> `` or the `rev-parse --show-toplevel` one). `GraphOps._op_changed` then skips `graph_index_age` and uses `IndexAge("unknown", "git could not list the uncommitted files (...), so their age against the graph index cannot be read")`, which `_uncommitted_age_gap` turns into `index-age-unknown` and `partial`. Test: `test_a_failed_git_status_is_index_age_unknown_never_fresh` (patches `changed_range._git` to fail `status` only, asserts the gap names `git status` and the stderr).
+2. minor, `graph_db_stamp` could raise: fixed. The stat and scandir work is wrapped in `except OSError: return 0`; docstring says "missing or cannot be read". Tests: `test_an_unreadable_cache_directory_gives_a_zero_stamp`, `test_an_unreadable_db_file_does_not_raise_from_the_stamp`. `graph_db_mtime` still lets a PermissionError out on purpose: its only caller, `graph_index_age`, catches it and answers `unknown` with the exception name, which is truer than "not found".
+3. minor, misnamed test: renamed to `test_a_commit_older_than_the_index_does_not_make_it_stale`, docstring and comment now say what it pins (index written after the commit and the files is fresh). Assertions unchanged.
+4. minor, repo-wide paths: fixed by filtering. `uncommitted_paths(root, within)` keeps only paths under `realpath(within or root)`; ops passes `self._answered_root or root`, i.e. the directory of the graph project that answers (an ancestor project's root when answered from one, so no edit `detect_changes` can report is dropped). Tests: `test_an_edit_outside_the_answered_project_does_not_make_its_index_stale` and its positive control `test_an_edit_inside_the_answered_project_still_makes_its_index_stale`. HEAD's commit time is still repo-wide (a commit anywhere in the repo counts); that is the ticket's rule.
+
+Proof (round 1): `.venv/bin/pytest tests/test_index_age.py tests/test_changed_range.py tests/test_reset.py tests/test_graph_real.py tests/test_null_reason_and_ripple.py tests/test_graph_failure_population.py tests/test_dispatch_callers.py tests/test_mcp_answer_size.py tests/test_gateway.py -q -o addopts=` -> 356 passed, 1 skipped. `tests/test_qualifier_scan.py test_graph_provider.py test_mcp_server.py test_cli_commands.py` -> 207 passed. `ruff check src tests bench` clean, `mypy` no issues (87 files), c4 check 0 gating findings, compileall OK. Acceptance `test_tf_freshness.py`: 5 passed, 9 failed (the same tickets 02/03 tests as before). `grep -rn "stale-index\|index-age-unknown" tests/` outside `test_index_age.py`/`test_changed_range.py` finds only comments in `conftest.py`. Whole Test command: left to the conductor's gate.
+
+For later tickets (round 1): `uncommitted_paths` returns a 3-tuple now; an `error` must be read as "cannot tell".
 
 ## Review findings (round 1, pair review)
 

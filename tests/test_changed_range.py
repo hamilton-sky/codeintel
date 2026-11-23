@@ -828,12 +828,13 @@ def test_a_fresh_index_raises_neither_staleness_gap(monkeypatch, tmp_path, repo,
     assert "stale-index" not in kinds and "index-age-unknown" not in kinds
 
 
-def test_a_plain_commit_after_the_index_does_not_make_it_stale(
+def test_a_commit_older_than_the_index_does_not_make_it_stale(
         monkeypatch, tmp_path, repo, real_index_age):
-    """A commit records content that was already on disk, so it says nothing about whether the
-    index saw it. Counting it flagged every query after every commit."""
+    """HEAD's commit time counts against the index (tests/test_index_age.py pins a commit after
+    it), but only when it is newer: an index written after the commit and after every file was
+    last touched is fresh."""
     p = _provider(monkeypatch, tmp_path, repo, _standard_graph(), index="fresh")
-    # An index written before the commit, but after every file was last touched:
+    # An index written after the commit, and after every file was last touched:
     db = tmp_path / "graph-cache" / f"{PROJECT}.db"
     base = time.time() + 600
     os.utime(db, (base, base))

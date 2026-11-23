@@ -72,23 +72,29 @@ def graph_db_stamp(project_root: str) -> int:
     Reads ``<graph_cache_dir()>/<graph_slug(realpath root)>.db`` and its ``-wal``. A root that has
     no db of its own may be answered from a project that contains it, so the newest ``*.db`` or
     ``*.db-wal`` in the directory stands in: a write to any index then still moves the stamp. 0
-    when the directory is missing."""
+    when the directory is missing or cannot be read."""
     directory = graph_cache_dir()
     if not os.path.isdir(directory):
         return 0
-    own = _db_stamps_ns(os.path.join(directory, graph_slug(os.path.realpath(str(project_root))) + ".db"))
-    if own:
-        return max(own)
-    newest = 0
-    with os.scandir(directory) as entries:
-        for entry in entries:
-            if not entry.name.endswith((".db", ".db-wal")):
-                continue
-            try:
-                newest = max(newest, entry.stat().st_mtime_ns)
-            except FileNotFoundError:
-                continue
-    return newest
+    try:
+        own = _db_stamps_ns(
+            os.path.join(directory, graph_slug(os.path.realpath(str(project_root))) + ".db"))
+        if own:
+            return max(own)
+        newest = 0
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.endswith((".db", ".db-wal")):
+                    continue
+                try:
+                    newest = max(newest, entry.stat().st_mtime_ns)
+                except FileNotFoundError:
+                    continue
+        return newest
+    except OSError:
+        # Unreadable (a permission error, a stale mount): the age is unknown, and callers such as
+        # a cache key must never fail on it.
+        return 0
 
 
 def graph_db_mtime(project: str) -> float | None:

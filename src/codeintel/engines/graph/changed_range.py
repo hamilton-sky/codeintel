@@ -488,18 +488,22 @@ def in_work_tree(root: str) -> bool:
     return code == 0 and out.strip() == b"true"
 
 
-def uncommitted_paths(root: str) -> tuple[list[str], list[str]]:
-    """`(changed, untracked)` paths of the working tree, as absolute paths, from
+def uncommitted_paths(root: str, within: str = "") -> tuple[list[str], list[str], str]:
+    """`(changed, untracked, error)` for the working tree, as absolute paths, from
     `git status --porcelain`. Porcelain paths are relative to the repository's top level, not to
-    *root*, which can be a subdirectory, so they are joined to that. Both lists are empty when git
-    cannot answer, which the index-age check then reads as "nothing to date"."""
-    code, top, _ = _git(root, "rev-parse", "--show-toplevel")
+    *root*, which can be a subdirectory, so they are joined to that. Only paths under *within*
+    (default *root*), the directory the graph project indexes, are kept: an edit beside it is not
+    in its index. *error* is empty on success; otherwise it names the git call that failed and why,
+    and both lists are empty, which the caller must read as "cannot tell", never as "nothing
+    changed"."""
+    code, top, err = _git(root, "rev-parse", "--show-toplevel")
     if code != 0 or not top.strip():
-        return [], []
+        return [], [], f"`git rev-parse --show-toplevel` failed: {err or f'exit {code}'}"
     base = os.fsdecode(top.strip())
-    code, out, _ = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    code, out, err = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if code != 0:
-        return [], []
+        return [], [], f"`git status` failed: {err or f'exit {code}'}"
+    scope = os.path.realpath(within or root)
     changed: list[str] = []
     untracked: list[str] = []
     entries = out.split(b"\0")
@@ -512,8 +516,11 @@ def uncommitted_paths(root: str) -> tuple[list[str], list[str]]:
         status, path = entry[:2], os.path.join(base, os.fsdecode(entry[3:]))
         if status[:1] in (b"R", b"C"):
             i += 1                     # the next entry is the rename's source path
+        real = os.path.realpath(path)
+        if real != scope and not real.startswith(scope.rstrip(os.sep) + os.sep):
+            continue
         (untracked if status == b"??" else changed).append(path)
-    return changed, untracked
+    return changed, untracked, ""
 
 
 def _ago(seconds: float) -> str:
