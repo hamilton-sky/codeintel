@@ -1,7 +1,7 @@
 # Make graph hints name only tools the agent has, suggest close names, and stop leaking project ids
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 02, 04, 07
 Test first: yes
 Level: 3
@@ -117,3 +117,29 @@ Work started at commit dcbb275f0061ce993d1db4c54acaf636a58b07be. Test-only commi
 **For later tickets**
 - `src/codeintel/engines/graph/ops.py:518` (ticket 04's `chain` `target-not-found` hint) still names `index_repository`. ops.py is not on this ticket's Touches. Ticket 15 finding 3 already covers it, and the fix is "`codeintel index <root>` (or ask the user to run it)". After that, the spec line "No hint names `index_repository`" holds everywhere.
 - Ticket 13 (CHANGELOG): did-you-mean on not-in-graph; backend stderr stripped of project lists and flattened paths, and its tool names rewritten; "project not found" now gives `project-not-indexed`; op-specific no-edges hint; `_dependency_kinds` limited to `_EDGE_KINDS`; `symbol`/`search` on the graph engine name their own engine; `changes` dropped from the ops list.
+
+## Review findings (round 1, pair review)
+
+QUALITY
+1. major tests/test_agent_hints.py: `test_a_failed_name_search_leaves_the_hint_without_names_and_the_reason_alone` checks `"did you mean" not in env["hint"]`, but the code writes " Did you mean: " (capital D, provider.py `_did_you_mean`), so the assertion passes even when suggestions are printed and nothing pins "a failed lookup gives no suggestions". Fix: compare case-insensitively (`not in hint.lower()`) or assert no backticked candidate appears.
+2. minor src/codeintel/engines/graph/provider.py: `_did_you_mean` calls `_search_symbols` directly with the full `timeout_ms`, not via `_guarded(..., surface=False)`; a failed suggestion search leaves `_last_failure` set after a not-in-graph answer and costs one extra backend launch of up to a full budget per unknown name. Fix: route through `_guarded(surface=False)` or the remaining scope budget, and restore the earlier failure state.
+3. minor src/codeintel/engines/graph/backend.py: `_FLATTENED_PATH` only withholds double-quoted ids; `project home-alice-work-repo not found` and `'home-alice-work-repo'` pass unchanged. No live leak on 0.10.8, but the ticket says "any flattened absolute path". Fix: also match single-quoted and bare hyphen-slug tokens next to "project".
+4. minor src/codeintel/engines/graph/backend.py: `_TOOL_NAMES` does not rewrite `list_projects`. Fix: map it to `code.status` or drop it.
+5. minor src/codeintel/engines/graph/provider.py: with `resolution.is_ancestor`, the not-in-graph return comes before the "Scope:" note, so did-you-mean names can come from outside the caller's root undisclosed, and a role without `pattern` can list names via typos. Fix: skip suggestions when `resolution.is_ancestor`, or add the scope note.
+
+Probes: target metacharacters/length, op strings, backend stderr shapes (incl. live 0.10.8 reply), ancestor scope: no cross-tenant id read. Done when: 405 passed, 1 deselected, 1 xfailed; no `index_repository` in provider.py; full suite 2379 passed (only the deselected root-only test fails). test_tf_hints.py cannot run here (temp HOME with warm daemon). END 86c2633 = HEAD.
+
+codeintel: changed dcbb275f0061ce993d1db4c54acaf636a58b07be: helped
+
+REVIEW: FAIL
+
+SPEC
+- New tests/test_agent_hints.py fails on main and passes here (close name listed without backend tool names; ids withheld; "project not found" -> project-not-indexed; `--op symbol` hint without self-suggestion or `changes`; callees no-edges hint without "dead code" or `1 1`, callers keeps the caveat): MET.
+- `_suggest_op` tests pass; ten-file pytest command passes; all existing tests pass: MET (2379 passed, 31 skipped, 1 deselected, 1 xfailed).
+- `grep -rn "index_repository" src/codeintel/engines/graph/provider.py` finds nothing: MET.
+- scope: OK.
+- test first: OK.
+
+Notes: acceptance test_tf_hints.py and one test_tf_http.py test fail because indexing into a temp HOME is refused while the warm daemon runs (environment). Quality note: "Did you mean:" is capitalised, so `"did you mean" not in env["hint"]` in test_a_failed_name_search_leaves_the_hint_without_names_and_the_reason_alone can never fail. END 86c2633 = HEAD. Answer not read.
+
+REVIEW: PASS
