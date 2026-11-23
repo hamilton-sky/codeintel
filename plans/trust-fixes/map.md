@@ -1,0 +1,51 @@
+# Map: trust-fixes
+
+## Destination
+
+The 34 red-team findings that map to blue-team fixes T1-T10 are fixed. Each one is pinned by a regression test built from its repro in `.feature-flow/state/redblue-findings.md`. An agent can act on `confidence: complete` and `safe_for_destructive: true`: known graph blind spots (aliased imports, sibling/interface dispatch, nested shadowing, `lsp_ts_local`) add a gap. Every graph answer, and the gateway cache, notices a stale or rebuilt index. `chain A->B` honours B. No write leaves the repo through a symlink. Every hint names a tool or command the agent really has.
+
+**The bar.** In the repo venv, these all pass:
+
+- `.venv/bin/pytest tests/ -q --deselect tests/test_doctor.py::test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read`
+- `.venv/bin/ruff check src tests bench` (CI's own lint command; it replaces the brief's `ruff check .`, decided by the user, see below)
+- `.venv/bin/mypy`
+- `.venv/bin/codeintel c4 . --check --out /tmp/codeintel-c4-check` (exit 0, "0 gating finding(s)")
+
+Also, every regression test added for a finding fails on main eb0902f and passes on the branch. Ticket 13 runs all of it.
+
+## How to work this
+
+- See what is ready: `python3 scripts/flow-status.py trust-fixes`. Take the lowest numbered READY ticket.
+- Claim: set `Status: claimed` in the ticket and save before starting.
+- Resolve: write the result under `## Answer`, set `Status: resolved`, then add one line to Decisions so far below.
+- See the graph: `python3 scripts/flow-status.py trust-fixes --mermaid` (coloured by status, drawn on demand).
+- Commands live in `commands.md` (frozen). Lessons live in `learnings.md` (append only).
+- Status lives only in the ticket files. This map never repeats it.
+- Read the finding's Repro/Observed/Expected in `.feature-flow/state/redblue-findings.md` and the matching T-section of `.feature-flow/state/redblue-fixplan.md` before writing the regression test. Line numbers there are from 0.29.3, so search by function name.
+- Run tools as `.venv/bin/<tool>`. PATH is not set for subagents.
+
+## Decisions so far
+
+- (plan) The gate's Test command deselects `tests/test_doctor.py::test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read`. It is a known failure on main eb0902f that appears only when the suite runs as root: this container is root, CI is not. The coordinator measured the full suite at ~3m50s, with 2168 passed, 31 skipped and that 1 failed. Do not "fix" it in this feature.
+- (plan) `codeintel c4 . --check` is run with `--out /tmp/codeintel-c4-check`, because without `--out` it writes `codeintel-c4/` into the repo. It reads the existing graph index. `tests/test_architecture.py`, in the Test command, enforces the same layer rule from the AST.
+- (plan) Every CHANGELOG entry is written once in ticket 13, so `CHANGELOG.md` does not force every ticket to be built alone.
+- (plan) Outside facts relied on:
+  - `O_NOFOLLOW` fails with ELOOP when the last component is a symlink, and `O_CREAT|O_EXCL` fails on any symlink. docs: https://manpages.debian.org/trixie/manpages-dev/open.2.en.html
+  - `%ct` is the committer timestamp. docs: https://git-scm.com/docs/pretty-formats
+  - An uncaught KeyboardInterrupt re-raises SIGINT on POSIX. docs: https://github.com/python/cpython/issues/41078
+  - The installed `mcp` 2.3.0 serializes a non-string tool result as `TextContent` text with `pydantic_core.to_json(result, fallback=str, indent=2)`. source: `.venv/lib/python3.13/site-packages/mcp/server/mcpserver/utilities/func_metadata.py` (`_convert_to_content`), installed package `mcp-2.3.0.dist-info`
+  - The MCP spec sets no result size limit. docs: https://modelcontextprotocol.io/specification/2025-11-25/server/tools.md
+  - Claude Code warns above 10,000 tokens of tool output. docs: https://code.claude.com/docs/en/mcp
+
+- (decided, brief) The T6 symlink rule: `CODE_INTEL.md` is never written through a symlink; `AGENTS.md`/`CLAUDE.md`/`USING_CODEINTEL.md` are refused when they or a parent resolve outside the repo root or into its `.git` directory, and followed to a regular file elsewhere in the work tree. Recorded in spec.md Decisions; built in ticket 08.
+- (decided, brief) `status-doctor-no-graph-age` (the 35th finding) stays out: it maps only to Improvement #1. If wanted later, it is one ticket: `cli/status.py` and `setup/doctor.py` print `graph_index_age` through `core.paths.graph_db_stamp`.
+- (decided, brief) `plans/dogfood-fixes` is left untouched by this feature.
+- (decided, brief) The lint bar is CI's `ruff check src tests bench`, replacing the brief's `ruff check .` in the bar, commands.md and ticket 13. Acceptance tests under `plans/` are not ruff-gated. Recorded in spec.md Decisions ("The lint bar").
+- (decided, brief) The project has no build step. commands.md's Build, `python -m compileall -q src/codeintel`, is a stand-in syntax check that is in neither `pyproject.toml` nor CI.
+
+## Open questions
+
+- `plans/dogfood-fixes` overlaps this plan, and its tickets are still open. For the user to act on after this feature, not part of it:
+  - Its 08 (staleness on callers/impact) is superseded by ticket 02 here.
+  - Its 04-06 ("Callers through" for TS structural interfaces) are the full version of the gap that ticket 06 here adds; they can build on 06's `dispatch-sibling-unbound` rows.
+- Live fixtures run against codebase-memory-mcp 0.9.x, which is in this container. 0.10.x behaviour, such as hops that carry `strategy`, is covered by unit fakes only.
