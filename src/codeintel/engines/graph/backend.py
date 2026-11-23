@@ -112,6 +112,9 @@ _STDERR_CAP = 400
 _PROJECT_LIST = re.compile(
     r'(?:"available_projects"\s*:\s*)?(?:\[|^…?)[^\[\]]*\]\s*,\s*"count"\s*:\s*\d+')
 _FLATTENED_PATH = re.compile(r'"[\w.]+(?:-[\w.]+){2,}"')
+# The same id single-quoted, or bare, where the backend names it as the project it was asked about.
+_QUOTED_FLATTENED_PATH = re.compile(r"'[\w.]+(?:-[\w.]+){2,}'")
+_NAMED_PROJECT = re.compile(r"\b(projects?\b\s*[:=]?\s*)[\w.]+(?:-[\w.]+){2,}", re.IGNORECASE)
 _SEARCH_ADVICE = re.compile(
     r'search_graph\(\s*name_pattern\s*=\s*\\?"(?:\.\*)?(.*?)(?:\.\*)?\\?"\s*\)')
 _TOOL_NAMES = (
@@ -119,6 +122,7 @@ _TOOL_NAMES = (
     (re.compile(r"\bsearch_graph\b"), "code.query op=pattern"),
     (re.compile(r"\btrace_path\b"), "code.query op=chain"),
     (re.compile(r"\bindex_repository\b"), "codeintel index"),
+    (re.compile(r"\blist_projects\b"), "code.status"),
 )
 _PROJECT_NOT_FOUND = re.compile(r"project not found", re.IGNORECASE)
 
@@ -132,6 +136,8 @@ def _agent_facing(text: str) -> str:
     """Backend text as a hint may carry it: no project list, no flattened path, no backend tool."""
     text = _PROJECT_LIST.sub("<project list withheld>", text)
     text = _FLATTENED_PATH.sub('"<project>"', text)
+    text = _QUOTED_FLATTENED_PATH.sub("'<project>'", text)
+    text = _NAMED_PROJECT.sub(r"\1<project>", text)
     text = _SEARCH_ADVICE.sub(lambda m: f"code.query op=pattern target={m.group(1)}", text)
     for pattern, replacement in _TOOL_NAMES:
         text = pattern.sub(replacement, text)

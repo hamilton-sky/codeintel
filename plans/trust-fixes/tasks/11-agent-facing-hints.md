@@ -1,7 +1,7 @@
 # Make graph hints name only tools the agent has, suggest close names, and stop leaking project ids
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 02, 04, 07
 Test first: yes
 Level: 3
@@ -143,3 +143,39 @@ SPEC
 Notes: acceptance test_tf_hints.py and one test_tf_http.py test fail because indexing into a temp HOME is refused while the warm daemon runs (environment). Quality note: "Did you mean:" is capitalised, so `"did you mean" not in env["hint"]` in test_a_failed_name_search_leaves_the_hint_without_names_and_the_reason_alone can never fail. END 86c2633 = HEAD. Answer not read.
 
 REVIEW: PASS
+
+## Answer (round 2)
+
+Work for round 2 started at commit 0d84db0752c6869823bcef73fa2d30c5d43e6432. Test-only commit: 163b497.
+
+**Built**
+- `tests/test_agent_hints.py`: the failed-search test now checks case-insensitively and that no backticked candidate appears. New tests: a failing suggestion search leaves `_last_failure` as it found it, adds no gap and gets less than the full budget; an ancestor-scoped not-in-graph answer runs no name search and lists no names; `_agent_facing` withholds a flattened id bare, single-quoted, double-quoted and after `project:` (4 cases); `list_projects` becomes `code.status`; a bare id in real stderr (fake `sh` backend) never reaches the envelope.
+- `src/codeintel/engines/graph/provider.py`: `_did_you_mean` runs its one search through `_guarded(..., surface=False)` on `timeout_ms // 4` (`_CLOSE_NAME_SEARCH_SHARE`). A non-list result gives no names. `build_result` skips `_did_you_mean` when `resolution.is_ancestor`.
+- `src/codeintel/engines/graph/backend.py`: `_QUOTED_FLATTENED_PATH` (single-quoted slug, two or more hyphens) and `_NAMED_PROJECT` (a bare slug right after `project`/`projects`, with an optional `:`/`=`) are replaced with `<project>`. `_TOOL_NAMES` maps `list_projects` to `code.status`.
+
+**Proof**
+- At 163b497 (tests only), `.venv/bin/pytest tests/test_agent_hints.py -q -o addopts=` gave 7 failed, 16 passed. The failures were the old behaviour: `_last_failure` still held the timeout, ancestor scope listed `compact_for_mcp`, three id shapes passed through `_agent_facing`, `list_projects` passed through, and the bare id was in the hint. The double-quoted case already passed. After the fix: 23 passed.
+- Check block (the exact `$` command): `413 passed, 1 deselected, 1 xfailed`, exit 0.
+- `grep -rn "index_repository" src/codeintel/engines/graph/provider.py`: no output, exit 1.
+- Neighbouring files (test_cold_process, test_graph_real, test_mcp_server, test_gateway, test_cli_commands, test_never_raise, test_redaction_boundary, test_rbac, test_chain_destination, test_architecture, test_wire_text): 371 passed, 3 skipped. The whole Test command is left to the conductor's gate.
+- `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 files. compileall: ok. `codeintel c4 . --check`: 0 gating findings. It needs `/root/.cache/codebase-memory-mcp/0.10.8` on PATH, because the backend is not on the default PATH here. Without that it fails with engine-unavailable, with or without this change.
+- Live (0.10.8 on PATH): `codeintel query --op callers --target compact_for_mcpp --engine graph` still gives "Did you mean: `compact_for_mcp`?".
+
+**Decisions**
+- The suggestion budget is a quarter of the answer's `timeout_ms`, not the remaining scope budget. Outside an op's `_lookup_scope` there is no running scope, so `_guarded` alone would still allow a full budget.
+- Under ancestor scope, suggestions are skipped rather than disclosed with a scope note. That costs no backend call, and a role without `pattern` cannot list names through typos.
+- A bare slug is stripped only right after the word `project(s)`. A bare hyphenated token anywhere else is left alone: `codebase-memory-mcp` and `~/.cache/codebase-memory-mcp/graph.db` must stay readable (`test_backend_failure_detail.py`).
+
+**Shortcuts taken**
+- A bare id that does not follow the word "project" (for example "failed to open home-alice-repo.db") is not stripped. Worth an exact check against the known project list if a backend emits that shape.
+- `is_project_not_found` still matches only the words "project not found". "project <id> not found" stays `backend-error`, with the id withheld.
+
+**Review fixes**
+1. Case-sensitive assertion: it now reads `"did you mean" not in hint.lower()` and also checks that `` `compact_for_mcp` `` is absent. A new test makes the failed search also record a backend failure.
+2. Unguarded search with a full budget: the search now goes through `_guarded(surface=False)` on a quarter budget. The test checks that `_last_failure` is `None` afterwards, that no gap is added, and that the budget is under 30000.
+3. Single-quoted and bare ids: `_QUOTED_FLATTENED_PATH` and `_NAMED_PROJECT` were added, with tests through `_agent_facing` and through a real stderr pipe.
+4. `list_projects`: it now maps to `code.status`, with a test.
+5. Ancestor scope: no suggestions, and no name search runs. Test added.
+
+**For later tickets**
+- Ticket 13 (CHANGELOG): did-you-mean is skipped under ancestor scope, and it uses a quarter of the budget.

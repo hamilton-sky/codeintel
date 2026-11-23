@@ -166,6 +166,8 @@ def _suggest_op(unknown: str) -> list[str]:
 # How many close names a not-in-graph hint offers, and how many the one name search may return.
 _CLOSE_NAMES = 5
 _CLOSE_NAME_SEARCH_LIMIT = 200
+# The suggestion search is an extra to an answer already given, so it gets this share of the budget.
+_CLOSE_NAME_SEARCH_SHARE = 4
 
 
 def _close_names(name: str, candidates: list[str]) -> list[str]:
@@ -842,16 +844,22 @@ class GraphProvider(GraphOps):
 
         One backend name search, for names containing either half of the name (a typo in one half
         still matches the other), ranked by `_close_names`. Best effort: a failed or empty search
-        gives `""`, and the reason of the answer it decorates never changes."""
+        gives `""`, and the reason of the answer it decorates never changes: the search runs through
+        `_guarded(surface=False)`, which puts back the failure state it found, on a quarter of the
+        budget."""
         name = _parse_symbol_target(target).name
         if not name:
             return ""
         half = len(name) // 2
         parts = [name[:half], name[half:]] if half >= 2 else [name]
         pattern = "|".join(re.escape(p) for p in parts)
-        found = self._search_symbols(
-            {"name_pattern": pattern, "limit": _CLOSE_NAME_SEARCH_LIMIT}, project, timeout_ms)
-        close = _close_names(name, [str(r.get("name") or "") for r in found or []])
+        found, _why = self._guarded(
+            lambda budget: self._search_symbols(
+                {"name_pattern": pattern, "limit": _CLOSE_NAME_SEARCH_LIMIT}, project, budget),
+            max(1, timeout_ms // _CLOSE_NAME_SEARCH_SHARE), surface=False)
+        if not isinstance(found, list):
+            return ""
+        close = _close_names(name, [str(r.get("name") or "") for r in found])
         if not close:
             return ""
         return " Did you mean: " + ", ".join(f"`{c}`" for c in close) + "?"
@@ -1090,11 +1098,14 @@ class GraphProvider(GraphOps):
                 # one. The second remedy deliberately does NOT repeat the path: `redact` rewrites
                 # this process's home to `~`, and an agent passing that on as a tool argument has
                 # no shell to expand it. A typo is the likelier cause than a stale index, so the
-                # close names come first.
+                # close names come first — but only from the caller's own project: under an
+                # ancestor they could name code outside the root it asked about.
+                close = ("" if resolution.is_ancestor
+                         else self._did_you_mean(target_str, project, timeout_ms))
                 return safe_null_result(
                     op_str, target_str, engine="graph", reason="not-in-graph",
                     hint=f"{named} is not in the graph index for this project."
-                         f"{self._did_you_mean(target_str, project, timeout_ms)} If you just "
+                         f"{close} If you just "
                          f"added or renamed it, refresh with: `codeintel index {root_str}` (or "
                          f"ask the user to run it).",
                 )
