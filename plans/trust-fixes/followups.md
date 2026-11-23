@@ -23,3 +23,7 @@ What the run left for later: minor findings of passing reviews, the findings a l
 
 - 1. minor src/codeintel/core/redact.py: the leading guard `(?<![\w.~/-])` also lets the home path through where it is a real path: with HOME=/home/alice, `file:///home/alice/x`, `-I/home/alice/inc`, `//home/alice/x` and `/var/home/alice/x` come back unchanged and `contains_home_path` agrees. `redact_text` also runs on backend stderr. Not a live leak today. Consider adding `realpath(home)` as a needle like `/private{home}`, and record the `-I`/`file://` gap next to the stated trade. (pair review)
 - 2. minor src/codeintel/transports/mcp.py: the `root-not-found` hint repeats the caller's `project_root` unescaped and unbounded (only to a caller whose role allows that root). Consider truncating the echoed root. (pair review)
+
+## 10-semantic-failure-handling (left for later)
+
+- 1. minor src/codeintel/engines/semantic/provider.py: `_is_model_load_failure` matches the text "could not load embedding model " that `EmbeddingModelUnavailable` builds in src/codeintel/engines/semantic/db.py:102; rewording that message silently stops the record and no test would catch it. Fix: keep the exception type on the indexer, or define the prefix once in db.py and import it. (pair review)
