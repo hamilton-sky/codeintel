@@ -538,15 +538,45 @@ def test_map_survives_an_unavailable_graph_provider(monkeypatch, capsys):
 
 
 def test_map_inject_reports_what_it_did_to_which_file(monkeypatch, capsys):
+    seen = {}
     monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", lambda provider: _Gen())
     monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
     monkeypatch.setattr("codeintel.setup.injector.Injector",
-                        lambda: type("I", (), {"inject": lambda self, root: ("CLAUDE.md",
-                                                                             "updated")})())
+                        lambda: type("I", (), {"inject": lambda self, root, create=False: (
+                            seen.update(create=create) or ("CLAUDE.md", "updated"))})())
 
     args = _args(project_root=None, inject=True, budget=32768)
     import_module("codeintel.cli.map").run(args)
     assert "Inject: updated block in CLAUDE.md" in capsys.readouterr().out
+    assert seen["create"] is True, "`map --inject` is asked for by name, so it may create AGENTS.md"
+
+
+def test_map_inject_creates_agents_md_when_the_repo_has_no_context_file(monkeypatch, tmp_path,
+                                                                        capsys):
+    """`codeintel install` advises `codeintel map --inject` to wire an agent in. In a repo with
+    neither AGENTS.md nor CLAUDE.md that advice was a no-op ("no-context-file")."""
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", lambda provider: _Gen())
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
+
+    args = _args(project_root=str(tmp_path), inject=True, budget=32768)
+    assert import_module("codeintel.cli.map").run(args) == 0
+    assert "codeintel-map-start" in (tmp_path / "AGENTS.md").read_text()
+    assert f"Inject: created block in {tmp_path / 'AGENTS.md'}" in capsys.readouterr().out
+
+
+def test_map_on_a_symlinked_code_intel_md_exits_1_naming_the_path(monkeypatch, tmp_path, capsys):
+    target = tmp_path / "elsewhere.md"
+    target.write_text("not yours\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "CODE_INTEL.md").symlink_to(target)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
+
+    args = _args(project_root=str(repo), inject=False, budget=32768)
+    assert import_module("codeintel.cli.map").run(args) == 1
+    out = capsys.readouterr().out
+    assert f"Refused to write CODE_INTEL.md: it is a symlink ({repo / 'CODE_INTEL.md'})" in out
+    assert target.read_text() == "not yours\n"
 
 
 def test_map_degrades_instead_of_tracebacking(monkeypatch, capsys):

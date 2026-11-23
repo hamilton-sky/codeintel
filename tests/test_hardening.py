@@ -273,3 +273,135 @@ def test_every_test_server_that_shuts_down_also_closes_its_socket():
     assert not offenders, (
         "these stop a server's loop without releasing its listening socket:\n  "
         + "\n  ".join(offenders))
+
+
+# --------------------------------------------------------------------------- no writes through symlinks
+# A cloned, untrusted repo can ship `CODE_INTEL.md -> ~/.bashrc`. A routine `map`, `index` or
+# `code.map` must not overwrite the target, and the same goes for the injector's files when they
+# resolve outside the repo or into its `.git` directory.
+
+_VICTIM = b"export PATH=/usr/bin\n# the user's own file\n"
+
+
+def _hostile_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_bytes(_VICTIM)
+    return repo, victim
+
+
+def test_map_refuses_symlinked_code_intel_md(tmp_path, monkeypatch, capsys):
+    import argparse
+    from importlib import import_module
+
+    repo, victim = _hostile_repo(tmp_path)
+    (repo / "CODE_INTEL.md").symlink_to(victim)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no backend")))
+
+    args = argparse.Namespace(project_root=str(repo), inject=False, budget=32768)
+    assert import_module("codeintel.cli.map").run(args) == 1
+    out = capsys.readouterr().out
+    assert "Refused to write CODE_INTEL.md: it is a symlink" in out
+    assert str(repo / "CODE_INTEL.md") in out
+    assert victim.read_bytes() == _VICTIM
+    assert (repo / "CODE_INTEL.md").is_symlink()
+
+
+def test_index_refresh_refuses_symlinked_code_intel_md(tmp_path, monkeypatch, caplog):
+    import argparse
+    import logging
+    from importlib import import_module
+
+    from codeintel.mapping import mapper
+    from tests.test_cli_commands import _stub_index
+
+    real_generator = mapper.MapGenerator
+    repo, victim = _hostile_repo(tmp_path)
+    _stub_index(monkeypatch, repo, has_map=False)
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", real_generator)
+    (repo / "CODE_INTEL.md").symlink_to(victim)
+
+    with caplog.at_level(logging.WARNING):
+        rc = import_module("codeintel.cli.index").run(argparse.Namespace(project_root=str(repo)))
+    assert rc == 0, "a refused refresh is skipped like any other refresh failure"
+    assert victim.read_bytes() == _VICTIM
+    assert any(str(repo / "CODE_INTEL.md") in r.getMessage() and "symlink" in r.getMessage()
+               for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+@pytest.mark.parametrize("target", ["inside", "dangling"])
+def test_map_refuses_code_intel_md_linked_anywhere(tmp_path, caplog, target):
+    import logging
+
+    from codeintel.mapping.mapper import MapGenerator
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    dest = repo / "docs" / "notes.md"
+    dest.parent.mkdir()
+    if target == "inside":
+        dest.write_bytes(_VICTIM)
+    (repo / "CODE_INTEL.md").symlink_to(dest)
+
+    gen = MapGenerator(None)
+    with caplog.at_level(logging.WARNING):
+        path, wrote = gen.write(str(repo), "# CODE_INTEL.md\n\n## Entry Points\n- `main`\n")
+    assert (path, wrote) == (str(repo / "CODE_INTEL.md"), False)
+    assert "it is a symlink" in gen.last_refusal and str(repo / "CODE_INTEL.md") in gen.last_refusal
+    if target == "inside":
+        assert dest.read_bytes() == _VICTIM
+    else:
+        assert not dest.exists(), "a dangling link was followed and its target created"
+    assert (repo / "CODE_INTEL.md").is_symlink()
+    assert any("symlink" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("via", ["link", "parent-dir"])
+@pytest.mark.parametrize("name", ["AGENTS.md", "CLAUDE.md", "USING_CODEINTEL.md"])
+def test_inject_refuses_context_files_linked_outside_the_repo(tmp_path, name, via):
+    from codeintel.setup.injector import Injector
+
+    repo, victim = _hostile_repo(tmp_path)
+    if via == "link":
+        (repo / name).symlink_to(victim)
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / name
+        victim.write_bytes(_VICTIM)
+        (repo / "sub").symlink_to(outside, target_is_directory=True)
+        (repo / name).symlink_to(os.path.join("sub", name))
+    if name == "USING_CODEINTEL.md":
+        (repo / "AGENTS.md").write_text("# rules\n")
+
+    inj = Injector()
+    path, action = inj.inject(str(repo))
+
+    assert victim.read_bytes() == _VICTIM
+    assert any(str(repo / name) in m and "outside the repo" in m for m in inj.refusals), inj.refusals
+    if name == "USING_CODEINTEL.md":
+        assert "codeintel" in (repo / "AGENTS.md").read_text()  # the safe file is still written
+    else:
+        assert (path, action) == (None, "refused")
+
+
+@pytest.mark.parametrize("git_file", ["config", "hooks/pre-commit"])
+def test_inject_refuses_agents_md_linked_into_the_git_dir(tmp_path, git_file):
+    from codeintel.setup.injector import Injector
+
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    config = repo / ".git" / "config"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    config.write_bytes(b"[core]\n\tbare = false\n")
+    hook.write_bytes(b"#!/bin/sh\nexit 0\n")
+    before = {config: config.read_bytes(), hook: hook.read_bytes()}
+    (repo / "AGENTS.md").symlink_to(os.path.join(".git", git_file))
+
+    inj = Injector()
+    assert inj.inject(str(repo)) == (None, "refused")
+
+    assert {p: p.read_bytes() for p in before} == before
+    assert any(str(repo / "AGENTS.md") in m and ".git" in m for m in inj.refusals), inj.refusals
