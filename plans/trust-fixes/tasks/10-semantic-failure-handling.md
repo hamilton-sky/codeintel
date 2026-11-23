@@ -1,7 +1,7 @@
 # Persist semantic model failures, report them in doctor and status, and fall back to graph name search
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 03
 Test first: yes
 Level: 3
@@ -116,3 +116,7 @@ Work started at commit cbc476df60570c3a3b952601e68113435ff082cb. Test-only commi
 **For later tickets**
 - `codeintel index` (`src/codeintel/cli/index.py`), the background reindexer's semantic pass (`gateway/reindexer.py`) and `setup/onboarding.py` do NOT write or clear the record: they were outside Touches. Only the provider's inline and background passes do. As a result, 4 of the 9 acceptance tests in `plans/trust-fixes/acceptance/test_tf_semantic_failure.py` still fail: search-within-1s, doctor, status, and FASTEMBED_CACHE_PATH-change. Each sets up its failure with `codeintel index`, so no record exists. Measured: 4 failed, 5 passed. The fallback, RBAC and reindexer-order tests pass. The fix is one call each: `_write_model_failure(model, indexer.last_error)` on `< 0` and `_clear_model_failure(model)` otherwise, at least in `cli/index.py`. That needs a new ticket or a widened Touches before ticket 13's acceptance run.
 - Ticket 12 can key the prompt steps on doctor's semantic `reason == "model-load-failed"`. Its remediation is `MODEL_FAILURE_FIX` (exported from `engines/semantic/provider.py`).
+
+**Round 2** (reopened by c68543e after the plan repair d2e1906; work started at c68543e)
+- No code change. The gap named under For later tickets (`codeintel index`, the reindexer's semantic pass and onboarding do not write or clear the failure record) is now ticket 16 (`16-semantic-failure-record-everywhere.md`, blocked by 10); it is not built here.
+- Check block re-run on HEAD c68543e: the first command gives `316 passed, 1 xfailed`; the doctor command gives `50 passed, 1 deselected`.
