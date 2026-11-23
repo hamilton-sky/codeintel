@@ -50,7 +50,7 @@ _COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Check health", [
         ("doctor", "Per-engine health + index status, with the fix for each gap"),
         ("status", "Engine readiness and index age at a glance"),
-        ("reset", "Clear the semantic index (recover from a corrupt or stale DB)"),
+        ("reset", "Clear the semantic and graph indexes (corrupt or stale DB)"),
     ]),
     ("Run as a server", [
         ("serve", "Start the MCP server over stdio — what an agent host launches"),
@@ -353,6 +353,7 @@ For agents that cannot read an MCP config: paste the output into the
 conversation.""",
     "reset": """examples:
   codeintel reset .
+  codeintel reset --semantic-only .     clear semantic only, keep the graph
   codeintel reset --all --yes           wipe every repo, no prompt
 
 Recovers from a corrupt or stale index. Re-index afterwards.""",
@@ -658,6 +659,8 @@ def build_parser() -> argparse.ArgumentParser:
     reset_parser.add_argument("project_root", nargs="?", default=None, help="Project root (default: cwd)")
     reset_parser.add_argument("--all", action="store_true",
                               help="Clear the ENTIRE index (all projects), not just this repo")
+    reset_parser.add_argument("--semantic-only", action="store_true",
+                              help="Clear only the semantic index; keep the graph index")
     reset_parser.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
     reset_parser.add_argument("--json", action="store_true", help="Emit the structured JSON report")
 
@@ -712,7 +715,11 @@ def main() -> None:
         print(render_help())    # "help" (`codeintel --no-color help`) — both skip the early-return
                                  # above because argv[0] is the flag, not the command/"help" itself
         sys.exit(0)
-    status = int(import_module(f"codeintel.cli.{module}").run(args))
+    try:
+        status = int(import_module(f"codeintel.cli.{module}").run(args))
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        status = 130
     if args.command in _NATIVE_RUNTIME_COMMANDS:
         _native_safe_exit(status)
     sys.exit(status)

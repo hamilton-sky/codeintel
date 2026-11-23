@@ -656,7 +656,7 @@ class SemanticProvider:
             return _with_model_cache({
                 "installed": True, "runnable": False, "repo_indexed": False,
                 "detail": f"semantic cache present but unreadable ({type(exc).__name__})",
-                "remediation": f"codeintel reset {project_root} && codeintel index {project_root}",
+                "remediation": f"codeintel reset --semantic-only {project_root} && codeintel index {project_root}",
             }, cached, named_model, failure)
         if count > 0:
             report = {
@@ -702,7 +702,7 @@ class SemanticProvider:
                     report["runnable"] = answered
                 if answered is False:
                     report["remediation"] = (
-                        f"codeintel reset {project_root} && codeintel index {project_root}")
+                        f"codeintel reset --semantic-only {project_root} && codeintel index {project_root}")
             return _with_model_cache(report, cached, named_model, failure)
         return _with_model_cache(
             _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo"),

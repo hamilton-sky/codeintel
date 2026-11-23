@@ -203,6 +203,7 @@ def run_reset(
     all_projects: bool = False,
     apply: bool = False,
     db_path: str | None = None,
+    semantic_only: bool = False,
 ) -> dict:
     """Drop indexed rows for ``project_root`` (or, with ``all_projects``, remove the whole cache —
     every per-model db file plus their -wal/-shm siblings). ``apply=False`` is a dry-run: count
@@ -210,7 +211,10 @@ def run_reset(
 
     An explicit ``db_path`` operates on exactly that one file (the test seam / a targeted reset);
     otherwise reset sweeps EVERY per-model cache file, so a repo's rows are cleared no matter which
-    model's file they landed in, and model-switch orphans are reclaimed."""
+    model's file they landed in, and model-switch orphans are reclaimed.
+
+    ``semantic_only`` leaves every graph file (``.db``, ``-wal``, ``-shm``, ``.corrupt``) in place:
+    it is the fix for a corrupt semantic cache, which the graph index has no part in."""
     try:
         if db_path is not None:
             return _reset_all(db_path, apply) if all_projects else _reset_scoped(project_root, db_path, apply)
@@ -218,9 +222,12 @@ def run_reset(
         files = _cache_files() or [default_db_path()]
         if all_projects:
             count = sum(_reset_all(p, apply)["count"] for p in files)
-            graph = _reset_graph_cache(apply)
             verb = "removed" if apply else "would remove"
             detail = f"{verb} {count} semantic index file(s) across all models"
+            if semantic_only:
+                return {"ok": True, "mode": "all", "target": "ALL", "count": count,
+                        "applied": bool(apply), "detail": detail + "; the graph indexes were kept"}
+            graph = _reset_graph_cache(apply)
             # `--all` used to mean "all SEMANTIC models", which is not what it says and not what a
             # caller told to "start from a clean index" would assume. It left every graph project
             # in place — including, on the evaluated machine, an index of the PARENT directory of
@@ -239,7 +246,8 @@ def run_reset(
         count = sum(r["count"] for r in results)
         # The graph half of a scoped reset — the piece that was missing, so `reset <repo>` now clears
         # BOTH engines and the repo is genuinely "never indexed", matching what `--all` does globally.
-        graph = _reset_graph_project(project_root, apply)
+        graph = ({"found": 0, "removed": 0} if semantic_only
+                 else _reset_graph_project(project_root, apply))
         verb = "removed" if apply else "found"
         # Surface per-file trouble instead of summing counts and synthesizing a success line —
         # discarding these is what made a failed reset indistinguishable from a clean one.
@@ -248,6 +256,8 @@ def run_reset(
         if graph["found"]:
             detail += " and the graph index" if apply else " and a graph index"
         detail += " for this project"
+        if semantic_only:
+            detail += "; the graph index was kept"
         if problems:
             detail = "\n".join([*problems, detail])
         return {"ok": True, "mode": "scoped", "target": real, "count": count, "applied": bool(apply),
