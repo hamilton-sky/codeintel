@@ -1,7 +1,7 @@
 # Key the gateway cache on the index files, and report `reindexing` only for a real change
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 01, 14
 Test first: yes
 Level: 3
@@ -203,3 +203,38 @@ ADVISORY (12 — never gating)
 ## Review findings (round 1, footprint check)
 
 the build changed paths outside the ticket's `Touches:` line (src/codeintel/gateway/gateway.py src/codeintel/gateway/cache.py src/codeintel/gateway/reindexer.py README.md tests/test_cache.py tests/test_reindexer.py tests/test_reindex_lock.py tests/test_gateway.py tests/test_gateway_freshness.py): docs/c4.md, src/codeintel/c4/check.py, src/codeintel/c4/model.py, tests/test_c4.py, tests/test_c4_check.py. tickets run side by side because their Touches do not overlap, so change only what Touches names. if the ticket cannot be done inside it, say so in the Answer and stop: the plan has to change, not the footprint. one file the ticket truly needs (a test that pins the old behaviour, a generator) may be named in the Answer as `Extra file: <path> - <why>`, when it is the only one
+
+## Review findings (round 1, pair review)
+
+Range reviewed: 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f..0bc8714 (END = HEAD). It includes ticket 14's c4 commits (eb217d8, 474ee7f).
+
+QUALITY
+1. major src/codeintel/gateway/reindexer.py: a pass that never runs, or that fails, is never retried while the tree stays the same. `maybe_reindex` records `_last_fingerprint[root]` when it submits a pass. If `_do_reindex` then gives up because another process holds the lock, or both engines raise, the recorded fingerprint still matches the tree, so every later query returns False and submits nothing. Reproduced: edit a file, hold the reindex lock, call `maybe_reindex` (True, pass skipped), release the lock, call it three more times: all return False, graph pass ran once in total. `_do_reindex`'s docstring still says "A persistent failure retries every debounce window". Fix: in `_do_reindex`, on the lock-skip path and when a pass raises, clear `_last_fingerprint[root]` under `self._lock`, or record the fingerprint only after a pass completes. Add a test for a lock-skipped pass followed by an unchanged tree.
+2. minor src/codeintel/gateway/reindexer.py: in `_tree_fingerprint`, the 5s timeout bounds only the git calls; the `os.stat` loop over every listed file and the unbounded `ls-files -o` output still run on the request thread once per debounce window. Fix: cap the number of listed entries (on overflow, fingerprint None and fall back to the debounce), or move the check off the request thread.
+3. minor src/codeintel/gateway/gateway.py: `_SEMANTIC_DB_PATHS`, like `Reindexer._last_fingerprint`, grows by one entry per distinct project_root and never shrinks. Fix: bound it (a small LRU), or key it on the realpath of roots that exist.
+4. minor src/codeintel/c4/check.py: when a truncated cycle has no allowed relation inside its listed members, `_allowed_cycle_breaker` falls back to "the first allowed relation", and the `ALLOWED:` reason it prints may belong to an unrelated entry. Fix: when no entry lies inside the cycle, report the cycle as allowed without naming a specific entry's reason, or keep it gating.
+
+codeintel: changed 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f: wrong: it listed unrelated `.get` callers (Searcher._rerank, c4.model functions, bench modules) as `ContentHashCache.get` callers. Its `maybe_reindex` entry was right.
+
+REVIEW: FAIL
+
+Range reviewed: 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f..0bc8714 (END = HEAD), including ticket 14's eb217d8 and 474ee7f.
+
+SPEC
+- New tests/test_gateway_freshness.py fails on main and passes here (utime-forward miss; deleted-db miss): MET. 60 passed across freshness/reindexer/cache/lock tests; e2e7d8e failed before the code.
+- tests/test_reindexer.py gains the 4 tests (unchanged tree False/no submit/no flag; edit True; graph before semantic; git timeout or nonzero submits once inside the debounce): MET.
+- tests/test_cache.py, a different freshness string misses: MET.
+- Tests needing a graph db point CODEBASE_MEMORY_CACHE_DIR at tmp_path: MET.
+- tests/test_reindex_lock.py passes with only the two order lists changed: MET.
+- Check-block pytest command passes: MET. All existing tests still pass: MET (2221 passed, 31 skipped, 1 deselected, 1 xfailed). Only test files on Touches change: MET.
+- Ticket 14 Done when, c4 tests: MET (243 passed, 1 xfailed).
+- Ticket 14 Done when, `codeintel c4 . --check --out /tmp/codeintel-c4-check`: MET (exit 0, 0 gating findings, 1 allowlisted, no stale allowlist).
+- Ticket 14 Done when, .codeintel.toml unchanged: MET.
+- scope: OK. Note: map.md ends with a stray unbulleted "03 — ..." line under Open questions.
+- test first: OK. e2e7d8e and eb217d8 add the failing tests before the code.
+
+Accepted deviation: the fingerprint hashes (path, mtime_ns, size) of `git ls-files -c -o --exclude-standard` instead of `-m`, as round 1 asked, so git never runs the repo's clean filter.
+
+codeintel: changed 03957a6b7daa3f224aaee3fd3cbfbf41ebe2262f: wrong: it listed many unrelated `.get` callers (Searcher.search, c4.model functions) as ContentHashCache.get callers.
+
+REVIEW: PASS
