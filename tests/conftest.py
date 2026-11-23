@@ -156,6 +156,38 @@ def _no_background_reindex(request, monkeypatch):
     monkeypatch.setattr(Reindexer, "maybe_reindex", lambda self, project_root: None)
 
 
+@pytest.fixture
+def real_index_age():
+    """Opt back in to the real `graph_index_age` for a test whose subject is the index's age.
+
+    Requesting this fixture suppresses the autouse stub below. Every test that asserts
+    `stale-index` or `index-age-unknown` — or their absence — must ask for it, or it would be
+    reading the stub's answer instead of the check it means to pin.
+    """
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _index_age_is_fresh(request, monkeypatch):
+    """Report every graph index as `fresh` unless a test asks for `real_index_age`.
+
+    `changed` reads the age of the graph backend's db file in every mode. Most graph tests answer
+    from a monkeypatched `_run` fake, with no db file and often no git repository, so the real
+    check would turn their answers into `index-age-unknown`, which is not what they test.
+    `engines/graph/changed.py` imports the function by name, so that binding is patched as well as
+    the module attribute that newer callers reach through `changed_range.graph_index_age`.
+    """
+    if "real_index_age" in request.fixturenames:
+        return
+    from codeintel.engines.graph import changed, changed_range
+
+    def fresh(project: str, root: str, paths: list[str]) -> changed_range.IndexAge:
+        return changed_range.IndexAge("fresh", "")
+
+    monkeypatch.setattr(changed_range, "graph_index_age", fresh)
+    monkeypatch.setattr(changed, "graph_index_age", fresh)
+
+
 def _interpreter_scripts_dir() -> str:
     """Where console scripts for the interpreter running these tests are installed."""
     return sysconfig.get_path("scripts") or os.path.dirname(sys.executable)

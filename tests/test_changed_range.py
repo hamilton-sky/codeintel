@@ -578,7 +578,8 @@ def test_the_envelope_is_safe_only_when_every_group_is_evidence_and_complete(
     assert guessed["confidence"] == "partial"
 
 
-def test_a_stale_index_alone_is_enough_to_withdraw_safe_for_destructive(monkeypatch, tmp_path):
+def test_a_stale_index_alone_is_enough_to_withdraw_safe_for_destructive(
+        monkeypatch, tmp_path, real_index_age):
     """Everything else about this answer is clean — one resolved caller, a whole list — so the
     only thing standing between it and `safe_for_destructive: true` is the index's age."""
     repo = _solo_repo(tmp_path, "solo3", edit_caller=False)
@@ -793,7 +794,7 @@ def test_a_renamed_file_is_not_reported_as_everything_removed_and_added(monkeypa
 # ============================================================================== index freshness
 
 def test_an_index_older_than_the_changed_files_raises_a_stale_index_gap(
-        monkeypatch, tmp_path, repo):
+        monkeypatch, tmp_path, repo, real_index_age):
     env = _ask(_provider(monkeypatch, tmp_path, repo, _standard_graph(), index="stale"), repo)
     assert "stale-index" in _gap_kinds(env) and env["confidence"] == "partial"
     assert "older tree than the one the symbols were diffed in" in env["result"]
@@ -801,20 +802,21 @@ def test_an_index_older_than_the_changed_files_raises_a_stale_index_gap(
 
 
 def test_an_index_whose_age_cannot_be_read_says_so_and_does_not_imply_freshness(
-        monkeypatch, tmp_path, repo):
+        monkeypatch, tmp_path, repo, real_index_age):
     env = _ask(_provider(monkeypatch, tmp_path, repo, _standard_graph(), index=None), repo)
     assert "index-age-unknown" in _gap_kinds(env) and "stale-index" not in _gap_kinds(env)
     assert "cannot be called current" in env["result"]
 
 
-def test_a_fresh_index_raises_neither_staleness_gap(monkeypatch, tmp_path, repo):
+def test_a_fresh_index_raises_neither_staleness_gap(monkeypatch, tmp_path, repo, real_index_age):
     env = _ask(_provider(monkeypatch, tmp_path, repo, _standard_graph(), index="fresh"), repo)
     assert "## Changes since" in env["result"], "the negative control must be a real range answer"
     kinds = _gap_kinds(env)
     assert "stale-index" not in kinds and "index-age-unknown" not in kinds
 
 
-def test_a_plain_commit_after_the_index_does_not_make_it_stale(monkeypatch, tmp_path, repo):
+def test_a_plain_commit_after_the_index_does_not_make_it_stale(
+        monkeypatch, tmp_path, repo, real_index_age):
     """A commit records content that was already on disk, so it says nothing about whether the
     index saw it. Counting it flagged every query after every commit."""
     p = _provider(monkeypatch, tmp_path, repo, _standard_graph(), index="fresh")
@@ -1313,7 +1315,8 @@ def test_a_downgraded_same_module_caller_keeps_its_qualified_call_badge(monkeypa
 
 # ================================================================== what the index looked like
 
-def test_the_index_age_is_read_before_the_lookups_can_touch_the_index(monkeypatch, tmp_path, repo):
+def test_the_index_age_is_read_before_the_lookups_can_touch_the_index(
+        monkeypatch, tmp_path, repo, real_index_age):
     """The age is the db file's mtime, and the lookups are backend processes that open that file. If
     opening it moves the mtime, a stamp taken afterwards says "just now" for every index and
     `stale-index` can never fire. The fake's lookups touch the file, as such a backend would."""
