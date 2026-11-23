@@ -18,3 +18,8 @@ What the run left for later: minor findings of passing reviews, the findings a l
 
 - 1. minor src/codeintel/core/containment.py: `_why_not_a_dir` (and the Windows branch of `_write_walk`) reports `dangling` when a directory on the resolved path is a regular file (e.g. `AGENTS.md -> README.md/x`, ENOTDIR). Refusal correct, reason wrong. Fix: return `not-a-file` when the component exists and is not a directory. (pair review)
 - 2. minor src/codeintel/core/containment.py: in `_write_walk`, if `os.fdopen(fd, ...)` raises, the descriptor from `os.open(tmp, ...)` is never closed. Fix: close `fd` in the except path when `fdopen` was not reached. (pair review)
+
+## 09-transport-hardening (left for later)
+
+- 1. minor src/codeintel/core/redact.py: the leading guard `(?<![\w.~/-])` also lets the home path through where it is a real path: with HOME=/home/alice, `file:///home/alice/x`, `-I/home/alice/inc`, `//home/alice/x` and `/var/home/alice/x` come back unchanged and `contains_home_path` agrees. `redact_text` also runs on backend stderr. Not a live leak today. Consider adding `realpath(home)` as a needle like `/private{home}`, and record the `-I`/`file://` gap next to the stated trade. (pair review)
+- 2. minor src/codeintel/transports/mcp.py: the `root-not-found` hint repeats the caller's `project_root` unescaped and unbounded (only to a caller whose role allows that root). Consider truncating the echoed root. (pair review)
