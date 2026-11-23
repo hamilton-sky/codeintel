@@ -309,5 +309,5 @@ def test_live_symbol_returns_definition_and_references():
 
     assert result is not None, "serena never returned a definition"
     assert "safe_null_result" in result
-    assert "src/codeintel/provider.py" in result
+    assert "src/codeintel/core/provider.py" in result
     assert "## References" in result
