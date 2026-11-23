@@ -1,7 +1,7 @@
 # Harden the transports: /code/status 403, root-not-found, redact leading boundary, and the MCP wire-byte bound
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 08
 Test first: yes
 Level: 3
@@ -82,3 +82,9 @@ Work started at 3b515e2fef18b7da1255d690499c015a94bd4675. Test-only commit: f23c
 - Ticket 13 (CHANGELOG): T7 `status-root-denied-200-fake-fallback` (GET /code/status now 403, and its body carries `reason`), `nonexistent-root-says-not-indexed` (new reason `root-not-found`, outcome `unavailable`), `redact-mid-path` (the home string in the middle of a path or URL is no longer redacted: say so), T10 `mcp-budget-measured-on-wrong-bytes`.
 - The agent-facing hints ticket: over stdio, `code_query_handler` now answers `root-not-found` for a missing root before the engine, so its "project not found -> project-not-indexed" mapping applies only to roots that exist.
 
+
+## Review findings (round 1, floor guard)
+
+floor guard: the diff weakens the bar instead of meeting it
+suppress: src/codeintel/transports/mcp.py: return redact(safe_null_result(  # type: ignore[return-value]
+if a finding is intended, the ticket needs a line like: Floor: allow <category>
