@@ -1,7 +1,7 @@
 # Never write CODE_INTEL.md through a symlink, and refuse AGENTS.md, CLAUDE.md or USING_CODEINTEL.md links that leave the work tree or enter .git
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: —
 Test first: yes
 Level: 3
@@ -103,3 +103,29 @@ Work started at d05a5f956ecb1a07ceb56df39b1b2a18891fa84a. Test-only commit: af9d
 
 **For later tickets**
 - Ticket 13 (CHANGELOG): T6 `map-symlink-write-through`, `install-inject-advice-noop` (`map --inject` now creates AGENTS.md) and `deploy-doc-stale-symlink-hole` are fixed here. New user-visible: `map` exits 1 on a refused write; MCP `code.map` gains `note` and `inject.refused`.
+
+## Review findings (round 1, pair review)
+
+QUALITY
+1. major src/codeintel/core/containment.py: `write_contained` decides "inside .git" by comparing path strings, `_inside(git_dir, resolved)`. On a case-insensitive filesystem (macOS APFS default), a cloned repo can ship `AGENTS.md -> .GIT/config` or `USING_CODEINTEL.md -> .GIT/hooks/pre-commit`; `os.path.realpath` keeps the `.GIT` spelling, so the prefix check fails and the write lands in the real `.git` (breaking `.git/config`, or appending to an executable hook with mode kept, or creating a hook). Fix: check by file identity: `os.stat` the git dir once, walk `resolved` and its parents up to the root, refuse if any `os.path.samestat`-matches the git dir (for a new file, start from its parent). Add a test faking case-insensitivity or using a second path to `.git` (e.g. a symlinked parent).
+2. minor src/codeintel/core/containment.py: check and write are separate; `O_NOFOLLOW` guards only the last component. A caller who can write inside the root can swap a parent directory for a symlink between the check and `os.replace`. Fix: open the resolved parent with `O_DIRECTORY|O_NOFOLLOW` and use `dir_fd=` for `os.open(tmp)` and `os.replace`, or document the accepted race in `docs/deploy.md`.
+3. minor src/codeintel/core/containment.py: with `follow_links=True` and an existing path, every `contained_path` failure is reported as `outside-repo`, including a dangling in-tree link, a link to an in-tree directory (`USING_CODEINTEL.md -> .git`) and a hard-linked file (nlink>1). Fix: tell these apart, or word it "does not resolve to a single regular file inside the repo".
+4. minor src/codeintel/cli/index.py: the refresh-gate WARNING rebuilds the refusal text by hand instead of `REFUSAL_TEXT["symlink"]` / `_refuse_write`. Fix: reuse the containment helper.
+
+Range d05a5f9..0e9c6ba (HEAD). Done when re-run: 278 passed, 1 xfailed. Probes: dangling in-tree link refused; `AGENTS.md -> .git/config` refused; `USING_CODEINTEL.md -> .git` refused; in-tree `CLAUDE.md -> docs/rules.md` written through. Only way past found is finding 1.
+
+codeintel: changed d05a5f956ecb1a07ceb56df39b1b2a18891fa84a: helped
+
+REVIEW: FAIL
+
+SPEC
+- tests/test_hardening.py gains the refusal tests (map and index refresh on a symlinked CODE_INTEL.md; in-repo and dangling links refused; AGENTS.md, CLAUDE.md, USING_CODEINTEL.md linked outside directly and through a parent; AGENTS.md linked to .git/config and .git/hooks/pre-commit), failing on main and passing here: MET. 34 passed at HEAD; all 12 refusal cases failed against the base source (af9d1f5 src).
+- tests/test_cli_commands.py (`map --inject` creates AGENTS.md; `map` on a symlink exits 1 with the refusal line; fake injector accepts `create`): MET. Pass at HEAD, fail on base.
+- tests/test_mapper.py::test_inject_writes_through_a_symlinked_rules_file passes unchanged; check block passes; existing tests pass; the four files not on Touches unchanged: MET.
+- Acceptance: test_tf_symlinks.py plus test_tf_small_fixes.py::test_deploy_doc_says_the_snippet_symlink_hole_is_closed_via_open_contained: 14 passed.
+- scope: OK. MCP `code.map` inject still uses `create=False`; installer.py untouched.
+- test first: OK (af9d1f5).
+
+END 0e9c6ba = HEAD. Answer not seen. No codeintel queries.
+
+REVIEW: PASS
