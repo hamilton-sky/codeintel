@@ -2,7 +2,7 @@
 
 Type: task
 Status: open
-Blocked by: 01
+Blocked by: 01, 14
 Test first: yes
 Level: 3
 Builder: backend
@@ -33,6 +33,7 @@ It is level 3 because it decides when `Reindexer.maybe_reindex` submits a minute
 
 - The semantic failure record and the search fallback are ticket 10.
 - `stale-index` inside answers is tickets 01 and 02.
+- The c4 allowlist fix this ticket's gate needs (the Lint command's `codeintel c4 . --check`) is ticket 14.
 
 ## Done when
 
