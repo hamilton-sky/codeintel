@@ -133,6 +133,148 @@ def _background_index_elapsed_s(project_root: str) -> float | None:
     return None if started is None else time.monotonic() - started
 
 
+# The last model-load failure, persisted so it outlives the process that saw it.
+#
+# `_BG_INDEX_FAILED` above lives in one process. Every new process (each CLI call, a restarted
+# server) started with it empty, retried the blocked download for ~40 s, and after the cooldown the
+# state flipped back to "first-time indexing ~0s ago". The record decides whether a ~50 MB download
+# is retried, so it is trusted only while it is young and its inputs are unchanged: a record that
+# does not parse, is dated in the future, or is older than the window is ignored, cause and all, so
+# a bad or hostile file can neither block indexing for good nor make every search retry.
+_FAILURE_RECORD_NAME = "semantic_failure.json"
+_FAILURE_RECORD_MAX_AGE_S = 600.0
+_FAILURE_RECORD_MAX_BYTES = 64 * 1024
+_FAILURE_CAUSE_MAX_CHARS = 2000
+# The fix for a recorded model-load failure, named once: the query hint, the probe and doctor's
+# row all print it.
+MODEL_FAILURE_FIX = (
+    "check network/proxy access to huggingface.co, or set FASTEMBED_CACHE_PATH to a directory "
+    "pre-seeded with the model (see docs/install.md, 'Offline / air-gapped install'); the index "
+    "is retried once FASTEMBED_CACHE_PATH, the model or the cached weights change, or after 10 "
+    "minutes"
+)
+
+
+def _failure_record_path() -> pathlib.Path:
+    from codeintel.core.paths import codeintel_home
+    return codeintel_home() / _FAILURE_RECORD_NAME
+
+
+def _write_model_failure(model: str, cause: str) -> None:
+    """Persist a failed index pass for *model*. Atomic (temp file, then `os.replace`); never raises.
+
+    Best effort: a home that cannot be written costs the record, never the answer being built."""
+    import json
+    import tempfile
+
+    from codeintel.engines.semantic.db import MODEL_CACHE_ENV, model_is_cached
+    tmp: str | None = None
+    try:
+        path = _failure_record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "cause": str(cause)[:_FAILURE_CAUSE_MAX_CHARS],
+            "at": time.time(),
+            "model": model,
+            "fastembed_cache_path": os.environ.get(MODEL_CACHE_ENV),
+            "model_files_present": model_is_cached(model) is True,
+        }
+        fd, tmp = tempfile.mkstemp(prefix=".semantic_failure.", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        os.replace(tmp, path)
+        tmp = None
+    except Exception as exc:
+        log_swallowed("SemanticProvider._write_model_failure", exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _read_failure_record() -> dict | None:
+    """The record as written, or ``None`` when it is absent, not a regular file inside
+    `codeintel_home()` (a symlink is not followed), too large, or not the shape written."""
+    import json
+    import stat
+
+    try:
+        fd = os.open(_failure_record_path(), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
+            raw = fh.read(_FAILURE_RECORD_MAX_BYTES + 1)
+        if len(raw) > _FAILURE_RECORD_MAX_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    at = data.get("at")
+    cache_path = data.get("fastembed_cache_path")
+    if (not isinstance(data.get("cause"), str) or not data["cause"].strip()
+            or isinstance(at, bool) or not isinstance(at, (int, float))
+            or not isinstance(data.get("model"), str)
+            or not (cache_path is None or isinstance(cache_path, str))
+            or not isinstance(data.get("model_files_present"), bool)):
+        return None
+    return data
+
+
+def _model_failure(model: str) -> str | None:
+    """The recorded cause while the record applies to an index pass for *model*, else ``None``.
+
+    It applies while it is under `_FAILURE_RECORD_MAX_AGE_S` old (and not dated ahead of now), names
+    the same model and the same `FASTEMBED_CACHE_PATH` as this process, and the weights were absent
+    then and are still not found now. Any change to those inputs licenses a new attempt. Never
+    raises."""
+    try:
+        record = _read_failure_record()
+        if record is None:
+            return None
+        age = time.time() - float(record["at"])
+        if age < 0 or age >= _FAILURE_RECORD_MAX_AGE_S:
+            return None
+        from codeintel.engines.semantic.db import MODEL_CACHE_ENV, model_is_cached
+        if record["model"] != model:
+            return None
+        if record["fastembed_cache_path"] != os.environ.get(MODEL_CACHE_ENV):
+            return None
+        if record["model_files_present"] or model_is_cached(model) is True:
+            return None
+        return " ".join(record["cause"].split())[:_FAILURE_CAUSE_MAX_CHARS]
+    except Exception as exc:
+        log_swallowed("SemanticProvider._model_failure", exc)
+        return None
+
+
+def _clear_model_failure(model: str) -> None:
+    """Remove the record after an index pass for *model* succeeded. Never raises.
+
+    A record for ANOTHER model is left alone: this pass proves nothing about that model's weights.
+    A record that cannot be read is removed, since it would be ignored anyway."""
+    try:
+        record = _read_failure_record()
+        if record is not None and record["model"] != model:
+            return
+        _failure_record_path().unlink(missing_ok=True)
+    except Exception as exc:
+        log_swallowed("SemanticProvider._clear_model_failure", exc)
+
+
+def _recorded_failure_hint(cause: str, project_root: str) -> str:
+    return (f"the last index pass could not load the embedding model: {cause} — this is NOT "
+            f"'still indexing', and the download is not retried while that record stands. Fix: "
+            f"{MODEL_FAILURE_FIX}. `codeintel index {project_root}` always tries again, with "
+            f"progress output")
+
+
 def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dict) -> bool:
     """Kick off ONE cold-index pass for *project_root* on a daemon thread, unless one is already
     running for it. Returns True iff this call actually started a new pass.
@@ -183,6 +325,9 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
                     # engine is an agent on the far side of MCP or HTTP, and the envelope is the
                     # only channel it has.
                     _record_background_failure(key, cause)
+                    _write_model_failure(str(indexer_kwargs.get("model_name") or ""), cause)
+                else:
+                    _clear_model_failure(str(indexer_kwargs.get("model_name") or ""))
             finally:
                 # `close()` cannot be allowed to raise out of this `finally`. An exception raised
                 # in a `finally` REPLACES the one already propagating (the original is demoted to
@@ -317,7 +462,8 @@ def _not_indexed_probe(project_root: str, detail: str) -> dict:
     }
 
 
-def _with_model_cache(probe: dict, model_cached: bool | None, model: str) -> dict:
+def _with_model_cache(probe: dict, model_cached: bool | None, model: str,
+                      failure: str | None = None) -> dict:
     """Stamp a probe with whether the embedding weights are on disk, and say so when they are not.
 
     This is the question `doctor` could not previously ask. "Installed, runnable, repo not
@@ -329,8 +475,21 @@ def _with_model_cache(probe: dict, model_cached: bool | None, model: str) -> dic
 
     Not a failure on its own: on a connected machine an uncached model is simply a download that
     has not happened yet, so it warns rather than failing (see `doctor._status_for`).
+
+    *failure* is the cause from a model-load failure record that applies (see `_model_failure`).
+    Then the download is not merely pending: the last pass tried it and failed, so the probe is
+    not runnable and names that cause instead of "the next index downloads ~50 MB".
     """
     probe["model_cached"] = model_cached
+    if failure is not None:
+        detail = str(probe.get("detail") or "")
+        note = f"last index could not load model: {failure}"
+        probe["detail"] = f"{note}; {detail}" if detail else note
+        probe["runnable"] = False
+        probe["reason"] = "model-load-failed"
+        rem = str(probe.get("remediation") or "")
+        probe["remediation"] = f"{MODEL_FAILURE_FIX}; then: {rem}" if rem else MODEL_FAILURE_FIX
+        return probe
     if model_cached is not False:
         return probe
     # Imported here, not at module scope: `semantic_db` imports `sqlite_vec`, and a top-level
@@ -456,10 +615,13 @@ class SemanticProvider:
         # must not load the model, and this must not create the cache directory it is inspecting.
         named_model = model or DEFAULT_MODEL
         cached = model_is_cached(named_model)
+        # A model-load failure recorded by any process (see `_model_failure`) makes this engine
+        # not runnable whatever the index holds: no pass can embed and no query can be embedded.
+        failure = _model_failure(named_model)
         if not os.path.exists(db_path):
             return _with_model_cache(
                 _not_indexed_probe(project_root, "no semantic index database yet"),
-                cached, named_model,
+                cached, named_model, failure,
             )
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -483,7 +645,7 @@ class SemanticProvider:
                 "installed": True, "runnable": False, "repo_indexed": False,
                 "detail": f"semantic cache present but unreadable ({type(exc).__name__})",
                 "remediation": f"codeintel reset {project_root} && codeintel index {project_root}",
-            }, cached, named_model)
+            }, cached, named_model, failure)
         if count > 0:
             report = {
                 "installed": True, "runnable": True, "repo_indexed": True,
@@ -529,10 +691,10 @@ class SemanticProvider:
                 if answered is False:
                     report["remediation"] = (
                         f"codeintel reset {project_root} && codeintel index {project_root}")
-            return _with_model_cache(report, cached, named_model)
+            return _with_model_cache(report, cached, named_model, failure)
         return _with_model_cache(
             _not_indexed_probe(project_root, "semantic.db present but 0 chunks for this repo"),
-            cached, named_model,
+            cached, named_model, failure,
         )
 
     @staticmethod
@@ -644,10 +806,23 @@ class SemanticProvider:
             # that had just failed, and the real cause (a blocked model download, an unwritable
             # cache) left in a stderr line they had no reason to connect to the answer.
             index_error: str | None = None
+            if background_reindex_off or no_index:
+                # A model-load failure recorded by any process (`semantic_failure.json`) is
+                # answered at once, before an inline pass or a background one would retry the
+                # same ~40 s download — and never relabelled as first-time indexing.
+                recorded = _model_failure(model)
+                if recorded is not None:
+                    return _finish(safe_null_result(
+                        op, target, engine="semantic", reason="index-failed",
+                        hint=_recorded_failure_hint(recorded, project_root),
+                    ))
             if background_reindex_off or (no_index and self._blocking_index):
                 indexer = Indexer(db, **indexer_kwargs)
                 if indexer.index(project_root) < 0:
                     index_error = indexer.last_error or "unrecoverable failure"
+                    _write_model_failure(model, index_error)
+                else:
+                    _clear_model_failure(model)
             elif no_index:
                 # Non-blocking caller (the long-lived MCP/HTTP server): a cold pass over a real repo
                 # is minutes long (~500s / 25k chunks per docs/benchmarks.md) plus a one-time ~50MB

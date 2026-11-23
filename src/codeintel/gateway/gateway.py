@@ -4,7 +4,7 @@ import os
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, cast
 
 from codeintel.core.paths import graph_db_stamp
 from codeintel.core.provider import Result, attach_confidence, log_swallowed, safe_null_result
@@ -43,6 +43,38 @@ _UNCACHED_OPS: frozenset[str] = frozenset({"changed", "changes"})
 
 # Engines whose slot can be filled after construction (see `Gateway.adopt_provider`).
 _ADOPTABLE_ENGINES: frozenset[str] = frozenset({"graph", "lsp", "semantic"})
+
+
+# Semantic `search` reasons that mean "the engine could not ask", for which an auto-routed search
+# falls back to the graph name search. `below-floor` and the like are answers about the repository
+# and are never replaced.
+_SEARCH_FALLBACK_REASONS: frozenset[str] = frozenset(
+    {"index-failed", "indexing-in-progress", "engine-unavailable", "no-index"})
+
+
+def _name_search_fallback(named: Result, semantic: Result) -> Result:
+    """The graph `pattern` answer, marked as a name-only stand-in for the semantic search.
+
+    Keeps the graph answer's own gaps and adds `name-only-fallback`; the hint keeps the semantic
+    reason, so the caller still learns why meaning search did not run."""
+    reason = str(semantic.get("reason") or "")
+    why = str(semantic.get("hint") or "").strip()
+    gaps = [g for g in (named.get("gaps") or []) if isinstance(g, dict)]
+    gaps.append({
+        "section": "scope",
+        "kind": "name-only-fallback",
+        "detail": "matched by name, not meaning: semantic search could not answer "
+                  f"({reason}), so these are the graph engine's name matches for the target. "
+                  "Code that does what was asked under another name is not listed.",
+    })
+    hint = (f"semantic search unavailable ({reason}){': ' + why if why else ''} — fell back to "
+            f"the graph name search (op=pattern); matched by name, not meaning")
+    if named.get("hint"):
+        hint = f"{hint}. graph: {named['hint']}"
+    # `fallback` is not a `Result` key (core/provider.py is not this change's to widen), so the
+    # envelope is built as a plain dict; every `Result` key is carried over from `named`.
+    marked: dict[str, Any] = {**named, "fallback": "graph-name-search", "hint": hint}
+    return attach_confidence(cast(Result, marked), gaps)
 
 
 def _mark_reindexing(result: Result, reindexing: bool) -> Result:
@@ -847,10 +879,32 @@ class Gateway:
                 if lsp_result.get("result") is not None:
                     result = lsp_result
 
+            # search auto-fallback: when auto-routed to semantic but semantic could not ask (no
+            # model, no index yet, a pass in flight), the graph name search still answers — by
+            # name, not meaning, and said so. Only for a role that may run `pattern` itself: this
+            # is a second dispatch inside the same query, so the op gate is applied to it here
+            # (the reindex and root checks above already ran for this query).
+            fallback = False
+            if (
+                was_auto
+                and op_str == "search"
+                and engine_str == "semantic"
+                and result.get("result") is None
+                and result.get("reason") in _SEARCH_FALLBACK_REASONS
+                and self.allows(role, "pattern")
+            ):
+                named = self._dispatch_single(
+                    self.graph, "pattern", target_str, budget, project_root, "graph")
+                if named.get("result") is not None:
+                    result = _name_search_fallback(named, result)
+                    fallback = True
+
             result = self._cross_check_name_resolved(
                 result, op_str, target_str, budget, project_root, was_auto)
 
-            if (not uncacheable and not _is_retryable(result)
+            # A name-only fallback is not cached: the next search must ask semantic again, since
+            # it may have recovered, and the db stamp in the key does not move until it does.
+            if (not uncacheable and not fallback and not _is_retryable(result)
                     and not _states_live_file_contents(result)):
                 self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
             return _mark_reindexing(result, reindexing)
