@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import pathlib
 import threading
@@ -145,6 +146,9 @@ _FAILURE_RECORD_NAME = "semantic_failure.json"
 _FAILURE_RECORD_MAX_AGE_S = 600.0
 _FAILURE_RECORD_MAX_BYTES = 64 * 1024
 _FAILURE_CAUSE_MAX_CHARS = 2000
+# How `EmbeddingModelUnavailable` (engines/semantic/db.py) begins: only a failed model load is
+# recorded, never an unwritable db or a walk error, which a model retry would not fix.
+_MODEL_LOAD_FAILURE_PREFIX = "could not load embedding model "
 # The fix for a recorded model-load failure, named once: the query hint, the probe and doctor's
 # row all print it.
 MODEL_FAILURE_FIX = (
@@ -194,6 +198,13 @@ def _write_model_failure(model: str, cause: str) -> None:
                 pass
 
 
+def _is_model_load_failure(cause: str) -> bool:
+    """Whether an `Indexer.last_error` comes from a failed model load. `Indexer.index` keeps an
+    `EmbeddingModelUnavailable` verbatim and every other failure as ``"<ExceptionType>: <text>"``;
+    no exception type name can start with this phrase, so it marks the model case alone."""
+    return cause.startswith(_MODEL_LOAD_FAILURE_PREFIX)
+
+
 def _read_failure_record() -> dict | None:
     """The record as written, or ``None`` when it is absent, not a regular file inside
     `codeintel_home()` (a symlink is not followed), too large, or not the shape written."""
@@ -219,7 +230,7 @@ def _read_failure_record() -> dict | None:
     at = data.get("at")
     cache_path = data.get("fastembed_cache_path")
     if (not isinstance(data.get("cause"), str) or not data["cause"].strip()
-            or isinstance(at, bool) or not isinstance(at, (int, float))
+            or isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at)
             or not isinstance(data.get("model"), str)
             or not (cache_path is None or isinstance(cache_path, str))
             or not isinstance(data.get("model_files_present"), bool)):
@@ -325,7 +336,8 @@ def _start_background_index(project_root: str, db_path: str, indexer_kwargs: dic
                     # engine is an agent on the far side of MCP or HTTP, and the envelope is the
                     # only channel it has.
                     _record_background_failure(key, cause)
-                    _write_model_failure(str(indexer_kwargs.get("model_name") or ""), cause)
+                    if _is_model_load_failure(cause):
+                        _write_model_failure(str(indexer_kwargs.get("model_name") or ""), cause)
                 else:
                     _clear_model_failure(str(indexer_kwargs.get("model_name") or ""))
             finally:
@@ -820,7 +832,8 @@ class SemanticProvider:
                 indexer = Indexer(db, **indexer_kwargs)
                 if indexer.index(project_root) < 0:
                     index_error = indexer.last_error or "unrecoverable failure"
-                    _write_model_failure(model, index_error)
+                    if _is_model_load_failure(index_error):
+                        _write_model_failure(model, index_error)
                 else:
                     _clear_model_failure(model)
             elif no_index:

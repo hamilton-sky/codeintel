@@ -643,6 +643,17 @@ class Gateway:
         except Exception:
             return True
 
+    def _allows_fallback_op(self, role: str, op: str) -> bool:
+        """``allows`` for an op this gateway runs on the caller's behalf (the search fallback), but
+        failing CLOSED: a policy that raises denies it, as the main gate in ``_query`` would."""
+        if self._policy is None:
+            return True
+        try:
+            return self._policy.is_allowed(role, op)
+        except Exception as exc:
+            log_swallowed(f"Gateway._allows_fallback_op[{op}]", exc)
+            return False
+
     def allows_root(self, role: str, project_root: str) -> bool:
         """Whether *role* may target *project_root*. The companion to ``allows`` — an op gate alone
         leaves the TARGET unbounded, which is how `doctor` and `status` could still be pointed at
@@ -891,7 +902,7 @@ class Gateway:
                 and engine_str == "semantic"
                 and result.get("result") is None
                 and result.get("reason") in _SEARCH_FALLBACK_REASONS
-                and self.allows(role, "pattern")
+                and self._allows_fallback_op(role, "pattern")
             ):
                 named = self._dispatch_single(
                     self.graph, "pattern", target_str, budget, project_root, "graph")

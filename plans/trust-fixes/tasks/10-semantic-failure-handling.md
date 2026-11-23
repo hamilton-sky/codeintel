@@ -1,7 +1,7 @@
 # Persist semantic model failures, report them in doctor and status, and fall back to graph name search
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 03
 Test first: yes
 Level: 3
@@ -120,6 +120,25 @@ Work started at commit cbc476df60570c3a3b952601e68113435ff082cb. Test-only commi
 **Round 2** (reopened by c68543e after the plan repair d2e1906; work started at c68543e)
 - No code change. The gap named under For later tickets (`codeintel index`, the reindexer's semantic pass and onboarding do not write or clear the failure record) is now ticket 16 (`16-semantic-failure-record-everywhere.md`, blocked by 10); it is not built here.
 - Check block re-run on HEAD c68543e: the first command gives `316 passed, 1 xfailed`; the doctor command gives `50 passed, 1 deselected`.
+
+**Round 3** (review findings round 1; work started at 20062a8; test-only commit 45dbacf: 4 failed, 56 passed there, each for the finding's cause)
+- Built: `src/codeintel/engines/semantic/provider.py` (`math.isfinite` on `at`; `_MODEL_LOAD_FAILURE_PREFIX` and `_is_model_load_failure`, checked at both write sites), `src/codeintel/gateway/gateway.py` (`_allows_fallback_op`, used by the search fallback), `tests/test_background_index_failure.py` (+`nan-at` case, +2 tests), `tests/test_search_fallback.py` (+1 test).
+- Proof, run after the last edit:
+  - The first check command gives `320 passed, 1 xfailed`. The doctor command gives `50 passed, 1 deselected`.
+  - `ruff check src tests bench` passes. `mypy` finds no issues in 88 files.
+  - The 51 test files that mention Gateway/SemanticProvider/doctor/code_query_handler/semantic_failure give `1403 passed, 3 skipped, 1 deselected, 1 xfailed`.
+  - `git diff --stat cbc476d -- tests` lists only the four test files on Touches.
+- Decisions:
+  - A model load is recognised from `Indexer.last_error`. `Indexer.index` keeps an `EmbeddingModelUnavailable` verbatim ("could not load embedding model '...'") and writes every other failure as `"<ExceptionType>: <text>"`. No type name can start with that phrase, so the prefix is unambiguous.
+  - The structural alternative was to expose the exception class on `Indexer` (indexer.py), which is outside Touches. If the message ever changes, the real-fake tests (`_BlockedEmbedding` through the real `load_embedder`) fail, because no record would be written.
+  - A non-model failure leaves any existing record alone. It neither writes nor clears one.
+- Shortcuts taken: the first Round-1 shortcut (any failed pass with absent weights is recorded) is gone. The second still stands.
+- For later tickets: ticket 16 must write the record the same way. Call `_write_model_failure(model, last_error)` only when `_is_model_load_failure(last_error)` is true; otherwise a locked db would block model retries for 10 minutes.
+
+**Review fixes**
+1. NaN `at`: `_read_failure_record` now rejects a non-finite `at` (`math.isfinite`), so NaN, Infinity and -Infinity all give `None`. New case `test_a_record_that_cannot_be_trusted_lets_an_index_be_tried_again[nan-at]` writes `"at": NaN`. It failed at 45dbacf (model not retried) and passes now: the model is retried, and the cause comes from the new pass.
+2. Record only for a model load: both write sites (inline and background) now call `_write_model_failure` only when `_is_model_load_failure(cause)` is true. New tests `test_a_failure_that_is_not_a_model_load_writes_no_record` (inline, run twice) and `test_a_background_failure_that_is_not_a_model_load_writes_no_record` patch `Indexer._index` to raise `PermissionError`. The answer is still `index-failed` naming PermissionError, and no record is written. Both failed at 45dbacf and pass now.
+3. Fail closed: the fallback calls a new `Gateway._allows_fallback_op(role, "pattern")`. It returns True when no policy is configured, otherwise `policy.is_allowed`. When the policy raises, it logs (`log_swallowed`) and returns False. `Gateway.allows` stays as it is, because doctor/status use it. This departs from the ticket's literal "`Gateway.allows(role, "pattern")`" on purpose, per the finding: it applies the same rule and only differs on a raising policy. New test `test_a_policy_that_raises_on_pattern_gets_no_fallback`: the graph is never called and the answer is `index-failed` with no `fallback`. It failed at 45dbacf and passes now. The existing searcher/admin RBAC test still passes.
 
 ## Review findings (round 1, pair review)
 
