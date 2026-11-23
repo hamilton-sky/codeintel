@@ -7,6 +7,7 @@ Test first: yes
 Level: 2
 Builder: backend
 Touches: src/codeintel/engines/graph/blindspots.py, src/codeintel/engines/graph/answer.py, src/codeintel/engines/graph/confidence.py, tests/fixtures/blindspots/, tests/test_blindspot_gaps.py, tests/test_edge_confidence.py
+Floor: allow skip (the live test skips only when codebase-memory-mcp is not on PATH, like tests/test_graph_real.py; a backend that is present but does not answer must fail the test, not skip it)
 
 This ticket covers rules 1, 3 and 4 of T1. It fixes `complete-callees-miss-aliased-import` and `nested-fn-false-verified-caller`, and the alias and nested halves of `ts-safe-for-destructive-wrong-half`. Today `_settle_evidence` sets `safe_for_destructive` only from row buckets and gaps, and knows nothing of what the backend cannot see.
 
