@@ -60,6 +60,8 @@ _WALK_MAX_SECONDS = 2.0
 _WALK_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "site-packages", "venv"})
 # The most of git's stderr a "search failed" gap quotes: its first line, enough to say why.
 _ERR_CHARS = 160
+# The most files a "could not read" shortfall names before it says "and others".
+_UNREAD_LISTED = 5
 
 
 def _is_python(path: str) -> bool:
@@ -280,7 +282,9 @@ class AliasSearch:
     shortfall: str = ""
 
 
-def files_aliasing(root: str, name: str, family: str) -> AliasSearch:
+def files_aliasing(
+    root: str, name: str, family: str, budget: qualifier_scan.Budget | None = None,
+) -> AliasSearch:
     """The files of language *family* under *root* that write *name* followed by `as <alias>`.
 
     The candidates for `import … name as Y`, `{ name as Y }` and `export { name as Y }` anywhere in
@@ -291,15 +295,47 @@ def files_aliasing(root: str, name: str, family: str) -> AliasSearch:
     Searched with `git grep` (tracked files in their working-tree state, plus untracked files that
     are not ignored), output read up to `_ALIAS_SEARCH_CAP_BYTES`. A root git does not manage is
     walked instead (`_walk_aliasing`). A root that is not a directory, a family `import_aliases`
-    cannot read, or a name that is not an identifier searches nothing and finds nothing."""
+    cannot read, or a name that is not an identifier searches nothing and finds nothing.
+
+    *budget* is the answer's read budget: `git grep` waits no longer than the time it has left, and
+    what it takes is charged to it. No time left is a shortfall, and git is not started.
+
+    A file whose name holds a character that is not printable (a line break, a control character) is
+    never named: an answer quotes the names, and such a name could write a line of its own into it.
+    It is counted in the shortfall instead, so the answer still says it could not check every file."""
     if family not in _ALIAS_FAMILIES or not _IDENTIFIER.fullmatch(name) or not os.path.isdir(root):
         return AliasSearch()
+    return _nameable(_search_aliasing(root, name, family, budget))
+
+
+def _nameable(search: AliasSearch) -> AliasSearch:
+    """*search* without the files whose names cannot be quoted on one line (`str.isprintable`)."""
+    kept = tuple(f for f in search.files if f.isprintable())
+    if len(kept) == len(search.files):
+        return search
+    why = "a file whose name holds a line break or a control character could not be named"
+    return AliasSearch(kept, f"{search.shortfall}; {why}" if search.shortfall else why)
+
+
+def _search_aliasing(
+    root: str, name: str, family: str, budget: qualifier_scan.Budget | None,
+) -> AliasSearch:
+    """`files_aliasing` once its arguments are known to be searchable."""
     suffixes = tuple(sorted(ext for ext, fam in _LANG_FAMILIES.items() if fam == family))
     pattern = (r"(^|[^A-Za-z0-9_$])" + name.replace("$", r"\$")
                + r"[[:space:]]+as[[:space:]]+[A-Za-z_$]")
+    timeout = float(changed_range._GIT_TIMEOUT_S)
+    if budget is not None:
+        timeout = min(timeout, budget.live_remaining())
+        if timeout <= 0:
+            return AliasSearch((), f"the answer's time for reading files was spent before the search "
+                                   f"for `{name} as` could run")
+    began = time.monotonic()
     code, out, err, cut = changed_range._git_capped(
         root, "grep", "-l", "-I", "-E", "-z", "--untracked", "--exclude-standard", "-e", pattern,
-        "--", *(f"*{ext}" for ext in suffixes), cap_bytes=_ALIAS_SEARCH_CAP_BYTES)
+        "--", *(f"*{ext}" for ext in suffixes), cap_bytes=_ALIAS_SEARCH_CAP_BYTES, timeout_s=timeout)
+    if budget is not None:
+        budget.spend(time.monotonic() - began)
     if code == changed_range._NO_GIT or (code == 128 and not cut):
         # Not a repository (or git refused it, or is not installed): walk the tree instead.
         return _walk_aliasing(root, name, suffixes)
@@ -350,9 +386,11 @@ def _walk_aliasing(root: str, name: str, suffixes: tuple[str, ...]) -> AliasSear
     budget = qualifier_scan.Budget(_WALK_MAX_SECONDS, files=_WALK_MAX_FILES)
     deadline = time.monotonic() + _WALK_MAX_SECONDS
     hits: list[str] = []
+    unread: list[str] = []
 
     def short(why: str) -> AliasSearch:
-        return AliasSearch(tuple(hits), f"the search of the tree for `{name} as` stopped: {why}")
+        stopped = f"the search of the tree for `{name} as` stopped: {why}"
+        return AliasSearch(tuple(hits), f"{stopped}; {_unread(unread)}" if unread else stopped)
 
     def call(work: Callable[[], object]) -> tuple[object, str]:
         """*work* under the walk's budget: `(value, "")`, or `(None, why it was not done)`."""
@@ -398,9 +436,22 @@ def _walk_aliasing(root: str, name: str, suffixes: tuple[str, ...]) -> AliasSear
                 return short(why)
             if budget.out_of_bytes:
                 return short("it reached its byte limit")
-            if isinstance(blob, bytes) and qualifier_scan._plain_text(blob) and needle.search(blob):
+            if not isinstance(blob, bytes):
+                unread.append(rel)          # too large, unreadable, or outside the root: not known
+            elif qualifier_scan._plain_text(blob) and needle.search(blob):
                 hits.append(rel)
+    if unread:
+        return AliasSearch(tuple(hits), _unread(unread))
     return AliasSearch(tuple(hits))
+
+
+def _unread(files: list[str]) -> str:
+    """The shortfall for files of the language that could not be read: the first few named (those
+    whose names can be quoted), then "and others"."""
+    shown = [f for f in files if f.isprintable()][:_UNREAD_LISTED]
+    more = " and others" if len(files) > len(shown) else ""
+    named = ", ".join(f"`{f}`" for f in shown) + more if shown else "a file whose name cannot be shown"
+    return f"could not read {named} (too large, unreadable or gone)"
 
 
 class SourceReader:

@@ -1675,13 +1675,18 @@ class AnswerRendering:
             # package can re-export it under another module's name. Past the first few files each
             # one is not a gap of its own; the rest are named together in one.
             aliasing: list[str] = []
+            # A file the search found that could not be read, for a reason other than the budget
+            # (which `reader.unchecked` already reports): too large, unreadable, or gone since.
+            unread: list[str] = []
             for family in dict.fromkeys(_lang_family(g.file) for g in groups if g.file):
-                search = blindspots.files_aliasing(root, name, family)
+                search = blindspots.files_aliasing(root, name, family, budget)
                 for f in search.files:
                     if f in read or _lang_family(f) != family:
                         continue
                     read.add(f)
                     text = reader.read(f)
+                    if text is None and f not in reader.unchecked:
+                        unread.append(f)
                     aliases = blindspots.alias_imports(text, name, f) if text is not None else []
                     if not aliases:
                         continue
@@ -1699,6 +1704,11 @@ class AnswerRendering:
                         "imports", "aliased-import-unbound",
                         f"could not check every file for an import of `{name}` under an alias: "
                         f"{search.shortfall}, so a call through an alias may be missing"))
+            if unread:
+                found.append((
+                    "imports", "aliased-import-unbound",
+                    f"{blindspots._unread(unread)}, where the search found `{name} as`, so a call "
+                    f"through an alias of `{name}` may be missing from this answer"))
             rest = aliasing[_ALIAS_GAPS_NAMED:]
             if rest:
                 shown = rest[:_ALIAS_GAPS_LISTED]

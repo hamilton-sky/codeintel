@@ -60,7 +60,14 @@ from codeintel.engines.graph import blindspots, qualifier_scan
 from codeintel.engines.graph.answer import AnswerRendering
 from codeintel.engines.graph.confidence import _NAME_MATCHED, _OWN_RECEIVERS, _edge_confidence, _evidence_class
 from codeintel.engines.graph.edges import _CALLER_KINDS, _DIRECT_KIND, _EdgeFetch, _EdgeGroup, _group_edges
-from codeintel.engines.graph.render import _cypher_literal, _in_list, _lang_family, _node_labels, _strip_project_prefix
+from codeintel.engines.graph.render import (
+    _LANG_FAMILIES,
+    _cypher_literal,
+    _in_list,
+    _lang_family,
+    _node_labels,
+    _strip_project_prefix,
+)
 from codeintel.engines.graph.targets import _qualified_name_matches, _SymbolTarget
 
 # How far up the class hierarchy to walk. Deep enough for any hierarchy a person wrote by hand (this
@@ -348,11 +355,13 @@ class _DirectTarget:
     `count` is how many distinct symbols the target matched: the lookup runs for exactly one, because
     an answer over several same-named symbols is already `target-ambiguous` and is narrowed by asking
     again. `qn` is that one symbol's qualified name, `""` when the direct answer had no rows to name
-    it. `is_method` is read from the row labels; an answer with no rows cannot say, and is asked."""
+    it. `is_method` is read from the row labels; an answer with no rows cannot say, and is asked.
+    `file` is that symbol's file, `""` when the answer did not name one."""
 
     count: int = 0
     qn: str = ""
     is_method: bool = True
+    file: str = ""
 
 
 def _direct_target(selected: list[_EdgeGroup]) -> _DirectTarget:
@@ -360,7 +369,7 @@ def _direct_target(selected: list[_EdgeGroup]) -> _DirectTarget:
         return _DirectTarget()
     group = selected[0]
     labels = next((r.get("labels(b)") for r in group.rows if r.get("labels(b)") is not None), None)
-    return _DirectTarget(len(selected), group.qn_raw, "Method" in _node_labels(labels))
+    return _DirectTarget(len(selected), group.qn_raw, "Method" in _node_labels(labels), group.file)
 
 
 def _self_call_of(row: dict) -> str:
@@ -428,6 +437,16 @@ def _guessed_sibling_call(row: dict, method: str) -> bool:
 # What is said of a method of the target's name found with no class node: nothing places its class
 # relative to the target's.
 _CLASSLESS_RELATION = "whether that class is a sibling, a base or a subclass of it is not known"
+
+
+def _family_pattern(family: str) -> str:
+    """A regular expression a whole file path of language *family* matches, by extension and in any
+    case (`.py` and `.PY` alike), with no backslash in it; `""` for a family with no extension known."""
+    exts = sorted(ext[1:] for ext, fam in _LANG_FAMILIES.items() if fam == family)
+    if not exts:
+        return ""
+    return ".*[.](" + "|".join(
+        "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in ext) for ext in exts) + ")"
 
 
 def _method_definer(qualified: str, file: str) -> _Definer:
@@ -1123,15 +1142,23 @@ class DispatchCallers(AnswerRendering):
         method of the name, each standing for its own class (the qualified name less its last part).
 
         `target` is `None` when the direct answer did not name one symbol. A lookup that failed or
-        came back at its row limit is the shortfall, said as "could not check"."""
+        came back at its row limit is the shortfall, said as "could not check".
+
+        Only methods in files of the target's language are namesakes: a call in another language
+        cannot reach it. The lookup asks for those alone, so a name common in another language does
+        not fill its row limit, and a method whose file is of another language is dropped again here.
+        A target whose language is not known keeps every namesake."""
         if not direct.qn:
             return None, [], ""
+        family = _lang_family(direct.file)
+        pattern = _family_pattern(family) if family else ""
+        in_family = f' AND m.file_path =~ "{_cypher_literal(pattern)}"' if pattern else ""
         rows, why = self._lookup(
-            f'MATCH (m:Method) WHERE m.name="{_cypher_literal(wanted.name)}" '
+            f'MATCH (m:Method) WHERE m.name="{_cypher_literal(wanted.name)}"{in_family} '
             f"RETURN m.qualified_name, m.file_path LIMIT {_LOOKUP_ROWS}", project, timeout_ms,
             surface=False)
         files = {str(r.get("m.qualified_name") or ""): str(r.get("m.file_path") or "") for r in rows}
-        target = _method_definer(direct.qn, files.get(direct.qn, ""))
+        target = _method_definer(direct.qn, direct.file or files.get(direct.qn, ""))
         if why:
             return target, [], (
                 f"could not check for another method named `{wanted.name}` whose callers the backend "
@@ -1142,7 +1169,9 @@ class DispatchCallers(AnswerRendering):
                  f"written against a sibling that reaches `{target.short}` may be missing"
                  if len(rows) >= _LOOKUP_ROWS else "")
         siblings = sorted((_method_definer(qn, file) for qn, file in files.items()
-                           if qn and qn != direct.qn and "." in qn), key=lambda d: d.method)
+                           if qn and qn != direct.qn and "." in qn
+                           and (not family or _lang_family(file) in (family, ""))),
+                          key=lambda d: d.method)
         return target, siblings, short
 
     def _sibling_gaps(self, details: list[str]) -> str:

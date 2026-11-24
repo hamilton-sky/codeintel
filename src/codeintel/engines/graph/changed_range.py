@@ -139,7 +139,9 @@ def _git(root: str, *args: str) -> tuple[int, bytes, str]:
     return done.returncode, done.stdout, done.stderr.decode("utf-8", "replace").strip()
 
 
-def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str, bool]:
+def _git_capped(
+    root: str, *args: str, cap_bytes: int, timeout_s: float = _GIT_TIMEOUT_S,
+) -> tuple[int, bytes, str, bool]:
     """`_git` for a command whose output has no natural bound: `(code, stdout, stderr, cut)`.
 
     `subprocess.run(capture_output=True)` buffers all of stdout before it returns, so a name that
@@ -148,7 +150,7 @@ def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str,
     was killed is meaningless, and the caller must treat `cut` as "a lower bound", not as failure.
     stderr goes to a file rather than a second pipe: nothing drains a pipe while stdout is being
     read, and a git that fills one blocks forever. The timeout is a timer that kills the process,
-    because a blocking read has no timeout of its own."""
+    because a blocking read has no timeout of its own; it fires after *timeout_s* seconds."""
     try:
         with tempfile.TemporaryFile() as errfile:
             proc = subprocess.Popen(
@@ -159,7 +161,7 @@ def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str,
                 expired.set()
                 proc.kill()
 
-            timer = threading.Timer(_GIT_TIMEOUT_S, _expire)
+            timer = threading.Timer(timeout_s, _expire)
             timer.start()
             stream = proc.stdout
             try:
@@ -176,8 +178,7 @@ def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str,
                 if stream is not None:
                     stream.close()
             if expired.is_set():
-                code, _, err = _unrunnable(subprocess.TimeoutExpired(args, _GIT_TIMEOUT_S), root, args)
-                return code, b"", err, False
+                return _COULD_NOT_RUN, b"", f"git {args[0]} did not finish within {timeout_s:g}s", False
             errfile.seek(0)
             err = errfile.read(2000).decode("utf-8", "replace").strip()
             return proc.returncode, out, err, cut

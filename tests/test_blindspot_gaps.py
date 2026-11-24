@@ -475,7 +475,7 @@ def test_git_capped_kills_a_command_at_the_timeout_it_is_given(monkeypatch, tmp_
 
     from codeintel.engines.graph import changed_range
 
-    monkeypatch.setattr(changed_range, "_GIT", ("sh", "-c", "sleep 5", "sh"))
+    monkeypatch.setattr(changed_range, "_GIT", ("sh", "-c", "exec sleep 5", "sh"))
     began = time.monotonic()
     code, out, err, cut = changed_range._git_capped(str(tmp_path), "grep", cap_bytes=100, timeout_s=0.3)
     took = time.monotonic() - began
