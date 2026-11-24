@@ -1,7 +1,7 @@
 # Record and clear the semantic model failure on every index pass, not only the provider's own
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 10
 Test first: yes
 Level: 2
@@ -34,3 +34,16 @@ prints passed
 ```
 
 ## Answer
+
+Work started at 4ee584896581045cc9bf398f9eb65febfab1c53d (the prompt named cae11ca; HEAD had moved on by the plan-repair commit 4ee5848). Test-only commit: e9ea8f2.
+
+- **Built**: `src/codeintel/cli/index.py` and `src/codeintel/gateway/reindexer.py`: after `Indexer.index()` returns, a result below 0 whose `last_error` passes `_is_model_load_failure` calls `_write_model_failure(model_name, last_error)`. Any other result of 0 or more calls `_clear_model_failure(model_name)`. Both import the provider's helpers lazily inside the function. `model_name` is now bound once and passed to the `Indexer`. Tests: `tests/test_cli_commands.py` (3 new tests plus local `_BlockedEmbedding`/`_WorkingEmbedding` fakes and a `blocked_model` fixture) and `tests/test_reindexer.py` (2 new tests with the same fakes).
+- **Proof**:
+  - CLI: at the test-only commit e9ea8f2, `test_a_failed_index_leaves_a_record_the_next_search_honours_at_once` and `test_a_successful_index_clears_the_record` failed because `semantic_failure.json` did not exist. After the change, `.venv/bin/pytest tests/test_cli_commands.py tests/test_reindexer.py -q -o addopts=` gave 124 passed. The first test checks that a fresh `SemanticProvider(blocking_index=True)` search returns `index-failed` in under 1 s, with no "first-time indexing" and no second model load (`built == 1`).
+  - Reindexer: both new tests failed at e9ea8f2 for the same reason (no record). They pass now (same run as above).
+  - Acceptance: `.venv/bin/pytest plans/trust-fixes/acceptance/test_tf_semantic_failure.py -q -o addopts=` gave 9 passed. It runs here: its fixture sets `PATH=/usr/bin:/bin`, so it never reaches the graph backend and the running daemon does not block it.
+  - Check block: `.venv/bin/pytest tests/test_cli_commands.py tests/test_reindexer.py tests/test_background_index_failure.py tests/test_semantic_provider.py tests/test_search_fallback.py plans/trust-fixes/acceptance/test_tf_semantic_failure.py -q -o addopts=` gave 218 passed.
+  - All existing tests: left to the conductor's gate. Also run: `ruff check src tests bench` gave All checks passed; `mypy` gave no issues in 88 files; `tests/test_index_failure_reason.py tests/test_doctor.py tests/test_e2e.py` gave 94 passed, 1 deselected.
+- **Decisions**: The record is written only for a model-load failure, as in ticket 10's provider passes and the caller's note. A new test pins that an `OSError: disk full` failure writes no record. A failed non-model pass leaves an existing record alone; it does not clear it, the same as the provider. `provider.py` is unchanged: the underscore helpers are imported as they are.
+- **Shortcuts taken**: none.
+- **For later tickets**: none.

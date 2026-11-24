@@ -301,20 +301,32 @@ class Reindexer:
             # index that had not moved. The bump is right (it protects cache correctness); the
             # silence was not. `_graph_reindex` below already surfaces its backend's failures for
             # exactly this reason; this is the sibling that never got the same treatment.
+            model_name = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
             indexer = Indexer(
                 db,
-                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                model_name=model_name,
                 window=int(cfg.get("window", 20)),
                 stride=int(cfg.get("stride", 10)),
                 max_chunks=int(cfg.get("max_chunks", 500)),
                 max_total_chunks=int(cfg.get("max_total_chunks", 100000)),
                 chunk_strategy=str(cfg.get("chunk_strategy", "syntax")),
             )
+            # The outcome is persisted like the provider's own passes, so the next `search` in
+            # any process answers a failed model load at once and doctor/status can name it.
+            from codeintel.engines.semantic.provider import (
+                _clear_model_failure,
+                _is_model_load_failure,
+                _write_model_failure,
+            )
             if indexer.index(project_root) < 0:
                 logger.warning(
                     "semantic reindex failed for %s: %s",
                     project_root, indexer.last_error or "unrecoverable failure",
                 )
+                if _is_model_load_failure(indexer.last_error or ""):
+                    _write_model_failure(model_name, indexer.last_error or "")
+            else:
+                _clear_model_failure(model_name)
         finally:
             db.close()
 
