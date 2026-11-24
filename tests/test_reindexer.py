@@ -458,6 +458,20 @@ def test_an_unchanged_tree_is_fingerprinted_at_most_once_per_debounce_window(tmp
     assert passes == [root]
 
 
+def test_the_first_pass_of_a_root_is_not_held_back_by_host_uptime(tmp_path, monkeypatch):
+    """A root that never fired is outside the window, even on a host up for less than it."""
+    import codeintel.gateway.reindexer as reindexer_mod
+
+    monkeypatch.setattr(reindexer_mod.time, "monotonic", lambda: 5.0)   # five seconds after boot
+    root = _git_repo(tmp_path / "repo")
+    r = Reindexer(debounce_seconds=1000)
+    passes = _counting_passes(r, monkeypatch)
+
+    assert r.maybe_reindex(root) is True
+    _drain(r)
+    assert passes == [root]
+
+
 def test_do_reindex_runs_the_graph_pass_before_the_semantic_pass(monkeypatch):
     """A blocked model download must not delay graph freshness."""
     r = Reindexer()

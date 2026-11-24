@@ -191,6 +191,95 @@ def test_a_file_the_budget_could_not_read_adds_the_gap_as_could_not_check(monkey
     assert env["evidence"]["safe_for_destructive"] is False
 
 
+# ---- aliases in files the answer has no row from --------------------------------------------
+#
+# The acceptance fakes' shape: the file that imports the target under an alias has a node of its own
+# but no caller row, because the backend never bound the alias. The rule above reads only the rows'
+# files and the target's file, so it has to search the tree for the alias.
+
+def _repo(root, files: dict[str, str], *, git: bool = True) -> str:
+    root.mkdir()
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    if git:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "--no-gpg-sign", "-m", "c")):
+            subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=root, env=env,
+                           check=True, capture_output=True)
+    return os.path.realpath(str(root))
+
+
+_PY_ALIAS_FILES = {
+    "core.py": "def helper():\n    return 1\n",
+    "a.py": "from core import helper\n\n\ndef use_a():\n    return helper()\n",
+    "b.py": "from core import helper as h\n\n\ndef use_b():\n    return h()\n",
+}
+_PY_ALIAS_ROWS = [_row("a.use_a", "a.py", "core.helper", "core.py", strategy="import_map",
+                       conf="0.95")]
+_TS_ALIAS_ROWS = [_row("src.lib.impl.process", "src/lib/impl.ts", "src.lib.impl.helper",
+                       "src/lib/impl.ts", strategy="lsp_ts_direct", conf="0.95")]
+_TS_IMPL = ("export function helper(x: number) { return x; }\n"
+            "export function process(x: number) { return helper(x); }\n")
+
+
+def _assert_alias_gap_names(env: dict, file: str, alias: str) -> None:
+    gaps = _gaps(env, "aliased-import-unbound")
+    assert gaps, env.get("gaps")
+    detail = " ".join(g["detail"] for g in gaps)
+    assert file in detail and f"`{alias}`" in detail, detail
+    assert env["confidence"] == "partial"
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+@pytest.mark.parametrize("git", [True, False], ids=["git", "not-a-repository"])
+def test_python_alias_in_a_file_with_no_row_is_found(monkeypatch, tmp_path, git):
+    root = _repo(tmp_path / "repo", _PY_ALIAS_FILES, git=git)
+    env = _ask(monkeypatch, root, "callers", "helper", _PY_ALIAS_ROWS)
+    _assert_alias_gap_names(env, "b.py", "h")
+
+
+def test_ts_alias_import_in_a_file_with_no_row_is_found(monkeypatch, tmp_path):
+    root = _repo(tmp_path / "repo", {
+        "src/lib/impl.ts": _TS_IMPL,
+        "src/main.ts": 'import { helper as h } from "./lib/impl";\n'
+                       "export function entry() { return h(2); }\n",
+    })
+    env = _ask(monkeypatch, root, "callers", "helper", _TS_ALIAS_ROWS)
+    _assert_alias_gap_names(env, "src/main.ts", "h")
+
+
+def test_ts_reexport_under_an_alias_in_a_file_with_no_row_is_found(monkeypatch, tmp_path):
+    root = _repo(tmp_path / "repo", {
+        "src/lib/impl.ts": _TS_IMPL,
+        "src/lib/index.ts": 'export { helper as runHelper } from "./impl";\n',
+        "src/main.ts": 'import { runHelper } from "./lib";\n'
+                       "export function entry() { return runHelper(2); }\n",
+    })
+    env = _ask(monkeypatch, root, "callers", "helper", _TS_ALIAS_ROWS)
+    _assert_alias_gap_names(env, "src/lib/index.ts", "runHelper")
+
+
+def test_a_tree_with_no_alias_of_the_target_stays_complete(monkeypatch, tmp_path):
+    files = dict(_PY_ALIAS_FILES, **{"b.py": "from core import helper\n\n\ndef use_b():\n"
+                                             "    return helper()\n"})
+    root = _repo(tmp_path / "repo", files)
+    env = _ask(monkeypatch, root, "callers", "helper", _PY_ALIAS_ROWS)
+    assert not _gaps(env, "aliased-import-unbound"), env.get("gaps")
+    assert env["evidence"]["safe_for_destructive"] is True
+
+
+def test_an_alias_in_a_file_of_another_language_is_not_counted(monkeypatch, tmp_path):
+    files = dict(_PY_ALIAS_FILES, **{
+        "b.py": "from core import helper\n",
+        "web/main.ts": 'import { helper as h } from "./lib";\n'})
+    root = _repo(tmp_path / "repo", files)
+    env = _ask(monkeypatch, root, "callers", "helper", _PY_ALIAS_ROWS)
+    assert not _gaps(env, "aliased-import-unbound"), env.get("gaps")
+
+
 # ---- nested shadowing -----------------------------------------------------------------------
 
 @pytest.mark.parametrize(("root", "rows"), [(PY_ROOT, INNER_CALLERS_PY), (TS_ROOT, INNER_CALLERS_TS)],
@@ -261,7 +350,8 @@ def _interface(qn: str, file: str) -> dict:
 
 
 def _ask_dispatch(monkeypatch, root: str, target: str, edges: list[dict], definers: list[dict],
-                  interfaces: list[dict] | None = None, *, fail_edge_call: int = 0) -> dict:
+                  interfaces: list[dict] | None = None, *, fail_edge_call: int = 0,
+                  methods: list[dict] | None = None) -> dict:
     """Like `_ask`, with a router that answers the way the backend does for a method: every edge row
     of the bare name for an edge query, the classes defining the name, and the interfaces."""
     monkeypatch.setattr(
@@ -282,6 +372,8 @@ def _ask_dispatch(monkeypatch, root: str, target: str, edges: list[dict], define
             return list(edges)
         if ":Interface" in cypher:
             return list(interfaces or [])
+        if "(m:Method)" in cypher and "DEFINES_METHOD" not in cypher:
+            return list(methods or [])
         if "DEFINES_METHOD" in cypher and "m.name=" in cypher:
             return list(definers)
         return []
@@ -364,6 +456,85 @@ def test_a_sibling_whose_callers_could_not_be_fetched_says_could_not_check(monke
     assert gaps, env.get("gaps")
     assert "could not check" in gaps[0]["detail"] and "Circle.area" in gaps[0]["detail"], gaps
     assert env["evidence"]["safe_for_destructive"] is False
+
+
+# The acceptance fakes' shape: the backend holds the same-named `*.area` METHOD nodes and the
+# `suffix_match` edge, and no class node at all, so no class defines the method. The call text is the
+# bare method name, as a backend that records no receiver gives it.
+
+def _method_node(qn: str, file: str) -> dict:
+    return {"m.qualified_name": f"{PROJECT}.{qn}", "m.file_path": file}
+
+
+PY_CLASSLESS_EDGES = [
+    _method_row("pkg.shapes.Square.describe", "pkg/shapes.py", "pkg.shapes.Square.area",
+                "pkg/shapes.py", strategy="lsp_method", written="area", conf="0.95",
+                caller_labels="Method"),
+    _method_row("pkg.shapes.only_square", "pkg/shapes.py", "pkg.shapes.Square.area",
+                "pkg/shapes.py", strategy="lsp_method", written="area", conf="0.95"),
+    _method_row("pkg.shapes.total_area", "pkg/shapes.py", "pkg.shapes.Circle.area",
+                "pkg/shapes.py", strategy="suffix_match", written="area", conf="0.55"),
+]
+PY_CLASSLESS_METHODS = [_method_node("pkg.shapes.Circle.area", "pkg/shapes.py"),
+                        _method_node("pkg.shapes.Square.area", "pkg/shapes.py")]
+
+TS_CLASSLESS_EDGES = [
+    _method_row("src.shapes.Square.describe", "src/shapes.ts", "src.shapes.Square.area",
+                "src/shapes.ts", strategy="lsp_ts_method", written="area", conf="0.95",
+                caller_labels="Method"),
+    _method_row("src.shapes.onlySquare", "src/shapes.ts", "src.shapes.Square.area",
+                "src/shapes.ts", strategy="lsp_ts_method", written="area", conf="0.95"),
+    _method_row("src.shapes.totalArea", "src/shapes.ts", "src.shapes.Shape.area",
+                "src/shapes.ts", strategy="suffix_match", written="area", conf="0.55"),
+]
+TS_CLASSLESS_METHODS = [_method_node("src.shapes.Shape.area", "src/shapes.ts"),
+                        _method_node("src.shapes.Square.area", "src/shapes.ts")]
+
+
+def test_a_sibling_method_with_no_class_node_lists_its_name_matched_caller(monkeypatch):
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", PY_CLASSLESS_EDGES, [],
+                        methods=PY_CLASSLESS_METHODS)
+
+    total = _row_named(env, "total_area")
+    assert total["evidence"] == "name-matched" and total["verified"] is False, total
+    assert "Circle.area" in total["why"], total["why"]
+    gaps = _gaps(env, "dispatch-sibling-unbound")
+    assert gaps, env.get("gaps")
+    assert "Circle.area" in gaps[0]["detail"] and "total_area" in gaps[0]["detail"], gaps
+    assert env["confidence"] == "partial"
+    assert env["evidence"]["safe_for_destructive"] is False
+    assert _row_named(env, "only_square")["verified"] is True
+
+
+def test_a_protocol_member_with_no_class_node_lists_its_name_matched_caller(monkeypatch):
+    env = _ask_dispatch(monkeypatch, TS_ROOT, "Square.area", TS_CLASSLESS_EDGES, [],
+                        methods=TS_CLASSLESS_METHODS)
+
+    total = _row_named(env, "totalArea")
+    assert total["evidence"] == "name-matched" and total["verified"] is False, total
+    gaps = _gaps(env, "dispatch-sibling-unbound")
+    assert gaps, env.get("gaps")
+    assert any("Shape.area" in g["detail"] and "totalArea" in g["detail"] for g in gaps), gaps
+    assert env["confidence"] == "partial"
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_a_classless_sibling_whose_callers_are_all_bound_adds_nothing(monkeypatch):
+    edges = [dict(r, strategy="lsp_method") if r["a.name"] == "total_area" else r
+             for r in PY_CLASSLESS_EDGES]
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", edges, [],
+                        methods=PY_CLASSLESS_METHODS)
+    assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
+    assert env["evidence"]["safe_for_destructive"] is True
+
+
+def test_a_classless_sibling_call_through_self_is_not_listed(monkeypatch):
+    """`self.area()` inside `Circle` runs `Circle`'s own method, whichever class the backend saw."""
+    edges = [dict(r, callee="self.area", **{"labels(a)": "Method"}) if r["a.name"] == "total_area"
+             else r for r in PY_CLASSLESS_EDGES]
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", edges, [],
+                        methods=PY_CLASSLESS_METHODS)
+    assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
 
 
 def test_ts_callers_of_a_method_an_interface_declares_has_the_gap(monkeypatch):
