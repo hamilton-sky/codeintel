@@ -212,8 +212,11 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/code/status":
             project_root = (parse_qs(parsed.query).get("project_root") or [""])[0]
             # role is server-authoritative, exactly as on the POST path — never read from input.
-            self._send_json(200, code_status_handler(
-                {"project_root": project_root, "role": role}))
+            result = code_status_handler({"project_root": project_root, "role": role})
+            # A root outside the role is denied the way POST denies it, not answered 200 with an
+            # all-false fallback that reads as "nothing is indexed there".
+            status = 403 if result.get("reason") in _RBAC_DENIED_REASONS else 200
+            self._send_json(status, result)
             return
         self._send_json(404, {"error": "not-found"})
 

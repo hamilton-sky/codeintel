@@ -6,6 +6,8 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from codeintel.core.containment import REFUSAL_TEXT, write_contained
+
 if TYPE_CHECKING:
     from codeintel.engines.graph.provider import GraphProvider
 
@@ -146,6 +148,9 @@ class MapGenerator:
 
     def __init__(self, provider: GraphProvider | None = None) -> None:
         self._provider = provider
+        # Why the last `write` refused to write (a symlinked CODE_INTEL.md), else None. Distinct
+        # from a kept-existing stub, which is also `wrote=False` but no refusal.
+        self.last_refusal: str | None = None
 
     def generate(self, project_root: str, budget_bytes: int = 32768, now: datetime | None = None) -> str:
         # Computed once, up front, so every exit path (stub or populated) is stamped with the SAME
@@ -213,11 +218,15 @@ class MapGenerator:
         backend is unavailable or hasn't indexed this repo yet — a common transient during
         `codeintel index`'s best-effort refresh. Overwriting a previously-populated CODE_INTEL.md
         with that stub silently destroys real orientation content, so when the new content is a
-        stub and an existing map is populated, preserve the existing file."""
+        stub and an existing map is populated, preserve the existing file.
+
+        A symlinked CODE_INTEL.md is never written through, wherever it points (an untrusted repo
+        can link it to ``~/.bashrc``): ``wrote`` is False and ``last_refusal`` says why."""
+        self.last_refusal = None
         path = os.path.join(project_root, "CODE_INTEL.md")
         if not _is_populated_map(content):
             try:
-                if os.path.isfile(path):
+                if not os.path.islink(path) and os.path.isfile(path):
                     with open(path, encoding="utf-8") as f:
                         existing = f.read()
                     if _is_populated_map(existing):
@@ -230,8 +239,11 @@ class MapGenerator:
             except Exception:
                 pass  # can't read the existing file — fall through and write (best-effort)
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
+            reason = write_contained(project_root, "CODE_INTEL.md", content, follow_links=False)
+            if reason is not None:
+                self.last_refusal = (f"Refused to write CODE_INTEL.md: {REFUSAL_TEXT[reason]} "
+                                     f"({path})")
+                return path, False
             return path, True
         except Exception as exc:
             logger.warning("CODE_INTEL.md write failed: %s", exc)

@@ -100,7 +100,7 @@ def test_every_gap_kind_the_guide_names_is_one_some_provider_raises():
     named = set(re.findall(r"`(ancestor-scope|row-cap-reached|all-rows-name-resolved|"
                            r"low-confidence-edges|name-collisions-dropped|unresolvable|"
                            r"non-call-relationships|target-ambiguous|callers-via-base|"
-                           r"dispatch-bases-incomplete)`", TEXT))
+                           r"dispatch-bases-incomplete|import-only-callers)`", TEXT))
     assert {"callers-via-base", "dispatch-bases-incomplete"} <= named, (
         "the guide no longer explains the rows that call a base, which is the one reading of "
         "`callers` that used to end in a deletion")

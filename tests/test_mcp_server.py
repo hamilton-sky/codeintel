@@ -262,3 +262,88 @@ def test_every_op_is_labelled_with_what_its_answer_supports(monkeypatch):
     # is the one the whole phase is about.
     assert "require `evidence_class: \"evidence\"`" in description, description
     assert "Before deleting or renaming" in description, description
+
+
+class _RecordingGateway:
+    """Stands in for the singleton gateway: every engine slot filled (so no refresh runs), RBAC
+    open, and every `query` call recorded."""
+
+    graph = lsp = semantic = object()
+
+    def __init__(self):
+        self.queries: list[dict] = []
+
+    def allows_root(self, role, root):
+        return True
+
+    def query(self, **kw):
+        self.queries.append(kw)
+        return {"ok": True, "op": kw.get("op"), "result": "first-time indexing started",
+                "reason": ""}
+
+
+def test_a_root_that_does_not_exist_is_root_not_found_before_any_query(monkeypatch):
+    """A path that does not exist was answered `project-not-indexed`, telling the agent to index
+    a directory that is not there (and `search` claimed "first-time indexing started")."""
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+
+    for op in ("callers", "search"):
+        r = srv.code_query_handler({"op": op, "target": "main", "project_root": "/nonexistent/dir"})
+        assert r["reason"] == "root-not-found", r
+        assert r["outcome"] == "unavailable", r
+        assert r["result"] is None
+        assert "/nonexistent/dir does not exist" in r["hint"], r
+        assert "absolute repo root" in r["hint"], r
+    assert gw.queries == [], "the gateway must never be asked about a missing root"
+
+
+def test_a_file_given_as_the_root_is_root_not_found(monkeypatch, tmp_path):
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+    f = tmp_path / "app.py"
+    f.write_text("x = 1\n")
+    r = srv.code_query_handler({"op": "callers", "target": "main", "project_root": str(f)})
+    assert r["reason"] == "root-not-found"
+    assert gw.queries == []
+
+
+def test_an_existing_root_still_reaches_the_gateway(monkeypatch, tmp_path):
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+    srv.code_query_handler({"op": "callers", "target": "main", "project_root": str(tmp_path)})
+    assert [q["project_root"] for q in gw.queries] == [str(tmp_path)]
+
+
+def test_root_not_found_hint_is_redacted(monkeypatch):
+    """This answer never reaches `Gateway.query`, where redaction runs, so it redacts itself."""
+    monkeypatch.setenv("HOME", "/home/alice")
+    monkeypatch.setattr(srv, "_get_gateway", lambda: _RecordingGateway())
+    r = srv.code_query_handler({"op": "callers", "target": "main",
+                                "project_root": "/home/alice/gone/repo"})
+    assert r["reason"] == "root-not-found"
+    assert "/home/alice" not in r["hint"] and "~/gone/repo does not exist" in r["hint"], r
+
+
+def test_root_not_found_echoes_at_most_200_characters_of_the_root(monkeypatch):
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+    root = "/nonexistent/" + "d" * 5000
+    r = srv.code_query_handler({"op": "callers", "target": "main", "project_root": root})
+
+    assert r["reason"] == "root-not-found", r
+    assert "d" * 201 not in r["hint"], r["hint"]
+    assert len(r["hint"]) < 400, r["hint"]
+    assert gw.queries == []
+
+
+def test_a_file_given_as_the_root_is_said_to_be_not_a_directory(monkeypatch, tmp_path):
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+    f = tmp_path / "app.py"
+    f.write_text("x = 1\n")
+    r = srv.code_query_handler({"op": "callers", "target": "main", "project_root": str(f)})
+
+    assert r["reason"] == "root-not-found"
+    assert "is not a directory" in r["hint"], r["hint"]
+    assert "does not exist" not in r["hint"], r["hint"]

@@ -62,6 +62,12 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
+# How every `EmbeddingModelUnavailable` message begins. The semantic provider records a failed
+# index pass as a model-load failure only when its `last_error` starts with this, so the message
+# and that check read the same constant.
+MODEL_LOAD_FAILURE_PREFIX = "could not load embedding model "
+
+
 class EmbeddingModelUnavailable(RuntimeError):
     """The embedding model could not be loaded, with the remedy that actually fits the cause.
 
@@ -99,7 +105,7 @@ class EmbeddingModelUnavailable(RuntimeError):
         text = _one_line(str(cause))
         detail = f"{type(cause).__name__}: {text}" if text else type(cause).__name__
         super().__init__(
-            f"could not load embedding model '{_one_line(model_name)}' ({detail}) "
+            f"{MODEL_LOAD_FAILURE_PREFIX}'{_one_line(model_name)}' ({detail}) "
             f"— {_one_line(remedy)}"
         )
 
@@ -480,8 +486,10 @@ class SemanticDb:
                     # `reset` alone cannot fix this: the vec0 table's dimension is fixed at
                     # creation and the table is SHARED across every project in this cache file,
                     # so a project-scoped reset (which only DELETEs that project's rows) leaves
-                    # it in place and the warning repeats forever. `--all` drops the file.
-                    "`codeintel reset --all` to rebuild the semantic index for the new model",
+                    # it in place and the warning repeats forever. `--all` drops the file, and
+                    # `--semantic-only` keeps every graph index, which a model switch leaves valid.
+                    "`codeintel reset --all --semantic-only` to rebuild the semantic index for "
+                    "the new model",
                     dim, self.dimension,
                 )
                 return None

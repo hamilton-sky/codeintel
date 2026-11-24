@@ -22,6 +22,16 @@ ROOT = "/Users/x/Documents/project/codeintel"
 LIST_PROJECTS = {"projects": [{"name": "codeintel", "root_path": ROOT}]}
 
 
+@pytest.fixture
+def in_a_work_tree(monkeypatch):
+    """`ROOT` is not a real directory, let alone a git work tree. The uncommitted `changed` tests
+    here are about rendering the backend's answer, not about the git checks in front of it, so
+    those are answered "yes, a work tree" and "git status lists nothing"."""
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.in_work_tree", lambda root: True)
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.uncommitted_paths",
+                        lambda root, within="": ([], [], ""))
+
+
 def _provider(monkeypatch, *, edge_rows, node_rows):
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
@@ -59,6 +69,7 @@ def test_a_genuinely_absent_symbol_still_says_so_and_still_offers_the_reindex(mo
     assert "codeintel index" in env["hint"]
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(monkeypatch):
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
@@ -90,6 +101,7 @@ def test_changed_reports_callers_outside_the_edit_not_just_symbols_inside_it(mon
     assert "resolved by name matching" in body
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_says_zero_ripple_out_loud_rather_than_omitting_the_section(monkeypatch):
     """An absent section and an empty one read the same to a model. Only one of them is a claim."""
     monkeypatch.setattr(
@@ -499,8 +511,11 @@ def test_an_all_calls_answer_keeps_its_plain_count(monkeypatch):
 
 
 def test_no_edges_names_the_relationships_that_do_point_at_the_symbol(monkeypatch):
-    """"No callers" plus silence reads as "unused". Naming what DOES reference it is the difference
-    between an answer and a dead end."""
+    """"No callees" plus silence reads as "it does nothing". Naming what DOES reference it is the
+    difference between an answer and a dead end — but only a real edge kind of this graph
+    (`_EDGE_KINDS`) is named. Backend 0.9.0 answers `type(c) AS kind` with `["1","1"]`, which
+    printed "1 1" as a relationship, and a kind the edge vocabulary does not describe is not one
+    a reader can act on."""
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
     p = GraphProvider()
@@ -509,16 +524,18 @@ def test_no_edges_names_the_relationships_that_do_point_at_the_symbol(monkeypatc
     def rows(cypher, project, timeout_ms):
         if "type(c) AS kind" in cypher:                       # the dependency census
             return [{"kind": "DECORATES", "n": "3"}, {"kind": "DEFINES", "n": "1"},
-                    {"kind": "TESTS", "n": "2"}]
+                    {"kind": "TESTS", "n": "2"}, {"kind": "CALLS", "n": "4"},
+                    {"kind": "1", "n": "1"}]
         if "-[" not in cypher:                                # the node-existence probe
             return [{"n.qualified_name": "pkg.route", "n.file_path": "src/api.py"}]
         return []                                             # no CALLS/USAGE/CALL_REFERENCE
     monkeypatch.setattr(p, "_query_rows", rows)
 
-    env = p.build_result("callers", "route", [], 30000, ROOT)
+    env = p.build_result("callees", "route", [], 30000, ROOT)
     assert env["reason"] == "no-edges"
     hint = env["hint"]
-    assert "3 DECORATES" in hint and "2 TESTS" in hint, hint
+    assert "4 CALLS" in hint, hint
+    assert "DECORATES" not in hint and "TESTS" not in hint and "1 1" not in hint, hint
     # Structural edges say where a symbol lives, not what depends on it.
     assert "DEFINES" not in hint, hint
 
@@ -545,6 +562,7 @@ def test_a_zero_count_is_never_rendered_as_a_relationship(monkeypatch):
     assert "Other relationships DO point at it" not in hint, hint
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkeypatch):
     """A function REGISTERED somewhere breaks just as thoroughly when its signature moves, and the
     edge recording that is CALL_REFERENCE — which the ripple query used to exclude. This op answers
@@ -571,6 +589,7 @@ def test_changed_ripple_includes_a_registration_and_says_it_is_not_a_call(monkey
     assert rows[0].startswith("- proj.app.run"), rows
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_changed_ripple_asks_for_the_registration_edge(monkeypatch):
     monkeypatch.setattr(
         "codeintel.engines.graph.provider.shutil.which", lambda x: "/fake/codebase-memory-mcp")
@@ -630,6 +649,7 @@ def _caller(name: str, *, conf: str, strategy: str) -> dict:
             "c.confidence": conf, "kind": "CALLS", "strategy": strategy}
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_the_headline_counts_resolved_callers_and_name_matches_get_their_own_heading(monkeypatch):
     """D4. '38 callers elsewhere' included 14 that the footnote admitted may not reach the code at
     all. The headline now counts the resolved ones, says how many more are name matches, and those
@@ -647,6 +667,7 @@ def test_the_headline_counts_resolved_callers_and_name_matches_get_their_own_hea
     assert "[?0.38]" in guessed and "resolved by name matching" in guessed
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_only_name_matches_is_not_reported_as_zero_callers(monkeypatch):
     """The negative control: nothing resolved must not read as 'nothing calls into them'."""
     body = _ripple_body(monkeypatch, [_caller("g", conf="0.38", strategy="suffix_match")])
@@ -656,6 +677,7 @@ def test_only_name_matches_is_not_reported_as_zero_callers(monkeypatch):
     assert "No symbol outside the changed files calls into them" not in body
 
 
+@pytest.mark.usefixtures("in_a_work_tree")
 def test_a_headline_without_name_matches_is_unchanged(monkeypatch):
     body = _ripple_body(monkeypatch, [_caller("real", conf="0.95", strategy="import_map")])
     assert "1 callers elsewhere)" in body and "matched by name only" not in body

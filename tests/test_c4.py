@@ -804,3 +804,26 @@ def test_the_header_states_the_fabrication_rate_rather_than_just_warning(monkeyp
     dsl = c4.render_c4_dsl(c4.build_c4_payload("/repo", depth=4))
     assert "1 in 1,239" in dsl
     assert "54 in 60" in dsl
+
+
+def test_each_relation_carries_its_import_file_pairs_whatever_the_edge_source(monkeypatch):
+    """`--check` matches `[[layers.allow]]` against these pairs, so an entry naming a file keeps
+    matching when auto-fit rolls that file up into a directory element (ticket 14)."""
+    _wire(monkeypatch,
+          file_rows=_rows(["svcA/a.py", "svcA/b.py", "svcB/x.py", "svcC/y.py"]),
+          import_rows=[{"a.file_path": "svcA/b.py", "b.file_path": "svcB/x.py", "count(*)": 3},
+                       {"a.file_path": "svcA/a.py", "b.file_path": "svcB/x.py", "count(*)": 2}],
+          calls_rows=[{"a.file_path": "svcA/a.py", "b.file_path": "svcB/x.py", "count(*)": 5},
+                      {"a.file_path": "svcA/a.py", "b.file_path": "svcC/y.py", "count(*)": 7}])
+    union = c4.build_c4_payload("/repo", depth=1)
+    by_pair = {(r["from"], r["to"]): r for r in union["relations"]}
+    imports_rel = next(r for r in union["relations"] if r["kind"] == "imports")
+    calls_rel = next(r for r in union["relations"] if r["kind"] == "calls_usage")
+    assert imports_rel["import_files"] == [["svcA/a.py", "svcB/x.py", 2],
+                                           ["svcA/b.py", "svcB/x.py", 3]]
+    assert calls_rel["import_files"] == []
+    assert len(by_pair) == 2
+
+    filtered = c4.build_c4_payload("/repo", depth=1, edges="imports")
+    assert [r["import_files"] for r in filtered["relations"]] == [
+        [["svcA/a.py", "svcB/x.py", 2], ["svcA/b.py", "svcB/x.py", 3]]]

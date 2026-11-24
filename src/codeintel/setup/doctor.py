@@ -100,6 +100,19 @@ def _probe_engine(
     except Exception as exc:
         r = {"installed": None, "runnable": False, "repo_indexed": None,
              "detail": f"probe raised ({type(exc).__name__})", "remediation": None}
+    if r.get("reason") == "model-load-failed":
+        # The last index pass could not load the embedding model, and nothing the user can do in
+        # this repo fixes that: the weights must be reachable or pre-seeded. A failing row, whose
+        # fix names the network and the cache variable, whatever the probe's own text said.
+        try:
+            from codeintel.engines.semantic.provider import MODEL_FAILURE_FIX as fix
+        except Exception:
+            fix = ("check network/proxy access, or set FASTEMBED_CACHE_PATH to a directory "
+                   "pre-seeded with the embedding model")
+        r["runnable"] = False
+        rem = str(r.get("remediation") or "")
+        if "FASTEMBED_CACHE_PATH" not in rem or "network" not in rem:
+            r["remediation"] = f"{fix}; then: {rem}" if rem else fix
     if on_provider is not None and r.get("installed") is True:
         try:
             on_provider(engine, p)

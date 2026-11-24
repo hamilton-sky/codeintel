@@ -482,3 +482,18 @@ def test_setup_install_deps_help_names_the_packages_onboarding_actually_installs
     for pkg in ("fastembed", "sqlite-vec"):
         assert pkg in action.help, f"--install-deps help omits {pkg!r}"
         assert pkg in source, f"onboarding.py no longer installs {pkg!r} — update the help text too"
+
+
+# --------------------------------------------------------------------------- reset
+
+def test_reset_help_names_both_indexes_and_offers_semantic_only():
+    """`reset <repo>` clears the graph index too, so a help line that names only the semantic index
+    understates what it deletes. `--semantic-only` is the way to keep the graph."""
+    from codeintel.__main__ import _DESCRIPTIONS
+    desc = _DESCRIPTIONS["reset"].lower()
+    assert "semantic" in desc and "graph" in desc, desc
+    out = _run("reset", "--help")
+    assert out.returncode == 0, out.stderr
+    description = out.stdout.split("\n\n")[1].lower()
+    assert "semantic" in description and "graph" in description, out.stdout
+    assert "--semantic-only" in out.stdout

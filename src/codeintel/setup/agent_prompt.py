@@ -40,45 +40,80 @@ def build_prompt(project_root: str, agent: str, report: dict[str, Any], *, fresh
     ``fresh=True`` the local state is ignored and every step is emitted."""
     engines = {} if fresh else (report.get("engines") or {})
 
+    def _row(name: str) -> dict[str, Any]:
+        row = engines.get(name)
+        return row if isinstance(row, dict) else {}
+
     def _ok(name: str) -> bool:
-        return (engines.get(name) or {}).get("status") == "ok"
+        return _row(name).get("status") == "ok"
+
+    def _installed(name: str) -> bool:
+        # Doctor says `installed: True` for a package that is present but failing. A row without
+        # the field (an older or partial report) keeps the status-based step.
+        return _row(name).get("installed") is True
 
     graph_ok, lsp_ok, semantic_ok = _ok("graph"), _ok("lsp"), _ok("semantic")
+    semantic_row = _row("semantic")
+    # The package is installed and the last index could not download the embedding model:
+    # reinstalling changes nothing, the network or a pre-seeded cache does.
+    model_failed = semantic_row.get("reason") == "model-load-failed"
+    # serena is installed but has not booted yet: unverified, not missing.
+    lsp_row = _row("lsp")
+    lsp_unverified = (not lsp_ok and _installed("lsp") and lsp_row.get("status") == "warn"
+                      and lsp_row.get("runnable") is None)
     healthy = (not fresh) and bool((report.get("summary") or {}).get("healthy"))
     registered = (not fresh) and any(
         r.get("agent") == agent and r.get("runnable")
         for r in (report.get("registrations") or [])
     )
     install_flag = f" --agent {agent}" if agent else ""
-    tools = "code.query, code.doctor, code.map"
+    tools = "code.query, code.status, code.doctor, code.map"
+
+    unverified = (
+        " The LSP engine is installed but unverified (serena boots on first use); "
+        "`doctor --deep` boots it to check." if lsp_unverified else ""
+    )
 
     # Already fully set up: the one thing an agent cannot do for itself is get restarted.
     if healthy and registered:
         return (
             f"codeintel is already installed and healthy for this project ({project_root}) and "
             f"registered as one of your MCP servers — nothing to install. Confirm with "
-            f"`codeintel doctor --deep {project_root}` (expect \"ready 3/3, healthy\"), then tell me "
+            f"`codeintel doctor --deep {project_root}` (expect \"ready 3/3, healthy\").{unverified} Then tell me "
             f"to restart you so your codeintel MCP tools ({tools}) load."
         )
 
     # Emit only the steps that are actually outstanding.
     steps: list[str] = []
     pip_targets: list[str] = []
-    if not semantic_ok:
+    semantic_missing = not semantic_ok and not _installed("semantic") and not model_failed
+    graph_missing = not graph_ok and not _installed("graph")
+    if semantic_missing:
         pip_targets.append(_PYPI_PACKAGE)
-    if not graph_ok:
+    if graph_missing:
         pip_targets.append("'codebase-memory-mcp==0.9.*'")
     if pip_targets:
         adds = " and ".join(
             part for part in (
-                "the codeintel CLI + semantic engine" if not semantic_ok else "",
-                "the graph engine" if not graph_ok else "",
+                "the codeintel CLI + semantic engine" if semantic_missing else "",
+                "the graph engine" if graph_missing else "",
             ) if part
         )
         steps.append(f"`pip install {' '.join(pip_targets)}` — installs {adds}")
+    if model_failed:
+        remediation = str(semantic_row.get("remediation") or "")
+        fix = remediation.split("; then:")[0].strip()
+        if "FASTEMBED_CACHE_PATH" not in fix or "network" not in fix:
+            fix = ("check network/proxy access to huggingface.co, or set FASTEMBED_CACHE_PATH to a "
+                   "directory pre-seeded with the embedding model")
+        steps.append(
+            f"the semantic engine is installed, but the last index could not download its "
+            f"embedding model, so do not reinstall it: {fix}"
+        )
     # setup --all installs uv, indexes, and warms serena — needed unless all three engines are
     # already ok (in which case the repo is indexed too, and only registration can be outstanding).
-    if not (graph_ok and lsp_ok and semantic_ok):
+    # An unverified LSP row counts as present: `doctor --deep` below boots it.
+    if not (graph_ok and (lsp_ok or lsp_unverified) and semantic_ok):
         steps.append(
             f"`codeintel setup --all {project_root}` — installs uv (the LSP engine), indexes this "
             f"repo, and warms serena; idempotent, safe to re-run"
@@ -91,7 +126,7 @@ def build_prompt(project_root: str, agent: str, report: dict[str, Any], *, fresh
         f"Set up the codeintel code-intelligence tool for this project ({project_root}) and wire it "
         f"into me. Run these in order, showing me the output of each:\n\n{numbered}\n\n"
         f"Then run `codeintel doctor --deep {project_root}` and show me the result — I expect "
-        f"\"ready 3/3, healthy\". If any engine is not \"ok\", run the exact remediation `doctor` "
+        f"\"ready 3/3, healthy\".{unverified} If any engine is not \"ok\", run the exact remediation `doctor` "
         f"prints for it and re-check. When it is healthy, tell me to restart you so my codeintel MCP "
         f"tools ({tools}) load."
     )

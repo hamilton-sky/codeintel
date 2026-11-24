@@ -61,10 +61,19 @@ _EDGE_KINDS: dict[str, str] = {
     "CALLS": "called directly",
     "USAGE": "referenced, not called (module scope, or a mention that is not a call site)",
     "CALL_REFERENCE": "passed as a value or registered as a callback — never invoked here",
+    "IMPORT": "module scope of a file — an import or a module-level reference; the function inside "
+              "that file that calls it is not resolved",
 }
 
 
 _DIRECT_KIND = "CALLS"
+
+# Not a kind the backend stores. A CALLS/USAGE row whose caller is a file's module scope
+# (`AnswerRendering._collapse_module_scope`) is counted under it: the backend hangs the edges of code
+# it has no node for — the import line, a module-level use — off the file, so the row says the file
+# references the symbol and not which function in it calls it. Counted as a direct call, it made
+# `callers safe_null_result` read "14 direct" over four real calls.
+_IMPORT_KIND = "IMPORT"
 
 
 # The relationship kinds a `callers` question matches. One spelling, because the dispatch lookup asks

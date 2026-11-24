@@ -731,3 +731,67 @@ def test_the_sandbox_guard_would_actually_catch_an_escape(tmp_path, sandbox):
         assert sandbox.escaped == [str(outside)]
     finally:
         sandbox.escaped.clear()      # the escape was this test's own; teardown must not fail on it
+
+
+# --------------------------------------------------------------------------- #
+# --semantic-only keeps the graph
+# --------------------------------------------------------------------------- #
+
+def _plant_graph_files(graph, slug):
+    files = [graph / f"{slug}{suffix}" for suffix in (".db", ".db-wal", ".db-shm", ".db.corrupt")]
+    for p in files:
+        p.write_bytes(b"graph-index")
+    return files
+
+
+def test_scoped_semantic_only_clears_the_semantic_index_and_keeps_the_graph(tmp_path, sandbox):
+    """`reset --semantic-only <repo>` is doctor's fix for a corrupt semantic cache: it must not
+    take the graph index (`.db`, `-wal`, `-shm`, `.corrupt`) with it."""
+    from codeintel.setup.reset import _graph_slug
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    repo_real = os.path.realpath(str(repo))
+    _seed(default_db_path(), repo_real, n=2)
+    graph_files = _plant_graph_files(sandbox.graph, _graph_slug(repo_real))
+    before = {str(p): p.read_bytes() for p in graph_files}
+
+    report = run_reset(str(repo), apply=True, semantic_only=True)
+
+    assert report["mode"] == "scoped" and report["applied"] is True
+    assert report["count"] == 2
+    assert _row_count(default_db_path(), repo_real) == 0             # semantic index cleared
+    assert {str(p): p.read_bytes() for p in graph_files} == before   # graph files untouched
+    assert report["graph_removed"] == 0
+    assert "graph index was kept" in report["detail"]
+
+
+def test_all_semantic_only_removes_semantic_files_and_keeps_every_graph_file(tmp_path, sandbox):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    repo_real = os.path.realpath(str(repo))
+    expected = _plant_a_full_cache(sandbox, repo_real, journals=True)
+    graph_root = str(sandbox.graph)
+    graph_before = _files_under(sandbox.graph)
+    assert graph_before
+
+    report = run_reset(str(repo), all_projects=True, apply=True, semantic_only=True)
+
+    survivors = _files_under(tmp_path)
+    for path, doomed in expected.items():
+        if path.startswith(graph_root):
+            continue
+        assert (path in survivors) is (not doomed), path
+    assert _files_under(sandbox.graph) == graph_before
+    assert "graph" not in report["detail"] or "kept" in report["detail"]
+
+
+def test_plain_reset_still_removes_the_graph_index_with_its_siblings(tmp_path, sandbox):
+    from codeintel.setup.reset import _graph_slug
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    graph_files = _plant_graph_files(sandbox.graph, _graph_slug(os.path.realpath(str(repo))))
+
+    report = run_reset(str(repo), apply=True)
+
+    assert report["graph_removed"] == 4
+    assert not any(p.exists() for p in graph_files)

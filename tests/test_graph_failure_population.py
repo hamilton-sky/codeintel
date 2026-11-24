@@ -90,10 +90,14 @@ def _fail_backend(gp: GraphProvider, missing: Missing):
 # T4 — no graph op reports a backend failure as an absence.
 # --------------------------------------------------------------------------------------------- #
 
-def test_no_graph_op_reports_a_backend_failure_as_an_absence():
+def test_no_graph_op_reports_a_backend_failure_as_an_absence(monkeypatch):
     ops = sorted({n[len("_op_"):] for cls in GraphProvider.__mro__
                   for n in vars(cls) if n.startswith("_op_")})
     assert len(ops) >= 8, f"op domain looks broken, only found: {ops}"
+    # `/tmp/x` is not a git work tree, so uncommitted `changed` would answer `not-a-git-repo`
+    # before the failing backend is ever asked. This test is about the backend, so that one git
+    # check is answered "yes".
+    monkeypatch.setattr("codeintel.engines.graph.changed_range.in_work_tree", lambda root: True)
 
     for missing in (
         Missing("backend-error", "the graph backend did not answer"),
@@ -367,7 +371,7 @@ def test_callees_of_a_shared_name_groups_the_symbols_instead_of_merging_them():
     # And each one is attributed to the symbol it actually came from.
     for owner in ("api.routes.handle", "worker.main.handle", "ui.button.handle"):
         assert owner in body, f"{owner} is not named as a distinct symbol: {body}"
-    assert "3 distinct symbols" in body
+    assert "3 symbols named `handle` have callee edges" in body, body
     # The ambiguity is machine-readable, not only prose.
     assert env["confidence"] == "partial"
     assert any(g["kind"] == "target-ambiguous" for g in env["gaps"]), env["gaps"]
@@ -659,7 +663,7 @@ def test_callers_of_a_shared_name_says_which_symbol_each_caller_calls():
     for caller in ("api.app.serve", "api.app.reload", "worker.run.loop"):
         assert caller in body, f"{caller} was lost: {body}"      # nothing dropped
     assert "(3)" in body
-    assert "2 distinct symbols" in body
+    assert "2 symbols named `handle` have caller edges" in body, body
     # Each caller is attributed to the symbol it actually calls.
     assert "api.routes.handle" in body and "worker.main.handle" in body
     assert env["confidence"] == "partial"
@@ -685,14 +689,24 @@ def test_impact_groups_both_of_its_halves_or_neither():
     the inconsistency this closes: a reader would see the callees attributed per symbol and read the
     callers list as belonging to whichever one they were looking at."""
     seq = iter([_TWO_HANDLERS_CALLED, _THREE_HANDLERS])
-    gp = _gp(query_rows=lambda cypher, project, timeout_ms: list(next(seq)))
+
+    def answer(cypher, project, timeout_ms):
+        # Each half's banner asks the index how many symbols carry the name; that count is not an
+        # edge query and takes no turn from the two the halves are answered from.
+        if cypher.startswith("MATCH (n) ") and "count(" in cypher:
+            return [{"symbols": "3"}]
+        return list(next(seq))
+
+    gp = _gp(query_rows=answer)
     env = gp.build_result("impact", "handle", [], 30000, "/tmp/x")
     body = env["result"]
 
     assert body is not None
     callers_half, _, callees_half = body.partition("## Callees of")
-    assert "distinct symbols" in callers_half, f"callers half not grouped:\n{callers_half}"
-    assert "distinct symbols" in callees_half, f"callees half not grouped:\n{callees_half}"
+    assert "symbols named `handle` have caller edges" in callers_half, (
+        f"callers half not grouped:\n{callers_half}")
+    assert "symbols named `handle` have callee edges" in callees_half, (
+        f"callees half not grouped:\n{callees_half}")
     assert env["confidence"] == "partial"
 
 
@@ -786,12 +800,15 @@ def test_callers_render_module_scope_nodes_as_locations_not_file_dunders():
     assert "module scope of src/click/decorators.py" in body
     # The File and Module representations of core.py's ONE module scope collapse to ONE row.
     assert body.count("module scope of src/click/core.py") == 1, body
-    # So the count is 1 (core.py) + 1 (decorators.py) + 1 (the real method) = 3, not the raw 4.
-    assert "(3)" in body
+    # So the rows are 1 (core.py) + 1 (decorators.py) + 1 (the real method) = 3, not the raw 4: one
+    # direct call and two files that reference it from module scope.
+    assert "(1 direct call, 2 files import it — call sites inside not resolved)" in body, body
+    assert len([ln for ln in body.splitlines() if ln.startswith("- ")]) == 3, body
     assert "Context.forward" in body, "the real method caller was lost"
-    # A pure relabel drops nothing, so the answer stays complete — not a partial with a gap.
-    assert env["confidence"] == "complete"
-    assert not (env.get("gaps") or [])
+    # The relabel drops nothing, but a module-scope row is an import: the function inside that file
+    # which calls the symbol is not resolved, so the answer is partial and says so.
+    assert env["confidence"] == "partial"
+    assert [g["kind"] for g in env.get("gaps") or []] == ["import-only-callers"], env["gaps"]
 
 
 def test_a_symbol_referenced_only_from_module_scope_is_not_reported_as_uncalled():
@@ -810,10 +827,13 @@ def test_a_symbol_referenced_only_from_module_scope_is_not_reported_as_uncalled(
 
     assert body is not None
     assert env.get("reason") is None, "a referenced symbol must be answered, not reported as a miss"
-    assert "(1)" in body and "(0)" not in body
+    assert "(0 direct calls, 1 file imports it — call sites inside not resolved)" in body, body
+    assert "(0)" not in body
+    assert len([ln for ln in body.splitlines() if ln.startswith("- ")]) == 1, body
     assert "module scope of src/click/core.py" in body
     assert "__file__" not in body
-    assert env["confidence"] == "complete"
+    assert env["confidence"] == "partial"
+    assert [g["kind"] for g in env.get("gaps") or []] == ["import-only-callers"], env["gaps"]
 
 
 def test_callees_are_untouched_by_the_module_scope_pass():

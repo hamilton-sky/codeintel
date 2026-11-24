@@ -446,6 +446,13 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("count", "GraphOps._op_impact"):
         "a zero is rendered only when the lookup answered — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",
+    ("count", "GraphOps._chain_between"):
+        "the hops listed under `## Path A → B` are a connected chain from A's qualified name to "
+        "B's — each listed hop is an edge the backend holds and each hop's callee is the next "
+        "hop's caller — test_the_path_hops_form_a_connected_chain_and_n_is_the_depth_sent",
+    ("tally", "GraphOps._chain_between"):
+        "N in \"within N hops\" is the depth actually sent to `trace_path`, read from the request "
+        "the stub captured — test_the_path_hops_form_a_connected_chain_and_n_is_the_depth_sent",
     ("count", "AnswerRendering._empty_edge_answer"):
         "a zero is rendered only when rows were retrieved — "
         "test_impact_renders_a_zero_only_when_the_lookup_actually_answered",
@@ -478,6 +485,12 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("tally", "AnswerRendering._confidence_note"):
         "the note's N-of-M counts the rows it describes — "
         "test_the_confidence_note_counts_the_rows_it_describes",
+    ("tally", "AnswerRendering._render_edge_answer"):
+        "the ambiguity banner's N is the per-symbol sections printed beneath it and N + M is the "
+        "count of every symbol of that name the index answered — "
+        "test_the_ambiguity_banner_counts_the_symbols_it_lists_and_the_rest_from_the_index, with "
+        "the failed count, which states no M, in "
+        "test_a_count_that_fails_leaves_the_number_out_and_says_others_may_exist",
     ("tally", "AnswerRendering._settle_name_matches"):
         "the two counts in the settle note are the rows in doubt and their distinct files — "
         "test_the_settle_note_counts_the_rows_it_sends_you_to_check. The note has a second shape "
@@ -745,9 +758,15 @@ def test_every_verifier_in_this_module_is_reachable_from_the_registry():
 # `## Callers of x (7)` / `### Changed files (3)`. Anchored at end of line so the trailing count
 # wins over an incidental number earlier in the heading — `up to 2 hop(s) (5)` claims 5, not 2.
 _HEAD_TOTAL = re.compile(r"^(#{2,4})\s+(.*?)\s*\((\d+)\)\s*$")
-# `## Callers of x (2 direct, 43 other reference(s))` — the split heading `#34` introduced.
+# `## Callers of x (2 direct, 43 other reference(s))` — the split heading `#34` introduced — and the
+# shape with importing files, `## Callers of x (4 direct calls, 1 other reference(s), 10 files import
+# it — call sites inside not resolved)`, where each module-scope row is one file that imports it. All
+# three numbers are rows beneath the heading, so the claim is their sum.
 _HEAD_SPLIT = re.compile(
-    r"^(#{2,4})\s+(.*?)\s*\((\d+)\s+direct,\s+(\d+)\s+other\s+reference\(s\)\)\s*$")
+    r"^(#{2,4})\s+(.*?)\s*\((?=[^)]*(?:other\s+reference\(s\)|imports?\s+it))"
+    r"(\d+)\s+direct(?:\s+calls?)?"
+    r"(?:,\s+(\d+)\s+other\s+reference\(s\))?"
+    r"(?:,\s+(\d+)\s+files?\s+imports?\s+it\b[^)]*)?\)\s*$")
 # `… (+12 more)` / `… (+3 more symbol(s) with this name, not shown)` — rows the body says it did
 # not render. A headline that counts them is still honest; one that counts nothing is not.
 _MORE = re.compile(r"\(\+(\d+)\s+more")
@@ -767,7 +786,7 @@ def _sections(body: str) -> list[tuple[str, int, int, list[str]]]:
         split = _HEAD_SPLIT.match(line)
         if split:
             heads.append((i, split.group(2), len(split.group(1)),
-                          int(split.group(3)) + int(split.group(4))))
+                          sum(int(g) for g in split.group(3, 4, 5) if g)))
             continue
         total = _HEAD_TOTAL.match(line)
         if total:
@@ -1281,6 +1300,7 @@ _DISCLOSURES = (
     "dropped as name collisions",
     "not shown",
     "distinct symbols",
+    "separate answers, not one",
     "comes from the indexed project that contains",
     "not evidence that",
 )

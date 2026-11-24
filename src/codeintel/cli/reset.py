@@ -11,7 +11,9 @@ def run(args: Any) -> int:
     from codeintel.setup import reset as _reset
 
     project_root = resolve_root(args)
-    preview = _reset.run_reset(project_root, all_projects=args.all, apply=False)
+    semantic_only = bool(getattr(args, "semantic_only", False))
+    preview = _reset.run_reset(project_root, all_projects=args.all, apply=False,
+                               semantic_only=semantic_only)
     if not args.yes:
         if not sys.stdin.isatty():
             print("refusing to reset without --yes in a non-interactive shell")
@@ -22,6 +24,7 @@ def run(args: Any) -> int:
         if ans not in ("y", "yes"):
             print("aborted")
             return 0
-    report = _reset.run_reset(project_root, all_projects=args.all, apply=True)
+    report = _reset.run_reset(project_root, all_projects=args.all, apply=True,
+                              semantic_only=semantic_only)
     emit(report, as_json=args.json, render=lambda r: r.get("detail", "reset complete"))
     return 0

@@ -33,6 +33,16 @@ def test_freshness_bump_busts_the_entry():
     assert c.get("search", "x", "semantic", "", 1) is None  # a completed reindex invalidates it
 
 
+def test_a_different_freshness_string_misses():
+    """The gateway's key is `generation:graph_db_stamp:semantic_db_mtime`, so an index written by
+    another process (or deleted by `reset`) changes the string and must force a miss."""
+    c = ContentHashCache()
+    c.put("callers", "helper", "graph", "/repo", _result("x"), "0:1700000000000000000:0")
+    assert c.get("callers", "helper", "graph", "/repo", "0:1700000000000000000:0") is not None
+    assert c.get("callers", "helper", "graph", "/repo", "0:1700000100000000000:0") is None
+    assert c.get("callers", "helper", "graph", "/repo", "0:0:0") is None
+
+
 def test_null_result_is_not_cached():
     c = ContentHashCache()
     c.put("search", "x", "semantic", "", {"ok": True, "result": None}, 0)

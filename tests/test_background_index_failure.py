@@ -544,3 +544,300 @@ def test_the_probe_reads_both_facts_under_one_lock(tmp_path, monkeypatch):
     assert "background index pass failed" in probe["detail"]
     assert "indexing in progress" not in probe["detail"]
     assert probe["runnable"] is False
+
+
+# --------------------------------------------------------------------------------------------- #
+# The failure is persisted, so a NEW process does not retry the blocked download for ~40 s
+# --------------------------------------------------------------------------------------------- #
+#
+# `_BG_INDEX_FAILED` lives in one process. Every new process (each CLI call, a restarted server)
+# started with it empty, retried the download, and after the cooldown the state flipped back to
+# "first-time indexing ~0s ago". The record under `codeintel_home()` carries the failure across.
+
+class _BlockedEmbedding:
+    """fastembed's model class on a host where the weights cannot be fetched."""
+
+    built = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).built += 1
+        raise ValueError("Could not load model BAAI/bge-small-en-v1.5 from any source.")
+
+    @classmethod
+    def list_supported_models(cls):
+        return [{"model": "BAAI/bge-small-en-v1.5"}]
+
+
+class _WorkingEmbedding:
+    """fastembed's model class once the weights are reachable."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def embed(self, texts):
+        import numpy as np
+        return [np.full(384, 0.1, dtype=np.float32) for _ in list(texts)]
+
+
+@pytest.fixture
+def blocked_host(tmp_path, monkeypatch):
+    """A repo, an empty fastembed cache and a model that cannot load. Returns the repo root."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "core.py").write_text("def helper():\n    return 1\n")
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.delenv("CODEINTEL_REINDEX", raising=False)
+    monkeypatch.setattr(sem, "_DEPS_OK", True)
+    _BlockedEmbedding.built = 0
+    monkeypatch.setattr("fastembed.TextEmbedding", _BlockedEmbedding)
+    return str(repo)
+
+
+def _record_path():
+    from codeintel.core.paths import codeintel_home
+    return codeintel_home() / "semantic_failure.json"
+
+
+def _fail_once(root: str) -> dict:
+    """One inline pass that fails to load the model, as `codeintel query` would run it."""
+    r = SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, root)
+    assert r["reason"] == "index-failed", r
+    assert _BlockedEmbedding.built == 1
+    return r
+
+
+def _as_a_new_process() -> None:
+    sem._BG_INDEX_STARTED.clear()
+    sem._BG_INDEX_FAILED.clear()
+
+
+def test_a_model_load_failure_is_written_to_a_record_under_codeintel_home(blocked_host):
+    import json
+    import os
+
+    _fail_once(blocked_host)
+
+    record = json.loads(_record_path().read_text())
+    assert set(record) == {"cause", "at", "model", "fastembed_cache_path", "model_files_present"}
+    assert "could not load embedding model" in record["cause"]
+    assert record["model"] == "BAAI/bge-small-en-v1.5"
+    assert record["fastembed_cache_path"] == os.environ["FASTEMBED_CACHE_PATH"]
+    assert record["model_files_present"] is False
+    assert abs(record["at"] - time.time()) < 60
+    # Written atomically: no temp file is left beside it.
+    assert sorted(p.name for p in _record_path().parent.iterdir()
+                  if p.name.startswith("semantic_failure") or p.name.startswith(".semantic")) == [
+        "semantic_failure.json"]
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+def test_a_new_process_fails_fast_with_the_recorded_cause(blocked_host, blocking, monkeypatch):
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    started: list[str] = []
+    real_start = sem._start_background_index
+    monkeypatch.setattr(sem, "_start_background_index",
+                        lambda *a, **k: started.append("bg") or real_start(*a, **k))
+
+    t0 = time.monotonic()
+    r = SemanticProvider(blocking_index=blocking).build_result(
+        "search", "helper", [], 0, blocked_host)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 1.0
+    assert r["reason"] == "index-failed"
+    assert "could not load" in r["hint"]
+    assert "first-time indexing" not in r["hint"]
+    assert "codeintel index" in r["hint"]
+    assert "FASTEMBED_CACHE_PATH" in r["hint"]
+    assert _BlockedEmbedding.built == 1          # the model load was not tried again
+    assert started == []                         # and no background pass was started
+
+
+def test_a_changed_fastembed_cache_path_lets_an_index_be_tried_again(
+        blocked_host, tmp_path, monkeypatch):
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    elsewhere = tmp_path / "fastembed-elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(elsewhere))
+
+    SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert _BlockedEmbedding.built == 2
+
+
+def test_a_different_model_lets_an_index_be_tried_again(blocked_host, monkeypatch):
+    import json
+
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    record = json.loads(_record_path().read_text())
+    record["model"] = "some/other-model"
+    _record_path().write_text(json.dumps(record))
+
+    SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert _BlockedEmbedding.built == 2
+
+
+def test_model_files_that_appear_let_an_index_be_tried_again(blocked_host, monkeypatch):
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    monkeypatch.setattr("codeintel.engines.semantic.db.model_is_cached", lambda *a, **k: True)
+
+    SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert _BlockedEmbedding.built == 2
+
+
+@pytest.mark.parametrize("damage", ["older-than-10-minutes", "future-at", "nan-at", "not-json",
+                                    "not-an-object", "at-not-a-number", "cause-not-text"])
+def test_a_record_that_cannot_be_trusted_lets_an_index_be_tried_again(blocked_host, damage):
+    import json
+
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    record = json.loads(_record_path().read_text())
+    if damage == "older-than-10-minutes":
+        record["at"] = time.time() - 601
+        text = json.dumps(record)
+    elif damage == "future-at":
+        record["at"] = time.time() + 3600
+        text = json.dumps(record)
+    elif damage == "nan-at":
+        # `json.loads` reads `NaN` as float('nan'): every age comparison with it is False, so a
+        # record dated NaN must not be read as forever recent.
+        record["at"] = float("nan")
+        text = json.dumps(record)
+        assert '"at": NaN' in text
+    elif damage == "not-json":
+        text = "{not json"
+    elif damage == "not-an-object":
+        text = json.dumps([record])
+    elif damage == "at-not-a-number":
+        record["at"] = "now"
+        text = json.dumps(record)
+    else:
+        record["cause"] = {"text": "x"}
+        text = json.dumps(record)
+    _record_path().write_text(text)
+
+    r = SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert _BlockedEmbedding.built == 2
+    # A record that is not trusted is not trusted for its cause either: this answer's cause is
+    # the pass just run, never the planted text.
+    assert r["reason"] == "index-failed"
+    assert "could not load embedding model" in r["hint"]
+
+
+def test_a_record_reached_through_a_symlink_is_ignored(blocked_host, tmp_path):
+    """The record is read only under `codeintel_home()`: a link out of it is not followed."""
+    import json
+
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    outside = tmp_path / "planted.json"
+    outside.write_text(_record_path().read_text())
+    _record_path().unlink()
+    _record_path().symlink_to(outside)
+    assert json.loads(_record_path().read_text())["model"]          # the link itself resolves
+
+    SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert _BlockedEmbedding.built == 2
+
+
+def test_a_successful_index_pass_removes_the_record(blocked_host, monkeypatch):
+    _fail_once(blocked_host)
+    _as_a_new_process()
+    assert _record_path().exists()
+    monkeypatch.setattr("codeintel.engines.semantic.db.model_is_cached", lambda *a, **k: True)
+    monkeypatch.setattr("fastembed.TextEmbedding", _WorkingEmbedding)
+
+    r = SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert r["result"] is not None, r
+    assert not _record_path().exists()
+
+
+def test_a_failed_background_pass_writes_the_record_too(blocked_host, monkeypatch):
+    captured: list = []
+    monkeypatch.setattr(sem.threading, "Thread",
+                        lambda target, **kw: type("_T", (), {"start": lambda self: captured.append(target)})())
+
+    first = SemanticProvider(blocking_index=False).build_result(
+        "search", "helper", [], 0, blocked_host)
+    assert first["reason"] == "indexing-in-progress"
+    captured[0]()                                    # run the thread body inline
+    assert _record_path().exists()
+
+    _as_a_new_process()
+    second = SemanticProvider(blocking_index=False).build_result(
+        "search", "helper", [], 0, blocked_host)
+    assert second["reason"] == "index-failed"
+    assert "first-time indexing" not in second["hint"]
+    assert len(captured) == 1                        # no second pass started
+
+
+def test_an_unwritable_codeintel_home_costs_only_the_record(blocked_host, tmp_path, monkeypatch):
+    """Persisting the failure is best effort: it must never replace the answer."""
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    monkeypatch.setattr("codeintel.engines.semantic.db._base_dir", lambda: db_dir)
+    not_a_dir = tmp_path / "home-is-a-file"
+    not_a_dir.write_text("x")
+    monkeypatch.setenv("CODEINTEL_HOME", str(not_a_dir))
+
+    r = SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert r["reason"] == "index-failed"
+    assert "could not load embedding model" in r["hint"]
+
+
+def _fail_without_touching_the_model(monkeypatch) -> None:
+    """Make every index pass fail for a reason that is not the model: an unwritable database."""
+    def _broken(self, project_root):
+        raise PermissionError("attempt to write a readonly database")
+    monkeypatch.setattr("codeintel.engines.semantic.indexer.Indexer._index", _broken)
+
+
+def test_a_failure_that_is_not_a_model_load_writes_no_record(blocked_host, monkeypatch):
+    """The record blocks a model download for 10 minutes; only a failed model load may set it."""
+    _fail_without_touching_the_model(monkeypatch)
+
+    r = SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+
+    assert r["reason"] == "index-failed"
+    assert "PermissionError" in r["hint"]
+    assert not _record_path().exists()
+    _as_a_new_process()
+    SemanticProvider(blocking_index=True).build_result("search", "helper", [], 0, blocked_host)
+    assert not _record_path().exists()
+
+
+def test_a_background_failure_that_is_not_a_model_load_writes_no_record(blocked_host, monkeypatch):
+    _fail_without_touching_the_model(monkeypatch)
+    captured: list = []
+    monkeypatch.setattr(sem.threading, "Thread",
+                        lambda target, **kw: type("_T", (), {"start": lambda self: captured.append(target)})())
+
+    SemanticProvider(blocking_index=False).build_result("search", "helper", [], 0, blocked_host)
+    captured[0]()                                    # run the thread body inline
+
+    assert sem._background_index_failure(blocked_host) is not None   # the pass did fail
+    assert not _record_path().exists()
+
+
+def test_the_model_load_failure_prefix_is_the_one_the_exception_is_built_with():
+    """The record is written only when `last_error` starts with the prefix; db.py builds the
+    message, so the prefix is defined there once and the provider imports it."""
+    from codeintel.engines.semantic.db import MODEL_LOAD_FAILURE_PREFIX, EmbeddingModelUnavailable
+
+    said = str(EmbeddingModelUnavailable("m", OSError("403"), "check the proxy"))
+    assert said.startswith(MODEL_LOAD_FAILURE_PREFIX)
+    assert sem._is_model_load_failure(said)
+    assert not sem._is_model_load_failure("OSError: disk full")

@@ -57,6 +57,27 @@ def test_a_changed_answer_over_mcp_stays_under_the_byte_budget(monkeypatch, big_
     assert out["result"] == big_answer["result"], "the answer text itself is never cut"
 
 
+def _wire_text(out: dict) -> str:
+    """The text FastMCP actually sends for a dict tool result: the installed `mcp` package's own
+    conversion, not a re-implementation of it."""
+    from mcp.server.mcpserver.utilities.func_metadata import _convert_to_content
+
+    blocks = _convert_to_content(out)
+    assert len(blocks) == 1
+    return blocks[0].text
+
+
+def test_the_text_fastmcp_sends_stays_under_the_byte_budget(monkeypatch, big_answer):
+    """The budget was measured on `json.dumps` (one line), but FastMCP sends the dict pretty-printed
+    with a two-space indent: every row field gains a newline and its indentation, so an envelope
+    "under 40,000 bytes" went out well over it."""
+    out = _over_mcp(monkeypatch, big_answer)
+    assert out.get("rows_omitted", 0) > 0, "the fixture must be compacted"
+    wire = _wire_text(out).encode("utf-8")
+    assert len(wire) <= srv.MCP_ENVELOPE_BUDGET_BYTES, len(wire)
+    assert json.loads(wire) == json.loads(json.dumps(out, default=str))
+
+
 def test_rows_left_out_over_mcp_are_counted_and_say_where_the_rest_are(monkeypatch, big_answer):
     out = _over_mcp(monkeypatch, big_answer)
     kept = len(out.get("rows", []))

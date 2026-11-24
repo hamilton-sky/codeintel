@@ -62,7 +62,7 @@ this repo is indexed.
 | `callees` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Up to 20 functions called by the symbol |
 | `impact` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Combined callers + callees section |
 | `context` | symbol name, or a [disambiguated](#when-several-symbols-share-a-name) one | Alias for `impact` — the graph's contribution to the `context` fan-out |
-| `chain` | `"A->B"` or symbol | Call path from A (trace_path). Each hop carries how it was **resolved** (`[lsp]`, `[import]`, `[?name-guess]`), and the walk follows `CALL_REFERENCE` as well as `CALLS` |
+| `chain` | `"A->B"` or symbol | With `A->B`: the call path from A to B within 5 hops (`## Path A → B`), or "No call path … within N hops" with a `no-path-found` gap, or `reason: "target-not-found"` when A or B is not indexed. With a bare symbol: its callees and callers (trace_path). Each hop carries how it was **resolved** (`[lsp]`, `[import]`, `[?name-guess]`, or `[unstated]` when the backend did not say), and the walk follows `CALL_REFERENCE` as well as `CALLS` |
 | `pattern` | text pattern | search_code results for the pattern |
 | `overview` | (ignored) | get_architecture output for the project |
 | `changed` | *(optional)* a git ref — `main`, `HEAD~3`, a SHA, a tag, or `<ref>...HEAD` | With no target: impact of the **uncommitted git worktree**, changed files → impacted symbols (via `detect_changes`). With a ref: what a **branch** removed, re-signed or rewrote, and who still uses it — see [`changed` against a base ref](#changed-against-a-base-ref) |
@@ -278,6 +278,24 @@ Every row is badged with its kind, direct calls sort first, and the heading spli
 answer mixes kinds (`Callers of X (0 direct, 2 other reference(s))`). An answer made entirely of
 `CALLS` keeps its plain count, so the common case is unchanged.
 
+A `module scope of <file>` row is counted under none of those. The backend has no node for code at a
+file's module level, so the edge (from the import line, or a module-level use) hangs off the file, and
+which function in it calls the symbol is not resolved. It is counted as a file that imports the symbol
+(kind `IMPORT` in the `Not calls` arithmetic), never as a direct call, and the answer carries an
+`import-only-callers` gap: `Callers of X (4 direct calls, 10 files import it — call sites inside not
+resolved)`. With other references as well, they come between: `(1 direct call, 1 other reference(s), 1
+file imports it — call sites inside not resolved)`. The row itself still reads `module scope of <file>`.
+
+Under a narrowed target (`Gateway.query`, `impl.process`, `query@gateway.py`), a `USAGE` row whose file
+neither writes the qualifier nor has an import statement naming the target's module is dropped and
+counted in a note: the name it shares is a parameter, a local or an attribute. A row whose file cannot
+be read, or is the file that defines the target, stays and is badged name-matched.
+
+A bare name that several symbols carry is answered for each of them, under its own heading, beneath
+the banner "**N symbols named `X` have caller edges; M more named `X` exist with none**". M is one count query
+(`MATCH (n) WHERE n.name = "X"`) less N; when that query fails, the banner says others may exist and
+gives no M.
+
 Why it matters: `set_forward_fn(app.forward_released_item)` registers a method at two real sites. The
 backend stored both correctly as `CALL_REFERENCE`; codeintel queried only `CALLS|USAGE` and answered
 *"no callers"* — the reading that deletes a live method. No confidence threshold could have recovered
@@ -333,7 +351,8 @@ measurement in that table speaks to the case this section describes.
 A `callers StrategyChain.resolve` answer binds most of its rows by the **leaf** name, `resolve`, which in
 TypeScript is also what every `new Promise((resolve, reject) => …)` binds. The part of the target the
 match did *not* use — `StrategyChain` — is what separates them, and the answer used to print the command
-that checks it (`Settle it: rg -n --fixed-strings 'StrategyChain' <root>`). It now **runs** that check and
+that checks it (`Settle it: rg -n --fixed-strings 'StrategyChain' <root>`; never for a bare target, which
+names no qualifier to grep for). It now **runs** that check and
 states the result, and the command it prints to re-run it names the files the scan judged, so `rg`
 reproduces each verdict — a dot-directory, an ignored path or an in-root symlink included — without
 searching anything outside the project:
@@ -415,8 +434,28 @@ string, not safe-null; only a backend failure returns safe-null.
 
 ### `chain` detail
 
-If `target` contains `"->"`, the part before `->` is used as the source for a `trace_path`
-call in `calls` mode. Otherwise, `chain` falls back to `impact`.
+If `target` contains `"->"`, `chain` answers the path from A to B. Each side may carry the same
+`name@file` or qualified-name hint `callers` takes. Both ends are looked up by name with
+`search_graph` first:
+
+- an end that is not in the index safe-nulls with `reason: "target-not-found"` (outcome
+  `not_found`), naming it;
+- an end that names several symbols lists them as candidates and claims no path.
+
+Then `trace_path` walks **outbound** from A's qualified name, `depth: 5`. Its hops carry hop numbers
+but no parent links, so the path is rebuilt from the caller/callee edges among the nodes it reached
+(a walk back from B, one `query_graph` per step), and the answer is one of:
+
+- `## Path A → B` with the hops in order, one `caller → callee [hop N] [how]` line each, each
+  labelled with its own edge's resolution;
+- "No call path from A to B within N hops (this is not proof none exists)" with a `no-path-found`
+  gap, so `confidence: partial`. N is the depth sent. B not being reached in the walk, or the edges
+  not connecting A to B, both land here.
+
+A bare symbol (no `->`) gets that symbol's callees and callers in `calls` mode, `direction: both`.
+
+A hop the backend gave no `strategy` (every hop on codebase-memory-mcp 0.9.x) prints `[unstated]`
+and adds one `hop-resolution-unstated` gap to the answer, which caps it at `partial`.
 
 Two arguments matter:
 

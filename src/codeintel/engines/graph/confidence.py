@@ -62,6 +62,11 @@ def _evidence_class(strategy: str) -> str:
     # (`lsp | language_rule | heuristic | unresolved`). Mapping only the specific names left every
     # traced hop labelled "other" — including the `heuristic` ones, which are exactly the guesses
     # that most need saying.
+    # `lsp_ts_local` is the one `lsp_*` label that is not a resolution on its own: it is what the
+    # backend stamped on `outer -> inner` when `outer` called its OWN nested `inner`, and the index had
+    # merged the two definitions. A name local to the caller's file bound it, nothing more.
+    if st.startswith("lsp_ts_local"):
+        return "name-guess"
     if st.startswith("lsp"):
         return "lsp"
     if st.startswith("import"):
@@ -352,8 +357,18 @@ def _why(row: dict, bucket: str) -> str:
             return (f"matched by name inside the caller's own module, but the call is written "
                     f"`{callee}` — through a receiver, not as this module's own symbol — so the "
                     f"match is a guess about what the receiver is ({strategy})")
-        text = (f"matched by name ({strategy})" if strategy
-                else "matched by bare symbol name, not by following a binding")
+        shadow = str(row.get("_nested_shadow") or "")
+        if shadow:
+            return (f"the caller defines its own nested `{shadow}` before it calls `{shadow}`, so the "
+                    "call most likely reaches that nested function; the backend's binding to this "
+                    f"symbol ({strategy or 'no strategy named'}) is not trusted here")
+        if strategy.lower().startswith("lsp_ts_local"):
+            text = ("matched by a name local to the caller's file (lsp_ts_local), which is not "
+                    "taken as a resolution on its own: the backend also gives this label to a call "
+                    "of a nested function that shares the symbol's name")
+        else:
+            text = (f"matched by name ({strategy})" if strategy
+                    else "matched by bare symbol name, not by following a binding")
         # A `self.m()` the class hierarchy would bind if one of its links were an edge: said here so
         # a reader who sees a `self.` call still badged knows the rule looked and why it declined.
         note = str(row.get("_hierarchy_note") or "")

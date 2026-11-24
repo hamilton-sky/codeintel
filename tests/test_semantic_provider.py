@@ -480,3 +480,53 @@ def test_a_fanout_where_the_repo_is_merely_unindexed_keeps_its_ordinary_summary(
     assert r["reason"] == "no-result"
     assert r["outcome"] == "not_found"
     assert "NOT evidence" not in (r.get("hint") or "")
+
+
+# --- a recorded model-load failure reaches the probe that `status` and `doctor` read -----------
+
+def _write_failure_record(model: str, cause: str, cache: str, at: float | None = None) -> None:
+    import json
+
+    from codeintel.core.paths import codeintel_home
+    home = codeintel_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "semantic_failure.json").write_text(json.dumps({
+        "cause": cause, "at": time.time() if at is None else at, "model": model,
+        "fastembed_cache_path": cache, "model_files_present": False,
+    }))
+
+
+def test_the_probe_reports_the_recorded_cause_instead_of_the_download_note(tmp_path, monkeypatch):
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path",
+                        lambda *a, **k: str(tmp_path / "missing.db"))
+    _write_failure_record("BAAI/bge-small-en-v1.5", "could not load embedding model 'x' (403)",
+                          str(cache))
+
+    r = SemanticProvider().probe(str(tmp_path))
+
+    assert r["runnable"] is False
+    assert r["reason"] == "model-load-failed"
+    assert r["detail"].startswith("last index could not load model: could not load embedding "
+                                  "model 'x' (403)")
+    assert "the next index downloads" not in r["detail"]
+    assert "FASTEMBED_CACHE_PATH" in r["remediation"]
+
+
+def test_the_probe_ignores_a_record_for_another_cache_path(tmp_path, monkeypatch):
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.setattr("codeintel.engines.semantic.provider._DEPS_OK", True)
+    monkeypatch.setattr("codeintel.engines.semantic.db.default_db_path",
+                        lambda *a, **k: str(tmp_path / "missing.db"))
+    _write_failure_record("BAAI/bge-small-en-v1.5", "boom", str(tmp_path / "elsewhere"))
+
+    r = SemanticProvider().probe(str(tmp_path))
+
+    assert r["runnable"] is True
+    assert "reason" not in r
+    assert "the next index downloads" in r["detail"]

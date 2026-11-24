@@ -116,9 +116,10 @@ def run(args: Any) -> int:
             # Bound to a name rather than constructed inline: `index()` parks the failure reason
             # on `indexer.last_error`, and a throwaway instance makes that unreachable — which is
             # why this command could only ever say "see the warnings above".
+            model_name = str(cfg.get("model") or "BAAI/bge-small-en-v1.5")
             indexer = Indexer(
                 db,
-                model_name=str(cfg.get("model") or "BAAI/bge-small-en-v1.5"),
+                model_name=model_name,
                 window=int(cfg.get("window", 20)),
                 stride=int(cfg.get("stride", 10)),
                 max_chunks=int(cfg.get("max_chunks", 500)),
@@ -131,6 +132,19 @@ def run(args: Any) -> int:
             finally:
                 if bridge is not None:
                     idx_logger.removeHandler(bridge)
+            # Persist the outcome the way the provider's own passes do, so the next `search` in
+            # any process answers a failed model load at once instead of retrying the download,
+            # and doctor/status can name the cause.
+            from codeintel.engines.semantic.provider import (
+                _clear_model_failure,
+                _is_model_load_failure,
+                _write_model_failure,
+            )
+            if count < 0:
+                if _is_model_load_failure(indexer.last_error or ""):
+                    _write_model_failure(model_name, indexer.last_error or "")
+            else:
+                _clear_model_failure(model_name)
             # Seal the live line before the plain summary: commit the ✓ row on real work, else erase
             # it so "Nothing new" / the failure message stands on its own clean line.
             if counter:
@@ -187,8 +201,17 @@ def run(args: Any) -> int:
     # creates one. Creating it put an uncommitted file into every repo on the first `index` —
     # including one whose index had just failed — when writing into the repo is `map`'s job, asked
     # for by name.
+    #
+    # `isfile` follows links, so a symlinked CODE_INTEL.md (an untrusted repo can point it at
+    # `~/.bashrc`) is checked first and never refreshed — skipped like any other refresh failure,
+    # with the WARNING every refused write logs.
     try:
-        if os.path.isfile(os.path.join(project_root, "CODE_INTEL.md")):
+        map_path = os.path.join(project_root, "CODE_INTEL.md")
+        if os.path.islink(map_path):
+            from codeintel.core.containment import log_write_refusal
+
+            log_write_refusal(map_path, "symlink")
+        elif os.path.isfile(map_path):
             from codeintel.engines.graph.provider import GraphProvider
             from codeintel.mapping.mapper import MapGenerator
 

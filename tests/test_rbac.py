@@ -228,6 +228,79 @@ def test_denied_op_does_no_reindex_work(monkeypatch):
     assert calls["n"] == 1                              # an allowed op proceeds to reindex
 
 
+@pytest.fixture
+def scoped_server(tmp_path, monkeypatch):
+    """A live server whose `reader` role may target only `<tmp>/allowed`. `run_doctor` is stubbed
+    so the allowed-root case is fast and its readiness recognisable."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (tmp_path / "auth.toml").write_text(
+        '[roles]\nreader = ["search"]\n'
+        f'[roots]\nreader = ["{allowed}"]\n'
+        '[tokens]\n"readertok" = "reader"\n'
+    )
+    monkeypatch.setenv("CODEINTEL_AUTH_CONFIG", str(tmp_path / "auth.toml"))
+    probe = {"installed": True, "runnable": True, "repo_indexed": True, "status": "ok", "detail": ""}
+    monkeypatch.setattr("codeintel.setup.doctor.run_doctor", lambda root, **kw: {
+        "engines": {"graph": dict(probe), "lsp": dict(probe), "semantic": dict(probe)},
+        "summary": {"healthy": True}})
+    from codeintel.transports import mcp as srv
+    srv._reset_gateway()
+    s = CodeIntelHTTPServer(("127.0.0.1", 0), _Handler)
+    s.token_auth = load_auth()
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield s.server_address[1], allowed, tmp_path
+    s.shutdown()
+    s.server_close()
+    srv._reset_gateway()
+
+
+def _status(port, query=""):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=_HTTP_TEST_TIMEOUT_S)
+    c.request("GET", "/code/status" + query, headers={"Authorization": "Bearer readertok"})
+    r = c.getresponse()
+    body = json.loads(r.read())
+    c.close()
+    return r.status, body
+
+
+def test_status_for_a_root_outside_the_role_is_403(scoped_server):
+    """It answered 200 with a fake all-false fallback, which read as "nothing is indexed there"
+    and hid cross-tenant probing from any 4xx-based alerting. It now denies like POST does."""
+    port, _allowed, tmp = scoped_server
+    (tmp / "secret").mkdir()
+    status, body = _status(port, f"?project_root={tmp / 'secret'}")
+    assert status == 403
+    assert body["reason"] == "root-not-allowed-for-role"
+    assert body["readiness"] == {}
+
+
+def test_a_bare_status_under_a_role_with_restricted_roots_is_403(scoped_server):
+    port, _allowed, _tmp = scoped_server
+    status, body = _status(port)
+    assert status == 403
+    assert body["reason"] == "root-not-allowed-for-role"
+
+
+def test_status_for_an_allowed_root_still_reports_real_readiness(scoped_server):
+    port, allowed, _tmp = scoped_server
+    status, body = _status(port, f"?project_root={allowed}")
+    assert status == 200
+    assert "reason" not in body
+    assert body["healthy"] is True
+    assert body["readiness"]["graph"]["repo_indexed"] is True
+
+
+def test_a_missing_root_outside_the_role_is_still_denied_not_reported_missing(scoped_server):
+    """root-not-found must come AFTER the RBAC check, or it tells a role which paths exist
+    outside its roots."""
+    port, _allowed, tmp = scoped_server
+    status, body = _query(port, {"op": "search", "target": "x",
+                                 "project_root": str(tmp / "nope")}, token="readertok")
+    assert status == 403
+    assert body["reason"] == "root-not-allowed-for-role"
+
+
 def test_rbac_healthz_still_unauthenticated(rbac_server):
     c = http.client.HTTPConnection("127.0.0.1", rbac_server, timeout=_HTTP_TEST_TIMEOUT_S)
     c.request("GET", "/healthz")

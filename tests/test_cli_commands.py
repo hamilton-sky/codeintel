@@ -290,6 +290,43 @@ def test_reset_with_yes_skips_the_prompt_entirely(monkeypatch):
     assert import_module("codeintel.cli.reset").run(_reset_args(yes=True)) == 0
 
 
+def test_reset_passes_semantic_only_through(monkeypatch):
+    seen = []
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
+                        lambda root, **kw: seen.append(kw.get("semantic_only")) or {"count": 1})
+    assert import_module("codeintel.cli.reset").run(_reset_args(yes=True, semantic_only=True)) == 0
+    assert seen == [True, True]          # the preview and the real run both keep the graph
+
+
+def test_reset_without_the_flag_still_clears_both(monkeypatch):
+    seen = []
+    monkeypatch.setattr("codeintel.setup.reset.run_reset",
+                        lambda root, **kw: seen.append(kw.get("semantic_only")) or {"count": 1})
+    assert import_module("codeintel.cli.reset").run(_reset_args(yes=True)) == 0
+    assert seen == [False, False]
+
+
+# --------------------------------------------------------------------------- Ctrl-C
+
+def test_ctrl_c_in_a_command_exits_130_with_one_line_and_no_traceback(monkeypatch, capsys):
+    """A Ctrl-C used to end every command with a KeyboardInterrupt traceback. It is one line,
+    `interrupted`, on stderr, and exit 130."""
+    import codeintel.__main__ as entry
+
+    def _interrupted(args):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("codeintel.cli.doctor.run", _interrupted)
+    monkeypatch.setattr(sys, "argv", ["codeintel", "doctor"])
+    with pytest.raises(SystemExit) as exited:
+        entry.main()
+    assert exited.value.code == 130
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == ["interrupted"]
+    assert captured.out == ""
+    assert "Traceback" not in captured.err and "KeyboardInterrupt" not in captured.err
+
+
 # --------------------------------------------------------------------------- query
 
 class _Gateway:
@@ -538,15 +575,45 @@ def test_map_survives_an_unavailable_graph_provider(monkeypatch, capsys):
 
 
 def test_map_inject_reports_what_it_did_to_which_file(monkeypatch, capsys):
+    seen = {}
     monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", lambda provider: _Gen())
     monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
     monkeypatch.setattr("codeintel.setup.injector.Injector",
-                        lambda: type("I", (), {"inject": lambda self, root: ("CLAUDE.md",
-                                                                             "updated")})())
+                        lambda: type("I", (), {"inject": lambda self, root, create=False: (
+                            seen.update(create=create) or ("CLAUDE.md", "updated"))})())
 
     args = _args(project_root=None, inject=True, budget=32768)
     import_module("codeintel.cli.map").run(args)
     assert "Inject: updated block in CLAUDE.md" in capsys.readouterr().out
+    assert seen["create"] is True, "`map --inject` is asked for by name, so it may create AGENTS.md"
+
+
+def test_map_inject_creates_agents_md_when_the_repo_has_no_context_file(monkeypatch, tmp_path,
+                                                                        capsys):
+    """`codeintel install` advises `codeintel map --inject` to wire an agent in. In a repo with
+    neither AGENTS.md nor CLAUDE.md that advice was a no-op ("no-context-file")."""
+    monkeypatch.setattr("codeintel.mapping.mapper.MapGenerator", lambda provider: _Gen())
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
+
+    args = _args(project_root=str(tmp_path), inject=True, budget=32768)
+    assert import_module("codeintel.cli.map").run(args) == 0
+    assert "codeintel-map-start" in (tmp_path / "AGENTS.md").read_text()
+    assert f"Inject: created block in {tmp_path / 'AGENTS.md'}" in capsys.readouterr().out
+
+
+def test_map_on_a_symlinked_code_intel_md_exits_1_naming_the_path(monkeypatch, tmp_path, capsys):
+    target = tmp_path / "elsewhere.md"
+    target.write_text("not yours\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "CODE_INTEL.md").symlink_to(target)
+    monkeypatch.setattr("codeintel.engines.graph.provider.GraphProvider", lambda: object())
+
+    args = _args(project_root=str(repo), inject=False, budget=32768)
+    assert import_module("codeintel.cli.map").run(args) == 1
+    out = capsys.readouterr().out
+    assert f"Refused to write CODE_INTEL.md: it is a symlink ({repo / 'CODE_INTEL.md'})" in out
+    assert target.read_text() == "not yours\n"
 
 
 def test_map_degrades_instead_of_tracebacking(monkeypatch, capsys):
@@ -1034,3 +1101,103 @@ def test_index_without_a_resolvable_home_fails_with_a_message_not_a_traceback(
 
     assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 1
     assert "index failed: could not determine home directory" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- semantic failure record
+
+class _BlockedEmbedding:
+    """fastembed's model class on a host where the weights cannot be fetched."""
+
+    built = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).built += 1
+        raise ValueError("Could not load model BAAI/bge-small-en-v1.5 from any source.")
+
+    @classmethod
+    def list_supported_models(cls):
+        return [{"model": "BAAI/bge-small-en-v1.5"}]
+
+
+class _WorkingEmbedding:
+    """fastembed's model class once the weights are reachable."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def embed(self, texts):
+        import numpy as np
+        return [np.full(384, 0.1, dtype=np.float32) for _ in list(texts)]
+
+
+@pytest.fixture
+def blocked_model(tmp_path, monkeypatch):
+    """A repo, an empty fastembed cache, no graph backend and a model that cannot load."""
+    import codeintel.engines.semantic.provider as sem
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "core.py").write_text("def helper():\n    return 1\n")
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.delenv("CODEINTEL_REINDEX", raising=False)
+    monkeypatch.setattr(sem, "_DEPS_OK", True)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    _BlockedEmbedding.built = 0
+    monkeypatch.setattr("fastembed.TextEmbedding", _BlockedEmbedding)
+    return str(repo)
+
+
+def _failure_record():
+    from codeintel.core.paths import codeintel_home
+    return codeintel_home() / "semantic_failure.json"
+
+
+def test_a_failed_index_leaves_a_record_the_next_search_honours_at_once(blocked_model, capsys):
+    """`codeintel index` ran the indexer without touching the record, so after it failed to load
+    the model the next `search` retried the same ~40 s download and doctor/status showed no cause."""
+    import time
+
+    from codeintel.engines.semantic.provider import SemanticProvider
+
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 1
+    assert "could not load embedding model" in capsys.readouterr().out
+    assert _failure_record().exists()
+    assert _BlockedEmbedding.built == 1
+
+    t0 = time.monotonic()
+    r = SemanticProvider(blocking_index=True).build_result(
+        "search", "helper", [], 0, blocked_model)
+    elapsed = time.monotonic() - t0
+
+    assert r["reason"] == "index-failed", r
+    assert elapsed < 1.0
+    assert "could not load" in r["hint"]
+    assert "first-time indexing" not in r["hint"]
+    assert _BlockedEmbedding.built == 1          # the search did not try the model again
+
+
+def test_a_successful_index_clears_the_record(blocked_model, monkeypatch, capsys):
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 1
+    assert _failure_record().exists()
+    monkeypatch.setattr("codeintel.engines.semantic.db.model_is_cached", lambda *a, **k: True)
+    monkeypatch.setattr("fastembed.TextEmbedding", _WorkingEmbedding)
+
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 0
+    assert "Indexed" in capsys.readouterr().out
+    assert not _failure_record().exists()
+
+
+def test_an_index_failure_that_is_not_a_model_load_writes_no_record(blocked_model, monkeypatch):
+    """Only a failed model load is recorded: a retry of the download would not fix anything else."""
+    from codeintel.engines.semantic.indexer import Indexer
+
+    def _fail(self, root):
+        self.last_error = "OSError: disk full"
+        return -1
+
+    monkeypatch.setattr(Indexer, "index", _fail)
+
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 1
+    assert not _failure_record().exists()

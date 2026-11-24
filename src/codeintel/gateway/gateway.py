@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, cast
 
+from codeintel.core.paths import graph_db_stamp
 from codeintel.core.provider import Result, attach_confidence, log_swallowed, safe_null_result
 from codeintel.core.query_ops import OPS_REQUIRING_A_TARGET, TARGETLESS_OPS
 from codeintel.core.redact import redact
@@ -42,6 +45,38 @@ _UNCACHED_OPS: frozenset[str] = frozenset({"changed", "changes"})
 _ADOPTABLE_ENGINES: frozenset[str] = frozenset({"graph", "lsp", "semantic"})
 
 
+# Semantic `search` reasons that mean "the engine could not ask", for which an auto-routed search
+# falls back to the graph name search. `below-floor` and the like are answers about the repository
+# and are never replaced.
+_SEARCH_FALLBACK_REASONS: frozenset[str] = frozenset(
+    {"index-failed", "indexing-in-progress", "engine-unavailable", "no-index"})
+
+
+def _name_search_fallback(named: Result, semantic: Result) -> Result:
+    """The graph `pattern` answer, marked as a name-only stand-in for the semantic search.
+
+    Keeps the graph answer's own gaps and adds `name-only-fallback`; the hint keeps the semantic
+    reason, so the caller still learns why meaning search did not run."""
+    reason = str(semantic.get("reason") or "")
+    why = str(semantic.get("hint") or "").strip()
+    gaps = [g for g in (named.get("gaps") or []) if isinstance(g, dict)]
+    gaps.append({
+        "section": "scope",
+        "kind": "name-only-fallback",
+        "detail": "matched by name, not meaning: semantic search could not answer "
+                  f"({reason}), so these are the graph engine's name matches for the target. "
+                  "Code that does what was asked under another name is not listed.",
+    })
+    hint = (f"semantic search unavailable ({reason}){': ' + why if why else ''} — fell back to "
+            f"the graph name search (op=pattern); matched by name, not meaning")
+    if named.get("hint"):
+        hint = f"{hint}. graph: {named['hint']}"
+    # `fallback` is not a `Result` key (core/provider.py is not this change's to widen), so the
+    # envelope is built as a plain dict; every `Result` key is carried over from `named`.
+    marked: dict[str, Any] = {**named, "fallback": "graph-name-search", "hint": hint}
+    return attach_confidence(cast(Result, marked), gaps)
+
+
 def _mark_reindexing(result: Result, reindexing: bool) -> Result:
     """Flag an answer served while a reindex for its project is still running."""
     if not reindexing or result.get("result") is None:
@@ -49,6 +84,71 @@ def _mark_reindexing(result: Result, reindexing: bool) -> Result:
     return {**result, "reindexing": True,
             "hint": "a reindex is in progress — this answer reflects the index as of the last "
                     "completed pass; re-ask shortly if you have just changed this code"}
+
+
+# root -> (the config files' stamps, the semantic db path they gave), for the
+# `_SEMANTIC_DB_PATHS_MAX` most recently used roots. Queries run on several threads, hence the lock.
+_SEMANTIC_DB_PATHS: OrderedDict[str, tuple[tuple, str]] = OrderedDict()
+_SEMANTIC_DB_PATHS_MAX = 256
+_SEMANTIC_DB_PATHS_LOCK = threading.Lock()
+
+
+def _file_stamp(path: str) -> tuple[int, int]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (0, -1)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _semantic_db_path(project_root: str) -> str:
+    """The semantic db ``default_db_path`` names for this root's configured model.
+
+    Remembered per root and read again only when the global ``config.toml`` or the project's
+    ``.codeintel.toml`` changes (two ``stat`` calls), so a query does not parse both TOML files
+    just to build its cache key. May raise; the caller handles it."""
+    from codeintel.core.config import load_config
+    from codeintel.core.paths import codeintel_home
+    from codeintel.engines.semantic.db import default_db_path
+
+    home = str(codeintel_home())
+    key = (home, _file_stamp(os.path.join(home, "config.toml")),
+           _file_stamp(os.path.join(project_root, ".codeintel.toml")))
+    with _SEMANTIC_DB_PATHS_LOCK:
+        remembered = _SEMANTIC_DB_PATHS.get(project_root)
+        if remembered is not None and remembered[0] == key:
+            _SEMANTIC_DB_PATHS.move_to_end(project_root)
+            return remembered[1]
+    path = default_db_path(str(load_config(project_root).get("model") or ""))
+    with _SEMANTIC_DB_PATHS_LOCK:
+        _SEMANTIC_DB_PATHS[project_root] = (key, path)
+        _SEMANTIC_DB_PATHS.move_to_end(project_root)
+        while len(_SEMANTIC_DB_PATHS) > _SEMANTIC_DB_PATHS_MAX:
+            _SEMANTIC_DB_PATHS.popitem(last=False)
+    return path
+
+
+def _semantic_db_stamp(project_root: str) -> int:
+    """The semantic index file's mtime in nanoseconds (its ``-wal`` included); 0 when missing.
+
+    The file is the one ``default_db_path`` names for this root's configured model, the same one
+    the semantic provider and the reindexer write. The db runs in WAL mode, so a pass's writes land
+    in ``-wal`` until a checkpoint, which is why that sibling is read too. The file is shared by
+    every project on the machine that uses the same model, so indexing any one of them invalidates
+    every project's cached answers: that errs toward a miss, never toward a stale hit. Never
+    raises: a cache key must not fail a query."""
+    try:
+        path = _semantic_db_path(project_root)
+    except Exception as exc:
+        log_swallowed("gateway._semantic_db_stamp", exc)
+        return 0
+    newest = 0
+    for candidate in (path, path + "-wal"):
+        try:
+            newest = max(newest, os.stat(candidate).st_mtime_ns)
+        except OSError:
+            continue
+    return newest
 
 
 def _unattached_hint(engine: str) -> str | None:
@@ -116,6 +216,36 @@ def _states_live_file_contents(result: Result | dict[str, Result]) -> bool:
         return False
 
     return walk(result, 0)
+
+
+def _index_moved(item: tuple[Any, Any]) -> bool:
+    """Whether what a cached answer's index-age check read has moved since: `item` is the
+    provider's own `index_behind` and the inputs its answer recorded. A check that fails counts as
+    moved, so a cached answer is never served on a check that did not run.
+
+    Cost: this runs on EVERY cache hit of an edge op, and `index_behind` is not cached. It stats
+    each checked path, and `graph_index_age` runs two or three git calls (`log -1`, `rev-parse
+    --git-path logs/HEAD`, and `rev-parse --verify HEAD` when the first fails), each bounded by
+    `changed_range._GIT_TIMEOUT_S` (30 s). Measured at about 5 ms per hit on this repository;
+    caching HEAD's time per generation would remove most of it."""
+    behind, inputs = item
+    try:
+        return bool(behind(inputs))
+    except Exception as exc:
+        log_swallowed("gateway._index_moved", exc)
+        return True
+
+
+def _note_index_inputs(provider: Any, inputs: list[tuple[Any, Any]] | None) -> None:
+    """Keep what the provider's answer just checked the index's age against, read on the thread
+    that ran `build_result` (the provider holds it per thread). The cache stores it with the answer
+    so a hit is re-checked: the db stamps in the key do not move when a source file is edited."""
+    if inputs is None:
+        return
+    got = getattr(provider, "index_inputs", None)
+    behind = getattr(provider, "index_behind", None)
+    if isinstance(got, tuple) and len(got) == 3 and callable(behind):
+        inputs.append((behind, got))
 
 
 class Gateway:
@@ -207,11 +337,12 @@ class Gateway:
         target_str: str,
         budget: Any,
         project_root: Any,
+        inputs: list[tuple[Any, Any]] | None = None,
     ) -> dict[str, Result]:
         def _call(engine_str: str) -> tuple[str, Result]:
             provider = self._provider_for(engine_str)
             return engine_str, self._dispatch_single(
-                provider, op_str, target_str, budget, project_root, engine_str
+                provider, op_str, target_str, budget, project_root, engine_str, inputs=inputs
             )
 
         results: dict[str, Result] = {}
@@ -502,6 +633,7 @@ class Gateway:
         project_root,
         engine_str: str,
         offset: int = 0,
+        inputs: list[tuple[Any, Any]] | None = None,
     ) -> Result:
         # Both arms short-circuit BEFORE `build_result`, so the provider's own unavailable-hint is
         # never reached from here — which is exactly how the documented contract ("safe-nulls with
@@ -528,6 +660,7 @@ class Gateway:
             r = (provider.build_result(op_str, target_str, [], budget or 0, project_root or "",
                                        offset=offset) if paged
                  else provider.build_result(op_str, target_str, [], budget or 0, project_root or ""))
+            _note_index_inputs(provider, inputs)
             if r is not None:
                 return r
             return safe_null_result(op_str, target_str, engine=engine_str, reason="no-result")
@@ -542,6 +675,17 @@ class Gateway:
             return self._policy is None or self._policy.is_allowed(role, op)
         except Exception:
             return True
+
+    def _allows_fallback_op(self, role: str, op: str) -> bool:
+        """``allows`` for an op this gateway runs on the caller's behalf (the search fallback), but
+        failing CLOSED: a policy that raises denies it, as the main gate in ``_query`` would."""
+        if self._policy is None:
+            return True
+        try:
+            return self._policy.is_allowed(role, op)
+        except Exception as exc:
+            log_swallowed(f"Gateway._allows_fallback_op[{op}]", exc)
+            return False
 
     def allows_root(self, role: str, project_root: str) -> bool:
         """Whether *role* may target *project_root*. The companion to ``allows`` — an op gate alone
@@ -649,12 +793,6 @@ class Gateway:
                          f"The ops that need no target: {', '.join(sorted(TARGETLESS_OPS))}.",
                 )
 
-            if not self._oneshot:
-                try:
-                    self._reindexer.maybe_reindex(str(project_root or ""))
-                except Exception:
-                    pass
-
             # If a reindex is running, this answer comes from the PREVIOUS index. Structural
             # answers (callers/impact/hotspots) hash a symbol name, not file bytes, so nothing
             # else in the envelope can reveal that — and an agent that just edited and asked
@@ -664,13 +802,23 @@ class Gateway:
             # reindex was started, so there is nothing for the answer to be behind. In server mode
             # the flag now means what it always claimed to — a pass this process did not start is
             # genuinely still running — which is why it is fixed at the cause rather than deleted.
-            if self._oneshot:
-                reindexing = False
-            else:
+            #
+            # The pending check is read BEFORE `maybe_reindex`, so a pass this query submits is
+            # not reported by the same query unless `maybe_reindex` says it found a changed tree
+            # (it returns True only when it submitted). Read after it, every query on an
+            # unchanged tree flagged its own pass once the debounce window had passed.
+            reindexing = False
+            if not self._oneshot:
+                root_for_reindex = str(project_root or "")
                 try:
-                    reindexing = self._reindexer.reindex_pending(str(project_root or ""))
+                    reindexing = bool(self._reindexer.reindex_pending(root_for_reindex))
                 except Exception:
                     reindexing = False
+                try:
+                    if self._reindexer.maybe_reindex(root_for_reindex):
+                        reindexing = True
+                except Exception:
+                    pass
 
             # Legacy list-based path (backward compat with pre-Phase-2 tests)
             if self._legacy_providers is not None:
@@ -703,42 +851,57 @@ class Gateway:
 
             root_str = project_root or ""
 
-            # Freshness token — bumps when a background reindex completes, so a cached
-            # structural answer (a symbol/free-text target, whose content hash never
-            # changes) is invalidated once the index actually moves. 0 when unavailable.
+            # Freshness token: this process's reindex generation, plus the graph db's stamp and
+            # the semantic db's mtime, so a cached structural answer (a symbol/free-text target,
+            # whose content hash never changes) is invalidated once the index moves — whichever
+            # process wrote it. The generation alone missed `codeintel index` run in another
+            # process, and a `reset` that deleted the db, so a running server served its pre-index
+            # answer with `cached: true` for as long as it lived. Each part is 0 when unavailable.
             try:
-                freshness = self._reindexer.generation(root_str)
+                generation = self._reindexer.generation(root_str)
             except Exception:
-                freshness = 0
+                generation = 0
+            # No root names no index files, and resolving "" would read the process's cwd.
+            stamps = (f"{graph_db_stamp(root_str)}:{_semantic_db_stamp(root_str)}"
+                      if root_str else "0:0")
+            freshness = f"{generation}:{stamps}"
 
             # Ops that read live, unhashable state (the git worktree) must never be served from the
             # content-hash cache — it can't see uncommitted edits. Computed ONCE here so it covers
             # BOTH the fan-out and the single-engine paths below (a miss on either serves a stale diff).
             uncacheable = op_str in _UNCACHED_OPS
+            # What each answer's index-age check read (its row and target files, HEAD), kept with
+            # the cached answer and re-checked on a hit: an edit moves no db stamp in `freshness`,
+            # so without it a hit served the pre-edit answer with no `stale-index` gap.
+            index_inputs: list[tuple[Any, Any]] = []
 
             # Fan-out: dispatch to multiple engines concurrently and merge
             if engine_str in _FANOUT_ENGINES:
                 cached_result = (
                     None if uncacheable
-                    else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
+                    else self._cache.get(op_str, target_str, cache_engine, root_str, freshness,
+                                         moved=_index_moved)
                 )
                 if cached_result is not None:
                     return _mark_reindexing({**cached_result, "cached": True}, reindexing)
                 # "both" is graph+lsp; "all" adds semantic.
                 engines = ["graph", "lsp"] if engine_str == "both" else ["graph", "lsp", "semantic"]
-                fan_results = self._fan_out(engines, op_str, target_str, budget, project_root)
+                fan_results = self._fan_out(engines, op_str, target_str, budget, project_root,
+                                            inputs=index_inputs)
                 result = self._merge(fan_results, op_str, target_str, engine_str)
                 # The merged answer drops each engine's `rows` and `evidence` but keeps their prose,
                 # so whether it states what the files hold now is read from the engines' own answers.
                 if (not uncacheable and not _is_retryable(result)
                         and not _states_live_file_contents(fan_results)):
-                    self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
+                    self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness,
+                                    inputs=tuple(index_inputs))
                 return _mark_reindexing(result, reindexing)
 
             # Single-engine dispatch (`uncacheable`, computed above, also guards this path).
             cached_result = (
                 None if uncacheable
-                else self._cache.get(op_str, target_str, cache_engine, root_str, freshness)
+                else self._cache.get(op_str, target_str, cache_engine, root_str, freshness,
+                                     moved=_index_moved)
             )
             if cached_result is not None:
                 # The staleness marker belongs on EVERY exit, and a cache hit is the exit that
@@ -750,7 +913,8 @@ class Gateway:
                 return _mark_reindexing({**cached_result, "cached": True}, reindexing)
             provider = self._provider_for(engine_str)
             result = self._dispatch_single(
-                provider, op_str, target_str, budget, project_root, engine_str, offset)
+                provider, op_str, target_str, budget, project_root, engine_str, offset,
+                inputs=index_inputs)
 
             # overview auto-fallback (F4 Story 2): when auto-routed to graph but graph can't serve
             # it — the backend is unavailable, OR this repo simply isn't in the graph — try lsp,
@@ -768,12 +932,35 @@ class Gateway:
                 if lsp_result.get("result") is not None:
                     result = lsp_result
 
+            # search auto-fallback: when auto-routed to semantic but semantic could not ask (no
+            # model, no index yet, a pass in flight), the graph name search still answers — by
+            # name, not meaning, and said so. Only for a role that may run `pattern` itself: this
+            # is a second dispatch inside the same query, so the op gate is applied to it here
+            # (the reindex and root checks above already ran for this query).
+            fallback = False
+            if (
+                was_auto
+                and op_str == "search"
+                and engine_str == "semantic"
+                and result.get("result") is None
+                and result.get("reason") in _SEARCH_FALLBACK_REASONS
+                and self._allows_fallback_op(role, "pattern")
+            ):
+                named = self._dispatch_single(
+                    self.graph, "pattern", target_str, budget, project_root, "graph")
+                if named.get("result") is not None:
+                    result = _name_search_fallback(named, result)
+                    fallback = True
+
             result = self._cross_check_name_resolved(
                 result, op_str, target_str, budget, project_root, was_auto)
 
-            if (not uncacheable and not _is_retryable(result)
+            # A name-only fallback is not cached: the next search must ask semantic again, since
+            # it may have recovered, and the db stamp in the key does not move until it does.
+            if (not uncacheable and not fallback and not _is_retryable(result)
                     and not _states_live_file_contents(result)):
-                self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness)
+                self._cache.put(op_str, target_str, cache_engine, root_str, result, freshness,
+                                inputs=tuple(index_inputs))
             return _mark_reindexing(result, reindexing)
 
         except Exception as exc:

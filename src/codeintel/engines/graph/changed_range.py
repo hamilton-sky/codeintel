@@ -139,7 +139,9 @@ def _git(root: str, *args: str) -> tuple[int, bytes, str]:
     return done.returncode, done.stdout, done.stderr.decode("utf-8", "replace").strip()
 
 
-def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str, bool]:
+def _git_capped(
+    root: str, *args: str, cap_bytes: int, timeout_s: float = _GIT_TIMEOUT_S,
+) -> tuple[int, bytes, str, bool]:
     """`_git` for a command whose output has no natural bound: `(code, stdout, stderr, cut)`.
 
     `subprocess.run(capture_output=True)` buffers all of stdout before it returns, so a name that
@@ -148,7 +150,7 @@ def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str,
     was killed is meaningless, and the caller must treat `cut` as "a lower bound", not as failure.
     stderr goes to a file rather than a second pipe: nothing drains a pipe while stdout is being
     read, and a git that fills one blocks forever. The timeout is a timer that kills the process,
-    because a blocking read has no timeout of its own."""
+    because a blocking read has no timeout of its own; it fires after *timeout_s* seconds."""
     try:
         with tempfile.TemporaryFile() as errfile:
             proc = subprocess.Popen(
@@ -159,7 +161,7 @@ def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str,
                 expired.set()
                 proc.kill()
 
-            timer = threading.Timer(_GIT_TIMEOUT_S, _expire)
+            timer = threading.Timer(timeout_s, _expire)
             timer.start()
             stream = proc.stdout
             try:
@@ -176,8 +178,7 @@ def _git_capped(root: str, *args: str, cap_bytes: int) -> tuple[int, bytes, str,
                 if stream is not None:
                     stream.close()
             if expired.is_set():
-                code, _, err = _unrunnable(subprocess.TimeoutExpired(args, _GIT_TIMEOUT_S), root, args)
-                return code, b"", err, False
+                return _COULD_NOT_RUN, b"", f"git {args[0]} did not finish within {timeout_s:g}s", False
             errfile.seek(0)
             err = errfile.read(2000).decode("utf-8", "replace").strip()
             return proc.returncode, out, err, cut
@@ -408,19 +409,21 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
     `reset` already knows how to find — and takes its mtime (WAL included, since a write lands there
     first).
 
-    "Inputs" are the newest of: the changed files present in the working tree, and the last time HEAD
-    moved by something other than a plain commit (see `_last_tree_move`) — which is what catches a
-    branch switch that left every file with an old mtime. Cannot-tell is `unknown`, never `fresh`:
-    the one thing this must not do is imply freshness it did not measure."""
+    "Inputs" are the newest of: the changed files present in the working tree, HEAD's commit time
+    (`git log -1 --format=%ct`, which catches a caller committed after the index in a file no diff
+    mentions), and the last time HEAD moved by something other than a plain commit (see
+    `_last_tree_move`) — which is what catches a branch switch that left every file with an old
+    mtime. There is no slack: an edit even a moment after the index was written is not in it.
+    Cannot-tell is `unknown`, never `fresh`: the one thing this must not do is imply freshness it
+    did not measure."""
     try:
         from codeintel.core.paths import graph_cache_dir as _graph_cache_dir
-        base = os.path.join(_graph_cache_dir(), f"{project}.db")
-        stamps = [os.stat(p).st_mtime for p in (base, base + "-wal") if os.path.exists(p)]
-        if not stamps:
+        from codeintel.core.paths import graph_db_mtime
+        written = graph_db_mtime(project)
+        if written is None:
             return IndexAge(
                 "unknown", f"the graph index file for `{project}` was not found under "
                            f"{_graph_cache_dir()}, so its age cannot be read")
-        written = max(stamps)
         newest, newest_what = 0.0, ""
         for rel in paths:
             try:
@@ -429,6 +432,21 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
                 continue
             if m > newest:
                 newest, newest_what = m, rel
+        # `--no-show-signature`: `log.showSignature`, from any config including the repository's
+        # own, would put verification text before the time and run the verifier program it names.
+        code, out, err = _git(root, "log", "-1", "--no-show-signature", "--format=%ct")
+        if code == 0 and out.strip().isdigit():
+            committed = float(out.strip())
+            if committed > newest:
+                newest, newest_what = committed, "HEAD (a commit)"
+        elif code == 0 or _git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")[0] == 0:
+            # HEAD exists and its time could not be read. Skipping it would let a commit made after
+            # the index read as fresh. Only a repository with no commit yet has no time to read.
+            why = (f"printed {out.strip()[:80]!r}" if code == 0
+                   else err or f"exit {code}")
+            return IndexAge(
+                "unknown", f"HEAD's commit time could not be read (`git log -1 --format=%ct` "
+                           f"{why}), so a commit after the index cannot be ruled out")
         code, out, _ = _git(root, "rev-parse", "--git-path", "logs/HEAD")
         if code == 0 and out.strip():
             reflog = out.decode().strip()
@@ -437,10 +455,9 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
                 newest, newest_what = moved, "HEAD (a checkout, merge, reset or rebase)"
         if not newest:
             return IndexAge(
-                "unknown", "neither the changed files nor the HEAD reflog could be dated, so "
-                           "there is nothing to compare the index's age against")
-        # A little slack: a file written during the same second as the index pass it triggered.
-        if written + 2.0 < newest:
+                "unknown", "neither the changed files nor HEAD could be dated, so there is "
+                           "nothing to compare the index's age against")
+        if written < newest:
             return IndexAge("stale", f"the graph index was last written "
                                      f"{_ago(newest - written)} before {newest_what} last changed")
         return IndexAge("fresh", "")
@@ -451,12 +468,13 @@ def graph_index_age(project: str, root: str, paths: list[str]) -> IndexAge:
 def _last_tree_move(reflog_path: str) -> float | None:
     """When HEAD last moved by something other than a plain commit, from its reflog.
 
-    A commit records content that was already in the working tree, so it says nothing about whether
-    the files the index saw are still the files on disk — treating it as "the tree moved" flagged
-    every query after every commit as stale. A checkout, merge, reset, rebase or pull is the
-    opposite: it rewrites files, including callers in files the diff never mentions, which is
-    exactly the population a stale graph under-reports. Reflog lines are
-    `old new Name <email> <epoch> <tz>` TAB `<message>`."""
+    A commit does not move the tree: it records content that was already in the working tree, so
+    it rewrites no file. It does prove that files were written after any index pass that happened
+    before it, and `graph_index_age` reads that from HEAD's commit time on its own, not from here.
+    A checkout, merge, reset, rebase or pull is different: it rewrites files, including callers in
+    files the diff never mentions, often leaving them with mtimes older than the index and a
+    commit time older still. That is the move only the reflog dates, so commits are skipped here.
+    Reflog lines are `old new Name <email> <epoch> <tz>` TAB `<message>`."""
     try:
         with open(reflog_path, encoding="utf-8", errors="replace") as fh:
             lines = fh.read().splitlines()[-200:]
@@ -472,6 +490,48 @@ def _last_tree_move(reflog_path: str) -> float | None:
         except (IndexError, ValueError):
             continue
     return None
+
+
+def in_work_tree(root: str) -> bool:
+    """Whether *root* is inside a git work tree — the one check uncommitted `changed` makes before
+    it may say anything about uncommitted changes. False when git cannot be run at all."""
+    code, out, _ = _git(root, "rev-parse", "--is-inside-work-tree")
+    return code == 0 and out.strip() == b"true"
+
+
+def uncommitted_paths(root: str, within: str = "") -> tuple[list[str], list[str], str]:
+    """`(changed, untracked, error)` for the working tree, as absolute paths, from
+    `git status --porcelain`. Porcelain paths are relative to the repository's top level, not to
+    *root*, which can be a subdirectory, so they are joined to that. Only paths under *within*
+    (default *root*), the directory the graph project indexes, are kept: an edit beside it is not
+    in its index. *error* is empty on success; otherwise it names the git call that failed and why,
+    and both lists are empty, which the caller must read as "cannot tell", never as "nothing
+    changed"."""
+    code, top, err = _git(root, "rev-parse", "--show-toplevel")
+    if code != 0 or not top.strip():
+        return [], [], f"`git rev-parse --show-toplevel` failed: {err or f'exit {code}'}"
+    base = os.fsdecode(top.strip())
+    code, out, err = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if code != 0:
+        return [], [], f"`git status` failed: {err or f'exit {code}'}"
+    scope = os.path.realpath(within or root)
+    changed: list[str] = []
+    untracked: list[str] = []
+    entries = out.split(b"\0")
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], os.path.join(base, os.fsdecode(entry[3:]))
+        if status[:1] in (b"R", b"C"):
+            i += 1                     # the next entry is the rename's source path
+        real = os.path.realpath(path)
+        if real != scope and not real.startswith(scope.rstrip(os.sep) + os.sep):
+            continue
+        (untracked if status == b"??" else changed).append(path)
+    return changed, untracked, ""
 
 
 def _ago(seconds: float) -> str:

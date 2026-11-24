@@ -118,6 +118,11 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+# A graph project slug: alphanumeric runs joined by single hyphens, with at least one hyphen.
+_SLUG_SHAPE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+")
+_NUMBER_THEN_WORD = re.compile(r"\d+ ")
+
+
 def _strip_project_prefix(qualified_name: str, *, may_be_filename: bool = True) -> str:
     """Drop the backend's project id from the head of a qualified name.
 
@@ -144,11 +149,25 @@ def _strip_project_prefix(qualified_name: str, *, may_be_filename: bool = True) 
     # rendered the full flattened absolute path, username included, straight into `result`. Found
     # by evaluating against a third language; two languages could not have shown it, because both
     # of them happen to produce dotted remainders.
-    # The space test covers the WHOLE name, not just the head. Dropping the dotted-remainder rule
-    # cost this: `EC-1.1: Empty workflow plan` is a document heading whose head happens to be
-    # hyphenated, and it was previously spared only because its remainder had no dot. A qualified
-    # name never contains a space, in any language, so that is the durable discriminator.
-    if "-" not in head or " " in qualified_name or not rest:
+    # The head must have the slug's own shape: the backend collapses every run of
+    # non-alphanumerics in the repo path to one `-` (`core.paths.graph_slug`), so a slug is
+    # alphanumeric runs joined by single hyphens, never a space.
+    #
+    # A space anywhere else does not rule a slug out: a repo DIRECTORY can have one
+    # (`ünï cødé/日本/uni.py` gives `<slug>.ünï cødé.日本.uni.unicaller`), and refusing every
+    # name with a space left the whole project id, home directory included, on those rows. What a
+    # space does rule out is a SYMBOL: the last segment of a qualified name is an identifier.
+    # `EC-1.1: Empty workflow plan` is a document heading whose head happens to look like a slug;
+    # its last segment is `1: Empty workflow plan`, so it is left alone.
+    #
+    # The last-segment rule alone let `Pre-1.0 notes for 2.x` through as `0 notes for 2.x`: there
+    # the space sits in a middle segment. A directory name does not start or end with a space, and
+    # a module path does not begin with a number followed by a word, so either of those also marks
+    # prose split at its dots rather than a slug and a path.
+    if (not rest or not _SLUG_SHAPE.fullmatch(head)
+            or " " in qualified_name.rsplit(".", 1)[-1]
+            or _NUMBER_THEN_WORD.match(rest)
+            or any(seg != seg.strip(" ") for seg in rest.split("."))):
         return qualified_name
     # `my-component.spec.ts` also has a dotted remainder, so "has dots" is not enough. What
     # separates a filename from a qualified name is the LAST segment: a module path ends in a
