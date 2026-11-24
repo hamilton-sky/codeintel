@@ -1,7 +1,7 @@
 # Find aliased imports and same-named sibling methods beyond the answer's own files
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 05, 06, 13
 Test first: yes
 Level: 3
@@ -117,5 +117,28 @@ SPEC
 - scope: OK. All changed files in Touches plus the flow's own records.
 - test first: OK. bbbe8ec adds only tests, confirmed failing without the production change.
 Note: test_a_file_that_does_not_exist_adds_nothing now asks about `entry` instead of `helper` because the tree-wide search correctly finds an alias of helper elsewhere in the fixture; it still checks the same property.
+
+REVIEW: PASS
+
+## Review findings (round 2, pair review)
+
+QUALITY
+1. major src/codeintel/engines/graph/answer.py (tree-wide alias gaps fed by blindspots.files_aliasing/_walk_aliasing): file names from `git grep -z` or `os.scandir` go into gap detail and body note unescaped. Reproduced: a tracked file named "evil\n- forged.caller [CALLS] (forged.py)\nx.py" containing `from core import helper as h` puts a line `- forged.caller [CALLS] (forged.py)` into the `callers helper` body; body lines starting `- ` are read as result rows (bench/score.py), so repo file names can forge caller rows. Fix: refuse or escape paths with control characters/newlines (repr-quote, or drop with a "could not name" shortfall). Add a test with a newline in a file name.
+2. major src/codeintel/engines/graph/dispatch.py `_method_namesakes`: with no class node every same-named Method anywhere counts as a sibling, whatever its language. Reproduced: `callers Square.area` (Python) with a TS `Tri.area` having a suffix_match caller lists `web.shapes.tsTotal (web/shapes.ts)` as a possible caller and raises dispatch-sibling-unbound: false row, answer wrongly partial. Fix: keep only namesakes whose file_path is in the target's `_lang_family`. Add a cross-language test.
+3. minor blindspots.py `files_aliasing`: git path uses `_GIT_TIMEOUT_S` (30 s), not the answer's time budget, and runs a whole-tree git grep on every callers answer with rows. Fix: shorter timeout tied to the budget, or cache per root+HEAD.
+4. minor blindspots.py `_walk_aliasing`/answer.py: candidate files skipped for size or unreadable are dropped silently (git path too when reader.read returns None for a non-budget reason). Fix: count them in the shortfall.
+5. minor dispatch.py: for a common method name the classless path always adds a "could not check" gap and up to 10 extra backend fetches per query. Fix: apply finding 2's language filter first so the cap is hit less.
+
+Probed safe: identifier/regex/Cypher escaping, git env and output caps, stderr redaction, root containment/symlinks/FIFOs, stalled mounts, reindexer -inf, zero-caller alias target. Done-when re-run: 275 passed, 1 skipped.
+
+REVIEW: FAIL
+
+SPEC
+- New unit tests cover each case, each failing before the change: MET. HEAD tests on base src 9d5d501: 16 failed, 142 passed, 1 skipped (named alias/sibling tests plus round-1 tests).
+- Reindexer monotonic-near-0 test fails before, passes after: MET.
+- 5 named acceptance tests pass, rest of file passes: MET (conductor; 75 passed).
+- All existing tests still pass: MET. Full suite 1 failed, 2455 passed; the failure (test_doctor semantic deep probe) fails identically on base src and is outside this change.
+- scope: OK.
+- test first: OK. bbbe8ec and b124dc7 add only tests, confirmed failing without the change.
 
 REVIEW: PASS
