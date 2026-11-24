@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -45,7 +44,9 @@ from typing import Any
 from codeintel.core.outcome import Missing
 from codeintel.core.per_thread import PerThread
 from codeintel.core.redact import redact_text
+from codeintel.engines.graph import session as warm_session
 from codeintel.engines.graph import wire_text
+from codeintel.engines.graph.locate import find_backend
 
 
 def _parse_query_rows(raw: Any) -> list[dict]:
@@ -196,6 +197,32 @@ def is_coordination_refusal(message: str) -> bool:
     return bool(_COORDINATION.search(message or ""))
 
 
+_CACHE_DIR_CLASH = re.compile(r"daemon uses a different cache directory", re.IGNORECASE)
+
+
+def is_cache_dir_refusal(message: str) -> bool:
+    """Whether *message* is the backend refusing because its running daemon has another cache.
+
+    Measured on 0.10.8 with a permanent daemon up (`codebase-memory-mcp daemon start`) and a call
+    made under a different `CBM_CACHE_DIR`: "CBM could not start because the active account daemon
+    uses a different cache directory (active cache <hash>; requested cache <hash>)". It hit the
+    0.30.0 build as six acceptance tests failing with no clear reason: they run under a temporary
+    HOME, and a daemon started from the real one refused them."""
+    return bool(_CACHE_DIR_CLASH.search(message or ""))
+
+
+def cache_dir_remediation() -> str:
+    """The recovery for `is_cache_dir_refusal`: one cache directory for every caller, or no daemon."""
+    current = os.environ.get("CBM_CACHE_DIR")
+    which = (f"this process asks for CBM_CACHE_DIR={current}" if current
+             else "this process asks for the default cache (CBM_CACHE_DIR unset, or HOME differs)")
+    return redact_text(
+        f"a codebase-memory-mcp daemon is running against a different cache directory, and {which}. "
+        "Either stop the daemon (`codebase-memory-mcp daemon stop`, after closing agent sessions "
+        "that use it) or run codeintel with the same CBM_CACHE_DIR and HOME as the daemon"
+    )
+
+
 def is_launch_refusal(message: str) -> bool:
     """Whether *message* says the backend will not run AT ALL, so launching it again is pointless."""
     return bool(_COULD_NOT_START.search(message or "")) or is_coordination_refusal(message)
@@ -248,8 +275,56 @@ def _refused(returncode: int, message: str) -> BackendRefused:
     return BackendRefused("backend-error", detail, None, returncode, message)
 
 
-_NOT_INSTALLED = "codebase-memory-mcp is not installed, or is no longer on PATH"
+_NOT_INSTALLED = ("codebase-memory-mcp is not installed, or is no longer on PATH or next to "
+                  "codeintel")
 _TIMED_OUT = "the graph backend did not respond within the time budget"
+
+
+# The budget a graph call gets when the caller names none (the MCP tools do not), and how it
+# follows the backend this machine actually has. A fixed 5 s was set against launches measured
+# at well under a second; 0.10.8 measured 1.5 to 4.8 s per launch on a cloud host, so a cold call
+# could spend nearly the whole budget starting up and the answer depended on whether something
+# else had warmed the machine. The kept-open session (`session.py`) removes most launches, and
+# this keeps the one that remains — the first — inside the budget: twice the slowest start seen
+# in this process, never below the old 5 s, never above 30 s (the CLI's own budget).
+DEFAULT_BUDGET_MS = 5000
+_MAX_DEFAULT_BUDGET_MS = 30_000
+_cold_start_ms: int | None = None
+_cold_lock = threading.Lock()
+
+
+def note_cold_start(ms: int) -> None:
+    """Record one measured backend start (a `cli` launch, or opening the kept-open session)."""
+    global _cold_start_ms
+    if ms < 0:
+        return
+    with _cold_lock:
+        _cold_start_ms = ms if _cold_start_ms is None else max(_cold_start_ms, ms)
+
+
+def measured_cold_start_ms() -> int | None:
+    """The slowest backend start measured in this process, by either path, or None."""
+    with _cold_lock:
+        launched = _cold_start_ms
+    opened = warm_session.slowest_start_ms()
+    seen = [ms for ms in (launched, opened) if ms is not None]
+    return max(seen) if seen else None
+
+
+def default_budget_ms() -> int:
+    """The per-call budget when the caller gave none. See `DEFAULT_BUDGET_MS`."""
+    cold = measured_cold_start_ms()
+    if cold is None:
+        return DEFAULT_BUDGET_MS
+    return max(DEFAULT_BUDGET_MS, min(_MAX_DEFAULT_BUDGET_MS, 2 * cold + 1000))
+
+
+def _reset_cold_start() -> None:
+    """Forget the measurement (tests)."""
+    global _cold_start_ms
+    with _cold_lock:
+        _cold_start_ms = None
+    warm_session._reset_measurements()
 
 
 class _Failed:
@@ -308,7 +383,9 @@ class BackendClient:
         self._detect_backend()
 
     def _detect_backend(self) -> None:
-        path = shutil.which("codebase-memory-mcp")
+        # PATH first, then codeintel's own environment — see `locate.py` for why PATH alone left
+        # the engine "unavailable" in every subagent shell.
+        path = find_backend()
         if path:
             self.available = True
             self._cmd: str | None = path
@@ -343,7 +420,22 @@ class BackendClient:
         # captured and then lost in the retry.
         body = json.dumps(payload)
         deadline = time.monotonic() + max(0.0, timeout_ms / 1000)
-        out = self._run_stdin(method, body, timeout_ms)
+        # A kept-open backend answers a read in tens of milliseconds where a launch costs seconds
+        # (`session.py`). It returns None for anything it will not vouch for, and the one-shot
+        # path below then runs with the budget that is left — the answer never depends on it.
+        warm = warm_session.warm_call(self._cmd, method, payload, timeout_ms)
+        if warm is not None:
+            out = self._decode(method, warm)
+            if out is self._UNPARSABLE:
+                self._last_failure = Missing(
+                    "unparsable", "the graph backend's reply could not be read")
+                return None
+            return out
+        remaining_first = int((deadline - time.monotonic()) * 1000)
+        if remaining_first <= 0:
+            self._last_failure = Missing("timeout", _TIMED_OUT)
+            return None
+        out = self._run_stdin(method, body, remaining_first)
         if out is self._UNPARSABLE:
             # Retrying the deprecated positional form would only get the same dialect back.
             self._last_failure = Missing("unparsable", "the graph backend's reply could not be read")
@@ -390,6 +482,7 @@ class BackendClient:
         code inferred "timed out" from the shared deadline having passed, which is how a backend
         that exited in a second came to be reported as one that never answered."""
         kwargs: dict[str, Any] = {} if stdin is None else {"input": stdin}
+        began = time.monotonic()
         try:
             result = subprocess.run(
                 argv, capture_output=True, timeout=timeout_ms / 1000, **kwargs)
@@ -406,6 +499,8 @@ class BackendClient:
                 retryable=False)
         except Exception:
             return self._FAIL
+        if method != "index_repository":
+            note_cold_start(int((time.monotonic() - began) * 1000))
         try:
             if result.returncode != 0:
                 # `getattr`: the doubles tests substitute for `subprocess.run` carry a return code

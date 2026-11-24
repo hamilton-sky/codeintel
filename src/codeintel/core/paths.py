@@ -37,8 +37,17 @@ def graph_cache_dir() -> str:
 
     codeintel does not own this directory, which is exactly why `reset --all` never touched it —
     and why "start from a clean index" was not true for the graph engine. Honouring the backend's
-    own override so a relocated cache is still cleared."""
-    override = os.environ.get("CODEBASE_MEMORY_HOME") or os.environ.get("CODEBASE_MEMORY_CACHE_DIR")
+    own override so a relocated cache is still cleared.
+
+    `CBM_CACHE_DIR` comes first because it is the one the backend actually reads. Measured
+    2026-11-24 on 0.9.0 and 0.10.8, each pointed at an empty directory: `CBM_CACHE_DIR` gave an
+    empty project list, while `CODEBASE_MEMORY_HOME` and `CODEBASE_MEMORY_CACHE_DIR` both listed
+    the real projects from `~/.cache/codebase-memory-mcp`, i.e. were ignored. A user who relocated
+    the cache the way the backend documents had `reset` and the index-age check looking in the
+    default directory. The two older names stay honoured after it, so an existing setup that named
+    one of them keeps resolving to the same place it did."""
+    override = (os.environ.get("CBM_CACHE_DIR") or os.environ.get("CODEBASE_MEMORY_HOME")
+                or os.environ.get("CODEBASE_MEMORY_CACHE_DIR"))
     if override:
         return os.path.expanduser(override)
     return os.path.join(os.path.expanduser("~"), ".cache", "codebase-memory-mcp")

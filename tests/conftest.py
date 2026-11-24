@@ -412,3 +412,40 @@ def pytest_unconfigure(config):
     except Exception:
         pass
     os._exit(int(status))
+
+
+@pytest.fixture
+def warm_graph_backend():
+    """Opt back in to the kept-open graph backend session (`engines/graph/session.py`).
+
+    Requesting this fixture suppresses the autouse guard below."""
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _graph_backend_is_cold_and_on_path_only(request, monkeypatch):
+    """Every test sees the graph backend the way it did before 0.31.0, unless it asks otherwise.
+
+    Two process-wide behaviours would otherwise leak into tests written against the one-shot
+    subprocess seam:
+
+    * *The kept-open session.* Hundreds of tests stub `subprocess.run`, `_launch` or `_run_stdin`
+      to stand in for the backend. A session would answer around those stubs from a real process
+      (or try to start one from a fake path). Off via its own switch; `warm_graph_backend` opts in.
+    * *The off-PATH search.* About eighty tests make the backend "absent" by stubbing
+      `shutil.which`. On a developer venv that has codebase-memory-mcp installed beside the
+      interpreter, the new search would find it anyway and those tests would test nothing. The
+      folders beside the interpreter are switched off, and an explicit `CODEINTEL_GRAPH_BACKEND`
+      from the developer's shell is cleared; tests of the search itself patch `own_bin_dirs`.
+
+    The default budget's cold-start measurement is process-wide too, and is reset each test."""
+    from codeintel.engines.graph import backend, locate, session
+
+    monkeypatch.delenv(locate.BACKEND_ENV, raising=False)
+    monkeypatch.setattr(locate, "own_bin_dirs", list)
+    backend._reset_cold_start()
+    if "warm_graph_backend" not in request.fixturenames:
+        monkeypatch.setenv(session.WARM_ENV, "0")
+    yield
+    session.close_all()
+    backend._reset_cold_start()
