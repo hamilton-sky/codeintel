@@ -189,7 +189,7 @@ def test_a_missing_binary_is_still_not_installed(tmp_path, monkeypatch):
 
     report = GraphProvider().probe(str(tmp_path))
     assert report["installed"] is False and report["runnable"] is False, report
-    assert report["detail"] == "codebase-memory-mcp not found on PATH"
+    assert report["detail"] == "codebase-memory-mcp not found on PATH or next to codeintel"
 
 
 def test_a_binary_that_vanishes_after_detection_is_named_as_not_installed(tmp_path, monkeypatch):

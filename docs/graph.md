@@ -4,9 +4,18 @@ Wraps the `codebase-memory-mcp` CLI binary. Never raises — always returns an e
 
 ## Install prerequisite
 
-`codebase-memory-mcp` must be on `PATH` (detected via `shutil.which`). If absent, every
-call returns a **safe null** with `reason: 'engine-unavailable'` — `ok` is still `true`; the
-contract never returns `ok: false`.
+codeintel looks for `codebase-memory-mcp` in this order: the path in `CODEINTEL_GRAPH_BACKEND`
+(when it names an executable file), `PATH`, then the folder of the Python running codeintel (its own
+`bin/`, where `pip install codebase-memory-mcp` into the same environment puts it). The last one
+matters for agent hosts and subagent shells that run `.venv/bin/codeintel` without that folder on
+`PATH`. If none has it, every call returns a **safe null** with `reason: 'engine-unavailable'` —
+`ok` is still `true`; the contract never returns `ok: false`.
+
+The backend reads its cache from `CBM_CACHE_DIR` (default `~/.cache/codebase-memory-mcp`), and
+codeintel's index-age check and `reset` read the same variable. 0.9.0 and 0.10.8 ignore
+`CODEBASE_MEMORY_HOME` and `CODEBASE_MEMORY_CACHE_DIR`; codeintel still honours them after
+`CBM_CACHE_DIR` for setups that used them. A running backend daemon refuses a call made under a
+different `CBM_CACHE_DIR`; `codeintel doctor` names that case and its fix.
 
 `codebase-memory-mcp` is a standalone, platform-specific binary distributed by its own project —
 install the build for your OS/arch and ensure it is on `PATH` (it self-manages via
@@ -654,14 +663,27 @@ the provider instance.
 
 ## Budget / timeout
 
-`budget` (milliseconds) sets the subprocess timeout. If `budget` is 0 or absent, the timeout
-defaults to **5000 ms**.
+`budget` (milliseconds) sets the per-call timeout. If `budget` is 0 or absent, the timeout
+defaults to **5000 ms**, raised to twice the slowest backend start measured in this process plus
+one second (at most 30 s) when the backend starts slowly. `codeintel doctor` prints the backend's
+path, the measured cold start and the default budget.
+
+## The kept-open backend session
+
+Launching `codebase-memory-mcp cli <method>` costs a full backend start per call (1.5 to 4.8 s
+measured on 0.10.8). So a codeintel process also starts the backend once as an MCP server on
+stdio, on a background thread, and sends read-only calls (`query_graph`, `search_graph`,
+`search_code`, `list_projects`, `get_architecture`, `trace_path`, `get_code_snippet`) to it once it
+is up: about 0.03 to 0.5 s per call. Until it is up, and whenever it returns an error, times out or
+closes, the call runs the one-shot CLI exactly as before, so the answer never depends on it.
+`index_repository` always uses the CLI. One session per backend binary and cache location; a
+timeout kills it and the next call starts a new one. Turn it off with `CODEINTEL_GRAPH_WARM=0`.
 
 ## Safe-null reasons
 
 | reason | When returned |
 |---|---|
-| `'engine-unavailable'` | `codebase-memory-mcp` not on PATH |
+| `'engine-unavailable'` | `codebase-memory-mcp` not found (see Install prerequisite) |
 | `'backend-unreachable'` | The backend did not answer while resolving the project — it timed out, **refused to run** (the `hint` quotes its own message and the fix; see [doctor.md](doctor.md#when-the-graph-backend-is-installed-and-fails)), or replied in a form this release cannot read |
 | `'project-not-indexed'` | No project found for the given `project_root` |
 | `'project-not-indexed-standalone'` | The repo isn't indexed on its own — it only resolves via a containing ancestor project, and the op (`overview`/`changed`/`changes`/`hotspots`) is scoped to the repo boundary, so it refuses rather than answer for the wrong tree |

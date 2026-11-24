@@ -162,7 +162,7 @@ jobs:
       # `-rs` prints skip reasons — a skip here means the contract went unchecked, which is the
       # failure mode that let this ship, so it must be visible in the log.
       - name: Live graph contract tests
-        run: pytest tests/test_graph_real.py tests/test_graph_stdin.py -v -rs -o addopts=
+        run: pytest tests/test_graph_real.py tests/test_graph_stdin.py tests/test_graph_session.py -v -rs -o addopts=
 
       # A skip is not a pass. If the backend is installed and the repo is indexed, these tests must
       # actually run; anything else means the contract was not exercised.

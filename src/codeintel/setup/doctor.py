@@ -226,7 +226,9 @@ def collect_versions(engines: dict) -> dict:
 
     jobs: dict[str, Callable[[], str | None]] = {}
     if _installed("graph"):
-        jobs["codebase-memory-mcp"] = lambda: _cmd_version(["codebase-memory-mcp", "--version"])
+        from codeintel.engines.graph.locate import find_backend
+        graph_cmd = find_backend() or "codebase-memory-mcp"
+        jobs["codebase-memory-mcp"] = lambda: _cmd_version([graph_cmd, "--version"])
     if _installed("lsp"):
         jobs["uv"] = lambda: _cmd_version(["uvx", "--version"])
         jobs["serena"] = lambda: _cmd_version(["serena", "--version"])
@@ -287,6 +289,31 @@ def collect_registrations() -> list[dict]:
     return out
 
 
+def graph_latency() -> dict:
+    """What a graph call costs on this machine, as measured in this process. Never raises.
+
+    The 0.30.0 build ran into a backend that took about 4.4 s to start against a fixed 5 s budget,
+    and nothing reported it: live queries timed out or passed depending on whether something had
+    warmed the machine. `cold_start_ms` is the slowest backend start measured so far (the probe
+    above makes one), `default_budget_ms` is what a call that names no budget now gets (it follows
+    that measurement), and `kept_open` says whether this process already holds a warm session —
+    true in a long-running `serve`, usually false in a one-shot `codeintel doctor`."""
+    try:
+        from codeintel.engines.graph import backend, session
+        from codeintel.engines.graph.locate import find_backend
+
+        path = find_backend()
+        return {
+            "backend": path,
+            "cold_start_ms": backend.measured_cold_start_ms(),
+            "default_budget_ms": backend.default_budget_ms(),
+            "kept_open": bool(path and session.warm_enabled() and session.is_open(path)),
+            "warm_enabled": session.warm_enabled(),
+        }
+    except Exception:
+        return {}
+
+
 # Which version keys belong to which engine, for the per-engine `versions` rollup.
 _ENGINE_BACKENDS = {
     "graph": ("codebase-memory-mcp",),
@@ -327,6 +354,9 @@ def run_doctor(
         engines["graph"] = {"engine": "graph", "status": "fail", "installed": False,
                             "runnable": False, "repo_indexed": None,
                             "detail": "graph provider unavailable", "remediation": None}
+    graph_row = engines.get("graph")
+    if isinstance(graph_row, dict) and graph_row.get("installed") is True:
+        graph_row["latency"] = graph_latency()
     try:
         from codeintel.engines.lsp.provider import LspProvider
         engines["lsp"] = _probe_engine(
@@ -500,6 +530,17 @@ def render_doctor_text(report: dict) -> str:
     shown = [f"{k} {v}" for k, v in versions.items() if v]
     if shown:
         out.append("  " + c.dim("backends: " + "  ".join(shown)))
+    latency = (engines.get("graph") or {}).get("latency") or {}
+    if latency.get("backend"):
+        parts = [f"graph backend: {latency['backend']}"]
+        if latency.get("cold_start_ms") is not None:
+            parts.append(f"cold start {latency['cold_start_ms'] / 1000:.1f}s")
+        if latency.get("default_budget_ms") is not None:
+            parts.append(f"default budget {latency['default_budget_ms'] / 1000:.1f}s")
+        parts.append("kept open" if latency.get("kept_open")
+                     else ("opens on first use" if latency.get("warm_enabled")
+                           else "kept-open session off (CODEINTEL_GRAPH_WARM=0)"))
+        out.append("  " + c.dim(" · ".join(parts)))
     if report.get("treesitter") is False:
         out.append("  " + c.dim(
             "def-aligned chunking: OFF for non-Python — tree-sitter-language-pack not importable, "

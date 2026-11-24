@@ -25,7 +25,10 @@ from codeintel.engines.graph.backend import (
     BackendRefused,
     _parse_query_rows,
     _parse_search_results,
+    cache_dir_remediation,
     coordination_remediation,
+    default_budget_ms,
+    is_cache_dir_refusal,
     is_coordination_refusal,
     is_project_not_found,
 )
@@ -222,9 +225,10 @@ _PIN_REMEDIATION = (
 # README tells a new user to run — received a bare `engine-unavailable` with nothing to act on,
 # while `doctor` three lines away knew the fix. A second copy of the text would drift, so the
 # envelope reads this one.
-_UNAVAILABLE_DETAIL = "codebase-memory-mcp not found on PATH"
+_UNAVAILABLE_DETAIL = "codebase-memory-mcp not found on PATH or next to codeintel"
 _UNAVAILABLE_REMEDIATION = (
-    "put the codebase-memory-mcp binary on PATH — it's an external native backend (see "
+    "put the codebase-memory-mcp binary on PATH, install it into the same environment as "
+    "codeintel, or point CODEINTEL_GRAPH_BACKEND at it — it's an external native backend (see "
     "docs/graph.md); once present it self-updates via `codebase-memory-mcp update`"
 )
 _UNAVAILABLE_HINT = (
@@ -411,6 +415,8 @@ class GraphProvider(GraphOps):
         Never "run the command that failed": the caller already ran it, through us, and the part
         of its output that explains it is what this report quotes. Sending the reader to rerun it
         by hand was the remediation that shipped with the original incident."""
+        if is_cache_dir_refusal(miss.message):
+            return cache_dir_remediation()
         if is_coordination_refusal(miss.message):
             return coordination_remediation()
         if miss.message:
@@ -932,7 +938,7 @@ class GraphProvider(GraphOps):
                 budget_ms = int(budget) if budget else 0
             except Exception:
                 budget_ms = 0
-            timeout_ms = budget_ms if budget_ms > 0 else 5000
+            timeout_ms = budget_ms if budget_ms > 0 else default_budget_ms()
 
             lookup = self._lookup_project(root_str)
             if lookup.reason == "backend-unreachable":

@@ -180,9 +180,9 @@ def run(args: Any) -> int:
     # best-effort graph reindex — an opaque subprocess, so a ticking elapsed heartbeat is the honest
     # fidelity (no counts cross the boundary): the number keeps moving so a minute-long reindex never
     # reads as a hang, but we never fabricate a percentage we can't see.
-    import shutil
+    from codeintel.engines.graph.locate import find_backend
 
-    if shutil.which("codebase-memory-mcp"):
+    if find_backend():
         beat = None if quiet else term.LiveHeartbeat(console, "graph reindex").start()
         try:
             from codeintel.gateway.reindexer import Reindexer

@@ -6,6 +6,39 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-11-24
+
+### Added
+- **A kept-open graph backend session.** Each graph call used to launch `codebase-memory-mcp cli`,
+  a full backend start measured at 1.5 to 4.8 s on 0.10.8 against a 5 s default budget. A codeintel
+  process now also starts the backend once as an MCP server on stdio (in the background, so no call
+  waits for it) and sends read-only calls to it once it is up: 0.03 to 0.5 s per call. Measured on
+  this repository from a cold start, `query --op callers safe_null_result` went from 10.9 s to
+  6.4 s and `--op impact` from 15.9 s to 6.3 s, with byte-identical output; in a long-running
+  `serve`, every call after the first skips the start. A reply that is an error, a timeout or a
+  closed pipe falls back to the CLI, and `index_repository` always uses it. Off with
+  `CODEINTEL_GRAPH_WARM=0`. See `docs/graph.md`.
+- `codeintel doctor` prints the graph backend's path, its measured cold start, the default budget
+  and whether a session is open; `--json` has them under `engines.graph.latency`.
+
+### Changed
+- **The backend is found when it is not on `PATH`.** codeintel looks in `CODEINTEL_GRAPH_BACKEND`
+  (an explicit path), then `PATH`, then its own Python's `bin/` folder. A backend installed into
+  the same environment as codeintel was reported as `engine-unavailable` in every agent subagent
+  shell that ran `.venv/bin/codeintel` without that folder on `PATH`.
+- The graph default budget (a call that names none, as the MCP tools do) follows the slowest
+  backend start measured in the process: twice it plus one second, never below 5 s or above 30 s.
+
+### Fixed
+- **The graph cache directory is the one the backend uses.** codeintel read `CODEBASE_MEMORY_HOME`
+  and `CODEBASE_MEMORY_CACHE_DIR`, which 0.9.0 and 0.10.8 both ignore (measured: pointed at an
+  empty directory, each still listed the real projects); the backend reads `CBM_CACHE_DIR`. With
+  the cache relocated that way, the index-age check and `reset` looked in the default directory.
+  `CBM_CACHE_DIR` now comes first; the two older names still apply after it.
+- A backend refusing to run because its daemon was started with a different cache directory is
+  named as such, with the fix (stop the daemon, or use the same `CBM_CACHE_DIR` and `HOME`), in
+  `doctor` and in query hints, instead of a generic refusal.
+
 ## [0.30.0] — 2026-11-24
 
 ### Changed
