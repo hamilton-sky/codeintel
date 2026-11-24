@@ -13,7 +13,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from codeintel.core.provider import Result, log_swallowed, safe_null_result
-from codeintel.core.redact import redact
+from codeintel.core.redact import redact, redact_text
 from codeintel.engines.graph.provider import GraphProvider
 from codeintel.engines.lsp.provider import LspProvider
 from codeintel.engines.semantic.provider import SemanticProvider
@@ -50,6 +50,8 @@ def _reset_gateway() -> None:
 _ENGINE_REFRESH_INTERVAL_S = 30.0
 _LAST_ENGINE_REFRESH: float = 0.0
 _REFRESH_LOCK = threading.Lock()
+# How much of a caller's `project_root` a `root-not-found` hint repeats back.
+_ROOT_ECHO_MAX = 200
 
 
 def _refresh_missing_engines(gw: Gateway) -> None:
@@ -194,10 +196,16 @@ def code_query_handler(args: dict) -> Result:
         # "first-time indexing started". Only once the role may name this root, so a role still
         # cannot learn which paths exist outside its roots. Redacted here because this answer never
         # reaches `Gateway.query`, where every other envelope is redacted.
+        # The echoed root is redacted, then cut to `_ROOT_ECHO_MAX` characters: it is the caller's
+        # own text, and a cut taken before redaction could split the home path past recognising.
         if project_root and gw.allows_root(role, project_root) and not os.path.isdir(project_root):
+            shown = redact_text(str(project_root))
+            if len(shown) > _ROOT_ECHO_MAX:
+                shown = shown[:_ROOT_ECHO_MAX - 1] + "…"
+            what = "is not a directory" if os.path.exists(project_root) else "does not exist"
             return cast(Result, redact(safe_null_result(
                 op, target, reason="root-not-found",
-                hint=(f"{project_root} does not exist; pass the absolute repo root, or omit it to "
+                hint=(f"{shown} {what}; pass the absolute repo root, or omit it to "
                       f"use the server cwd"))))
         try:
             offset = max(0, int(args.get("offset", 0) or 0))

@@ -202,6 +202,15 @@ lookup did not answer*. The envelope distinguishes them, and you must too:
 
 If you read one thing from this page, read that list.
 
+### Known limits
+
+- **A `not-in-graph` hint can name symbols to a role that may not run `pattern`.** When a symbol is
+  not in the graph, the hint offers up to five close names from the caller's own project ("Did you
+  mean ..."), found with one name search. The graph engine does not know the caller's role, so a
+  role allowed `callers` but not `pattern` still sees those names. They come only from the root
+  the role may already query, never from an ancestor project. Accepted rather than passing the
+  role into every engine; give such a role no graph ops at all if its callers must not see names.
+
 ---
 
 ## 2. Five minutes: verify it on a symbol you already know

@@ -56,7 +56,7 @@ def build_prompt(project_root: str, agent: str, report: dict[str, Any], *, fresh
     semantic_row = _row("semantic")
     # The package is installed and the last index could not download the embedding model:
     # reinstalling changes nothing, the network or a pre-seeded cache does.
-    model_failed = semantic_row.get("reason") in ("model-load-failed", "index-failed")
+    model_failed = semantic_row.get("reason") == "model-load-failed"
     # serena is installed but has not booted yet: unverified, not missing.
     lsp_row = _row("lsp")
     lsp_unverified = (not lsp_ok and _installed("lsp") and lsp_row.get("status") == "warn"

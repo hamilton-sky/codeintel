@@ -94,6 +94,11 @@ def _parse_search_results(raw: Any) -> list[dict] | None:
 # dropped: a `level=warn` or `level=error` line may well BE the reason, and a filter that guessed
 # wrong in the other direction would hide it.
 _LOG_NOISE = re.compile(r"^\s*(?:\w+=\S+\s+)*level=(?:info|debug)\b", re.IGNORECASE)
+# The backend's own deprecation notice for the raw-JSON call form (`warning: passing raw JSON to
+# 'cli search_graph' is deprecated ...`). It is about how this process called the backend, not
+# about the question, and the tool-name rewrite below would turn its `cli search_graph --help` into
+# a `cli code.query op=pattern --help` that does not exist. Dropped like the log lines.
+_DEPRECATION = re.compile(r"^\s*warning:\s*passing raw JSON\b", re.IGNORECASE)
 # The ceiling on what a report carries of the backend's stderr. A message is a sentence or two; a
 # crash can print a page, and a doctor line the size of a page is not read.
 _STDERR_CAP = 400
@@ -115,10 +120,20 @@ _FLATTENED_PATH = re.compile(r'"[\w.]+(?:-[\w.]+){2,}"')
 # The same id single-quoted, or bare, where the backend names it as the project it was asked about.
 _QUOTED_FLATTENED_PATH = re.compile(r"'[\w.]+(?:-[\w.]+){2,}'")
 _NAMED_PROJECT = re.compile(r"\b(projects?\b\s*[:=]?\s*)[\w.]+(?:-[\w.]+){2,}", re.IGNORECASE)
+# A comma list of ids after `project(s)`, and any `[...]`: every slug-shaped id in it (one hyphen
+# is enough there, `home-bob`) is withheld, not only the first.
+_ID = r"[\w.]+(?:-[\w.]+)+"
+_NAMED_PROJECT_LIST = re.compile(
+    rf"\b(projects?\b\s*[:=]?\s*)((?:['\"]?{_ID}['\"]?\s*,\s*)+['\"]?{_ID}['\"]?)", re.IGNORECASE)
+_BRACKETED = re.compile(r"\[[^\[\]]*\]")
+_LISTED_ID = re.compile(rf"(?<![\w.-]){_ID}(?![\w.-])")
+# Every pattern here is linear in the text: `_agent_facing` runs on the whole stderr, before the
+# cap, so a lazy `.*?` or a `[^)]*` that rescans to the end from each of thousands of starts took
+# seconds on 100 KB. Each scan below stops at the next quote, backslash or parenthesis.
 _SEARCH_ADVICE = re.compile(
-    r'search_graph\(\s*name_pattern\s*=\s*\\?"(?:\.\*)?(.*?)(?:\.\*)?\\?"\s*\)')
+    r'search_graph\(\s*name_pattern\s*=\s*\\?"(?:\.\*)?([^"\\]*?)(?:\.\*)?\\?"\s*\)')
 _TOOL_NAMES = (
-    (re.compile(r"search_graph\([^)]*\)"), "code.query op=pattern target=<name>"),
+    (re.compile(r"search_graph\([^()]*\)"), "code.query op=pattern target=<name>"),
     (re.compile(r"\bsearch_graph\b"), "code.query op=pattern"),
     (re.compile(r"\btrace_path\b"), "code.query op=chain"),
     (re.compile(r"\bindex_repository\b"), "codeintel index"),
@@ -135,6 +150,9 @@ def is_project_not_found(message: str) -> bool:
 def _agent_facing(text: str) -> str:
     """Backend text as a hint may carry it: no project list, no flattened path, no backend tool."""
     text = _PROJECT_LIST.sub("<project list withheld>", text)
+    text = _BRACKETED.sub(lambda m: _LISTED_ID.sub("<project>", m.group(0)), text)
+    text = _NAMED_PROJECT_LIST.sub(
+        lambda m: m.group(1) + _LISTED_ID.sub("<project>", m.group(2)), text)
     text = _FLATTENED_PATH.sub('"<project>"', text)
     text = _QUOTED_FLATTENED_PATH.sub("'<project>'", text)
     text = _NAMED_PROJECT.sub(r"\1<project>", text)
@@ -155,7 +173,8 @@ def _stderr_tail(raw: Any) -> str:
     if not raw:
         return ""
     text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
-    kept = [line for line in text.splitlines() if not _LOG_NOISE.match(line)]
+    kept = [line for line in text.splitlines()
+            if not _LOG_NOISE.match(line) and not _DEPRECATION.match(line)]
     flat = _agent_facing(redact_text(" ".join(" ".join(kept).split())))
     if len(flat) > _STDERR_CAP:
         flat = "…" + flat[-(_STDERR_CAP - 1):]

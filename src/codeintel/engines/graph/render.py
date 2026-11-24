@@ -120,6 +120,7 @@ def _int_or_zero(value: Any) -> int:
 
 # A graph project slug: alphanumeric runs joined by single hyphens, with at least one hyphen.
 _SLUG_SHAPE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+")
+_NUMBER_THEN_WORD = re.compile(r"\d+ ")
 
 
 def _strip_project_prefix(qualified_name: str, *, may_be_filename: bool = True) -> str:
@@ -158,7 +159,15 @@ def _strip_project_prefix(qualified_name: str, *, may_be_filename: bool = True) 
     # space does rule out is a SYMBOL: the last segment of a qualified name is an identifier.
     # `EC-1.1: Empty workflow plan` is a document heading whose head happens to look like a slug;
     # its last segment is `1: Empty workflow plan`, so it is left alone.
-    if not rest or not _SLUG_SHAPE.fullmatch(head) or " " in qualified_name.rsplit(".", 1)[-1]:
+    #
+    # The last-segment rule alone let `Pre-1.0 notes for 2.x` through as `0 notes for 2.x`: there
+    # the space sits in a middle segment. A directory name does not start or end with a space, and
+    # a module path does not begin with a number followed by a word, so either of those also marks
+    # prose split at its dots rather than a slug and a path.
+    if (not rest or not _SLUG_SHAPE.fullmatch(head)
+            or " " in qualified_name.rsplit(".", 1)[-1]
+            or _NUMBER_THEN_WORD.match(rest)
+            or any(seg != seg.strip(" ") for seg in rest.split("."))):
         return qualified_name
     # `my-component.spec.ts` also has a dotted remainder, so "has dots" is not enough. What
     # separates a filename from a qualified name is the LAST segment: a module path ends in a

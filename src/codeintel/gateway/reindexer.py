@@ -62,7 +62,9 @@ def _tree_fingerprint(root: str) -> str | None:
     newest = 0
     for rel in paths:
         try:
-            st = os.stat(os.path.join(root, rel))
+            # lstat: a tracked symlink is dated as the link. Following it could block this request
+            # thread on a hung mount, and the graph does not index what a link points at.
+            st = os.lstat(os.path.join(root, rel))
         except OSError:
             stamp = "-"  # deleted since it was listed or committed; its name still counts
         else:
@@ -151,14 +153,19 @@ class Reindexer:
         return held_by_another_process(lock_path(os.path.realpath(project_root)))
 
     def maybe_reindex(self, project_root: str) -> bool:
-        """Submit a background pass for *project_root* when its tree changed; ``True`` if submitted.
+        """Submit a background pass for *project_root*; ``True`` when submitted for a changed tree.
 
         A git root submits only when its fingerprint (`_tree_fingerprint`) differs from the one
         last submitted, so a query on an unchanged tree starts nothing, and the gateway does not
         report that query's own pass as "a reindex is in progress". The time debounce still bounds
         every root: a changed tree inside the window waits for the next query after it. A root git
         cannot fingerprint (not a repository, or git failed or timed out) keeps the time debounce
-        alone, so a broken git never submits more passes than before."""
+        alone, so a broken git never submits more passes than before.
+
+        Such a pass is submitted but returns ``False``: nothing showed its tree changed, so the
+        query that submitted it does not report ``reindexing`` (it would, on every window, for a
+        tree nobody touched). A later query that finds the pass still running reports it through
+        `reindex_pending`, as for any pass."""
         if not self._enabled:
             return False
         if not project_root:
@@ -209,7 +216,7 @@ class Reindexer:
         with self._lock:
             self._in_flight.add(project_root)
         self._executor.submit(self._do_reindex, project_root)
-        return True
+        return fingerprint is not None
 
     def _reindex_disabled(self, project_root: str) -> bool:
         try:

@@ -673,6 +673,9 @@ class GraphProvider(GraphOps):
         than the index becomes `unstated`. Unknown: an `index-age-unknown` gap. Fresh: nothing, and
         `""`. Both gaps are in the `index` section: one gap for the whole answer, `impact` included.
         `written` is the db's mtime read before the backend round trip, as `changed` reads it.
+        The db's mtime is read again here: if it moved, a reindex landed while the rows were read,
+        so they come from the index as it was and the check below, which reads the new one, could
+        call them fresh. A moved db is stale whatever the age check says.
         """
         base = self._answered_root or root
         files = sorted(({str(r.get("file") or "") for r in self._pending_rows}
@@ -688,12 +691,16 @@ class GraphProvider(GraphOps):
         checked = present + sorted(set(stand_ins))
         self.index_inputs = (project, base, tuple(checked))
         age = changed_range.graph_index_age(project, base, checked)
+        try:
+            rewritten = written is not None and graph_db_mtime(project) != written
+        except OSError:
+            rewritten = True
         rerun = f"re-run `codeintel index {root}`"
         if age.state == "unknown":
             detail = f"{age.detail}, so these {op} rows cannot be called current; {rerun}"
             self._add_gap("index", "index-age-unknown", detail)
             return f"\n\n> Index age unknown: {detail}."
-        if age.state != "stale":
+        if age.state != "stale" and not rewritten:
             return ""
 
         if written is None:
@@ -710,6 +717,8 @@ class GraphProvider(GraphOps):
                 except OSError:
                     continue
         what = []
+        if rewritten:
+            what.append("the graph index was rewritten while this answer was being read")
         if newer:
             what.append(f"{_name_files(newer)} changed after the index was written")
         if missing:

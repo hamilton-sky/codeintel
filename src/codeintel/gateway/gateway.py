@@ -221,7 +221,13 @@ def _states_live_file_contents(result: Result | dict[str, Result]) -> bool:
 def _index_moved(item: tuple[Any, Any]) -> bool:
     """Whether what a cached answer's index-age check read has moved since: `item` is the
     provider's own `index_behind` and the inputs its answer recorded. A check that fails counts as
-    moved, so a cached answer is never served on a check that did not run."""
+    moved, so a cached answer is never served on a check that did not run.
+
+    Cost: this runs on EVERY cache hit of an edge op, and `index_behind` is not cached. It stats
+    each checked path, and `graph_index_age` runs two or three git calls (`log -1`, `rev-parse
+    --git-path logs/HEAD`, and `rev-parse --verify HEAD` when the first fails), each bounded by
+    `changed_range._GIT_TIMEOUT_S` (30 s). Measured at about 5 ms per hit on this repository;
+    caching HEAD's time per generation would remove most of it."""
     behind, inputs = item
     try:
         return bool(behind(inputs))

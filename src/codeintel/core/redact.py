@@ -105,7 +105,14 @@ def _flattened_home() -> str:
 # the home string in the MIDDLE of a longer path or URL (`https://example.com/root/api`) is no
 # longer redacted. Corrupting a real path was judged the worse failure (`redact-mid-path`). The
 # flattened form keeps its own boundary rules: a project id is one token, never a path's middle.
-_SLASHED_HEAD = r"(?<![\w.~/-])"
+#
+# Three heads start a path token although the character before the needle is `/` or a letter: a
+# `file://` URL (`file:///home/alice/x`), a doubled slash (`//home/alice/x`, but not a URL's
+# `https://home/...`, whose `//` follows a `:`), and a one-letter flag glued to its path
+# (`-I/home/alice/inc`, `-L...`). Each is itself guarded, so `x//home/...` and `a-I/home/...` stay
+# path middles.
+_SLASHED_HEAD = (r"(?:(?<![\w.~/-])|(?<=file://)|(?<=(?<![\w.~/:-])/)"
+                 r"|(?<=(?<![\w.~/-])-[A-Za-z]))")
 _SLASHED_TAIL = r"(?![\w.-])"
 _FLAT_TAIL = r"(?![\w.])"
 
@@ -118,8 +125,27 @@ def _bounded(needle: str, tail: str, head: str = "") -> re.Pattern[str]:
     return re.compile(head + re.escape(needle) + tail)
 
 
+@lru_cache(maxsize=8)
+def _resolved(home: str) -> str:
+    """*home* with its links resolved, or ``""`` when that is *home* itself. `/home` is a link to
+    `/var/home` on some systems, and a path that was resolved on the way arrives in that spelling.
+    Cached: the home path is fixed for the process."""
+    try:
+        real = os.path.realpath(home).rstrip(os.sep)
+    except (OSError, ValueError):
+        return ""
+    return real if real and real != home else ""
+
+
+def _slashed_needles(home: str) -> tuple[str, ...]:
+    """The slashed spellings of *home* to match, the longer, more specific ones first."""
+    real = _resolved(home)
+    return (f"/private{home}", real, home) if real else (f"/private{home}", home)
+
+
 def redact_text(text: str) -> str:
-    """Replace occurrences of the home directory with `~`, including its /private-prefixed form.
+    """Replace occurrences of the home directory with `~`, including its /private-prefixed form
+    and its resolved form when that differs.
 
     macOS resolves `/tmp` to `/private/tmp` and reports realpaths accordingly, so a leak can arrive
     with a `/private` prefix that a plain home-prefix comparison would miss.
@@ -131,7 +157,7 @@ def redact_text(text: str) -> str:
     if not home or not text:
         return text
     out = text
-    for prefix in (f"/private{home}", home):
+    for prefix in _slashed_needles(home):
         out = _bounded(prefix, _SLASHED_TAIL, _SLASHED_HEAD).sub("~", out)
     flat = _flattened_home()
     if flat:
@@ -171,7 +197,7 @@ def contains_home_path(text: str) -> bool:
     home = _home()
     if not home or not text:
         return False
-    for prefix in (f"/private{home}", home):
+    for prefix in _slashed_needles(home):
         if _bounded(prefix, _SLASHED_TAIL, _SLASHED_HEAD).search(text):
             return True
     flat = _flattened_home()

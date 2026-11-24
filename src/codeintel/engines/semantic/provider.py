@@ -146,9 +146,6 @@ _FAILURE_RECORD_NAME = "semantic_failure.json"
 _FAILURE_RECORD_MAX_AGE_S = 600.0
 _FAILURE_RECORD_MAX_BYTES = 64 * 1024
 _FAILURE_CAUSE_MAX_CHARS = 2000
-# How `EmbeddingModelUnavailable` (engines/semantic/db.py) begins: only a failed model load is
-# recorded, never an unwritable db or a walk error, which a model retry would not fix.
-_MODEL_LOAD_FAILURE_PREFIX = "could not load embedding model "
 # The fix for a recorded model-load failure, named once: the query hint, the probe and doctor's
 # row all print it.
 MODEL_FAILURE_FIX = (
@@ -201,8 +198,12 @@ def _write_model_failure(model: str, cause: str) -> None:
 def _is_model_load_failure(cause: str) -> bool:
     """Whether an `Indexer.last_error` comes from a failed model load. `Indexer.index` keeps an
     `EmbeddingModelUnavailable` verbatim and every other failure as ``"<ExceptionType>: <text>"``;
-    no exception type name can start with this phrase, so it marks the model case alone."""
-    return cause.startswith(_MODEL_LOAD_FAILURE_PREFIX)
+    no exception type name can start with this phrase, so it marks the model case alone. Only a
+    failed model load is recorded, never an unwritable db or a walk error, which a model retry would
+    not fix. The prefix is db.py's own, imported here rather than at module scope because db.py
+    imports `sqlite_vec`."""
+    from codeintel.engines.semantic.db import MODEL_LOAD_FAILURE_PREFIX
+    return cause.startswith(MODEL_LOAD_FAILURE_PREFIX)
 
 
 def _read_failure_record() -> dict | None:

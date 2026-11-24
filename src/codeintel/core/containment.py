@@ -191,7 +191,7 @@ def _write_walk(root_real: str, parts: list[str], content: str, git_st: os.stat_
                 if stat.S_ISLNK(st.st_mode):
                     return "symlink"
                 if not stat.S_ISDIR(st.st_mode):
-                    return "dangling"
+                    return "not-a-file"
             if git_st is not None and os.path.samestat(st, git_st):
                 return "inside-git-dir"
 
@@ -219,13 +219,19 @@ def _write_walk(root_real: str, parts: list[str], content: str, git_st: os.stat_
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
         fd = os.open(tmp, flags, 0o666 if mode is None else mode, dir_fd=dir_fd)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-                if mode is not None:   # the umask must not narrow or widen the old file's mode
-                    if hasattr(os, "fchmod"):
-                        os.fchmod(f.fileno(), mode)
-                    else:
-                        os.chmod(tmp, mode)
-                f.write(content)
+            # `closefd=False`: the descriptor stays this function's, and the `finally` closes it
+            # exactly once, also when `os.fdopen` itself raises (it would otherwise leak, or be
+            # closed already, depending on where inside `fdopen` the failure came).
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="", closefd=False) as f:
+                    if mode is not None:   # the umask must not narrow or widen the old file's mode
+                        if hasattr(os, "fchmod"):
+                            os.fchmod(f.fileno(), mode)
+                        else:
+                            os.chmod(tmp, mode)
+                    f.write(content)
+            finally:
+                os.close(fd)
             os.replace(tmp, leaf, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:
             try:
@@ -240,12 +246,17 @@ def _write_walk(root_real: str, parts: list[str], content: str, git_st: os.stat_
 
 
 def _why_not_a_dir(comp: str, dir_fd: int) -> str:
-    """A directory on the resolved path could not be opened as one without following a link."""
+    """A directory on the resolved path could not be opened as one without following a link.
+
+    A link is ``symlink``; something that exists and is not a directory (ENOTDIR: a regular file
+    in the middle of the path) is ``not-a-file``; nothing there at all is ``dangling``."""
     try:
         st = os.stat(comp, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return "dangling"
-    return "symlink" if stat.S_ISLNK(st.st_mode) else "dangling"
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    return "dangling" if stat.S_ISDIR(st.st_mode) else "not-a-file"
 
 
 def log_write_refusal(path: str, reason: str) -> str:
