@@ -303,6 +303,114 @@ def test_an_alias_in_a_file_of_another_language_is_not_counted(monkeypatch, tmp_
     assert not _gaps(env, "aliased-import-unbound"), env.get("gaps")
 
 
+# ---- the tree walk on a stalled mount, and what the gaps say -------------------------------------
+
+def _stall(monkeypatch, module, attr: str, blocks):
+    """Make `module.attr` block (up to 10 s) on the calls *blocks* picks out; the event releases it."""
+    import threading
+
+    release = threading.Event()
+    real = getattr(module, attr)
+
+    def call(*args, **kwargs):
+        if blocks(*args):
+            release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, attr, call)
+    return release
+
+
+def _let_go(release) -> None:
+    """Release a stalled call and wait for its thread, so no later test sees a stalled read."""
+    import time
+
+    release.set()
+    deadline = time.monotonic() + 10
+    while qualifier_scan._stalled_reads() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_a_walk_whose_read_stalls_gives_up_in_time_and_says_could_not_check(monkeypatch, tmp_path):
+    import time
+
+    from codeintel.engines.graph import blindspots
+
+    monkeypatch.setattr(blindspots, "_WALK_MAX_SECONDS", 0.3)
+    root = _repo(tmp_path / "repo", _PY_ALIAS_FILES, git=False)
+    release = _stall(monkeypatch, qualifier_scan, "_read", lambda real, path, *a: path.endswith("b.py"))
+    try:
+        began = time.monotonic()
+        search = blindspots.files_aliasing(root, "helper", "python")
+        took = time.monotonic() - began
+    finally:
+        _let_go(release)
+    assert took < 2.0, took
+    assert search.shortfall and "b.py" not in search.files, search
+
+
+def test_a_walk_whose_directory_listing_stalls_gives_up_in_time(monkeypatch, tmp_path):
+    import time
+
+    from codeintel.engines.graph import blindspots
+
+    monkeypatch.setattr(blindspots, "_WALK_MAX_SECONDS", 0.3)
+    files = dict(_PY_ALIAS_FILES, **{"sub/c.py": "from core import helper as hh\n"})
+    root = _repo(tmp_path / "repo", files, git=False)
+    release = _stall(monkeypatch, blindspots, "_list_dir", lambda path: path.endswith("sub"))
+    try:
+        began = time.monotonic()
+        search = blindspots.files_aliasing(root, "helper", "python")
+        took = time.monotonic() - began
+    finally:
+        _let_go(release)
+    assert took < 2.0, took
+    assert search.shortfall and "sub/c.py" not in search.files, search
+
+
+def test_a_walk_reads_nothing_while_a_read_is_still_stalled(monkeypatch, tmp_path):
+    from codeintel.engines.graph import blindspots
+
+    root = _repo(tmp_path / "repo", _PY_ALIAS_FILES, git=False)
+    monkeypatch.setattr(qualifier_scan, "_stalled_reads", lambda: qualifier_scan._MAX_STALLED)
+    search = blindspots.files_aliasing(root, "helper", "python")
+    assert search.files == () and search.shortfall, search
+
+
+def test_an_alias_found_by_the_tree_search_says_it_was_matched_by_name(monkeypatch, tmp_path):
+    """The search matches `helper as h` from any module: a namesake's alias counts too, and says so."""
+    files = dict(_PY_ALIAS_FILES, **{"b.py": "from other_mod import helper as h\n"})
+    root = _repo(tmp_path / "repo", files)
+    env = _ask(monkeypatch, root, "callers", "helper", _PY_ALIAS_ROWS)
+    detail = " ".join(g["detail"] for g in _gaps(env, "aliased-import-unbound"))
+    assert "b.py" in detail and "by name" in detail, detail
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_many_files_aliasing_the_target_collapse_into_a_few_gaps(monkeypatch, tmp_path):
+    files = dict(_PY_ALIAS_FILES, **{f"m{i}.py": f"from core import helper as h{i}\n" for i in range(8)})
+    root = _repo(tmp_path / "repo", files)
+    env = _ask(monkeypatch, root, "callers", "helper", _PY_ALIAS_ROWS)
+    gaps = _gaps(env, "aliased-import-unbound")
+    assert 1 < len(gaps) <= 4, [g["detail"] for g in gaps]
+    detail = " ".join(g["detail"] for g in gaps)
+    assert "b.py" in detail and "and others" in detail, detail
+    assert env["result"].count("Known blind spot (`aliased-import-unbound`)") == len(gaps)
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_a_failed_search_names_git_briefly_and_without_the_home_directory(monkeypatch, tmp_path):
+    from codeintel.engines.graph import blindspots, changed_range
+
+    home = os.path.expanduser("~").rstrip(os.sep)
+    noise = f"fatal: cannot read {home}/secret/thing.py\n" + "x" * 3000
+    monkeypatch.setattr(changed_range, "_git_capped", lambda *a, **k: (2, b"", noise, False))
+    search = blindspots.files_aliasing(_repo(tmp_path / "repo", _PY_ALIAS_FILES), "helper", "python")
+    assert search.shortfall and "failed" in search.shortfall, search
+    assert len(search.shortfall) < 300, len(search.shortfall)
+    assert f"{home}/secret" not in search.shortfall, search.shortfall
+
+
 # ---- nested shadowing -----------------------------------------------------------------------
 
 @pytest.mark.parametrize(("root", "rows"), [(PY_ROOT, INNER_CALLERS_PY), (TS_ROOT, INNER_CALLERS_TS)],
@@ -558,6 +666,18 @@ def test_a_classless_sibling_call_through_self_is_not_listed(monkeypatch):
     env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", edges, [],
                         methods=PY_CLASSLESS_METHODS)
     assert not _gaps(env, "dispatch-sibling-unbound"), env.get("gaps")
+
+
+def test_a_classless_namesake_is_not_called_a_sibling_for_certain(monkeypatch):
+    """With no class node, `Circle.area` may be a base's method as well as a sibling's: say so."""
+    env = _ask_dispatch(monkeypatch, PY_ROOT, "Square.area", PY_CLASSLESS_EDGES, [],
+                        methods=PY_CLASSLESS_METHODS)
+    why = _row_named(env, "total_area")["why"]
+    detail = " ".join(g["detail"] for g in _gaps(env, "dispatch-sibling-unbound"))
+    for text in (why, detail):
+        assert "a sibling, a base or a subclass" in text, text
+        assert "not known" in text, text
+    assert "on a sibling class" not in why, why
 
 
 def test_ts_callers_of_a_method_an_interface_declares_has_the_gap(monkeypatch):
