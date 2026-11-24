@@ -6,6 +6,8 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-11-24
+
 ### Changed
 - **The source tree is organized by layer.** The 58 flat modules under `src/codeintel/` now live in
   six packages, top to bottom: `cli/`, `transports/`, tools (`setup/`, `c4/`, `mapping/`),
@@ -25,11 +27,13 @@ All notable changes to codeintel are documented here. The format is based on
 
 ### Fixed
 - **`safe_for_destructive: true` is no longer stamped on answers the graph cannot see.** A
-  `callers` or `callees` answer now falls to `partial`, with a named gap, when a file the answer
-  reads imports the target under an alias (`helper as h`, `{ helper as h }`,
-  `export { helper as X }`: `aliased-import-unbound`), or `callees`' body calls an import alias
-  that has no callee row; when a sibling class's method of the same name has a call the backend
-  bound by name, or a TypeScript interface declares the method (`dispatch-sibling-unbound`;
+  `callers` or `callees` answer now falls to `partial`, with a named gap, when any file of the
+  target's language in the repository imports the target under an alias (`helper as h`,
+  `{ helper as h }`, `export { helper as X }`: `aliased-import-unbound`; the search is bounded,
+  and a search it could not finish says so), or `callees`' body calls an import alias that has no
+  callee row; when a same-named method in the same language, on a sibling class or with no class
+  the index knows, has a call the backend bound by name, or a TypeScript interface declares the
+  method (`dispatch-sibling-unbound`;
   `callers Square.area` now lists `total_area`'s `s.area()` as name-matched); or when a caller
   defines its own nested function of the same name (`target-ambiguous`; the answer no longer says
   "the only symbol named"). A row the backend resolved with the `lsp_ts_local` strategy counts as
@@ -96,6 +100,9 @@ All notable changes to codeintel are documented here. The format is based on
   allowlist entry names the file edge it excuses, so it holds whatever depth auto-fit picks; a
   relation is allowed only when every one of its file edges is, and an entry that matches no edge is
   reported as stale.
+
+- The background reindexer no longer holds back a root's first pass on a machine that booted less
+  than one debounce window ago (a fresh CI runner, a just-woken laptop).
 
 ### Security
 - **A hostile repository can no longer make codeintel write outside it through a symlink.**
