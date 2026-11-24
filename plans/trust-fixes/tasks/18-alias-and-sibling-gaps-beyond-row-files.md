@@ -1,7 +1,7 @@
 # Find aliased imports and same-named sibling methods beyond the answer's own files
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 05, 06, 13
 Test first: yes
 Level: 3
@@ -81,3 +81,27 @@ Work started at 9d5d501c8ddad4e8d2c74b77b147a23fb35b9651. Test-only commit: bbbe
 **For later tickets**
 - None of the open tickets change. The CHANGELOG T1 bullet (ticket 13) says the alias rule covers "an alias in a file the answer reads". It now covers any file of the language in the tree, and siblings without class nodes. Reword it at PR time.
 - `tests/test_graph_real.py::test_live_callers_of_safe_null_result` fails here whenever the backend is on PATH, with or without this ticket. It is not in the gate's run (it skips without PATH).
+
+## Review findings (round 1, pair review)
+
+QUALITY
+1. major src/codeintel/engines/graph/blindspots.py: `_walk_aliasing` (non-git root) calls `os.walk` and `qualifier_scan._read` directly, bypassing SourceReader, `qualifier_scan._within`, the shared Budget and the `_MAX_STALLED` stop. Its 2.0 s deadline is only checked between files, so one stat/open/read/listdir on a stalled NFS/FUSE mount blocks the `callers` query with no limit (the git path has `_git_capped`, 30 s kill). Fix: run each read through `qualifier_scan._within` against a Budget (or reuse the answer's SourceReader), check `_stalled_reads() >= _MAX_STALLED` before each read, and return a "could not check" shortfall when the walk is abandoned.
+2. minor src/codeintel/engines/graph/blindspots.py: `files_aliasing`/`alias_imports` flag any `name as X` whatever module it comes from (ticket asked for imports of the target's module). `from other_mod import helper as h` makes `callers core.helper` partial. Fix: require the import to name the target's module (as `_imports_module` does), or say in the gap text the match is by name only.
+3. minor src/codeintel/engines/graph/answer.py: one `aliased-import-unbound` gap + body note per file found, up to ~200. Fix: after the first few, collapse into one "and N other files" gap.
+4. minor src/codeintel/engines/graph/blindspots.py: "search failed" shortfall puts git's raw stderr (up to 2000 bytes, may hold absolute paths) into the gap detail. Fix: cap it short or pass it through the stderr-cleaning helper.
+5. minor src/codeintel/engines/graph/dispatch.py: with no class node `_method_namesakes` treats every other `*.name` method as a sibling, including the target's base classes; such rows are labelled "sibling" wrongly. Fix: say in the row/gap text that the class relation is unknown.
+
+Checked: identifier/cypher/git inputs safe; root containment, symlink/FIFO refusal OK; git env scrubbed, output capped; reindexer -inf correct. Done-when check 268 passed, 1 skipped.
+
+REVIEW: FAIL
+
+SPEC
+- New unit tests cover each case (Python alias, TS alias, TS re-export, classless plain sibling, classless protocol member), each failing before the change: MET. HEAD tests vs base src 9d5d501: 9 failed, 69 passed, 1 skipped; failures are the named new tests plus walk limit, files_aliasing and reindexer.
+- Reindexer test with monotonic clock pinned near 0 fails before, passes after: MET (test_the_first_pass_of_a_root_is_not_held_back_by_host_uptime).
+- All 5 named acceptance tests pass and the rest of the file still passes: MET (conductor; acceptance 75 passed).
+- All existing tests still pass: MET. Full suite: 2448 passed, 35 skipped, 1 deselected, 1 xfailed, coverage 91.04%.
+- scope: OK. All changed files in Touches plus the flow's own records.
+- test first: OK. bbbe8ec adds only tests, confirmed failing without the production change.
+Note: test_a_file_that_does_not_exist_adds_nothing now asks about `entry` instead of `helper` because the tree-wide search correctly finds an alias of helper elsewhere in the fixture; it still checks the same property.
+
+REVIEW: PASS
