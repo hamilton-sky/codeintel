@@ -181,7 +181,7 @@ class Reindexer:
             # one graph subprocess, for no benefit.
             if project_root in self._in_flight:
                 return False
-            last = self._last_fired.get(project_root, 0.0)
+            last = self._last_fired.get(project_root, float("-inf"))
             if now - last < self._debounce_seconds:
                 return False
 
@@ -192,7 +192,7 @@ class Reindexer:
             # Re-checked: another thread may have submitted while git ran.
             if project_root in self._in_flight:
                 return False
-            last = self._last_fired.get(project_root, 0.0)
+            last = self._last_fired.get(project_root, float("-inf"))
             if now - last < self._debounce_seconds:
                 return False
             if fingerprint is not None and fingerprint == self._last_fingerprint.get(project_root):

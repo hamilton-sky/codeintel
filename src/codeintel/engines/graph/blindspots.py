@@ -28,8 +28,10 @@ import os
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from codeintel.engines.graph import qualifier_scan
+from codeintel.engines.graph import changed_range, qualifier_scan
+from codeintel.engines.graph.render import _LANG_FAMILIES
 
 _PY_SUFFIXES = (".py", ".pyi")
 
@@ -40,6 +42,21 @@ _BRACES = re.compile(r"\b(?:import|export)\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\{([^
 _AS = re.compile(r"(?:^|[\s,({])(?:type\s+)?([\w$.]+)\s+as\s+([\w$]+)")
 # A Python import statement, with a parenthesised list allowed to run over several lines.
 _PY_IMPORT = re.compile(r"^[ \t]*(?:from\s+[\w.]+\s+)?import\s+(\([^)]*\)|[^\n]*)", re.MULTILINE)
+
+
+# The language families whose imports `import_aliases` can read; an alias search runs for these only.
+_ALIAS_FAMILIES = ("python", "ts-js")
+# A name an alias search can look for: an identifier, never an option or a pattern.
+_IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
+# The most `git grep -l` output read: a list of file names, so this is thousands of files.
+_ALIAS_SEARCH_CAP_BYTES = 200_000
+# Without git, the tree is walked instead, and the walk stops at this many files of the language or
+# this many seconds, whichever comes first; what it did not reach is named as not checked.
+_WALK_MAX_FILES = 5000
+_WALK_MAX_SECONDS = 2.0
+# Directories the walk does not enter, besides every dot-directory: installed dependencies and
+# caches, which import the target under no alias of the project's.
+_WALK_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "site-packages", "venv"})
 
 
 def _is_python(path: str) -> bool:
@@ -247,6 +264,80 @@ def interface_declares(text: str, interface: str, member: str) -> bool:
                         return True
                     break
     return False
+
+
+@dataclass(frozen=True)
+class AliasSearch:
+    """The files a tree search found writing `name as <alias>`, and why it fell short, if it did.
+
+    `shortfall` is `""` when the whole tree of the language was searched. Otherwise it says what was
+    not, and the files found before the search stopped are still in `files`."""
+
+    files: tuple[str, ...] = ()
+    shortfall: str = ""
+
+
+def files_aliasing(root: str, name: str, family: str) -> AliasSearch:
+    """The files of language *family* under *root* that write *name* followed by `as <alias>`.
+
+    The candidates for `import … name as Y`, `{ name as Y }` and `export { name as Y }` anywhere in
+    the tree, not only in the files an answer has rows from: the file that imports the target under
+    an alias is exactly the one the backend has no row for. A hit is a candidate, not a finding — the
+    caller reads it and asks `alias_imports`.
+
+    Searched with `git grep` (tracked files in their working-tree state, plus untracked files that
+    are not ignored), output read up to `_ALIAS_SEARCH_CAP_BYTES`. A root git does not manage is
+    walked instead (`_walk_aliasing`). A root that is not a directory, a family `import_aliases`
+    cannot read, or a name that is not an identifier searches nothing and finds nothing."""
+    if family not in _ALIAS_FAMILIES or not _IDENTIFIER.fullmatch(name) or not os.path.isdir(root):
+        return AliasSearch()
+    suffixes = tuple(sorted(ext for ext, fam in _LANG_FAMILIES.items() if fam == family))
+    pattern = (r"(^|[^A-Za-z0-9_$])" + name.replace("$", r"\$")
+               + r"[[:space:]]+as[[:space:]]+[A-Za-z_$]")
+    code, out, err, cut = changed_range._git_capped(
+        root, "grep", "-l", "-I", "-E", "-z", "--untracked", "--exclude-standard", "-e", pattern,
+        "--", *(f"*{ext}" for ext in suffixes), cap_bytes=_ALIAS_SEARCH_CAP_BYTES)
+    if code == changed_range._NO_GIT or (code == 128 and not cut):
+        # Not a repository (or git refused it, or is not installed): walk the tree instead.
+        return _walk_aliasing(root, name, suffixes)
+    names = out.decode("utf-8", "replace").split("\0")
+    if cut:
+        names.pop()                         # the last name was cut mid-way
+        return AliasSearch(tuple(n for n in names if n),
+                           f"the search for `{name} as` found more files than it reads")
+    if code == 1:
+        return AliasSearch()
+    if code != 0:
+        return AliasSearch((), f"the search for `{name} as` failed ({err or f'git grep exited {code}'})")
+    return AliasSearch(tuple(n for n in names if n))
+
+
+def _walk_aliasing(root: str, name: str, suffixes: tuple[str, ...]) -> AliasSearch:
+    """`files_aliasing` for a root git does not manage: every file of the language under it, read
+    with the source size cap and confined to the root, up to `_WALK_MAX_FILES` files and
+    `_WALK_MAX_SECONDS`. Dot-directories and `_WALK_SKIP_DIRS` are not entered."""
+    real = qualifier_scan._root(root)
+    if real is None:
+        return AliasSearch()
+    needle = re.compile(rb"(?<![\w$])" + re.escape(name.encode()) + rb"\s+as\s+[A-Za-z_$]")
+    deadline = time.monotonic() + _WALK_MAX_SECONDS
+    seen = 0
+    hits: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d not in _WALK_SKIP_DIRS)
+        for filename in sorted(filenames):
+            if not filename.endswith(suffixes):
+                continue
+            seen += 1
+            if seen > _WALK_MAX_FILES or time.monotonic() > deadline:
+                stop = "file limit" if seen > _WALK_MAX_FILES else "time limit"
+                return AliasSearch(tuple(hits), f"the search of the tree for `{name} as` stopped at "
+                                                f"its {stop}")
+            rel = os.path.relpath(os.path.join(dirpath, filename), root)
+            blob = qualifier_scan._read(real, os.path.join(root, rel))
+            if blob is not None and qualifier_scan._plain_text(blob) and needle.search(blob):
+                hits.append(rel)
+    return AliasSearch(tuple(hits))
 
 
 class SourceReader:

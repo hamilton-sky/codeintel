@@ -411,6 +411,27 @@ def _guessed_receiver_call(row: dict, method: str) -> bool:
     return receiver not in own and not receiver.startswith("super")
 
 
+def _guessed_sibling_call(row: dict, method: str) -> bool:
+    """`_guessed_receiver_call` for a sibling found with no class node: a call the backend bound by
+    name alone, written through a receiver that is not the enclosing object — or recorded with no
+    receiver at all (the bare method name, or no call text). With no class to say whose method the
+    sibling is, a call with no receiver is still one the backend picked a namesake for."""
+    strategy = str(row.get("strategy") or "").strip().lower()
+    if not strategy.startswith(_SIBLING_GUESSES):
+        return False
+    written = str(row.get("callee") or "").strip()
+    if "." not in written:
+        return written in ("", method)
+    return _guessed_receiver_call(row, method)
+
+
+def _method_definer(qualified: str, file: str) -> _Definer:
+    """A method node standing for its class, when no class node is known: the class is the qualified
+    name less its last part."""
+    owner = qualified.rsplit(".", 1)[0] if "." in qualified else qualified
+    return _Definer(_ClassNode(owner, owner.rsplit(".", 1)[-1], file), qualified, file)
+
+
 def _pick_class(candidates: list[_ClassNode], written: str, child: _ClassNode) -> _ClassNode | None:
     """The one indexed class a base NAME denotes, or `None` when the name does not settle it.
 
@@ -982,20 +1003,27 @@ class DispatchCallers(AnswerRendering):
             return "", 0
         target = dispatch.target
         details: list[str] = []
+        classless = target is None
         if target is None:
             if dispatch.unknown:
                 details.append(
                     f"could not check for another class defining `{wanted.name}` whose callers the "
                     "backend bound by name: the lookup of the classes that define it fell short, so a "
                     "call written against a sibling class that reaches this symbol may be missing")
-            return self._sibling_gaps(details), 0
-
-        in_bases = {b.method for b in dispatch.bases}
-        siblings = sorted(
-            {d.method: d for d in dispatch.definers
-             if d.method != target.method and d.cls.qualified != target.cls.qualified
-             and d.method not in in_bases and not d.cls.is_protocol}.values(),
-            key=lambda d: d.method)
+            # No class node defines the method (the index holds none, or not the target's): its
+            # same-named METHOD nodes are the siblings, found without any class.
+            target, siblings, short = self._method_namesakes(wanted, direct, project, timeout_ms)
+            if short:
+                details.append(short)
+            if target is None:
+                return self._sibling_gaps(details), 0
+        else:
+            in_bases = {b.method for b in dispatch.bases}
+            siblings = sorted(
+                {d.method: d for d in dispatch.definers
+                 if d.method != target.method and d.cls.qualified != target.cls.qualified
+                 and d.method not in in_bases and not d.cls.is_protocol}.values(),
+                key=lambda d: d.method)
         unchecked = [d.short for d in siblings[_MAX_BASES:]]
         reason = f"the lookup stops at {_MAX_BASES} sibling methods" if unchecked else ""
         siblings = siblings[:_MAX_BASES]
@@ -1026,8 +1054,10 @@ class DispatchCallers(AnswerRendering):
                 for r in g.rows:
                     caller = str(r.get("a.qualified_name") or "")
                     shown = _strip_project_prefix(caller, may_be_filename=False)
+                    guessed = (_guessed_sibling_call(r, wanted.name) if classless
+                               else _guessed_receiver_call(r, wanted.name))
                     if (not caller or caller == target.method or shown in listed or caller in seen
-                            or not _guessed_receiver_call(r, wanted.name)):
+                            or not guessed):
                         continue
                     seen.add(caller)
                     rows.append(r)
@@ -1073,6 +1103,36 @@ class DispatchCallers(AnswerRendering):
                 body += self._distinct_cap_note(
                     "callers", "caller", ", ".join(g.label for g in groups), omitted, tests_last=True)
         return body + self._sibling_gaps(details), len(shown_rows)
+
+    def _method_namesakes(
+        self, wanted: _SymbolTarget, direct: _DirectTarget, project: str, timeout_ms: int
+    ) -> tuple[_Definer | None, list[_Definer], str]:
+        """`(target, siblings, shortfall)` from the METHOD nodes named like the target, for an index
+        with no class node that defines it: the target as the direct answer named it, and every other
+        method of the name, each standing for its own class (the qualified name less its last part).
+
+        `target` is `None` when the direct answer did not name one symbol. A lookup that failed or
+        came back at its row limit is the shortfall, said as "could not check"."""
+        if not direct.qn:
+            return None, [], ""
+        rows, why = self._lookup(
+            f'MATCH (m:Method) WHERE m.name="{_cypher_literal(wanted.name)}" '
+            f"RETURN m.qualified_name, m.file_path LIMIT {_LOOKUP_ROWS}", project, timeout_ms,
+            surface=False)
+        files = {str(r.get("m.qualified_name") or ""): str(r.get("m.file_path") or "") for r in rows}
+        target = _method_definer(direct.qn, files.get(direct.qn, ""))
+        if why:
+            return target, [], (
+                f"could not check for another method named `{wanted.name}` whose callers the backend "
+                f"bound by name: the lookup of the methods of that name did not complete ({why}), so "
+                f"a call written against a sibling that reaches `{target.short}` may be missing")
+        short = (f"could not check every method named `{wanted.name}` for callers the backend bound "
+                 f"by name: the lookup of them reached its row limit, so a call "
+                 f"written against a sibling that reaches `{target.short}` may be missing"
+                 if len(rows) >= _LOOKUP_ROWS else "")
+        siblings = sorted((_method_definer(qn, file) for qn, file in files.items()
+                           if qn and qn != direct.qn and "." in qn), key=lambda d: d.method)
+        return target, siblings, short
 
     def _sibling_gaps(self, details: list[str]) -> str:
         """Raise one `dispatch-sibling-unbound` gap per finding, and say each in the body too."""

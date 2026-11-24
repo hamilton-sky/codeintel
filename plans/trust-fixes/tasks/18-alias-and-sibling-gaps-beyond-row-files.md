@@ -1,7 +1,7 @@
 # Find aliased imports and same-named sibling methods beyond the answer's own files
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 05, 06, 13
 Test first: yes
 Level: 3
@@ -48,3 +48,36 @@ prints passed
 ```
 
 ## Answer
+
+Work started at 9d5d501c8ddad4e8d2c74b77b147a23fb35b9651. Test-only commit: bbbe8ec.
+
+**Built**
+- `src/codeintel/engines/graph/blindspots.py`: `files_aliasing(root, name, family)` returns an `AliasSearch(files, shortfall)`. It lists the files of the target's language (python or ts-js, by `render._LANG_FAMILIES`) that write `name as <identifier>`. It uses `git grep -l -I -E -z --untracked --exclude-standard` through `changed_range._git_capped` (30 s timeout, output capped at 200 kB). A root git does not manage (exit 128, or git missing) gets a bounded walk instead (`_walk_aliasing`). The walk skips dot-dirs, `node_modules`, `__pycache__`, `site-packages` and `venv`, reads through `qualifier_scan._read` (containment and `MAX_SOURCE_BYTES`), and stops at 5000 files or 2 s. A cut, a failure or a stopped walk sets `shortfall`. A name that is not an identifier, a family with no alias reader, or a root that is not a directory searches nothing.
+- `src/codeintel/engines/graph/answer.py`: in `_known_blind_spots` (callers), after ticket 05's row-file loop, each family of the answered symbols' files is searched with `files_aliasing`. Every hit that was not already read, and whose language matches, is read through the answer's `SourceReader` (same read budget) and checked with `alias_imports`. An alias adds `aliased-import-unbound` (section `imports`) naming the file and alias, with "no caller row here comes from that file". A search shortfall adds the same gap as "could not check every file …". A file the budget refused still goes to the existing `reader.unchecked` gap.
+- `src/codeintel/engines/graph/dispatch.py`: when `_dispatch_bases` found no target class (`dispatch.target is None`), `_through_siblings` now calls `_method_namesakes`. That runs one `MATCH (m:Method) WHERE m.name="m" RETURN m.qualified_name, m.file_path LIMIT 200` (via `_lookup`, `surface=False`) and builds `_Definer`s with `_method_definer`: the class is the qualified name minus its last part. The target is the direct answer's `qn`, and every other `*.m` node is a sibling. From there it runs the existing sibling loop, rows, heading, `_mark_sibling` and `dispatch-sibling-unbound`. The interface check for TS also still runs. On this class-less path a row qualifies through `_guessed_sibling_call`: `suffix_match`/`unique_name`, with call text that is the bare method name or empty, or a receiver call that `_guessed_receiver_call` accepts (so `self.`/`this.`/`super` are still refused). A failed lookup, or one that hit its row limit, adds a "could not check" `dispatch-sibling-unbound`. The class-based path from ticket 06 is unchanged.
+- `src/codeintel/gateway/reindexer.py`: both `_last_fired.get(project_root, …)` defaults are now `float("-inf")`.
+- `tests/test_blindspot_gaps.py`: 13 new tests (alias in a no-row file: Python on git and on a non-git root, TS import, TS re-export, walk limit gives "could not check", `files_aliasing` edges, no alias stays complete, alias in another language ignored; class-less sibling, class-less protocol member, all-bound sibling adds nothing, `self.area` not listed). `_ask_dispatch` gained a `methods=` answer for the `(m:Method)` query. One existing test changed, see Decisions.
+- `tests/test_reindexer.py`: `test_the_first_pass_of_a_root_is_not_held_back_by_host_uptime` pins `time.monotonic` to 5.0.
+
+**Proof**
+- Fails before: at bbbe8ec (tests only), `.venv/bin/pytest tests/test_blindspot_gaps.py tests/test_reindexer.py -q -o addopts=` gave `8 failed, 68 passed, 1 skipped`. The failures were the 6 new positive cases (Python alias in a no-row file ×2 [git, not-a-repository], TS alias import, TS re-export, class-less sibling (StopIteration, no `total_area` row), class-less protocol member (no `totalArea` row)) plus the new uptime test (`maybe_reindex` returned False). The existing `test_an_unchanged_tree_is_fingerprinted_at_most_once_per_debounce_window` also failed: this host had been up 335 s (`/proc/uptime`), less than its 1000 s window.
+- After: the check block `.venv/bin/pytest tests/test_blindspot_gaps.py tests/test_dispatch_callers.py tests/test_edge_confidence.py tests/test_reindexer.py plans/trust-fixes/acceptance/test_tf_safe_for_destructive.py -q -o addopts=` gave `268 passed, 1 skipped`. The skip is 05's live test, which skips without the backend on PATH. With `.venv/bin` on PATH, `tests/test_blindspot_gaps.py` gave `41 passed` (the live test included). `tests/test_reindexer.py`: 38 passed.
+- Acceptance: `test_tf_safe_for_destructive.py -v` gave 9/9 PASSED, including the 5 named tests: `…python_symbol_imported_as_an_alias…`, `…ts_symbol_imported_as_an_alias…`, `…ts_symbol_reexported_under_an_alias…`, `…sibling_has_a_name_matched_call…`, `…protocol_member_has_a_name_matched_call…`.
+- Existing tests: I ran all 50 test files that touch the graph engine or the reindexer, with `.venv/bin` on PATH and the root-only doctor test deselected: `1 failed, 1586 passed, 29 skipped, 1 xfailed`. The one failure is `tests/test_graph_real.py::test_live_callers_of_safe_null_result`. It also fails with my source changes stashed (at 9d5d501's src), so it is environmental. It runs only when the backend is on PATH (without it, it skips, as in the gate's PATH). It is a live run against this host's stale codeintel index. Run in-process with the same call, it answers, so I left it alone. `ruff check src tests bench`: all passed. `mypy`: no issues in 88 files. compileall: ok. `codeintel c4 . --check` (backend on PATH): 0 gating. The whole Test command is left to the conductor's gate.
+
+**Decisions**
+- The tree search finds candidates by text, using git grep for `name as <ident>`, and does not use backend import edges. The acceptance fake (and 0.10.x) gives no IMPORTS rows for the aliasing file. The `as` pattern is narrow enough that the read budget is not spent on files that only mention the name. `alias_imports` still decides from each hit's text.
+- The tree search does not check that the alias import is from the target's own module. That matches 05's rule, and it errs conservative: a re-export through a package (`from pkg import helper as h`, where `pkg/__init__` re-exports) names a module other than the target's file. It is restricted to the target's language family.
+- Existing test changed: `test_a_file_that_does_not_exist_adds_nothing` asked `callers helper` on the Python fixture, and that fixture aliases `helper` in three files (`alias_direct.py`, `main.py`, `pkg/reexport.py`). The new search rightly finds them, so its "safe" assertion pinned the old row-files-only scope. It now asks `callers entry`, which no file aliases, with the same missing-file row. Its point (a row file that cannot be read adds nothing) and its assertions are unchanged.
+- The class-less sibling path runs whenever `dispatch.target` is `None`, whether there were no class nodes or the definer lookup fell short (it keeps 06's "could not check" detail in that case). It needs one direct method symbol (`direct.count == 1`, `is_method`), as 06 does.
+- On the class-less path a guessed row with no receiver in its call text counts as a sibling call. With no class to place the sibling, the backend picking a namesake by name is the evidence. 06's class-based path still requires a receiver.
+- Wording avoids `{_LIMIT} rows/files` tallies ("its row limit", "its file limit"), per learnings (06).
+
+**Shortcuts taken**
+- The non-git walk has fixed limits (5000 files, 2 s) and its own skip list. A large non-git tree gets a "could not check" alias gap on every `callers` answer. Worth replacing with `rg` or the backend's file list if non-git users report noise.
+- `files_aliasing` spawns one `git grep` per `callers` answer with a real root. It is not cached per root or generation. Worth caching against the gateway's cache key if latency shows up on big repos.
+- A `_method_definer` class is a guess from the qualified name (the part before the method). Rendering only uses it for `Class.m` wording, and the TS interface check sees no `bases`, so every interface is "may satisfy it by structure".
+
+**For later tickets**
+- None of the open tickets change. The CHANGELOG T1 bullet (ticket 13) says the alias rule covers "an alias in a file the answer reads". It now covers any file of the language in the tree, and siblings without class nodes. Reword it at PR time.
+- `tests/test_graph_real.py::test_live_callers_of_safe_null_result` fails here whenever the backend is on PATH, with or without this ticket. It is not in the gate's run (it skips without PATH).

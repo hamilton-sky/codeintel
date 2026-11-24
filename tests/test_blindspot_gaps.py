@@ -167,10 +167,11 @@ def test_callees_whose_alias_call_has_its_row_raises_no_alias_gap(monkeypatch):
 
 
 def test_a_file_that_does_not_exist_adds_nothing(monkeypatch):
-    """Positive evidence only: the rule fires on text it read."""
-    rows = [_row("pkg.gone.caller", "pkg/gone.py", "pkg.sub.impl.helper", "pkg/sub/impl.py",
+    """Positive evidence only: the rule fires on text it read. The target is one no file in the
+    fixture imports under an alias (`helper` is, and the tree search now finds that wherever it is)."""
+    rows = [_row("pkg.gone.caller", "pkg/gone.py", "main.entry", "main.py",
                  strategy="lsp_direct", conf="0.95")]
-    env = _ask(monkeypatch, PY_ROOT, "callers", "helper", rows)
+    env = _ask(monkeypatch, PY_ROOT, "callers", "entry", rows)
     assert not _gaps(env, "aliased-import-unbound"), env.get("gaps")
     assert env["evidence"]["safe_for_destructive"] is True
 
@@ -260,6 +261,28 @@ def test_ts_reexport_under_an_alias_in_a_file_with_no_row_is_found(monkeypatch, 
     })
     env = _ask(monkeypatch, root, "callers", "helper", _TS_ALIAS_ROWS)
     _assert_alias_gap_names(env, "src/lib/index.ts", "runHelper")
+
+
+def test_a_tree_walk_that_stops_at_its_limit_says_could_not_check(monkeypatch, tmp_path):
+    from codeintel.engines.graph import blindspots
+
+    monkeypatch.setattr(blindspots, "_WALK_MAX_FILES", 0)
+    root = _repo(tmp_path / "repo", _PY_ALIAS_FILES, git=False)
+    env = _ask(monkeypatch, root, "callers", "helper", _PY_ALIAS_ROWS)
+
+    detail = " ".join(g["detail"] for g in _gaps(env, "aliased-import-unbound"))
+    assert "could not check" in detail and "file limit" in detail, detail
+    assert env["evidence"]["safe_for_destructive"] is False
+
+
+def test_files_aliasing_searches_nothing_it_cannot_name(tmp_path):
+    from codeintel.engines.graph.blindspots import AliasSearch, files_aliasing
+
+    root = _repo(tmp_path / "repo", _PY_ALIAS_FILES)
+    assert files_aliasing(root, "helper", "python") == AliasSearch(("b.py",))
+    assert files_aliasing(root, "-e", "python") == AliasSearch()          # not an identifier
+    assert files_aliasing(root, "helper", "go") == AliasSearch()          # no alias reader for it
+    assert files_aliasing(str(tmp_path / "missing"), "helper", "python") == AliasSearch()
 
 
 def test_a_tree_with_no_alias_of_the_target_stays_complete(monkeypatch, tmp_path):

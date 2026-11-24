@@ -1663,6 +1663,29 @@ class AnswerRendering:
                         f"`{f}` imports `{name}` as " + ", ".join(f"`{a}`" for a in aliases)
                         + f"; the graph does not bind a call written through an alias to `{name}`, so "
                         f"callers that call it by that name may be missing from this answer"))
+            # The file that imports the target under an alias is the one the backend has no row
+            # for, so the tree of the target's language is searched for it too.
+            read = set(files)
+            for family in dict.fromkeys(_lang_family(g.file) for g in groups if g.file):
+                search = blindspots.files_aliasing(root, name, family)
+                for f in search.files:
+                    if f in read or _lang_family(f) != family:
+                        continue
+                    read.add(f)
+                    text = reader.read(f)
+                    aliases = blindspots.alias_imports(text, name, f) if text is not None else []
+                    if aliases:
+                        found.append((
+                            "imports", "aliased-import-unbound",
+                            f"`{f}` imports `{name}` as " + ", ".join(f"`{a}`" for a in aliases)
+                            + f", and no caller row here comes from that file: the graph does not "
+                            f"bind a call written through an alias to `{name}`, so callers that call "
+                            f"it by that name may be missing from this answer"))
+                if search.shortfall:
+                    found.append((
+                        "imports", "aliased-import-unbound",
+                        f"could not check every file for an import of `{name}` under an alias: "
+                        f"{search.shortfall}, so a call through an alias may be missing"))
             for g in groups:
                 for r in g.rows:
                     f = str(r.get(file_key) or "")
