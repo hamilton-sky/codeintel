@@ -23,6 +23,91 @@ All notable changes to codeintel are documented here. The format is based on
 - `tests/test_architecture.py` enforces the layer rule from the AST on every test leg, and
   `.codeintel.toml` declares the same layers so CI runs `codeintel c4 . --check` on this repository.
 
+### Fixed
+- **`safe_for_destructive: true` is no longer stamped on answers the graph cannot see.** A
+  `callers` or `callees` answer now falls to `partial`, with a named gap, when a file the answer
+  reads imports the target under an alias (`helper as h`, `{ helper as h }`,
+  `export { helper as X }`: `aliased-import-unbound`), or `callees`' body calls an import alias
+  that has no callee row; when a sibling class's method of the same name has a call the backend
+  bound by name, or a TypeScript interface declares the method (`dispatch-sibling-unbound`;
+  `callers Square.area` now lists `total_area`'s `s.area()` as name-matched); or when a caller
+  defines its own nested function of the same name (`target-ambiguous`; the answer no longer says
+  "the only symbol named"). A row the backend resolved with the `lsp_ts_local` strategy counts as
+  possible, not verified.
+- **Every graph answer says when the index is stale.** `changed` checks the index's age in every
+  mode, including the uncommitted one, counts a commit made after the index as stale even when no
+  file in the diff is, and has no 2-second blind window. Uncommitted `changed` outside a git
+  repository answers `not-a-git-repo` instead of "working tree clean". `callers`, `callees`,
+  `impact` and `context` carry a `stale-index` gap (or `index-age-unknown`) when the target's file
+  or a row's file is missing or newer than the index; rows in those files are `unstated`, and the
+  answer is never `safe_for_destructive`.
+- **`chain "A -> B"` honours B.** It returns `## Path A → B` with the hops in order; when B is not
+  reachable within 5 hops it says "No call path from A to B within N hops (this is not proof none
+  exists)" with a `no-path-found` gap; a B that does not exist is `target-not-found`, and an
+  ambiguous one lists its candidates. A hop the backend gives no strategy for (codebase-memory-mcp
+  0.9.x) prints `[unstated]` and adds a `hop-resolution-unstated` gap.
+- **The MCP and HTTP servers notice an index rebuilt outside them.** The answer cache is keyed on
+  the graph and semantic index files, so after an external `codeintel index` or `reset` the next
+  answer is asked again (`cached: false`), and a cached answer is asked again once a file it cites
+  changes. `reindexing: true` now appears only when a pass was already running or the query found a
+  changed tree (a git file listing fingerprint), not after every query; the background pass indexes
+  the graph before the semantic index.
+- **Caller counts no longer pass imports off as calls.** A caller row at "module scope of x.py"
+  counts as an import: the heading reads "(N direct calls, M files import it — call sites inside not
+  resolved)" and the answer has an `import-only-callers` gap. Under a narrowed target
+  (`Gateway.query`), a USAGE row from a file that neither mentions the qualifier nor imports the
+  target's module is dropped, and one that cannot be judged is name-matched rather than direct. The
+  ambiguity banner reads "N symbols named `run` have caller edges; M more named `run` exist with
+  none", and an unqualified target never gets a "Settle it …" qualifier.
+- **`codeintel map --inject` creates `AGENTS.md`** in a repo that has neither `AGENTS.md` nor
+  `CLAUDE.md`, so the advice `codeintel install` prints works. `codeintel map` exits 1 and names the
+  path when it refuses to write a symlinked `CODE_INTEL.md`, and MCP `code.map` reports the refusal
+  (see Security). `docs/deploy.md` says the snippet symlink hole is closed via `open_contained`.
+- **The HTTP transport reports denials and missing roots as such.** `GET /code/status` for a root
+  outside the caller's role returns 403 with `root-not-allowed-for-role` instead of 200 and a fake
+  "nothing installed" answer. `code.query` with a `project_root` that does not exist answers
+  `root-not-found` before any dispatch or indexing, instead of "first-time indexing started". Home
+  redaction only rewrites a home path that starts a path token, so `/srv/root/app` and
+  `/proc/self/root/x` stay intact under `HOME=/root` (the home string in the middle of a longer path
+  or URL is no longer redacted). A backend "project not found" error is `project-not-indexed`.
+- **A host that cannot download the embedding model gets a fast, honest answer.** A model-load
+  failure from `codeintel index`, the background reindexer or `search`'s own pass is recorded under
+  `CODEINTEL_HOME` (`semantic_failure.json`, trusted for 10 minutes while the model,
+  `FASTEMBED_CACHE_PATH` and the missing weights stay the same). The next `search`, in any process,
+  answers `index-failed` with the cause within a second instead of stalling ~40 s or flapping back
+  to "first-time indexing started". `doctor` reports semantic `runnable: false` with "last index
+  could not load model: <cause>", and `status` names that cause. Auto-routed `search` falls back to
+  the graph name search (`fallback: graph-name-search`, gap `name-only-fallback`) when the caller's
+  role allows `pattern`.
+- **Hints name only tools the agent has.** No hint names `index_repository`, `search_graph` or
+  `trace_path`. The not-in-graph hint says `codeintel index <root>` (or ask the user to run it) and
+  lists up to 5 close names (`compact_for_mcpp` → `compact_for_mcp`). `--engine graph --op symbol`
+  points at engine=lsp and op=context / op=pattern instead of "did you mean symbol", and `changes` is
+  never offered. The no-edges hint names only edge kinds (no "1 1", no `DEFINES`/`CONTAINS`), and
+  keeps its dead-code caveat for `callers` only.
+- **Smaller CLI and MCP fixes.** `reset --help` says it clears the semantic and graph indexes, and
+  the new `reset --semantic-only` (which doctor's corrupt-DB fix now uses) keeps the graph. Ctrl-C
+  prints `interrupted` and exits 130 with no traceback. `codeintel prompt` builds its steps from
+  doctor's reasons: no `pip install` when only the model download failed, an unverified LSP is not
+  "missing", and `code.status` is listed. Names from a repo path with spaces render without the
+  project id (`ünï cødé.日本.uni.unicaller`). An MCP `code.query` answer's text block stays within
+  40,000 bytes as FastMCP actually sends it (pretty-printed), not as `json.dumps` measures it.
+- **`c4 --check` matches `[[layers.allow]]` against file-level import edges at any depth.** An
+  allowlist entry names the file edge it excuses, so it holds whatever depth auto-fit picks; a
+  relation is allowed only when every one of its file edges is, and an entry that matches no edge is
+  reported as stale.
+
+### Security
+- **A hostile repository can no longer make codeintel write outside it through a symlink.**
+  `codeintel map`, `codeintel index` and MCP `code.map` never write `CODE_INTEL.md` through a
+  symlink, wherever it points (outside the repo, inside it, or nowhere); the target is unchanged and
+  the refusal is reported. `map --inject` and `code.map` with `inject` refuse an `AGENTS.md`,
+  `CLAUDE.md` or `USING_CODEINTEL.md` that (or whose parent directory) resolves outside the repo
+  root or into its `.git` directory; a link to a regular file elsewhere in the work tree is still
+  written through. Every repo write goes through one atomic, no-follow path.
+- **Backend error hints no longer leak other projects' ids.** The graph backend's stderr is cleaned
+  before it reaches a hint, so a scoped HTTP caller no longer sees the ids of every indexed project.
+
 ## [0.29.3] — 2026-10-28
 
 _0.29.1 and 0.29.2 were never published: each tag was pushed on a commit whose `__version__` did
