@@ -1,7 +1,7 @@
 # Find aliased imports and same-named sibling methods beyond the answer's own files
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 05, 06, 13
 Test first: yes
 Level: 3
@@ -81,6 +81,20 @@ Work started at 9d5d501c8ddad4e8d2c74b77b147a23fb35b9651. Test-only commit: bbbe
 **For later tickets**
 - None of the open tickets change. The CHANGELOG T1 bullet (ticket 13) says the alias rule covers "an alias in a file the answer reads". It now covers any file of the language in the tree, and siblings without class nodes. Reword it at PR time.
 - `tests/test_graph_real.py::test_live_callers_of_safe_null_result` fails here whenever the backend is on PATH, with or without this ticket. It is not in the gate's run (it skips without PATH).
+
+**Review fixes** (round 1; work restarted at 500b21f, test-only commit b124dc7)
+1. major, non-git walk unbounded on a stalled mount: fixed. `_walk_aliasing` in `blindspots.py` no longer uses `os.walk` or calls `_read` inline. It walks a stack of directories, and each filesystem call (resolving the root with `qualifier_scan._root`, listing one directory with the new `_list_dir` (`os.scandir`, links to directories are not followed, as with `os.walk`), reading one file with `qualifier_scan._read`) runs through `qualifier_scan._within` on its own `Budget(_WALK_MAX_SECONDS, files=_WALK_MAX_FILES)`. Before each call it checks `_stalled_reads() >= _MAX_STALLED`, the budget and the wall deadline. A call that does not return in time exhausts the budget. The walk then stops and returns what it found with a shortfall ("stopped: a file system call did not return within its time limit" / "an earlier read of the tree is still blocked" / "it reached its file|byte|time limit" / "could not list `dir`"). The answer turns a shortfall into the "could not check every file" `aliased-import-unbound` gap, as before. It does not reuse the answer's SourceReader: that reader's 200-file budget would be spent by the walk and leave none for reading the hits. Tests: `test_a_walk_whose_read_stalls_gives_up_in_time_and_says_could_not_check` (a `_read` blocking 10 s on `b.py`; before the fix it took 10.0 s, now under 2 s with a shortfall), `test_a_walk_whose_directory_listing_stalls_gives_up_in_time`, `test_a_walk_reads_nothing_while_a_read_is_still_stalled`.
+2. minor, match by name and not by module: I took the finding's second option and the gap now says so: "(matched by name only, so it may be another module's `helper`)". I did not require the import to name the target's module, because that would miss a package re-export. `from pkg import helper as h`, where `pkg/__init__.py` re-exports `pkg/sub/impl.py`'s `helper`, names `pkg`, not `impl` (the stem `_imports_module` would check). The answer would then say complete and safe for a real alias caller. That is the dangerous direction, and the conservative one is a partial answer. Test: `test_an_alias_found_by_the_tree_search_says_it_was_matched_by_name`.
+3. minor, one gap per file: fixed in `answer.py`. The first `_ALIAS_GAPS_NAMED` (3) files found by the tree search get a gap each. The rest share one gap that names up to `_ALIAS_GAPS_LISTED` (5) of them, then "and others". It gives no count, so it adds no tally to the summary census (learnings 06). Test: `test_many_files_aliasing_the_target_collapse_into_a_few_gaps` (9 aliasing files make 4 gaps; before the fix there were 9).
+4. minor, raw git stderr in the gap: fixed. The "search failed" detail now goes through `blindspots._brief`: git's first non-empty line, whitespace collapsed, `core.redact.redact_text` (home becomes `~`), cut at `_ERR_CHARS` (160). Test: `test_a_failed_search_names_git_briefly_and_without_the_home_directory` (before the fix: 3077 chars with `/root/secret/...`).
+5. minor, class-less namesakes called "siblings": fixed in `dispatch.py`. On the class-less path the row's `why` says "a method of the same name in a class the index does not relate to this one's: whether that class is a sibling, a base or a subclass of it is not known". The gap detail says the same, and the heading reads "Callers bound by name to another method named `area` than `Square.area`". `_mark_sibling` takes a keyword `classless`, and the class-based path's wording is unchanged. Test: `test_a_classless_namesake_is_not_called_a_sibling_for_certain`.
+
+Proof for this round, all run after the last edit:
+- Fails before: at b124dc7 (new tests, old src), `pytest tests/test_blindspot_gaps.py -q -o addopts= -k "walk or by_name or collapse or failed_search or not_called_a_sibling"` gave `7 failed, 2 passed`. The 7 are the new tests: the read stall took 10.0 s, `_list_dir` was missing, a stalled read still read `b.py`, there was no "by name", 9 gaps, 3077 chars of stderr, and "on a sibling class".
+- Check block: `.venv/bin/pytest tests/test_blindspot_gaps.py tests/test_dispatch_callers.py tests/test_edge_confidence.py tests/test_reindexer.py plans/trust-fixes/acceptance/test_tf_safe_for_destructive.py -q -o addopts=` gave `275 passed, 1 skipped` (the skip is 05's live test without the backend on PATH).
+- With `.venv/bin` on PATH: `tests/test_blindspot_gaps.py tests/test_summary_integrity.py tests/test_graph_failure_population.py tests/test_architecture.py tests/test_qualifier_scan.py plans/trust-fixes/acceptance` gave `256 passed, 1 xfailed`. This includes the whole acceptance folder and the live blindspot test.
+- `tests/test_graph_provider.py tests/test_mcp_answer_size.py tests/test_dispatch_callers.py tests/test_graph_stdin.py`: `169 passed, 2 skipped`.
+- `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 source files. compileall: ok. `codeintel c4 . --check` (backend on PATH): 0 gating findings, exit 0. The whole Test command is left to the conductor's gate.
 
 ## Review findings (round 1, pair review)
 

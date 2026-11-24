@@ -80,6 +80,11 @@ _IMPORT_STATEMENT = re.compile(
     r"|\brequire\(\s*['\"][^'\"]*['\"]\s*\)",
     re.MULTILINE)
 
+# A tree search for files that import the target under an alias names this many of them in a gap
+# each; the rest share one gap, which names up to `_ALIAS_GAPS_LISTED` of them and then "and others".
+_ALIAS_GAPS_NAMED = 3
+_ALIAS_GAPS_LISTED = 5
+
 
 def _qualifier_token(wanted: _SymbolTarget) -> str:
     """The segment of a qualified target in front of its leaf (`Gateway` of `Gateway.query`), or `""`."""
@@ -1666,6 +1671,10 @@ class AnswerRendering:
             # The file that imports the target under an alias is the one the backend has no row
             # for, so the tree of the target's language is searched for it too.
             read = set(files)
+            # Matched by name: the import is not checked to be of the target's own module, since a
+            # package can re-export it under another module's name. Past the first few files each
+            # one is not a gap of its own; the rest are named together in one.
+            aliasing: list[str] = []
             for family in dict.fromkeys(_lang_family(g.file) for g in groups if g.file):
                 search = blindspots.files_aliasing(root, name, family)
                 for f in search.files:
@@ -1674,18 +1683,33 @@ class AnswerRendering:
                     read.add(f)
                     text = reader.read(f)
                     aliases = blindspots.alias_imports(text, name, f) if text is not None else []
-                    if aliases:
+                    if not aliases:
+                        continue
+                    aliasing.append(f)
+                    if len(aliasing) <= _ALIAS_GAPS_NAMED:
                         found.append((
                             "imports", "aliased-import-unbound",
                             f"`{f}` imports `{name}` as " + ", ".join(f"`{a}`" for a in aliases)
-                            + f", and no caller row here comes from that file: the graph does not "
-                            f"bind a call written through an alias to `{name}`, so callers that call "
-                            f"it by that name may be missing from this answer"))
+                            + f" (matched by name only, so it may be another module's `{name}`), and "
+                            f"no caller row here comes from that file: the graph does not bind a call "
+                            f"written through an alias to `{name}`, so callers that call it by that "
+                            f"name may be missing from this answer"))
                 if search.shortfall:
                     found.append((
                         "imports", "aliased-import-unbound",
                         f"could not check every file for an import of `{name}` under an alias: "
                         f"{search.shortfall}, so a call through an alias may be missing"))
+            rest = aliasing[_ALIAS_GAPS_NAMED:]
+            if rest:
+                shown = rest[:_ALIAS_GAPS_LISTED]
+                more = " and others" if len(rest) > len(shown) else ""
+                found.append((
+                    "imports", "aliased-import-unbound",
+                    ", ".join(f"`{f}`" for f in shown) + more
+                    + (" also imports" if len(rest) == 1 else " also import") + f" `{name}` under an "
+                    f"alias (matched by name only, so it may be another module's `{name}`), and no "
+                    f"caller row here comes from them, so callers that call it through an alias may "
+                    f"be missing from this answer"))
             for g in groups:
                 for r in g.rows:
                     f = str(r.get(file_key) or "")

@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from codeintel.core.redact import redact_text
 from codeintel.engines.graph import changed_range, qualifier_scan
 from codeintel.engines.graph.render import _LANG_FAMILIES
 
@@ -57,6 +58,8 @@ _WALK_MAX_SECONDS = 2.0
 # Directories the walk does not enter, besides every dot-directory: installed dependencies and
 # caches, which import the target under no alias of the project's.
 _WALK_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "site-packages", "venv"})
+# The most of git's stderr a "search failed" gap quotes: its first line, enough to say why.
+_ERR_CHARS = 160
 
 
 def _is_python(path: str) -> bool:
@@ -308,34 +311,94 @@ def files_aliasing(root: str, name: str, family: str) -> AliasSearch:
     if code == 1:
         return AliasSearch()
     if code != 0:
-        return AliasSearch((), f"the search for `{name} as` failed ({err or f'git grep exited {code}'})")
+        return AliasSearch((), f"the search for `{name} as` failed ({_brief(err) or f'git grep exited {code}'})")
     return AliasSearch(tuple(n for n in names if n))
+
+
+def _brief(err: str) -> str:
+    """git's stderr as a gap may carry it: its first line, whitespace collapsed, the home directory
+    replaced, and cut at `_ERR_CHARS`."""
+    first = next((line for line in err.splitlines() if line.strip()), "")
+    flat = redact_text(" ".join(first.split()))
+    return flat if len(flat) <= _ERR_CHARS else flat[:_ERR_CHARS - 1] + "…"
+
+
+def _list_dir(path: str) -> tuple[list[str], list[str]]:
+    """`(directories, files)` directly under *path*, each sorted; a link to a directory is listed
+    as neither, as `os.walk` does not follow one."""
+    dirs: list[str] = []
+    files: list[str] = []
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                dirs.append(entry.name)
+            elif not entry.is_symlink() or entry.is_file():
+                files.append(entry.name)
+    return sorted(dirs), sorted(files)
 
 
 def _walk_aliasing(root: str, name: str, suffixes: tuple[str, ...]) -> AliasSearch:
     """`files_aliasing` for a root git does not manage: every file of the language under it, read
     with the source size cap and confined to the root, up to `_WALK_MAX_FILES` files and
-    `_WALK_MAX_SECONDS`. Dot-directories and `_WALK_SKIP_DIRS` are not entered."""
-    real = qualifier_scan._root(root)
-    if real is None:
+    `_WALK_MAX_SECONDS`. Dot-directories and `_WALK_SKIP_DIRS` are not entered.
+
+    Every filesystem call — resolving the root, listing a directory, reading a file — runs through
+    `qualifier_scan._within` on a budget of its own, so a call that blocks on a stalled mount is
+    abandoned once that budget is spent instead of holding the query. While a read abandoned earlier
+    is still blocked (`qualifier_scan._MAX_STALLED`), the walk starts no call at all. Either way what
+    was not reached is the shortfall."""
+    budget = qualifier_scan.Budget(_WALK_MAX_SECONDS, files=_WALK_MAX_FILES)
+    deadline = time.monotonic() + _WALK_MAX_SECONDS
+    hits: list[str] = []
+
+    def short(why: str) -> AliasSearch:
+        return AliasSearch(tuple(hits), f"the search of the tree for `{name} as` stopped: {why}")
+
+    def call(work: Callable[[], object]) -> tuple[object, str]:
+        """*work* under the walk's budget: `(value, "")`, or `(None, why it was not done)`."""
+        if qualifier_scan._stalled_reads() >= qualifier_scan._MAX_STALLED:
+            return None, "an earlier read of the tree is still blocked"
+        if budget.exhausted or time.monotonic() > deadline:
+            return None, "it reached its time limit"
+        began = time.monotonic()
+        value, finished = qualifier_scan._within(work, budget)
+        budget.spend(time.monotonic() - began)
+        if not finished:
+            budget.exhaust()
+            return None, "a file system call did not return within its time limit"
+        return value, ""
+
+    real, why = call(functools.partial(qualifier_scan._root, root))
+    if why:
+        return short(why)
+    if not isinstance(real, str):
         return AliasSearch()
     needle = re.compile(rb"(?<![\w$])" + re.escape(name.encode()) + rb"\s+as\s+[A-Za-z_$]")
-    deadline = time.monotonic() + _WALK_MAX_SECONDS
-    seen = 0
-    hits: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d not in _WALK_SKIP_DIRS)
-        for filename in sorted(filenames):
+    pending = [""]
+    while pending:
+        rel_dir = pending.pop()
+        try:
+            listed, why = call(functools.partial(_list_dir, os.path.join(root, rel_dir)))
+        except OSError as exc:
+            return short(f"could not list `{rel_dir or '.'}` ({exc.strerror or type(exc).__name__})")
+        if why:
+            return short(why)
+        dirnames, filenames = listed if isinstance(listed, tuple) else ([], [])
+        pending.extend(os.path.join(rel_dir, d) for d in reversed(dirnames)
+                       if not d.startswith(".") and d not in _WALK_SKIP_DIRS)
+        for filename in filenames:
             if not filename.endswith(suffixes):
                 continue
-            seen += 1
-            if seen > _WALK_MAX_FILES or time.monotonic() > deadline:
-                stop = "file limit" if seen > _WALK_MAX_FILES else "time limit"
-                return AliasSearch(tuple(hits), f"the search of the tree for `{name} as` stopped at "
-                                                f"its {stop}")
-            rel = os.path.relpath(os.path.join(dirpath, filename), root)
-            blob = qualifier_scan._read(real, os.path.join(root, rel))
-            if blob is not None and qualifier_scan._plain_text(blob) and needle.search(blob):
+            if not budget.take_file():
+                return short("it reached its file limit")
+            rel = os.path.join(rel_dir, filename)
+            blob, why = call(functools.partial(
+                qualifier_scan._read, real, os.path.join(root, rel), budget))
+            if why:
+                return short(why)
+            if budget.out_of_bytes:
+                return short("it reached its byte limit")
+            if isinstance(blob, bytes) and qualifier_scan._plain_text(blob) and needle.search(blob):
                 hits.append(rel)
     return AliasSearch(tuple(hits))
 

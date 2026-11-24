@@ -425,6 +425,11 @@ def _guessed_sibling_call(row: dict, method: str) -> bool:
     return _guessed_receiver_call(row, method)
 
 
+# What is said of a method of the target's name found with no class node: nothing places its class
+# relative to the target's.
+_CLASSLESS_RELATION = "whether that class is a sibling, a base or a subclass of it is not known"
+
+
 def _method_definer(qualified: str, file: str) -> _Definer:
     """A method node standing for its class, when no class node is known: the class is the qualified
     name less its last part."""
@@ -1076,13 +1081,17 @@ class DispatchCallers(AnswerRendering):
             groups, "a.name", "a.qualified_name", "a.file_path", tests_last=True)
         shown_rows: list[dict] = []
         for g in groups:
-            g.rows = [self._mark_sibling(r, *bound_to[str(r.get("a.qualified_name") or "")])
+            g.rows = [self._mark_sibling(r, *bound_to[str(r.get("a.qualified_name") or "")],
+                                         classless=classless)
                       for r in g.rows]
             shown_rows.extend(g.rows)
             if g.rows:
                 callers = ", ".join(f"`{r.get('a.name')}`" for r in g.rows)
+                which = (f"a method of the same name, `{g.label}` ({g.file}), whose class the index "
+                         f"does not relate to its own: {_CLASSLESS_RELATION}"
+                         if classless else f"a sibling, `{g.label}` ({g.file})")
                 details.append(
-                    f"`{target.short}` has a sibling, `{g.label}` ({g.file}), and the backend bound "
+                    f"`{target.short}` has {which}, and the backend bound "
                     f"{callers} to it by name through a receiver whose class it does not know; at run "
                     f"time such a call may reach `{target.short}`, so it is listed here as name-matched")
 
@@ -1091,7 +1100,9 @@ class DispatchCallers(AnswerRendering):
 
         body = ""
         if shown_rows:
-            body = (f"\n\n## Callers bound by name to a sibling of `{target.short}`\n"
+            heading = (f"another method named `{wanted.name}` than `{target.short}`" if classless
+                       else f"a sibling of `{target.short}`")
+            body = (f"\n\n## Callers bound by name to {heading}\n"
                     f"_The backend bound each call below to another class's method named "
                     f"`{wanted.name}`, by name and not through the receiver's type. Which class the "
                     f"receiver is decides at run time, so each may reach `{target.short}`._\n"
@@ -1143,15 +1154,20 @@ class DispatchCallers(AnswerRendering):
         return "".join(notes)
 
     @staticmethod
-    def _mark_sibling(row: dict, sib: _Definer, written: str) -> dict:
-        """A copy of `row` counted as name-matched, whose `why` names the sibling it was bound to."""
+    def _mark_sibling(row: dict, sib: _Definer, written: str, *, classless: bool = False) -> dict:
+        """A copy of `row` counted as name-matched, whose `why` names the sibling it was bound to.
+
+        *classless*: the sibling was found with no class node (`_method_namesakes`), so its class's
+        relation to the target's is not known, and the `why` says so instead of calling it a sibling."""
         marked = dict(row)
         marked["_bucket"] = _NAME_MATCHED
         marked["_low_confidence"] = _edge_confidence(row)
+        where = (f"in a class the index does not relate to this one's: {_CLASSLESS_RELATION}"
+                 if classless else "on a sibling class")
         marked["_hierarchy_note"] = (
             f"the backend bound the call `{written}` to `{sib.short}` "
             f"(`{_strip_project_prefix(sib.method, may_be_filename=False)}`), a method of the same name "
-            "on a sibling class, and not to this symbol; the receiver's class is not known, so at run "
+            f"{where}, and not to this symbol; the receiver's class is not known, so at run "
             "time the call may reach this symbol instead")
         return marked
 
