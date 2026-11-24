@@ -1,7 +1,7 @@
 # Run the bar end to end, prove each regression test fails on eb0902f, and write the CHANGELOG
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12, 14, 16, 17
 Test first: no
 Level: 1
@@ -118,6 +118,8 @@ On the branch every row's tests passed (34 runs, 0 failed). `status-doctor-no-gr
 **For later tickets**
 - The 5 acceptance failures above need a new ticket (or reopened 05/06) if the conductor holds the spec's "imported as `h` somewhere" and "a same-named sibling method" to the acceptance fake's shape: the alias rule would have to search beyond the answer's own files (the fake answers `search_code`), and the sibling rule would have to find `*.m` methods without class nodes (the fake answers `MATCH (n:Method) WHERE n.name=…`). Separately, whether `fresh_index()` after a fresh commit should read as stale for `callers` (HEAD commit time, ticket 01/02) is a spec question: the spec's callers story names only files, the `changed <ref>` story names HEAD's commit time.
 - `codeintel c4 . --check` needs the backend on PATH here: `PATH=/root/.cache/codebase-memory-mcp/0.10.8:$PATH`.
+
+**Review fixes** (checkpoint): the only failure is `tests/test_graph_real.py::test_live_callers_of_safe_null_result`, the known cold-start flake on this host. That test runs only when the backend is on PATH and the codeintel project is indexed locally, and each graph call cold-starts the backend (about 4.4 s) against a 5 s budget. It fails the same way at 0e2d07c and passes with a warm backend client held open (see ticket 18's round-3 note). No code change. The checkpoint is re-run with the backend warm.
 
 ## Review findings (round 1, checkpoint, done when)
 
