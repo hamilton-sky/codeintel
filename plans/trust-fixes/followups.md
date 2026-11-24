@@ -56,3 +56,9 @@ What the run left for later: minor findings of passing reviews, the findings a l
 - 11. minor src/codeintel/engines/graph/provider.py `_stamp_staleness` (ticket 02): the verdict re-reads the db mtime after dispatch, so a reindex finishing during dispatch marks old rows fresh. Fix: compare the pre-dispatch `written` with the post-dispatch mtime inside `_stamp_staleness` and treat a change as stale. (feature review)
 - 12. minor src/codeintel/gateway/reindexer.py (ticket 03): unfingerprintable roots submit a pass every window and the gateway flags `reindexing` on an unchanged tree. Decide: document it in the spec, or skip the flag for debounce-only passes. Also `_tree_fingerprint` uses `os.stat`; use `os.lstat`. (feature review)
 - 13. minor src/codeintel/gateway/gateway.py `_index_moved` (ticket 15): every edge-op cache hit runs `graph_index_age` (git calls). Fix: note the cost in a comment, or cache HEAD's commit time per generation. (feature review)
+
+## 17-review-minors (left for later)
+
+- 1. minor src/codeintel/engines/graph/backend.py: ids withheld only when the projects list is comma-separated; `and`, `;`, newline, backticks, or `projects (a-b-c, d-e-f)` leak every id after the first. Real backend prints a JSON array (covered), so defensive only. Fix: withhold every slug-shaped id to the end of the clause after `project(s)`. (pair review)
+- 2. minor src/codeintel/engines/graph/backend.py: `_BRACKETED` rewrites every hyphenated token inside any `[...]`, e.g. `error in [src/my-file.py] at [2024-01-01]` -> `error in [src/<project>] at [<project>]`, damaging backend messages. Fix: only rewrite brackets whose whole content is a list of bare or quoted ids. (pair review)
+- 3. minor src/codeintel/core/redact.py: `FILE:///home/alice/x` (case-sensitive scheme), `file://localhost/home/alice/x` and `///home/alice/x` are not redacted and contains_home_path misses them. Fix: case-insensitive scheme, optional localhost. (pair review)
