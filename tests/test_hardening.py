@@ -506,7 +506,6 @@ def test_write_contained_names_why_an_in_tree_target_is_refused(tmp_path, make, 
     assert not (repo / "gone.md").exists()
 
 
-@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts descriptors in /proc")
 def test_write_contained_closes_the_temp_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
     from codeintel.core.containment import write_contained
 
@@ -516,11 +515,13 @@ def test_write_contained_closes_the_temp_descriptor_when_fdopen_fails(tmp_path, 
     def _broken_fdopen(*a, **k):
         raise MemoryError("no buffer")
 
-    before = len(os.listdir("/proc/self/fd"))
+    # /proc/self/fd on Linux, /dev/fd on macOS: both list this process's open descriptors.
+    fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    before = len(os.listdir(fd_dir))
     monkeypatch.setattr(os, "fdopen", _broken_fdopen)
     with pytest.raises(MemoryError):
         write_contained(str(repo), "CODE_INTEL.md", "x\n", follow_links=False)
     monkeypatch.undo()
 
-    assert len(os.listdir("/proc/self/fd")) == before, "the temp file's descriptor leaked"
+    assert len(os.listdir(fd_dir)) == before, "the temp file's descriptor leaked"
     assert os.listdir(repo) == [], "the temp file was left behind"

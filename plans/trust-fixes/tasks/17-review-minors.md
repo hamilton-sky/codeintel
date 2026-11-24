@@ -1,7 +1,7 @@
 # Fix the minor findings the reviews left for later
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 16
 Test first: yes
 Level: 3
@@ -63,6 +63,8 @@ prints passed
   - 13: a comment states the cost: two or three git calls per hit, each capped at 30 s, about 5 ms here.
 - **Shortcuts taken**: none.
 - **For later tickets**: `test_an_unchanged_tree_is_fingerprinted_at_most_once_per_debounce_window` (and any reindexer test using `debounce_seconds` greater than the uptime) fails on a freshly booted machine, because `_last_fired` defaults to 0.0 on the `time.monotonic()` clock. This is a latent bug outside this ticket's items: a root is debounced for its first window after boot. It is worth a follow-up (default to `-inf`).
+
+**Review fixes:** round 1 (floor guard): the `skipif` on the descriptor-leak test is gone. The test now counts descriptors in `/proc/self/fd` on Linux or `/dev/fd` on macOS, so it runs everywhere the suite runs.
 
 ## Review findings (round 1, floor guard)
 
