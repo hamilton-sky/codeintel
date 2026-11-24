@@ -1101,3 +1101,103 @@ def test_index_without_a_resolvable_home_fails_with_a_message_not_a_traceback(
 
     assert import_module("codeintel.cli.index").run(_args(project_root=str(tmp_path))) == 1
     assert "index failed: could not determine home directory" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- semantic failure record
+
+class _BlockedEmbedding:
+    """fastembed's model class on a host where the weights cannot be fetched."""
+
+    built = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).built += 1
+        raise ValueError("Could not load model BAAI/bge-small-en-v1.5 from any source.")
+
+    @classmethod
+    def list_supported_models(cls):
+        return [{"model": "BAAI/bge-small-en-v1.5"}]
+
+
+class _WorkingEmbedding:
+    """fastembed's model class once the weights are reachable."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def embed(self, texts):
+        import numpy as np
+        return [np.full(384, 0.1, dtype=np.float32) for _ in list(texts)]
+
+
+@pytest.fixture
+def blocked_model(tmp_path, monkeypatch):
+    """A repo, an empty fastembed cache, no graph backend and a model that cannot load."""
+    import codeintel.engines.semantic.provider as sem
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "core.py").write_text("def helper():\n    return 1\n")
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.delenv("CODEINTEL_REINDEX", raising=False)
+    monkeypatch.setattr(sem, "_DEPS_OK", True)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    _BlockedEmbedding.built = 0
+    monkeypatch.setattr("fastembed.TextEmbedding", _BlockedEmbedding)
+    return str(repo)
+
+
+def _failure_record():
+    from codeintel.core.paths import codeintel_home
+    return codeintel_home() / "semantic_failure.json"
+
+
+def test_a_failed_index_leaves_a_record_the_next_search_honours_at_once(blocked_model, capsys):
+    """`codeintel index` ran the indexer without touching the record, so after it failed to load
+    the model the next `search` retried the same ~40 s download and doctor/status showed no cause."""
+    import time
+
+    from codeintel.engines.semantic.provider import SemanticProvider
+
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 1
+    assert "could not load embedding model" in capsys.readouterr().out
+    assert _failure_record().exists()
+    assert _BlockedEmbedding.built == 1
+
+    t0 = time.monotonic()
+    r = SemanticProvider(blocking_index=True).build_result(
+        "search", "helper", [], 0, blocked_model)
+    elapsed = time.monotonic() - t0
+
+    assert r["reason"] == "index-failed", r
+    assert elapsed < 1.0
+    assert "could not load" in r["hint"]
+    assert "first-time indexing" not in r["hint"]
+    assert _BlockedEmbedding.built == 1          # the search did not try the model again
+
+
+def test_a_successful_index_clears_the_record(blocked_model, monkeypatch, capsys):
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 1
+    assert _failure_record().exists()
+    monkeypatch.setattr("codeintel.engines.semantic.db.model_is_cached", lambda *a, **k: True)
+    monkeypatch.setattr("fastembed.TextEmbedding", _WorkingEmbedding)
+
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 0
+    assert "Indexed" in capsys.readouterr().out
+    assert not _failure_record().exists()
+
+
+def test_an_index_failure_that_is_not_a_model_load_writes_no_record(blocked_model, monkeypatch):
+    """Only a failed model load is recorded: a retry of the download would not fix anything else."""
+    from codeintel.engines.semantic.indexer import Indexer
+
+    def _fail(self, root):
+        self.last_error = "OSError: disk full"
+        return -1
+
+    monkeypatch.setattr(Indexer, "index", _fail)
+
+    assert import_module("codeintel.cli.index").run(_args(project_root=blocked_model)) == 1
+    assert not _failure_record().exists()

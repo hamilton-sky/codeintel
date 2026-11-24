@@ -694,3 +694,66 @@ def test_reconciling_one_deleted_project_leaves_others_alone(tmp_path):
         ).fetchone()[0] == 1
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# The semantic pass writes and clears the persisted model-failure record
+# ---------------------------------------------------------------------------
+
+class _BlockedEmbedding:
+    """fastembed's model class on a host where the weights cannot be fetched."""
+
+    def __init__(self, *args, **kwargs):
+        raise ValueError("Could not load model BAAI/bge-small-en-v1.5 from any source.")
+
+    @classmethod
+    def list_supported_models(cls):
+        return [{"model": "BAAI/bge-small-en-v1.5"}]
+
+
+class _WorkingEmbedding:
+    """fastembed's model class once the weights are reachable."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def embed(self, texts):
+        import numpy as np
+        return [np.full(384, 0.1, dtype=np.float32) for _ in list(texts)]
+
+
+@pytest.fixture
+def blocked_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "core.py").write_text("def helper():\n    return 1\n")
+    cache = tmp_path / "fastembed-empty"
+    cache.mkdir()
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    monkeypatch.setattr("fastembed.TextEmbedding", _BlockedEmbedding)
+    return str(repo)
+
+
+def _failure_record():
+    from codeintel.core.paths import codeintel_home
+    return codeintel_home() / "semantic_failure.json"
+
+
+def test_a_failed_semantic_pass_writes_the_model_failure_record(blocked_repo):
+    import json
+
+    Reindexer()._semantic_reindex(blocked_repo)
+
+    record = json.loads(_failure_record().read_text())
+    assert "could not load embedding model" in record["cause"]
+    assert record["model"] == "BAAI/bge-small-en-v1.5"
+
+
+def test_a_successful_semantic_pass_clears_the_model_failure_record(blocked_repo, monkeypatch):
+    Reindexer()._semantic_reindex(blocked_repo)
+    assert _failure_record().exists()
+    monkeypatch.setattr("fastembed.TextEmbedding", _WorkingEmbedding)
+
+    Reindexer()._semantic_reindex(blocked_repo)
+
+    assert not _failure_record().exists()
