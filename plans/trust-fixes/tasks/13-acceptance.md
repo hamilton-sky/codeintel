@@ -1,7 +1,7 @@
 # Run the bar end to end, prove each regression test fails on eb0902f, and write the CHANGELOG
 
 Type: task
-Status: resolved
+Status: open
 Blocked by: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12, 14, 16, 17
 Test first: no
 Level: 1
@@ -118,3 +118,52 @@ On the branch every row's tests passed (34 runs, 0 failed). `status-doctor-no-gr
 **For later tickets**
 - The 5 acceptance failures above need a new ticket (or reopened 05/06) if the conductor holds the spec's "imported as `h` somewhere" and "a same-named sibling method" to the acceptance fake's shape: the alias rule would have to search beyond the answer's own files (the fake answers `search_code`), and the sibling rule would have to find `*.m` methods without class nodes (the fake answers `MATCH (n:Method) WHERE n.name=…`). Separately, whether `fresh_index()` after a fresh commit should read as stale for `callers` (HEAD commit time, ticket 01/02) is a spec question: the spec's callers story names only files, the `changed <ref>` story names HEAD's commit time.
 - `codeintel c4 . --check` needs the backend on PATH here: `PATH=/root/.cache/codebase-memory-mcp/0.10.8:$PATH`.
+
+## Review findings (round 1, checkpoint, done when)
+
+its Done when checks failed at the checkpoint, with every ticket since the last one built.
+
+$ .venv/bin/pytest tests/ -q --deselect tests/test_doctor.py::test_semantic_deep_probe_warns_when_indexed_source_cannot_be_read
+  wanted: exit 0 and output containing 'passed'
+  got: exit 1
+  the last lines of its output:
+src/codeintel/engines/graph/dispatch.py           819     24    97%   369, 418, 447, 658, 694, 853, 902, 1007, 1043, 1070, 1133, 1152, 1217, 1222, 1226, 1229-1230, 1325, 1396, 1450-1451, 1505, 1509, 1515
+src/codeintel/engines/graph/ops.py                536     37    93%   114, 274, 352, 391-393, 395, 419, 431, 443, 463, 488, 512, 547, 631, 648, 650-651, 674, 781, 787, 789-790, 871, 888-889, 933, 951, 966, 971, 1001-1006, 1008-1009, 1066, 1097, 1147
+src/codeintel/engines/graph/provider.py           457     23    95%   287, 331, 354, 483, 485, 696-697, 707-710, 717-718, 785, 812, 828-829, 893, 920-921, 1024-1025, 1226
+src/codeintel/engines/graph/qualifier_scan.py     186      5    97%   164-165, 324, 386-387
+src/codeintel/engines/graph/render.py              94      7    93%   59, 94, 117-118, 269, 281-282
+src/codeintel/engines/graph/resolution.py         112     17    85%   60-61, 160-161, 164, 170, 173, 191, 231, 259, 264-274
+src/codeintel/engines/graph/symbol_diff.py        398     26    93%   194-197, 232, 387, 389, 398, 428-429, 522, 545, 553, 560, 577-578, 581-582, 612-614, 625-626, 668-669, 675
+src/codeintel/engines/graph/targets.py             60      5    92%   120, 123-124, 137-138
+src/codeintel/engines/graph/wire_text.py          186      6    97%   93, 228, 253, 277, 375-376
+src/codeintel/engines/lsp/lang_config.py          145     28    81%   97-98, 109-112, 171, 186, 213-216, 220-221, 223, 238-248, 258-260, 281
+src/codeintel/engines/lsp/provider.py             624     77    88%   187, 190-191, 301-302, 315-321, 326-327, 406, 513-515, 562-564, 615-617, 645, 653-656, 677, 682-684, 686, 689, 724-728, 761-767, 837-838, 942-944, 974-989, 1008, 1027-1028, 1047, 1050, 1053-1054, 1061, 1089, 1092, 1095, 1223-1226, 1280, 1286, 1344, 1352, 1354-1356
+src/codeintel/engines/semantic/db.py              235     37    84%   198-199, 204-205, 208-209, 269, 275, 277, 294, 360-361, 368-369, 377-382, 444-449, 464-465, 503-505, 538-539, 544-546, 558-559, 571-572, 602-603
+src/codeintel/engines/semantic/indexer.py         481     68    86%   179-180, 189-190, 201-202, 312-320, 342-361, 365-366, 370, 391-392, 415, 469, 491, 513-514, 554-555, 563, 605, 640-641, 665, 723-724, 778-779, 782, 800-802, 805-806, 832-833, 864-869, 897-898, 924-926, 931, 938, 961-962, 966-967, 977
+src/codeintel/engines/semantic/provider.py        420     33    92%   21-22, 60-61, 192-195, 222, 225, 264-266, 277, 279-280, 411, 418-420, 425-426, 566, 675-676, 684-688, 703, 705, 1006-1010, 1090, 1098
+src/codeintel/engines/semantic/searcher.py        223     16    93%   113, 140-142, 164-166, 203-205, 365, 423-425, 448-449
+src/codeintel/gateway/auth.py                      87      2    98%   137, 148
+src/codeintel/gateway/cache.py                     54      2    96%   32-33
+src/codeintel/gateway/factory.py                   31      6    81%   27-28, 33-34, 47-48
+src/codeintel/gateway/gateway.py                  380     40    89%   73, 142-144, 176, 202, 212, 216, 234-236, 318-319, 331, 356-364, 501-503, 532, 586, 666, 676-677, 696-697, 721-723, 819, 829, 837, 966-968
+src/codeintel/gateway/policy.py                    38      3    92%   14-15, 92
+src/codeintel/gateway/reindexer.py                181      9    95%   57, 68-69, 101, 172, 194, 197, 225-226
+src/codeintel/mapping/grapher.py                   74      7    91%   29-30, 33-34, 47, 129-130
+src/codeintel/mapping/mapper.py                   173     19    89%   133, 136, 141-142, 172, 182, 209-210, 239-240, 248-250, 262-263, 323, 379, 395-397
+src/codeintel/setup/agent_prompt.py                60      3    95%   107, 140-141
+src/codeintel/setup/doctor.py                     247     39    84%   73, 94-97, 109-110, 119-120, 152, 160-161, 193, 197, 220-221, 245-248, 264-265, 275, 285-286, 317-318, 326-327, 336-337, 345-346, 356-357, 453-455, 514-517
+src/codeintel/setup/injector.py                   112     17    85%   124, 138-140, 175, 178-180, 190-192, 201-203, 235, 246, 271
+src/codeintel/setup/installer.py                  309     26    92%   54-55, 59-60, 156, 183-184, 215, 218, 228-229, 252, 263-264, 286, 308-309, 380-381, 454, 483, 514, 527, 544, 548-549
+src/codeintel/setup/onboarding.py                 190     48    75%   36-40, 52, 55-58, 67-68, 91-92, 104, 143, 147-148, 156-158, 182-183, 186-195, 207-208, 229, 232-233, 238-239, 241-242, 270-271, 302-303, 316-317
+src/codeintel/setup/reset.py                      162      4    98%   145-146, 174-175
+src/codeintel/setup/verify.py                     179     25    86%   38-39, 61, 66-67, 80-81, 92, 161-162, 174-175, 180-181, 193, 207, 212, 215, 261-262, 289, 325, 335, 360-361
+src/codeintel/transports/http.py                  232     48    79%   57-58, 63-64, 66-69, 116-117, 134-135, 189-191, 207-209, 246-247, 254-255, 269, 319-356
+src/codeintel/transports/mcp.py                   228     18    92%   90-91, 212-213, 307, 326-329, 354-355, 391-392, 444-445, 602, 612, 627
+-----------------------------------------------------------------------------
+TOTAL                                           12921   1143    91%
+
+28 files skipped due to complete coverage.
+Required test coverage of 83% reached. Total coverage: 91.15%
+=========================== short test summary info ============================
+FAILED tests/test_graph_real.py::test_live_callers_of_safe_null_result - Asse...
+1 failed, 2470 passed, 31 skipped, 1 deselected, 1 xfailed, 1 warning in 469.78s (0:07:49)
