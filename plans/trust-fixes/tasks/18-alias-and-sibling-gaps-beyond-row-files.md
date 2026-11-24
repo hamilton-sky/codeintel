@@ -1,7 +1,7 @@
 # Find aliased imports and same-named sibling methods beyond the answer's own files
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 05, 06, 13
 Test first: yes
 Level: 3
@@ -112,6 +112,8 @@ Proof for round 2, all run after the last edit:
 - Check block: `.venv/bin/pytest tests/test_blindspot_gaps.py tests/test_dispatch_callers.py tests/test_edge_confidence.py tests/test_reindexer.py plans/trust-fixes/acceptance/test_tf_safe_for_destructive.py -q -o addopts=` gave `287 passed, 1 skipped`.
 - Related tests, with `.venv/bin` on PATH: `tests/test_blindspot_gaps.py tests/test_null_reason_and_ripple.py tests/test_qualifier_scan.py tests/test_graph_failure_population.py tests/test_index_age.py tests/test_mcp_answer_size.py tests/test_edge_staleness.py tests/test_summary_integrity.py tests/test_architecture.py tests/test_graph_provider.py tests/test_graph_stdin.py tests/test_changed_range.py plans/trust-fixes/acceptance` gave `533 passed, 1 xfailed, 2 errors`. The 2 errors were in the setup of two `plans/trust-fixes/acceptance/test_tf_hints.py` tests: a `CalledProcessError` from the fixture's live indexing subprocess. Run alone straight after, `test_tf_hints.py` gave `5 passed`. That file drives the live backend and does not reach the alias or sibling code.
 - `ruff check src tests bench`: all checks passed. `mypy`: no issues in 88 source files. compileall: ok. `codeintel c4 . --check` (backend on PATH): 0 gating findings, exit 0. The whole Test command is left to the conductor's gate.
+
+**Review fixes** (round 3, gate): the one failure, `tests/test_graph_real.py::test_live_callers_of_safe_null_result`, is the known cold-start flake on this host, not this ticket. Each graph call cold-starts the backend (about 4.4 s) against a 5 s budget. The test fails the same way at the previous round's commit 0e2d07c (2 of 2 runs, in a worktree). At fab282c it passes once a warm backend client is held open (1 passed, 13.5 s). The gate is re-run with the backend warm. No code change.
 
 ## Review findings (round 1, pair review)
 
