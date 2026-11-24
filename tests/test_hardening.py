@@ -487,6 +487,8 @@ def test_write_contained_refuses_a_parent_swapped_for_a_link_after_the_check(tmp
     (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to("gone.md"), "dangling"),
     (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to(".git"), "inside-git-dir"),
     (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to("docs"), "not-a-file"),
+    # A directory on the resolved path is a regular file (ENOTDIR): not dangling, not a file.
+    (lambda repo: (repo / "USING_CODEINTEL.md").symlink_to("docs/rules.md/x"), "not-a-file"),
     (lambda repo: os.link(repo / "docs" / "rules.md", repo / "USING_CODEINTEL.md"), "hard-link"),
 ])
 def test_write_contained_names_why_an_in_tree_target_is_refused(tmp_path, make, reason):
@@ -502,3 +504,23 @@ def test_write_contained_names_why_an_in_tree_target_is_refused(tmp_path, make, 
     assert reason in REFUSAL_TEXT
     assert (repo / "docs" / "rules.md").read_bytes() == _VICTIM
     assert not (repo / "gone.md").exists()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts descriptors in /proc")
+def test_write_contained_closes_the_temp_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
+    from codeintel.core.containment import write_contained
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _broken_fdopen(*a, **k):
+        raise MemoryError("no buffer")
+
+    before = len(os.listdir("/proc/self/fd"))
+    monkeypatch.setattr(os, "fdopen", _broken_fdopen)
+    with pytest.raises(MemoryError):
+        write_contained(str(repo), "CODE_INTEL.md", "x\n", follow_links=False)
+    monkeypatch.undo()
+
+    assert len(os.listdir("/proc/self/fd")) == before, "the temp file's descriptor leaked"
+    assert os.listdir(repo) == [], "the temp file was left behind"

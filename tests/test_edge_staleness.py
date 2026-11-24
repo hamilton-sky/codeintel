@@ -303,3 +303,27 @@ def test_a_cached_fan_out_answer_is_asked_again_once_a_file_it_cites_is_edited(
     assert again["cached"] is False
     assert "pkg/app.py" in again["result"]
     assert "Stale index" in again["result"]
+
+
+# ------------------------------------------------------------- an index rewritten during the answer
+
+def test_an_index_rewritten_while_the_answer_was_read_marks_it_stale(monkeypatch, repo, cache):
+    """The rows came from the index as it was before dispatch. A reindex that lands during the
+    round trip makes the age check read the NEW index as fresh, while the rows are the old one's."""
+    _stamp_index(cache, time.time() - 60)
+    _write(repo, "pkg/app.py", "def main():\n    return 0\n", mtime=time.time() - 30)
+    p = _provider(monkeypatch, _graph(), str(repo))
+    dispatch = p._dispatch
+
+    def _reindexed_meanwhile(*args, **kwargs):
+        out = dispatch(*args, **kwargs)
+        _stamp_index(cache, time.time())
+        return out
+
+    monkeypatch.setattr(p, "_dispatch", _reindexed_meanwhile)
+    env = p.build_result("callers", "helper", [], 30000, str(repo))
+
+    gap = _stale(env)
+    assert "rewritten" in gap["detail"], gap
+    assert _rows(env)[("caller", "pkg.app.main")]["evidence"] == "unstated"
+    assert env["evidence"]["safe_for_destructive"] is False

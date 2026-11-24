@@ -245,3 +245,39 @@ def test_a_ci_path_is_home_shaped_but_must_not_be_rewritten(home):
     home("/Users/alice")
     ci = "/home/runner/work/repo/src/a.py:1 | x"
     assert redact_text(ci) == ci
+
+
+# ---------------------------------------------- a home path behind a URL scheme, a slash or a flag
+
+@pytest.mark.parametrize("text, expected", [
+    ("file:///home/alice/x", "file://~/x"),
+    ("see file:///home/alice/x.py", "see file://~/x.py"),
+    ("//home/alice/x", "/~/x"),
+    ("-I/home/alice/inc", "-I~/inc"),
+    ("cc -L/home/alice/lib -o a", "cc -L~/lib -o a"),
+])
+def test_a_home_path_after_a_scheme_a_doubled_slash_or_a_flag_is_redacted(home, text, expected):
+    home("/home/alice")
+    assert redact_text(text) == expected
+    assert not contains_home_path(redact_text(text))
+    assert contains_home_path(text), "the detector must see the leak the redactor removes"
+
+
+@pytest.mark.parametrize("text", ["https://example.com/home/alice/x", "https://home/alice/x",
+                                  "a-I/home/alice/x", "x//home/alice/y"])
+def test_the_new_heads_still_leave_a_path_middle_alone(home, text):
+    home("/home/alice")
+    assert redact_text(text) == text
+
+
+def test_the_resolved_home_is_redacted_when_it_differs(home, tmp_path):
+    """`/home` is a link to `/var/home` on some systems; paths then arrive resolved."""
+    real_home = tmp_path / "var" / "home" / "alice"
+    real_home.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "var" / "home", target_is_directory=True)
+    home(str(tmp_path / "home" / "alice"))
+
+    text = f"error in {real_home}/x.py"
+    assert redact_text(text) == "error in ~/x.py"
+    assert contains_home_path(text)
+    assert redact_text(f"{tmp_path}/home/alice/x.py") == "~/x.py"

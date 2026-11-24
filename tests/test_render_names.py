@@ -18,3 +18,15 @@ def test_a_heading_with_a_hyphenated_head_is_left_alone():
     heading = "EC-1.1: Empty workflow plan"
     assert _strip_project_prefix(heading) == heading
     assert _strip_project_prefix(heading, may_be_filename=False) == heading
+
+
+def test_a_heading_whose_second_segment_starts_with_a_digit_and_a_space_is_left_alone():
+    heading = "Pre-1.0 notes for 2.x"
+    assert _strip_project_prefix(heading) == heading
+    assert _strip_project_prefix(heading, may_be_filename=False) == heading
+
+
+def test_a_real_project_slug_is_still_stripped():
+    assert _strip_project_prefix("home-alice-repo.pkg.mod.fn", may_be_filename=False) == "pkg.mod.fn"
+    assert _strip_project_prefix("home-alice-repo.Execute") == "Execute"
+    assert _strip_project_prefix("home-alice-v1.2fa.verify", may_be_filename=False) == "2fa.verify"

@@ -830,3 +830,14 @@ def test_a_background_failure_that_is_not_a_model_load_writes_no_record(blocked_
 
     assert sem._background_index_failure(blocked_host) is not None   # the pass did fail
     assert not _record_path().exists()
+
+
+def test_the_model_load_failure_prefix_is_the_one_the_exception_is_built_with():
+    """The record is written only when `last_error` starts with the prefix; db.py builds the
+    message, so the prefix is defined there once and the provider imports it."""
+    from codeintel.engines.semantic.db import MODEL_LOAD_FAILURE_PREFIX, EmbeddingModelUnavailable
+
+    said = str(EmbeddingModelUnavailable("m", OSError("403"), "check the proxy"))
+    assert said.startswith(MODEL_LOAD_FAILURE_PREFIX)
+    assert sem._is_model_load_failure(said)
+    assert not sem._is_model_load_failure("OSError: disk full")

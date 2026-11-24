@@ -323,3 +323,27 @@ def test_root_not_found_hint_is_redacted(monkeypatch):
                                 "project_root": "/home/alice/gone/repo"})
     assert r["reason"] == "root-not-found"
     assert "/home/alice" not in r["hint"] and "~/gone/repo does not exist" in r["hint"], r
+
+
+def test_root_not_found_echoes_at_most_200_characters_of_the_root(monkeypatch):
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+    root = "/nonexistent/" + "d" * 5000
+    r = srv.code_query_handler({"op": "callers", "target": "main", "project_root": root})
+
+    assert r["reason"] == "root-not-found", r
+    assert "d" * 201 not in r["hint"], r["hint"]
+    assert len(r["hint"]) < 400, r["hint"]
+    assert gw.queries == []
+
+
+def test_a_file_given_as_the_root_is_said_to_be_not_a_directory(monkeypatch, tmp_path):
+    gw = _RecordingGateway()
+    monkeypatch.setattr(srv, "_get_gateway", lambda: gw)
+    f = tmp_path / "app.py"
+    f.write_text("x = 1\n")
+    r = srv.code_query_handler({"op": "callers", "target": "main", "project_root": str(f)})
+
+    assert r["reason"] == "root-not-found"
+    assert "is not a directory" in r["hint"], r["hint"]
+    assert "does not exist" not in r["hint"], r["hint"]

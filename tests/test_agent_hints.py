@@ -302,3 +302,48 @@ def test_a_real_edge_kind_is_still_named(monkeypatch):
 
     assert "Other relationships DO point at it: 2 CALLS" in hint, hint
     assert "1 1" not in hint and "DEFINES" not in hint, hint
+
+
+# --------------------------------------------------------------------------- stderr cleaning
+
+def test_a_huge_stderr_is_cleaned_in_well_under_a_second():
+    """`_agent_facing` runs on the whole stderr, before the cap; a backend that prints many
+    unclosed `search_graph(name_pattern="` advices must not stall the request."""
+    import time
+
+    from codeintel.engines.graph.backend import _stderr_tail
+
+    raw = ('search_graph(name_pattern="x ' * 4000)[:100_000].encode()
+    started = time.monotonic()
+    out = _stderr_tail(raw)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, f"cleaning 100 KB of stderr took {elapsed:.2f}s"
+    assert "search_graph" not in out, out
+
+
+@pytest.mark.parametrize("said, ids", [
+    ("available projects: home-alice-work, home-bob-repo-x", ("alice", "bob")),
+    ("project not found; projects = home-alice-work-repo, srv-bob-x-y, home-carol",
+     ("alice", "bob", "carol")),
+    ("candidates [home-alice-work-repo, srv-bob-x-y]", ("alice", "bob")),
+    ('candidates ["home-alice-work-repo", "home-bob"]', ("alice", "bob")),
+])
+def test_every_project_id_in_a_list_is_withheld(said, ids):
+    cleaned = _agent_facing(said)
+
+    for who in ids:
+        assert who not in cleaned, cleaned
+
+
+def test_the_backends_deprecation_warning_is_not_rewritten_into_a_command_that_does_not_exist():
+    from codeintel.engines.graph.backend import _stderr_tail
+
+    out = _stderr_tail(
+        b"warning: passing raw JSON to 'cli search_graph' is deprecated and will be removed in a "
+        b"future release; use flags (run 'cli search_graph --help'), --args-file <path>, or piped "
+        b"stdin.\nerror: query failed\n")
+
+    assert "cli code.query" not in out, out
+    assert "op=pattern --help" not in out, out
+    assert "query failed" in out, out

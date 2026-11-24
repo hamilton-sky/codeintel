@@ -757,3 +757,51 @@ def test_a_successful_semantic_pass_clears_the_model_failure_record(blocked_repo
     Reindexer()._semantic_reindex(blocked_repo)
 
     assert not _failure_record().exists()
+
+
+def test_the_fingerprint_does_not_follow_a_tracked_symlink(tmp_path):
+    """A tracked link into a hung network mount would block the request thread on `stat`; the
+    fingerprint dates the link itself, so a change behind it does not move it."""
+    import subprocess
+
+    import codeintel.gateway.reindexer as reindexer_mod
+
+    outside = tmp_path / "outside.py"
+    outside.write_text("x = 1\n")
+    root = _git_repo(tmp_path / "repo")
+    os.symlink(str(outside), os.path.join(root, "link.py"))
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for args in (("add", "-A"), ("commit", "-q", "--no-gpg-sign", "-m", "link")):
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=root, env=env,
+                       check=True, capture_output=True)
+    before = reindexer_mod._tree_fingerprint(root)
+
+    outside.write_text("x = 1000000\n")
+    os.utime(outside, (os.stat(outside).st_atime, os.stat(outside).st_mtime + 50))
+
+    assert before is not None
+    assert reindexer_mod._tree_fingerprint(root) == before
+
+
+def test_a_root_without_a_fingerprint_is_not_flagged_reindexing_for_a_debounce_pass(
+        tmp_path, monkeypatch):
+    """A root git cannot fingerprint still gets a pass each window, but nothing says its tree
+    changed, so the query that submitted it does not report `reindexing`."""
+    from codeintel.gateway.gateway import Gateway
+
+    root = str(tmp_path / "plain")
+    os.mkdir(root)
+    r = Reindexer(debounce_seconds=0)
+    passes = _counting_passes(r, monkeypatch)
+
+    assert r.maybe_reindex(root) is False
+    _drain(r)
+    assert passes == [root], "the debounce pass was not submitted"
+
+    answer = Gateway(graph=_AnsweringGraph(), reindexer=r).query(
+        op="callers", target="helper", engine="graph", role="", project_root=root)
+    _drain(r)
+    assert answer["result"] is not None
+    assert "reindexing" not in answer, answer
+    assert passes == [root, root]

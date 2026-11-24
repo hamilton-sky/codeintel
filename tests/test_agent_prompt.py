@@ -118,3 +118,15 @@ def test_the_prompt_lists_code_status():
     assert "code.status" in build_prompt("/repo", "claude", _report(registered_agent="claude"))
     assert "code.status" in build_prompt("/repo", "claude", _model_failed_report())
     assert "code.status" in build_prompt(".", "claude", {}, fresh=True)
+
+
+def test_an_index_failure_that_is_not_the_model_gets_no_model_download_advice():
+    rep = _report(semantic="fail", registered_agent="claude", healthy=False)
+    rep["engines"]["semantic"].update({
+        "installed": True, "runnable": False, "repo_indexed": False, "reason": "index-failed",
+        "remediation": "OSError: disk full; then: codeintel index /repo",
+    })
+    p = build_prompt("/repo", "claude", rep)
+
+    assert "FASTEMBED_CACHE_PATH" not in p, p
+    assert "huggingface" not in p, p
