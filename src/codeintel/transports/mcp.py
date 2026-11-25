@@ -350,9 +350,50 @@ def _code_status_handler_inner(args: dict) -> dict:
             # surfaced on `status`, not just in `doctor`, because `status` is what a caller checks
             # when an expected fix appears to be missing.
             "version_skew": report.get("version_skew") if isinstance(report, dict) else None,
+            "graph_index": _graph_index_age(
+                _probe("graph"),
+                str((report.get("project_root") if isinstance(report, dict) else "")
+                    or project_root or os.getcwd())),
         }
     except Exception:
         return dict(_STATUS_FALLBACK)
+
+
+def _graph_index_age(probe: dict, root: str) -> dict | None:
+    """The graph index's own age for this repo, and whether the working tree has moved past it.
+
+    `status` used to report only the semantic database's age, but the graph is what `callers`,
+    `impact` and `changed` answer from. `state` is the same check those answers make
+    (`graph_index_age`, against the uncommitted files, HEAD's commit time and the last checkout):
+    `fresh`, `stale` or `unknown`. None when the graph has not indexed this repo. Never raises."""
+    project = probe.get("project")
+    if probe.get("repo_indexed") is not True or not project:
+        return None
+    try:
+        from codeintel.core.paths import graph_db_mtime
+        from codeintel.engines.graph import changed_range
+
+        written = graph_db_mtime(str(project))
+        if not changed_range.in_work_tree(root):
+            paths, error = [], ""
+        else:
+            changed, untracked, error = changed_range.uncommitted_paths(root)
+            paths = changed + untracked
+        if error:
+            age = changed_range.IndexAge(
+                "unknown", f"git could not list the uncommitted files ({error})")
+        else:
+            age = changed_range.graph_index_age(str(project), root, paths)
+        return {
+            "project": project,
+            "written_at": written,
+            "age_seconds": max(0, int(time.time() - written)) if written is not None else None,
+            "state": age.state,
+            "detail": age.detail,
+        }
+    except Exception as exc:
+        return {"project": project, "written_at": None, "age_seconds": None, "state": "unknown",
+                "detail": f"the graph index's age could not be read ({type(exc).__name__})"}
 
 
 def _code_doctor_handler_inner(args: dict) -> dict:

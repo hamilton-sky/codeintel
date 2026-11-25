@@ -36,3 +36,20 @@ def _no_background_reindex(request, monkeypatch):
     from codeintel.gateway.reindexer import Reindexer
 
     monkeypatch.setattr(Reindexer, "maybe_reindex", lambda self, project_root: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_kept_open_graph_backend(monkeypatch):
+    """No kept-open graph backend session outlives the test that opened it.
+
+    A kept-open backend (0.31.0) starts the backend's account-wide daemon for the test's HOME. The
+    next test, with a different HOME, then had its own `index_repository` refused ("the active
+    account daemon uses a different cache directory"), so these tests failed in any order where a
+    live-backend test followed another."""
+    from codeintel.engines.graph import locate, session
+
+    # As tests/conftest.py does: a developer venv with the backend installed beside the
+    # interpreter would otherwise defeat every test that hides the backend by stubbing PATH.
+    monkeypatch.setattr(locate, "own_bin_dirs", list)
+    yield
+    session.close_all()

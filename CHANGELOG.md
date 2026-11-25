@@ -6,6 +6,32 @@ All notable changes to codeintel are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-11-25
+
+### Added
+- **`codeintel status` reports the graph index's age, and whether the working tree has moved past
+  it.** The graph answers `callers`, `impact` and `changed`, but `status` only printed the semantic
+  database's age: a stale graph sat under a fresh-looking line, and a graph indexed a minute
+  earlier sat under "Index age: unknown — run `codeintel index`" whenever the embedding model could
+  not be downloaded. A new `Graph index:` line (and `graph_index` in `--json` and MCP
+  `code.status`: `project`, `written_at`, `age_seconds`, `state`, `detail`) runs the same check the
+  answers make, against the uncommitted files, HEAD's commit time and the last checkout, and says
+  `current`, `STALE` with the file that moved and the fix, or why it could not tell.
+
+### Changed
+- The semantic age line is labelled `Semantic index age:`, and no longer advises re-running
+  `codeintel index` when the semantic engine itself cannot work (its row names that fix).
+
+### Fixed
+- **Uncommitted `changed` says in its text when the index is stale.** It raised `stale-index` (and
+  `index-age-unknown`, and "git lists a change the backend did not report") in `gaps` only, so
+  `codeintel query --op changed` printed an out-of-date blast radius with nothing saying so. Those
+  gaps are now also listed under "Limits of this answer", as `changed <ref>` already did.
+- The `plans/trust-fixes` acceptance tests close any kept-open graph backend after each test and no
+  longer find the backend beside the interpreter when a test hides it. A session left open by one
+  test started the backend's daemon for that test's HOME, and the next test's `index_repository`
+  was refused; seven of those tests failed on a machine with the backend installed.
+
 ## [0.31.0] — 2026-11-24
 
 ### Added

@@ -413,7 +413,7 @@ Full system docs live in [`docs/`](docs/) — start with the index:
 | `codeintel serve` | Start the MCP server (stdio transport) |
 | `codeintel serve-http [--host HOST] [--port 8766] [--allow-remote] [--token TOKEN]` | Start the HTTP transport (loopback-only unless `--allow-remote`; `--token` requires a bearer token on every request) |
 | `codeintel query --op OP --target TARGET [--engine auto] [--project-root DIR] [--json]` | Run a single query and print the result |
-| `codeintel status [project_root]` | Show engine availability and index age |
+| `codeintel status [project_root]` | Show engine availability, the graph index's age and whether the working tree has moved past it, and the semantic index's age |
 | `codeintel doctor [project_root] [--deep] [--json]` | Diagnose per-engine health + repo index status, with a fix for each gap. `--deep` puts one **real query** to each engine and requires an answer with content — a process that starts is not a process that answers, and `runnable` means the second |
 | `codeintel map [project_root]` | Generate the `CODE_INTEL.md` orientation file |
 | `codeintel graph [project_root] [--html] [--out FILE] [--limit N]` | Emit the call graph as `{nodes,edges}` JSON, or `--html` a self-contained interactive viewer — see [docs/graph-viewer.md](docs/graph-viewer.md) |

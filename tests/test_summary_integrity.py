@@ -437,10 +437,10 @@ _VERIFIED_BY: dict[tuple[str, str], str] = {
     ("claim", "ChangedSince._mention_row"):
         "a text mention is never `verified`: its bucket is name-matched and its strategy names the "
         "tool that found it — test_a_text_mention_row_never_claims_to_be_verified",
-    ("count", "GraphOps._op_changed"):
+    ("count", "GraphOps._changed_uncommitted"):
         "each section heading counts its own section — "
         "test_every_rendered_headline_counts_the_rows_beneath_it",
-    ("tally", "GraphOps._op_changed"):
+    ("tally", "GraphOps._changed_uncommitted"):
         "the impact headline sums its own sections — "
         "test_the_changed_headline_sums_the_sections_beneath_it",
     ("count", "GraphOps._op_impact"):

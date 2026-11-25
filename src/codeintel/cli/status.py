@@ -89,8 +89,10 @@ def run(args: Any) -> int:
             "\n    restart the codeintel server (or the agent hosting it) to pick it up"
         )
 
+    _print_graph_index(status.get("graph_index"), project_root)
+
     if not os.path.exists(db_path):
-        print(f"\nIndex: not found  ({db_path})")
+        print(f"\nSemantic index: not found  ({db_path})")
         return 0
 
     # The age of THIS project, not of the database file. Every project shares one per-model file,
@@ -100,11 +102,37 @@ def run(args: Any) -> int:
     if indexed_at is None:
         # Either never indexed, or indexed before this was recorded. "Unknown" is the honest
         # answer; the previous number was worse than none because it looked authoritative.
-        print(f"\nIndex age: unknown for this repo — run `codeintel index {project_root}`"
-              f"  ({db_path})")
+        # When the engine itself cannot work (no model, a download refused), re-indexing does not
+        # help, and its row above already names the fix.
+        fix = ("see the semantic row above, or `codeintel doctor`"
+               if semantic_readiness.get("remediation")
+               else f"run `codeintel index {project_root}`")
+        print(f"\nSemantic index age: unknown for this repo — {fix}  ({db_path})")
     else:
         age = datetime.datetime.now() - datetime.datetime.fromtimestamp(indexed_at)
-        hours = int(age.total_seconds() // 3600)
-        minutes = int((age.total_seconds() % 3600) // 60)
-        print(f"\nIndex age: {hours}h {minutes}m  ({db_path})")
+        print(f"\nSemantic index age: {_hm(age.total_seconds())}  ({db_path})")
     return 0
+
+
+def _hm(seconds: float) -> str:
+    return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
+
+def _print_graph_index(block: Any, project_root: str) -> None:
+    """The graph index's age and whether the working tree moved past it. The graph is what
+    `callers`, `impact` and `changed` answer from, so its age is the one that decides whether
+    those answers are current; the semantic line below is only about `search`."""
+    if not isinstance(block, dict):
+        return
+    seconds = block.get("age_seconds")
+    age = f"{_hm(float(seconds))} old" if isinstance(seconds, (int, float)) else "age unknown"
+    state = block.get("state")
+    detail = str(block.get("detail") or "")
+    if state == "fresh":
+        print(f"\nGraph index: {age}, current with the working tree")
+    elif state == "stale":
+        print(f"\nGraph index: {age}, STALE — {detail}"
+              f"\n  callers/impact/changed answers miss what changed since; "
+              f"run `codeintel index {project_root}`")
+    else:
+        print(f"\nGraph index: {age}, freshness unknown — {detail or 'could not be checked'}")
