@@ -204,6 +204,57 @@ def test_an_uncommitted_answer_with_no_graph_db_says_its_age_is_unknown(monkeypa
     assert env["confidence"] == "partial"
 
 
+# The body is what an agent reads and what `codeintel query` prints; `gaps` reaches neither a
+# CLI reader nor a model handed only the text. Range mode said its gaps under "Limits of this
+# answer"; the uncommitted answer raised the same gaps and printed none of them.
+
+def test_an_uncommitted_stale_answer_says_so_in_its_body(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo)
+    _stamp_index(tmp_path / "graph-cache", time.time() - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef brand_new():\n    return 3\n")
+
+    env = _ask(p, repo)
+
+    assert "stale-index" in _gap_kinds(env), env.get("gaps")
+    assert "### Limits of this answer" in env["result"], env["result"]
+    assert "> **stale-index** — " in env["result"], env["result"]
+
+
+def test_an_uncommitted_answer_of_unknown_age_says_so_in_its_body(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n")
+
+    env = _ask(p, repo)
+
+    assert "> **index-age-unknown** — " in env["result"], env["result"]
+
+
+def test_backend_missing_a_git_listed_edit_says_stale_in_its_body(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo)
+    _stamp_index(tmp_path / "graph-cache", time.time() - 60)
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n")
+    monkeypatch.setattr(p, "_run", lambda method, payload, timeout_ms: (
+        {"projects": [{"name": PROJECT, "root_path": str(repo)}]} if method == "list_projects"
+        else {"changed_files": [], "impacted_symbols": []} if method == "detect_changes" else None))
+
+    env = _ask(p, repo)
+
+    assert "stale-index" in _gap_kinds(env), env.get("gaps")
+    assert "> **stale-index** — " in env["result"], env["result"]
+
+
+def test_a_fresh_uncommitted_answer_has_no_limits_section(monkeypatch, tmp_path, repo):
+    p = _provider(monkeypatch, tmp_path, repo)
+    now = time.time()
+    _write(repo, "pkg/core.py", "def helper():\n    return 2\n\n\ndef compute():\n    return 0\n",
+           mtime=now - 90)
+    _stamp_index(tmp_path / "graph-cache", now - 60)
+
+    env = _ask(p, repo)
+
+    assert "Limits of this answer" not in env["result"], env["result"]
+
+
 def test_a_clean_git_tree_still_says_working_tree_clean(monkeypatch, tmp_path, repo):
     p = _provider(monkeypatch, tmp_path, repo)
     _stamp_index(tmp_path / "graph-cache", time.time() - 60)

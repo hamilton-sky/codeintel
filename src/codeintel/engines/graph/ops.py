@@ -55,6 +55,10 @@ def _is_name_guess(row: tuple[str, str, float | None, str, str]) -> bool:
                                         and conf < _EDGE_CONFIDENCE_FLOOR)
 
 
+# Gaps the uncommitted `changed` body already words itself, so its "Limits" section skips them.
+_SAID_IN_BODY = frozenset({"ripple-truncated"})
+
+
 class GraphOps(DispatchCallers, ChangedSince):
     """One method per graph op. Mixed into `GraphProvider`.
 
@@ -808,6 +812,19 @@ class GraphOps(DispatchCallers, ChangedSince):
         since = (target or "").strip()
         if since:
             return self._answer_changed_since(since, project, timeout_ms, root)
+        # Every gap this answer raises is also said in its body, as range mode does under the same
+        # heading: `gaps` is what an integration branches on, the body is what an agent reads and
+        # what `codeintel query` prints. A stale index went into `gaps` alone, so a reader of the
+        # text was handed an out-of-date blast radius with nothing saying so.
+        before = len(self._pending_gaps)
+        body = self._changed_uncommitted(project, timeout_ms, root)
+        if body is None:
+            return None
+        unsaid = [(g["kind"], g["detail"]) for g in self._pending_gaps[before:]
+                  if g.get("section") == "changed" and g["kind"] not in _SAID_IN_BODY]
+        return body + self._limits(unsaid)
+
+    def _changed_uncommitted(self, project: str, timeout_ms: int, root: str) -> str | None:
         if self._changed_offset:
             # Nothing here is paged: the uncommitted answer lists files and impacted symbols, not a
             # capped symbol lookup. Saying so beats an answer that reads as "page 2".

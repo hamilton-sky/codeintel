@@ -37,6 +37,9 @@ def blocked(tmp_path, monkeypatch):
         "FASTEMBED_CACHE_PATH": str(cache),
         "NO_COLOR": "1",
         "PATH": "/usr/bin:/bin",            # no graph backend, no LSP: semantic is the subject
+        # Since 0.31.0 the backend is also found beside the interpreter, which PATH cannot hide
+        # from a child process. An explicit backend that cannot run keeps the graph out of it.
+        "CODEINTEL_GRAPH_BACKEND": "/bin/false",
     }
     for k, v in values.items():
         monkeypatch.setenv(k, v)
